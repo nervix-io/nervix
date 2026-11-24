@@ -53,7 +53,7 @@ Feature: Verification of licensing decisions
       REFRESH LICENSE;
       """
     Then the licensing refresh response is held after its decision is issued
-    When the licensing service changes the domain quota to 12
+    When the licensing service changes the plan to enable licensing.dummy
     And the licensing notification stream is "normal"
     Then the licensing service holds exactly one authenticated notification stream
     When the licensing notification stream is disconnected
@@ -62,7 +62,7 @@ Feature: Verification of licensing decisions
     Then the background command request succeeds
     And node "node-1" eventually describes this license without a selected domain
       """
-      quota cluster.domains: 1 of 12
+      capability licensing.dummy: enabled
       verification: verified
       """
 

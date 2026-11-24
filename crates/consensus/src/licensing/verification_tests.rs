@@ -299,18 +299,18 @@ fn invalid_signed_binding_never_changes_committed_state_and_reload_is_semantic()
 /// reason names.
 #[test]
 fn a_rejected_decision_names_each_cause_once() {
-    use nervix_licensing_protocol::{conditions::CLUSTER_NODES, validation::DecisionRejection};
+    use nervix_licensing_protocol::{conditions::REFRESH_INTERVAL, validation::DecisionRejection};
 
     let fixture = SignedFixture::new();
     let mut incomplete = fixture.decision.clone();
     assert!(
         incomplete
             .conditions
-            .usage
-            .quotas
-            .remove(CLUSTER_NODES)
+            .operating
+            .durations
+            .remove(REFRESH_INTERVAL)
             .is_some(),
-        "the fixture decision lists the cluster node quota"
+        "the fixture decision lists the refresh interval"
     );
     let received = fixture.received(&incomplete, &[]);
     let report = LicensingRecord::free(fixture.identity.public().created_at)
@@ -321,7 +321,7 @@ fn a_rejected_decision_names_each_cause_once() {
             &received,
             &fixture.environment,
         )
-        .expect_err("a decision without the cluster node quota is incomplete");
+        .expect_err("a decision without the refresh interval is incomplete");
     assert_eq!(
         report.current_context(),
         &LicenseDecisionError::Rejected {
@@ -335,7 +335,7 @@ fn a_rejected_decision_names_each_cause_once() {
     assert_eq!(
         format!("{report:#}"),
         "licensing decision was rejected: the decision conditions, status or acknowledged \
-         transitions are invalid: condition cluster.nodes is missing"
+         transitions are invalid: condition refresh.interval is missing"
     );
 }
 

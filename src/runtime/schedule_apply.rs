@@ -224,10 +224,10 @@ impl Runtime {
         for (domain_id, change) in &revision_plan.domains {
             let domain = &change.revision;
             // The control plane plans each domain's change against the schedule its execution
-            // runs, so the predecessor matches unless the execution was installed outside schedule
-            // application. Such an execution that already runs the desired schedule takes no
-            // change; any other one is rebuilt rather than given a delta planned for another
-            // predecessor.
+            // runs, and schedule application installs every execution, so the predecessor
+            // matches. An execution found running another revision would have been installed
+            // outside it: if it already runs the desired schedule it takes no change, and any other
+            // one is rebuilt rather than given a delta planned for another predecessor.
             let (already_applied, predecessor_matches) = match self.inner.executions.get(domain_id)
             {
                 Some(execution) => (
@@ -539,6 +539,21 @@ impl Runtime {
                         *unit,
                     );
                 }
+                #[cfg(feature = "testing")]
+                if !previous_local_units.is_subset(&desired_local_units) {
+                    self.hold_or_fail_entity_swap(domain, entity, Some(local_node_id))
+                        .await?;
+                }
+                // An instance that leaves this node while it still owes its MQTT session a
+                // retirement here has that session retired before it goes, while the swap can
+                // still fail and hold the move.
+                Box::pin(self.settle_released_mqtt_session_retirements(
+                    domain,
+                    &IngestorName::from(&entity.identifier),
+                    revision,
+                    Some(local_node_id),
+                ))
+                .await?;
             }
 
             self.activate_prepared_forced_ownership_recovery_state(
@@ -1081,6 +1096,17 @@ impl Runtime {
                 }));
             }
         };
+        // Nothing of the swap can fail any more, so the inputs it replaced give up what they kept
+        // at their brokers, before the revision publishes and its ingestors start.
+        Box::pin(self.retire_swapped_ingestor_inputs(
+            domain,
+            installed.as_deref(),
+            &revision,
+            entities,
+            local_node_id,
+            &mut retiring_ingestors,
+        ))
+        .await;
         let mut routing_published = false;
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             if let Some(local_node_id) = local_node_id {

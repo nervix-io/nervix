@@ -121,12 +121,11 @@ distinction without depending on cryptography.
 
 The catalog declares the kind, scope and owner of every current name. Cluster quotas and
 capabilities belong in `usage`; relationship quotas, durations, sets and policy belong in
-`operating`.
+`operating`. Licensing never limits base features such as nodes or domains, so the catalog declares
+no cluster quota: a capability's own limit is the only cluster quota a later catalog may declare.
 
 | Name | Kind and scope | Owner |
 | --- | --- | --- |
-| `cluster.nodes` | quota, cluster | committed membership admission |
-| `cluster.domains` | quota, cluster | domain admission |
 | `licensing.dummy` | capability, cluster | none: it changes nothing |
 | `license.activations.persistent` | quota, license | service activation capacity |
 | `license.activations.ephemeral` | quota, license | service activation capacity |
@@ -135,7 +134,7 @@ capabilities belong in `usage`; relationship quotas, durations, sets and policy 
 | `refresh.interval` | bounded duration, organization | decision timing |
 | `refresh.overdue_after` | bounded duration, organization | decision timing |
 | `offline.allowance` | bounded/unbounded duration, organization | decision timing |
-| `offline.on_lapse` | closed `freeze` policy, organization | cluster admission freeze |
+| `offline.on_lapse` | closed `freeze` policy, organization | cluster capability freeze |
 | `transition.capability_removal_grace` | bounded duration, organization | transition arithmetic |
 | `transition.quota_reduction_grace` | bounded duration, organization | transition arithmetic |
 
@@ -162,8 +161,10 @@ SHA-256 over typed serialization with fixed field order and sorted maps. Active 
 from the assignment. Every non-active status uses the free usage policy, except expired ephemeral
 activations, whose usage is empty. Operating conditions remain authoritative in each state.
 An organization suspension yields suspended/free usage even when the license itself is active.
-The free policy grants every current cluster quota without a limit, disables every capability and
-has no operating half.
+The free policy disables every capability, leaves every cluster quota the catalog declares
+unlimited and has no operating half. A cluster applies its own embedded free policy for every
+non-active status and accepts a non-active decision whatever usage it carries, so a cluster and a
+service built with different free policies stay compatible.
 An expired lifetime is a firm stop even if the license or activation also has another terminal state.
 
 ## Decision Acceptance
@@ -201,7 +202,8 @@ already fit usage create no grant. An affected quota gets only the newly affecte
 previous target; earlier amounts retain their deadlines. Current quota entries share one transition
 with one checked deadline and an explicit decision, tick or release trigger. Expiry creates none.
 
-For example, reducing unlimited nodes to four while seven are in use protects three units. A later
+For example, reducing an unlimited cluster quota to four while seven units are in use protects
+three units. A later
 reduction from four to three protects one further unit, keeping the first deadline. The effective
 allowance is seven until the first deadline, four until the second, then three. An improvement caps
 remaining grants at their protected existing usage, preventing expansion. Same-revision refreshes

@@ -32,7 +32,7 @@ use super::{
 };
 use crate::{
     client_row::ArrowRowBatch,
-    licensing::{CapabilityName, CapabilityVerdict, Quota, QuotaName},
+    licensing::{CapabilityName, CapabilityVerdict},
     runtime_schema::{batch_payload_bytes, parse_as_type_from_arrow},
 };
 
@@ -326,55 +326,10 @@ impl SessionServiceImpl {
                 );
                 let summary = RecordBatch::try_from_iter(columns)
                     .assured("fixed licensing columns have one value each");
-                let quotas: Vec<_> = QuotaName::ALL
-                    .into_iter()
-                    .map(|name| policy.quota(name))
-                    .collect();
-                let columns: Vec<(&str, ArrayRef)> = vec![
-                    (
-                        "condition",
-                        StdArc::new(StringArray::from(
-                            QuotaName::ALL.map(QuotaName::as_str).to_vec(),
-                        )),
-                    ),
-                    (
-                        "usage",
-                        StdArc::new(UInt64Array::from(vec![
-                            policy.snapshot.usage.cluster_nodes,
-                            policy.snapshot.usage.cluster_domains,
-                        ])),
-                    ),
-                    (
-                        "limit_kind",
-                        StdArc::new(StringArray::from(
-                            quotas
-                                .iter()
-                                .map(|quota| match quota {
-                                    Quota::Unlimited => "unlimited",
-                                    Quota::Bounded { .. } => "bounded",
-                                })
-                                .collect::<Vec<_>>(),
-                        )),
-                    ),
-                    (
-                        "limit",
-                        StdArc::new(UInt64Array::from(
-                            quotas
-                                .iter()
-                                .map(|quota| match quota {
-                                    Quota::Unlimited => None,
-                                    Quota::Bounded { value } => Some(*value),
-                                })
-                                .collect::<Vec<_>>(),
-                        )),
-                    ),
-                ];
-                let quotas = RecordBatch::try_from_iter(columns)
-                    .assured("fixed quota columns have two values each");
                 let capabilities = capabilities_batch(&policy);
                 let transitions = transitions_batch(&policy);
                 let mut rows = 0_u64;
-                for batch in [&summary, &quotas, &capabilities, &transitions] {
+                for batch in [&summary, &capabilities, &transitions] {
                     let batch_rows =
                         u64::try_from(batch.num_rows()).assured("bounded licensing rows fit u64");
                     rows = rows
@@ -383,13 +338,12 @@ impl SessionServiceImpl {
                 }
                 match (
                     section("summary", &summary),
-                    section("quotas", &quotas),
                     section("capabilities", &capabilities),
                     section("transitions", &transitions),
                 ) {
-                    (Ok(summary), Ok(quotas), Ok(capabilities), Ok(transitions)) => {
+                    (Ok(summary), Ok(capabilities), Ok(transitions)) => {
                         let mut bytes = 0_u64;
-                        for section_bytes in [summary.1, quotas.1, capabilities.1, transitions.1] {
+                        for section_bytes in [summary.1, capabilities.1, transitions.1] {
                             bytes = bytes
                                 .checked_add(section_bytes)
                                 .verified("bounded licensing sections fit the payload count");
@@ -399,7 +353,7 @@ impl SessionServiceImpl {
                             rows,
                             bytes,
                         };
-                        let sections = vec![summary.0, quotas.0, capabilities.0, transitions.0];
+                        let sections = vec![summary.0, capabilities.0, transitions.0];
                         let mut fingerprint = Sha256::new();
                         fingerprint.update(&revision.to_le_bytes());
                         for section in &sections {
@@ -448,10 +402,7 @@ impl SessionServiceImpl {
                             wasm_binding: None,
                         })
                     }
-                    (Err(error), _, _, _)
-                    | (_, Err(error), _, _)
-                    | (_, _, Err(error), _)
-                    | (_, _, _, Err(error)) => {
+                    (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
                         tracing::debug!(error = %format_args!("{error:#}"), "licensing inspection encoding refused");
                         StateInspectionResult::Rejected(StateInspectionRejection::ReplyTooLarge)
                     }
@@ -575,13 +526,6 @@ fn transitions_batch(policy: &crate::licensing::LicensingPolicy) -> RecordBatch 
                 .affected
                 .iter()
                 .map(|affected| {
-                    let state = match QuotaName::ALL
-                        .into_iter()
-                        .find(|name| name.as_str() == affected.condition)
-                    {
-                        Some(name) => policy.quota_state(name),
-                        None => "unknown",
-                    };
                     (
                         transition.transition_id.to_string(),
                         affected.condition.clone(),
@@ -594,7 +538,6 @@ fn transitions_batch(policy: &crate::licensing::LicensingPolicy) -> RecordBatch 
                         affected.target,
                         affected.usage,
                         acknowledged,
-                        state,
                     )
                 })
                 .collect::<Vec<_>>()
@@ -647,10 +590,6 @@ fn transitions_batch(policy: &crate::licensing::LicensingPolicy) -> RecordBatch 
         (
             "acknowledged",
             strings(rows.iter().map(|row| row.8.to_string()).collect()),
-        ),
-        (
-            "state",
-            strings(rows.iter().map(|row| row.9.to_owned()).collect()),
         ),
     ])
     .assured("every transition column projects the same bounded rows")

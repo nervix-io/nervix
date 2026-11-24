@@ -13,8 +13,8 @@ Feature: Signed license activation
       mode: activated
       policy: licensed fresh
       processing: running
-      quota cluster.nodes: <cluster_size> of 16
-      quota cluster.domains: 0 of 64
+      conditions not understood: 0
+      capability licensing.dummy: disabled
       """
 
     Examples:

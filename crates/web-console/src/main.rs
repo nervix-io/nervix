@@ -80,6 +80,7 @@ mod clock_display;
 mod command_retry;
 mod create_dialog;
 mod node_panel;
+mod pacing;
 mod request_handoff;
 mod resource_upload;
 mod tab_restoration;
@@ -98,6 +99,7 @@ use create_dialog::{
     LabelTargetKind, SubscriptionDispatch,
 };
 use node_panel::{ClusterEventLog, NodePanel};
+use pacing::ConsolePacing;
 use request_handoff::{RequestReceiver, RequestSender, request_handoff};
 use resource_upload::UploadAnswer;
 use tab_restoration::{RetryTick, RetryWait, TabRestoration};
@@ -108,49 +110,13 @@ const RUNTIME_VERSION_LABEL: &str = concat!("nervix runtime v", env!("CARGO_PKG_
 /// keystrokes sends one request instead of one for each.
 #[cfg_attr(
     nervix_lint,
-    expect(
-        nervix::hidden_tunable,
-        reason = "how many completion requests a burst of typing may send trades against the \
-                  server's round trip, which depends on the network, and the console has no \
-                  settings carrier yet https://app.clickup.com/t/86bd5vvdq"
+    nervix::constant(
+        fixed,
+        reason = "the web console chapter asks for completions once typing pauses for 50 \
+                  milliseconds, a pause between keystrokes rather than a network wait"
     )
 )]
 const SUGGESTION_REQUEST_DEBOUNCE_DELAY: Duration = Duration::from_millis(50);
-/// The first wait before the console connects or retries again, which doubles with each failed
-/// attempt up to [`WEBSOCKET_MAX_RECONNECT_DELAY`].
-#[cfg_attr(
-    nervix_lint,
-    expect(
-        nervix::hidden_tunable,
-        reason = "how soon to try again depends on the network and the cluster, and the console \
-                  has no settings carrier yet; it stays fixed until its repair task serves the \
-                  retry backoff https://app.clickup.com/t/86bd5vvdq"
-    )
-)]
-const WEBSOCKET_INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(250);
-/// The longest wait the doubling reconnect and retry backoff reaches.
-#[cfg_attr(
-    nervix_lint,
-    expect(
-        nervix::hidden_tunable,
-        reason = "how long the backoff may grow depends on the network and the cluster, and the \
-                  console has no settings carrier yet; it stays fixed until its repair task serves \
-                  the maximum backoff https://app.clickup.com/t/86bd5vvdq"
-    )
-)]
-const WEBSOCKET_MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
-/// The period of a session's retry timer, which retries interrupted subscriptions and checks
-/// whether the credentials changed while the session waits.
-#[cfg_attr(
-    nervix_lint,
-    expect(
-        nervix::hidden_tunable,
-        reason = "how soon an interrupted subscription is retried depends on the cluster, and the \
-                  console has no settings carrier yet; it stays fixed until its repair task serves \
-                  it with the session opening https://app.clickup.com/t/86bd5vvdq"
-    )
-)]
-const SUBSCRIPTION_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Explicit default bounds for isolated console fixtures.
 #[cfg(test)]
@@ -223,6 +189,7 @@ struct WebConsoleSession {
     request_tx: RwSignal<Option<RequestSender>>,
     upload_base_url: RwSignal<Option<String>>,
     auth_token: RwSignal<Option<String>>,
+    pacing: RwSignal<ConsolePacing>,
 }
 
 impl WebConsoleSession {
@@ -267,6 +234,9 @@ struct WebConsoleSignals {
     resource_details: RwSignal<BTreeMap<String, ResourceDetailView>>,
     subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
     subscription_retry_tick: RwSignal<RetryTick>,
+    /// The pacing the node of the session's last opening announced, which the console keeps
+    /// across reconnects and follows for its waits, its retries and its graph's freshness.
+    pacing: RwSignal<ConsolePacing>,
     active_subscription_tab: RwSignal<Option<u64>>,
     domains_loaded: RwSignal<bool>,
     auth_token: RwSignal<Option<String>>,
@@ -1682,29 +1652,6 @@ const THEMES: [ThemeView; 4] = [
     },
 ];
 
-/// How long a snapshot stays fresh before the freshness pill reports a stall.
-#[cfg_attr(
-    nervix_lint,
-    expect(
-        nervix::hidden_tunable,
-        reason = "how often snapshots arrive is the serving node's session snapshot interval, \
-                  which the console has no carrier to learn yet; it stays fixed until its repair \
-                  task derives it from the announced interval https://app.clickup.com/t/86bd5vvdq"
-    )
-)]
-const GRAPH_FRESHNESS_TIMEOUT: Duration = Duration::from_millis(2_500);
-/// How often the freshness pill re-evaluates the age of the last snapshot.
-#[cfg_attr(
-    nervix_lint,
-    expect(
-        nervix::hidden_tunable,
-        reason = "the freshness tick follows the serving node's session snapshot interval, which \
-                  the console has no carrier to learn yet; it stays fixed until its repair task \
-                  derives it from the announced interval https://app.clickup.com/t/86bd5vvdq"
-    )
-)]
-const GRAPH_FRESHNESS_TICK: Duration = Duration::from_millis(500);
-
 fn main() {
     console_error_panic_hook::set_once();
     mount_to_body(App);
@@ -1761,12 +1708,14 @@ fn App() -> impl IntoView {
     let selected_resource = RwSignal::new(None::<String>);
     let upload_status = RwSignal::new(String::new());
     let upload_base_url = RwSignal::new(web_console_http_base_url());
+    let pacing = RwSignal::new(ConsolePacing::default());
     let backups = BackupSignals::new(
         ConsoleHandles {
             base_url: upload_base_url,
             auth_token,
             terminal_lines,
             transaction_status,
+            pacing,
         },
         boxed_session_storage(),
     );
@@ -1788,6 +1737,7 @@ fn App() -> impl IntoView {
         resource_details,
         subscription_tabs,
         subscription_retry_tick: RwSignal::new(RetryTick::default()),
+        pacing,
         active_subscription_tab,
         domains_loaded,
         auth_token,
@@ -2315,6 +2265,7 @@ fn App() -> impl IntoView {
                             active_domain=active_domain
                             domains=domains
                             websocket_state=web_console_session.state
+                            pacing=web_console_session.pacing
                             domain=active_graph
                             run_command=run_command
                             create=create
@@ -2725,6 +2676,7 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
         request_tx,
         upload_base_url,
         auth_token: signals.auth_token,
+        pacing: signals.pacing,
     }
 }
 
@@ -2742,7 +2694,7 @@ async fn run_websocket_session(
         auth_error,
         ..
     } = signals;
-    let mut reconnect_delay = WEBSOCKET_INITIAL_RECONNECT_DELAY;
+    let mut reconnect_delay = signals.pacing.get_untracked().retry().first();
     let mut requests = SessionRequests::new(None);
     let mut redirected_url = None::<String>;
     let mut session_auth_token = auth_token.get_untracked();
@@ -2765,7 +2717,7 @@ async fn run_websocket_session(
             domains_loaded.set(false);
             requests.clear_held();
             redirected_url = None;
-            wait_for_browser_delay(WEBSOCKET_INITIAL_RECONNECT_DELAY).await;
+            wait_for_browser_delay(signals.pacing.get_untracked().retry().first()).await;
             continue;
         };
         let url = match &redirected_url {
@@ -2775,7 +2727,11 @@ async fn run_websocket_session(
         let Some(url) = url else {
             state.set(ConsoleConnectionState::Waiting);
             wait_for_browser_delay(reconnect_delay).await;
-            reconnect_delay = (reconnect_delay * 2).min(WEBSOCKET_MAX_RECONNECT_DELAY);
+            reconnect_delay = signals
+                .pacing
+                .get_untracked()
+                .retry()
+                .after(reconnect_delay);
             continue;
         };
         state.set(ConsoleConnectionState::Connecting);
@@ -2829,7 +2785,8 @@ async fn run_websocket_session(
                         continue;
                     }
                     opened_this_attempt = true;
-                    reconnect_delay = WEBSOCKET_INITIAL_RECONNECT_DELAY;
+                    // The connection adopted the pacing its node announced.
+                    reconnect_delay = signals.pacing.get_untracked().retry().first();
                     auth_error.set(None);
                     requests.end_connection();
                     signals.create.connection_lost();
@@ -2859,7 +2816,15 @@ async fn run_websocket_session(
         }
         if !opened_this_attempt
             && auth_token.get_untracked().as_deref() == Some(current_auth_token.as_str())
-            && credentials_invalid(&current_auth_token).await
+            && credentials_invalid(
+                &current_auth_token,
+                signals
+                    .pacing
+                    .get_untracked()
+                    .web_console()
+                    .connect_timeout(),
+            )
+            .await
             && auth_token.get_untracked().as_deref() == Some(current_auth_token.as_str())
         {
             auth_error.set(Some("Authentication failed".to_string()));
@@ -2870,29 +2835,21 @@ async fn run_websocket_session(
         }
         state.set(ConsoleConnectionState::Waiting);
         wait_for_browser_delay(reconnect_delay).await;
-        reconnect_delay = (reconnect_delay * 2).min(WEBSOCKET_MAX_RECONNECT_DELAY);
+        reconnect_delay = signals
+            .pacing
+            .get_untracked()
+            .retry()
+            .after(reconnect_delay);
     }
 }
-
-/// How long the console waits for the authentication probe's answer before it leaves the token in
-/// place for the next reconnect attempt.
-#[cfg_attr(
-    nervix_lint,
-    expect(
-        nervix::hidden_tunable,
-        reason = "how long the probe's answer may take depends on the network, and the console \
-                  has no settings carrier yet; it stays fixed until its repair task derives it \
-                  from a served connect capability https://app.clickup.com/t/86bd5vvdq"
-    )
-)]
-const CREDENTIAL_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// A failed WebSocket handshake does not tell browser JavaScript whether the server rejected the
 /// credentials or was unreachable. The same-origin authentication probe does: a valid
 /// credential gets `204 No Content`, and a rejected credential gets `401 Unauthorized` without a
 /// browser-managed Basic authentication challenge.
-/// Network failures and a slow probe leave the token in place for the next reconnect attempt.
-async fn credentials_invalid(auth_token: &str) -> bool {
+/// Network failures and a probe that `timeout`, the announced connect timeout, does not see
+/// answered leave the token in place for the next reconnect attempt.
+async fn credentials_invalid(auth_token: &str, timeout: Duration) -> bool {
     let Some(base) = web_console_http_base_url() else {
         return false;
     };
@@ -2902,7 +2859,7 @@ async fn credentials_invalid(auth_token: &str) -> bool {
     url.set_path("/console/auth");
     url.query_pairs_mut().append_pair("auth", auth_token);
     let response = gloo_net::http::Request::get(url.as_str()).send().fuse();
-    let timeout = wait_for_browser_delay(CREDENTIAL_PROBE_TIMEOUT).fuse();
+    let timeout = wait_for_browser_delay(timeout).fuse();
     futures_util::pin_mut!(response, timeout);
     match nervix_primitives::unmodeled::futures::select! {
         result = response => Some(result),
@@ -2913,19 +2870,22 @@ async fn credentials_invalid(auth_token: &str) -> bool {
     }
 }
 
-/// Installs exactly this socket's bounds before any ordinary request or observation.
+/// Reads this socket's opening, adopts the pacing it announces, and returns its bounds, which the
+/// connection installs before any ordinary request or observation.
 async fn read_session_opening(
     socket: &mut WebSocket,
     signals: WebConsoleSignals,
     current_auth_token: &str,
 ) -> Option<SessionLimits> {
-    // Keep the existing session tick's authentication responsiveness while the first frame waits.
+    // Keep the existing session tick's authentication responsiveness while the first frame waits:
+    // the tick of the pacing the console follows until this opening announces its own.
+    let session_tick = signals.pacing.get_untracked().restoration().first();
     let message = loop {
         if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
             return None;
         }
         let received = socket.next().fuse();
-        let check_auth = wait_for_browser_delay(SUBSCRIPTION_RETRY_DELAY).fuse();
+        let check_auth = wait_for_browser_delay(session_tick).fuse();
         futures_util::pin_mut!(received, check_auth);
         nervix_primitives::unmodeled::futures::select! {
             message = received => break message,
@@ -2939,7 +2899,10 @@ async fn read_session_opening(
         return None;
     };
     match nervix_client_wire::SessionOpened::verify(Bytes::from(payload)) {
-        Ok(opened) => Some(opened.limits),
+        Ok(opened) => {
+            signals.pacing.update(|pacing| pacing.adopt(opened.pacing));
+            Some(opened.limits)
+        }
         Err(error) => {
             leptos::logging::error!("invalid session opening: {error:#}");
             None
@@ -3016,7 +2979,9 @@ async fn serve_connection(
             return ConnectionEnd::Dropped;
         }
     }
-    let mut retry_delay = Box::pin(wait_for_browser_delay(SUBSCRIPTION_RETRY_DELAY).fuse());
+    // The session's retry timer ticks at the restoration backoff this connection's node announced.
+    let session_tick = signals.pacing.get_untracked().restoration().first();
+    let mut retry_delay = Box::pin(wait_for_browser_delay(session_tick).fuse());
     let mut command_waits: FuturesUnordered<LocalBoxFuture<'static, IssueOrder>> =
         FuturesUnordered::new();
     loop {
@@ -3080,7 +3045,7 @@ async fn serve_connection(
                 SessionStep::Continue
             }
             () = retry_delay.as_mut() => {
-                retry_delay = Box::pin(wait_for_browser_delay(SUBSCRIPTION_RETRY_DELAY).fuse());
+                retry_delay = Box::pin(wait_for_browser_delay(session_tick).fuse());
                 signals.subscription_retry_tick.update(RetryTick::advance);
                 // A tab whose restoration was refused is tried again while the session is ready,
                 // has room for it in flight, and holds no transaction, which would refuse it again.
@@ -3302,6 +3267,17 @@ async fn wait_for_websocket_open(socket: &mut WebSocket) {
              reached next",
         );
 }
+
+/// The longest period a browser timer holds, in milliseconds.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the HTML timer APIs take their delay in milliseconds as a WebIDL long, whose \
+                  largest value is i32::MAX"
+    )
+)]
+const LONGEST_BROWSER_TIMER_MILLIS: i32 = i32::MAX;
 
 async fn wait_for_browser_delay(delay: Duration) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
@@ -3780,7 +3756,9 @@ fn apply_command_outcome(
         return step;
     }
     if matches!(outcome.disposition, CommandDisposition::OutcomeUnknown(_)) {
-        let wait = requests.command_retries.wait(order);
+        let wait = requests
+            .command_retries
+            .wait(order, signals.pacing.get_untracked().retry());
         requests.hold_again(IssuedRequest {
             order,
             request: ConsoleRequest::Command { request, purpose },
@@ -4553,6 +4531,7 @@ fn fail_subscription_start(
     let mut remove = false;
     let mut report_in_repl = origin != SubscriptionOrigin::Restoration;
     let now = signals.subscription_retry_tick.get_untracked();
+    let restoration_backoff = signals.pacing.get_untracked().restoration();
     signals.subscription_tabs.update(|tabs| {
         // The operator explicitly controls the number of tabs in this console.
         let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) else {
@@ -4579,10 +4558,10 @@ fn fail_subscription_start(
                     tab.lines
                         .push(TermLine::error(format!("restoration ended ({cause})")));
                 } else {
-                    let wait = restoration.refused(now);
+                    let wait = restoration.refused(now, restoration_backoff);
                     tab.lines.push(TermLine::error(format!(
-                        "restoration refused ({cause}); retry in {}s",
-                        wait.delay.as_secs()
+                        "restoration refused ({cause}); retry in {}",
+                        nervix_models::timing_text(wait.delay)
                     )));
                     tab.state = SubscriptionTabState::RetryWaiting { restoration, wait };
                 }
@@ -5368,6 +5347,7 @@ fn Sidebar(
                     upload_status=upload_status
                     upload_base_url=web_console_session.upload_base_url
                     auth_token=web_console_session.auth_token
+                    pacing=web_console_session.pacing
                     request_tx=web_console_session.request_tx
                     active_domain=active_domain
                     close=move || selected_resource.set(None)
@@ -5630,6 +5610,7 @@ fn ResourceDialog(
     upload_status: RwSignal<String>,
     upload_base_url: RwSignal<Option<String>>,
     auth_token: RwSignal<Option<String>>,
+    pacing: RwSignal<ConsolePacing>,
     request_tx: RwSignal<Option<RequestSender>>,
     active_domain: RwSignal<Option<DomainName>>,
     close: impl Fn() + Copy + Send + 'static,
@@ -5666,6 +5647,7 @@ fn ResourceDialog(
                     input,
                     upload_base_url,
                     attempt_auth.clone(),
+                    pacing,
                 ),
                 registration,
             )
@@ -5845,13 +5827,15 @@ fn event_target_input(event: &ev::Event) -> web_sys::HtmlInputElement {
 /// Every attempt posts the same files under one upload identity to the leader the console knows
 /// at that moment. An answer that decided nothing, from a node that could not act as the leader,
 /// is sent again after the wait the console's reconnects use, doubling up to their longest, for as
-/// long as the dialog keeps the upload; every other answer ends it.
+/// long as the dialog keeps the upload; every other answer ends it. The waits follow the pacing
+/// the session announced last.
 async fn upload_resource_files(
     resource: String,
     domain: DomainName,
     input: web_sys::HtmlInputElement,
     upload_base_url: RwSignal<Option<String>>,
     auth_token: Option<String>,
+    pacing: RwSignal<ConsolePacing>,
 ) -> String {
     let Some(files) = input.files() else {
         return "no files selected".to_string();
@@ -5888,7 +5872,7 @@ async fn upload_resource_files(
         return "failed to access browser upload identity source".to_string();
     };
     let upload_identity = crypto.random_uuid();
-    let mut retry_delay = WEBSOCKET_INITIAL_RECONNECT_DELAY;
+    let mut retry_delay = pacing.get_untracked().retry().first();
     loop {
         let base_url = upload_base_url.get_untracked();
         let url = web_console_resource_upload_url(
@@ -5904,10 +5888,7 @@ async fn upload_resource_files(
             UploadAnswer::NotDecided(_) => {}
         }
         wait_for_browser_delay(retry_delay).await;
-        let doubled = retry_delay
-            .checked_mul(2)
-            .assured("a delay of at most the reconnect ceiling doubles well within a Duration");
-        retry_delay = doubled.min(WEBSOCKET_MAX_RECONNECT_DELAY);
+        retry_delay = pacing.get_untracked().retry().after(retry_delay);
     }
 }
 
@@ -6101,6 +6082,7 @@ fn GraphPanel(
     active_domain: RwSignal<Option<DomainName>>,
     domains: RwSignal<Vec<DomainView>>,
     websocket_state: RwSignal<ConsoleConnectionState>,
+    pacing: RwSignal<ConsolePacing>,
     domain: impl Fn() -> Option<GraphView> + Copy + Send + Sync + 'static,
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
     create: CreateSignals,
@@ -6148,13 +6130,26 @@ fn GraphPanel(
         }
         snapshot_observed_at.set(js_sys::Date::now());
     });
-    let freshness_interval = set_interval_with_handle(
-        move || freshness_now.set(js_sys::Date::now()),
-        GRAPH_FRESHNESS_TICK,
-    )
-    .ok();
+    // The freshness is evaluated again once per snapshot interval of the node the session reached
+    // last, so a new interval announced at an opening replaces the timer. A browser timer holds
+    // at most LONGEST_BROWSER_TIMER_MILLIS, so a longer interval is evaluated more often, never
+    // less.
+    let longest_timer =
+        Duration::from_millis(u64::from(LONGEST_BROWSER_TIMER_MILLIS.unsigned_abs()));
+    let freshness_interval = StoredValue::new(None::<IntervalHandle>);
+    Effect::new(move |_| {
+        let tick = pacing
+            .with(ConsolePacing::freshness_tick)
+            .min(longest_timer);
+        if let Some(previous) = freshness_interval.get_value() {
+            previous.clear();
+        }
+        let interval =
+            set_interval_with_handle(move || freshness_now.set(js_sys::Date::now()), tick).ok();
+        freshness_interval.set_value(interval);
+    });
     on_cleanup(move || {
-        if let Some(interval) = freshness_interval {
+        if let Some(interval) = freshness_interval.get_value() {
             interval.clear();
         }
     });
@@ -6201,7 +6196,8 @@ fn GraphPanel(
             return "OFFLINE";
         }
         let age = freshness_now.get() - snapshot_observed_at.get();
-        if age <= GRAPH_FRESHNESS_TIMEOUT.as_millis().approx_into::<f64>() {
+        let timeout = pacing.with(ConsolePacing::freshness_timeout);
+        if age <= timeout.as_millis().approx_into::<f64>() {
             "LIVE"
         } else {
             "STALE"
@@ -9414,12 +9410,14 @@ mod tests {
         let transaction_status = RwSignal::new(None);
         let auth_token = RwSignal::new(None);
         let upload_base_url = RwSignal::new(None);
+        let pacing = RwSignal::new(ConsolePacing::default());
         let backups = BackupSignals::new(
             ConsoleHandles {
                 base_url: upload_base_url,
                 auth_token,
                 terminal_lines,
                 transaction_status,
+                pacing,
             },
             None,
         );
@@ -9449,6 +9447,7 @@ mod tests {
                 lines: TermLineHistory::default(),
             }]),
             subscription_retry_tick: RwSignal::new(RetryTick::default()),
+            pacing,
             active_subscription_tab: RwSignal::new(Some(1)),
             domains_loaded: RwSignal::new(true),
             auth_token,
@@ -10464,6 +10463,7 @@ mod tests {
                 request_tx,
                 upload_base_url: RwSignal::new(None),
                 auth_token: RwSignal::new(None),
+                pacing: RwSignal::new(ConsolePacing::default()),
             };
             assert!(matches!(
                 session.send_when_connected(ConsoleRequest::ListDomains),
@@ -11986,7 +11986,9 @@ mod tests {
         let mut requests = SessionRequests::new(Some(SESSION_LIMITS));
         let issued = requests.issue(repl_command("SHOW DOMAINS;"));
         let order = issued.order;
-        let _ = requests.command_retries.wait(order);
+        let _ = requests
+            .command_retries
+            .wait(order, ConsolePacing::default().retry());
         requests.command_retries.ready(order);
         assert!(matches!(
             requests.encoding_refused(issued),
@@ -12502,7 +12504,7 @@ mod tests {
                     panic!("an uncertain command waits on the open connection");
                 };
                 assert_eq!(wait.order, order);
-                assert_eq!(wait.delay, WEBSOCKET_INITIAL_RECONNECT_DELAY);
+                assert_eq!(wait.delay, ConsolePacing::default().retry().first());
 
                 let later = requests.issue(repl_command("later"));
                 assert!(matches!(requests.accept(later), Admission::Held));

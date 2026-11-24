@@ -672,12 +672,6 @@ impl SessionServiceImpl {
     ) -> Result<CommandExecutionEffect, Box<CommandResult>> {
         let existing = self.inner.consensus.current_domain(&create.id).await;
         let existed_at_admission = existing.is_some();
-        let domain_quota = if existed_at_admission {
-            self.domain_quota()
-        } else {
-            self.admit_domain_creation(&create.id, false)
-                .map_err(|error| Box::new(command_error(format!("{error:#}"))))?
-        };
         let state = match existing {
             Some(existing) => existing,
             None => DomainState {
@@ -692,7 +686,6 @@ impl SessionServiceImpl {
             },
         };
         Ok(CommandExecutionEffect::CreateDomain {
-            domain_quota,
             if_not_exists: create.if_not_exists,
             existed_at_admission,
             state: Box::new(state),
@@ -940,7 +933,6 @@ impl SessionServiceImpl {
                 .await
             }
             CommandExecutionEffect::CreateDomain {
-                domain_quota,
                 if_not_exists,
                 existed_at_admission,
                 state,
@@ -956,7 +948,6 @@ impl SessionServiceImpl {
                     existed_at_admission,
                     *state,
                     Some(mutation),
-                    domain_quota,
                 ))
                 .await
             }

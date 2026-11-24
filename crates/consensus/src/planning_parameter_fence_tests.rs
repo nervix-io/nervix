@@ -184,7 +184,6 @@ fn planning_parameter_fence_preserves_existing_conflict_precedence() {
     let applied = apply_consensus_command(
         &mut state,
         &ConsensusCommand::PutDomain {
-            domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
             domain: changed,
             mutation: None,
         },

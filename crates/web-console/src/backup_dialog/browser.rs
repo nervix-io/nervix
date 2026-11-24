@@ -11,6 +11,8 @@ use std::{future::Future, time::Duration};
 use futures_util::{FutureExt as _, SinkExt as _, StreamExt as _};
 use gloo_net::websocket::{Message as WebSocketMessage, WebSocketError, futures::WebSocket};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
+use nervix_client_wire::SessionOpened;
+use nervix_models::Timestamp;
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
 use wasm_bindgen::JsCast as _;
@@ -113,6 +115,11 @@ pub(crate) trait Browser {
     /// Waits for `duration` as the browser's timers measure it.
     fn wait(&self, duration: Duration) -> impl Future<Output = ()>;
 
+    /// The browser's UTC, which a download compares with the instant its archive stops being
+    /// retained and a restore with the end of its execution reference's retry validity. Both
+    /// instants count from the reference the console issued on this clock.
+    fn now(&self) -> Timestamp;
+
     /// A place for the archive one download attempt receives.
     fn new_archive(&self) -> Self::Archive;
 }
@@ -154,6 +161,10 @@ impl Browser for PageBrowser {
 
     fn wait(&self, duration: Duration) -> impl Future<Output = ()> {
         wait_for_browser_delay(duration)
+    }
+
+    fn now(&self) -> Timestamp {
+        crate::clock_display::browser_utc_now()
     }
 
     fn new_archive(&self) -> BlobArchive {
@@ -322,22 +333,24 @@ pub(crate) fn boxed_session_storage() -> Option<Box<dyn RecordStorage>> {
 #[cfg(test)]
 pub(crate) mod in_memory;
 
-/// Why the required opening did not establish bounds for a companion socket.
+/// Why the required opening did not establish bounds and pacing for a companion socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum CallOpeningError {
     #[error("the console connection ended before its session opening")]
     Transport,
-    #[error("the console session opening did not arrive within the frame timeout")]
+    #[error("the console session opening did not arrive within the request timeout")]
     TimedOut,
     #[error("the console session opening is invalid")]
     Invalid,
 }
 
+/// The opening of a companion socket: the bounds its frames keep and the pacing of the node it
+/// reached, which must arrive within `timeout`.
 pub(crate) async fn read_opening<B: Browser>(
     browser: &B,
     socket: &mut B::Socket,
     timeout: Duration,
-) -> Result<nervix_client_wire::SessionLimits, error_stack::Report<CallOpeningError>> {
+) -> Result<SessionOpened, error_stack::Report<CallOpeningError>> {
     let received = std::pin::pin!(socket.receive());
     let timeout = std::pin::pin!(browser.wait(timeout));
     let received = match futures_util::future::select(received, timeout).await {
@@ -347,11 +360,8 @@ pub(crate) async fn read_opening<B: Browser>(
         }
     };
     match received {
-        Received::Binary(payload) => {
-            let opened = nervix_client_wire::SessionOpened::verify(payload.into())
-                .map_err(|report| report.change_context(CallOpeningError::Invalid))?;
-            Ok(opened.limits)
-        }
+        Received::Binary(payload) => SessionOpened::verify(payload.into())
+            .map_err(|report| report.change_context(CallOpeningError::Invalid)),
         Received::Text => Err(error_stack::Report::new(CallOpeningError::Invalid)),
         Received::Ended => Err(error_stack::Report::new(CallOpeningError::Transport)),
     }

@@ -362,8 +362,9 @@ impl std::fmt::Display for LicensingNotice {
                  connectivity and run REFRESH LICENSE."
             }
             WarningCode::RefreshLapsed => {
-                "The license offline allowance has expired; new usage is refused while existing \
-                 processing continues. Restore service connectivity and run REFRESH LICENSE."
+                "The license offline allowance has expired and the license is frozen: existing \
+                 processing continues under the last verified decision. Restore service \
+                 connectivity and run REFRESH LICENSE."
             }
             WarningCode::DecisionUnverifiable => {
                 "The committed license decision cannot be verified; the free usage policy applies. \

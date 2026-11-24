@@ -5,7 +5,7 @@
 //! - **Depends on.** The host session runtime, typed outcomes and magnus keyword conversion.
 //! - **Must not know.** Server state, routing, request correlation or recovery decisions.
 
-use std::{cell::RefCell, time::Duration};
+use std::{cell::RefCell, num::NonZeroU32, time::Duration};
 
 use magnus::{
     DataTypeFunctions, Error, RArray, RHash, RModule, RString, Ruby, TypedData, Value, function,
@@ -36,6 +36,11 @@ pub(crate) fn seconds(argument: &'static str, value: f64) -> Result<Duration, Er
             &format!("must be finite non-negative seconds: {error}"),
         )
     })
+}
+
+/// A receive window a host passed in bytes.
+fn window(argument: &'static str, bytes: i64) -> Result<NonZeroU32, Error> {
+    host::Session::receive_window(argument, bytes).map_err(errors::raise)
 }
 
 #[derive(DataTypeFunctions, TypedData)]
@@ -92,6 +97,100 @@ struct Connection {
     cancel: Option<host::Cancel>,
 }
 
+/// The keywords naming who connects and where: credentials, TLS and the servers to reach.
+struct ConnectAccess {
+    username: Option<String>,
+    password: Option<String>,
+    tls: Option<i32>,
+    ca_certificate: Option<RString>,
+    seeds: Option<Vec<String>>,
+}
+
+impl ConnectAccess {
+    fn apply(self, options: ConnectOptions) -> Result<ConnectOptions, Error> {
+        let mut options = match (self.username, self.password) {
+            (Some(username), Some(password)) => options.with_basic_auth(username, password),
+            (None, None) => options,
+            _ => {
+                return Err(errors::invalid(
+                    "username",
+                    "and password must both be supplied or both be absent",
+                ));
+            }
+        };
+        if let Some(tls) = self.tls {
+            let requirement = match tls {
+                1 => TlsRequirement::Preferred,
+                2 => TlsRequirement::Required,
+                _ => {
+                    return Err(errors::invalid(
+                        "tls",
+                        "must be Tls::PREFERRED or Tls::REQUIRED",
+                    ));
+                }
+            };
+            options.tls_requirement = Some(requirement);
+        }
+        if let Some(certificate) = self.ca_certificate {
+            options.ca_certificate_pem = Some(values::bytes(certificate));
+        }
+        if let Some(seeds) = self.seeds {
+            let mut parsed = Vec::with_capacity(seeds.len());
+            for seed in seeds {
+                let seed = Url::parse(&seed).map_err(|error| {
+                    errors::invalid("seeds", &format!("contains an invalid URL: {error}"))
+                })?;
+                parsed.push(seed);
+            }
+            options.seed_servers = parsed;
+        }
+        Ok(options)
+    }
+}
+
+/// The keywords bounding the connection: its deadlines in seconds, its keepalive and its receive
+/// windows in bytes.
+struct ConnectLimits {
+    connect_timeout: Option<f64>,
+    request_timeout: Option<f64>,
+    retry_timeout: Option<f64>,
+    backup_wait_timeout: Option<f64>,
+    keepalive_interval: Option<f64>,
+    keepalive_timeout: Option<f64>,
+    stream_window_bytes: Option<i64>,
+    connection_window_bytes: Option<i64>,
+}
+
+impl ConnectLimits {
+    fn apply(self, mut options: ConnectOptions) -> Result<ConnectOptions, Error> {
+        if let Some(timeout) = self.connect_timeout {
+            options.connect_timeout = seconds("connect_timeout", timeout)?;
+        }
+        if let Some(timeout) = self.request_timeout {
+            options.request_timeout = seconds("request_timeout", timeout)?;
+        }
+        if let Some(timeout) = self.retry_timeout {
+            options.retry_timeout = seconds("retry_timeout", timeout)?;
+        }
+        if let Some(timeout) = self.backup_wait_timeout {
+            options.backup_wait_timeout = seconds("backup_wait_timeout", timeout)?;
+        }
+        if let Some(interval) = self.keepalive_interval {
+            options.keepalive_interval = seconds("keepalive_interval", interval)?;
+        }
+        if let Some(timeout) = self.keepalive_timeout {
+            options.keepalive_timeout = seconds("keepalive_timeout", timeout)?;
+        }
+        if let Some(bytes) = self.stream_window_bytes {
+            options.stream_window_bytes = window("stream_window_bytes", bytes)?;
+        }
+        if let Some(bytes) = self.connection_window_bytes {
+            options.connection_window_bytes = window("connection_window_bytes", bytes)?;
+        }
+        Ok(options)
+    }
+}
+
 impl Connection {
     fn parse(args: &[Value]) -> Result<Self, Error> {
         let args = scan_args::<(String,), (), (), (), RHash, ()>(args)?;
@@ -139,79 +238,62 @@ impl Connection {
             request_timeout,
             retry_timeout,
         ) = kwargs.optional;
-        let domain = domain.flatten();
-        let username = username.flatten();
-        let password = password.flatten();
-        let tls = tls.flatten();
-        let ca_certificate = ca_certificate.flatten();
-        let seeds = seeds.flatten();
-        let connect_timeout = connect_timeout.flatten();
-        let request_timeout = request_timeout.flatten();
-        let retry_timeout = retry_timeout.flatten();
-        let more = get_kwargs::<_, (), (Option<Option<f64>>, Option<Option<Obj<Cancel>>>), ()>(
+        let more = get_kwargs::<
+            _,
+            (),
+            (
+                Option<Option<f64>>,
+                Option<Option<Obj<Cancel>>>,
+                Option<Option<f64>>,
+                Option<Option<f64>>,
+                Option<Option<i64>>,
+                Option<Option<i64>>,
+            ),
+            (),
+        >(
             kwargs.splat,
             &[],
-            &["backup_wait_timeout", "cancel"],
+            &[
+                "backup_wait_timeout",
+                "cancel",
+                "keepalive_interval",
+                "keepalive_timeout",
+                "stream_window_bytes",
+                "connection_window_bytes",
+            ],
         )?;
-        let (backup_wait_timeout, cancel) = more.optional;
-        let backup_wait_timeout = backup_wait_timeout.flatten();
-        let cancel = cancel.flatten().map(|cancel| cancel.child());
-        let mut options = ConnectOptions::default();
-        match (username, password) {
-            (Some(username), Some(password)) => {
-                options = options.with_basic_auth(username, password)
-            }
-            (None, None) => {}
-            _ => {
-                return Err(errors::invalid(
-                    "username",
-                    "and password must both be supplied or both be absent",
-                ));
-            }
-        }
-        if let Some(tls) = tls {
-            let requirement = match tls {
-                1 => TlsRequirement::Preferred,
-                2 => TlsRequirement::Required,
-                _ => {
-                    return Err(errors::invalid(
-                        "tls",
-                        "must be Tls::PREFERRED or Tls::REQUIRED",
-                    ));
-                }
-            };
-            options.tls_requirement = Some(requirement);
-        }
-        if let Some(certificate) = ca_certificate {
-            options.ca_certificate_pem = Some(values::bytes(certificate));
-        }
-        if let Some(seeds) = seeds {
-            let mut parsed = Vec::with_capacity(seeds.len());
-            for seed in seeds {
-                let seed = Url::parse(&seed).map_err(|error| {
-                    errors::invalid("seeds", &format!("contains an invalid URL: {error}"))
-                })?;
-                parsed.push(seed);
-            }
-            options.seed_servers = parsed;
-        }
-        if let Some(timeout) = connect_timeout {
-            options.connect_timeout = seconds("connect_timeout", timeout)?;
-        }
-        if let Some(timeout) = request_timeout {
-            options.request_timeout = seconds("request_timeout", timeout)?;
-        }
-        if let Some(timeout) = retry_timeout {
-            options.retry_timeout = seconds("retry_timeout", timeout)?;
-        }
-        if let Some(timeout) = backup_wait_timeout {
-            options.backup_wait_timeout = seconds("backup_wait_timeout", timeout)?;
-        }
+        let (
+            backup_wait_timeout,
+            cancel,
+            keepalive_interval,
+            keepalive_timeout,
+            stream_window_bytes,
+            connection_window_bytes,
+        ) = more.optional;
+        let access = ConnectAccess {
+            username: username.flatten(),
+            password: password.flatten(),
+            tls: tls.flatten(),
+            ca_certificate: ca_certificate.flatten(),
+            seeds: seeds.flatten(),
+        };
+        let limits = ConnectLimits {
+            connect_timeout: connect_timeout.flatten(),
+            request_timeout: request_timeout.flatten(),
+            retry_timeout: retry_timeout.flatten(),
+            backup_wait_timeout: backup_wait_timeout.flatten(),
+            keepalive_interval: keepalive_interval.flatten(),
+            keepalive_timeout: keepalive_timeout.flatten(),
+            stream_window_bytes: stream_window_bytes.flatten(),
+            connection_window_bytes: connection_window_bytes.flatten(),
+        };
+        let options = access.apply(ConnectOptions::default())?;
+        let options = limits.apply(options)?;
         Ok(Self {
             server,
-            domain,
+            domain: domain.flatten(),
             options,
-            cancel,
+            cancel: cancel.flatten().map(|cancel| cancel.child()),
         })
     }
 

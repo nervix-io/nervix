@@ -126,6 +126,7 @@ impl Failure {
             | ClientError::InvalidServerEndpoint
             | ClientError::InvalidDeadline { .. }
             | ClientError::InvalidFrameCapacity { .. }
+            | ClientError::InvalidReceiveWindow { .. }
             | ClientError::InvalidRetryBackoff
             | ClientError::InvalidRestorationBackoff
             | ClientError::InvalidSubscriptionRetention
@@ -296,6 +297,11 @@ mod endpoint_recovery_tests {
             ClientError::InvalidRetryBackoff,
             ClientError::InvalidRestorationBackoff,
             ClientError::InvalidSubscriptionRetention,
+            ClientError::InvalidReceiveWindow {
+                field: "connection-window-bytes",
+                bytes: 1,
+                smallest: 65_535,
+            },
         ] {
             assert_eq!(Failure::from(error).kind(), FailureKind::InvalidArgument);
         }
