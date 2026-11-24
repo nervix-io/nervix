@@ -317,9 +317,10 @@ where
 }
 
 /// Encode a stream request's envelope, which copies the payload it nests. The caller gives the
-/// payload's own charge back first, so the encoding never waits for room while holding it; the
-/// request's outbound admission bounds the nested payload until the encoding's charge covers its
-/// copy. An output its class has no room for now waits for room while holding nothing.
+/// payload's own charge back first, so the encoding never waits for room while holding it. The
+/// request's place in the incoming queue bounds the nested payload until the encoding's charge
+/// covers its copy, or, for a request of a reserved kind, the stream it leased before encoding its
+/// payload. An output its class has no room for now waits for room while holding nothing.
 pub(crate) async fn encode_stream_request(
     executor: &Executor,
     envelope: crate::request::StreamRequestEnvelope,
@@ -516,7 +517,9 @@ where
 /// because cancellation can end its caller before a submitted CPU job exits, and one for the decoded
 /// value: both as one charge, waited for while the caller holds nothing of the class. A caller
 /// therefore gives back the charge of the envelope that carried the payload before it decodes it,
-/// and the request's admission bounds the payload until this charge covers it.
+/// and the request's own bound covers the payload until this charge does. A request this node
+/// sends keeps its place in the incoming queue until its answer is decoded, or, for a reserved
+/// kind, its stream. A request it serves keeps its stream open until its handler answers.
 pub(crate) async fn decode_rkyv_payload<T>(
     executor: &Executor,
     class: MemoryClass,

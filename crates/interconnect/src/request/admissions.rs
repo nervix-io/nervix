@@ -76,7 +76,7 @@ impl RequestAdmissions {
         Some(RequestAdmission {
             admissions: Arc::clone(admissions),
             subquota,
-            _place: place,
+            place,
         })
     }
 
@@ -91,7 +91,16 @@ pub(crate) struct RequestAdmission {
     admissions: Arc<RequestAdmissions>,
     subquota: RequestSubquota,
     /// The incoming queue's place a request without a reserved kind holds until it resolves.
-    _place: Option<OwnedSemaphorePermit>,
+    place: Option<OwnedSemaphorePermit>,
+}
+
+impl RequestAdmission {
+    /// Whether this admission holds a place of the incoming queue. The place bounds what its
+    /// request holds uncharged while an encoding or decoding waits for room. A request of a
+    /// reserved kind holds no place, so the stream it leases bounds that instead.
+    pub(crate) fn holds_a_place(&self) -> bool {
+        self.place.is_some()
+    }
 }
 
 impl Drop for RequestAdmission {

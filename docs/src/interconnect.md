@@ -799,9 +799,13 @@ validates the relationships among operation limits and these budgets, including 
 that must fit for independent operations to keep making progress.
 
 No stage of a request waits for room while it holds a charge of the same class. A typed request's
-caller gives its payload's charge back before the envelope's encoding copies the payload, and the
-request's outbound admission bounds the payload meanwhile; an encoding whose output outgrows its
-charge gives back what it holds and waits for the larger charge, holding nothing.
+caller gives the payload's charge back before the envelope's encoding copies the payload, and the
+answer envelope's charge back before the typed answer's decoding copies its payload. A request
+without a reserved kind holds a place of the incoming queue meanwhile, which bounds those copies.
+A request of a reserved kind holds no place, so it leases its stream before it encodes its payload
+and keeps the stream until its answer is decoded, and a peer connection's stream slots bound its
+copies. An encoding whose output outgrows its charge gives back what it holds and waits for the
+larger charge, holding nothing.
 
 Every request and answer body declares its length (`content-length`), and its receiver waits for
 the body and the room its decoding takes as one charge while it holds nothing of the class, then

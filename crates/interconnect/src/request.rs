@@ -56,6 +56,7 @@ use crate::{
     connection::{
         ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSender,
         EncodedMessage, FrameReader, OutboundByteStreamRequest, PeerProcessFence, RawDuplexRequest,
+        StreamLease,
     },
     observation::{ConnectionDirection, RequestOutcome, TransportObservations},
 };
@@ -886,6 +887,45 @@ pub enum RequestError {
 }
 
 impl RequestError {
+    /// The request failure a control request's transport failure means.
+    pub(crate) fn control_with_cause(
+        cause: Report<super::TransportError>,
+        node: &ClusterNodeName,
+        request: &'static str,
+        timeout: Duration,
+    ) -> Report<Self> {
+        let request_error = match cause.current_context() {
+            super::TransportError::PeerProcessChanged {
+                expected, actual, ..
+            } => Self::PeerProcessChanged {
+                node: node.clone(),
+                request,
+                expected: *expected,
+                actual: *actual,
+            },
+            super::TransportError::ShuttingDown => Self::ShuttingDown {
+                node: node.clone(),
+                request,
+            },
+            super::TransportError::RequestTimeout { .. }
+            | super::TransportError::ProgressTimeout { .. } => Self::Timeout {
+                node: node.clone(),
+                request,
+                timeout,
+            },
+            super::TransportError::PoolExhausted => Self::ConnectionCapacityExhausted {
+                node: node.clone(),
+                request,
+            },
+            cause => Self::Transport {
+                node: node.clone(),
+                request,
+                reason: cause.to_string(),
+            },
+        };
+        cause.change_context(request_error)
+    }
+
     pub(crate) fn stream_with_cause<C: error_stack::Context>(
         cause: Report<C>,
         node: ClusterNodeName,
@@ -1866,6 +1906,48 @@ impl Transport {
         Ok(())
     }
 
+    /// Leases the stream a control request `M` exchanges on, by `deadline`.
+    async fn lease_control_stream<M, F>(
+        &self,
+        node: &ClusterNodeName,
+        deadline: Instant,
+        fence: F,
+        timeout_duration: Duration,
+    ) -> Result<StreamLease, Report<RequestError>>
+    where
+        M: InterconnectRequest,
+        F: PeerProcessFence,
+    {
+        self.inner
+            .lease_control(node, M::CLASS, M::SUBQUOTA, deadline, fence)
+            .await
+            .map_err(|error| {
+                RequestError::control_with_cause(error, node, M::NAME, timeout_duration)
+            })
+    }
+
+    /// Leases the stream a byte-stream request `M` opens on, by a deadline `timeout` from now, and
+    /// returns the stream with that deadline.
+    async fn lease_byte_stream<M>(
+        &self,
+        node: &ClusterNodeName,
+        timeout: Duration,
+    ) -> Result<(StreamLease, Instant), Report<RequestError>>
+    where
+        M: InterconnectStreamRequest,
+    {
+        let deadline = self
+            .inner
+            .request_deadline(timeout)
+            .map_err(|error| RequestError::stream_with_cause(error, node.clone(), M::NAME))?;
+        let lease = self
+            .inner
+            .lease(node, M::CLASS, M::SUBQUOTA, deadline)
+            .await
+            .map_err(|error| RequestError::stream_with_cause(error, node.clone(), M::NAME))?;
+        Ok((lease, deadline))
+    }
+
     pub async fn request_stream<M>(
         &self,
         node: &ClusterNodeName,
@@ -1910,6 +1992,16 @@ impl Transport {
                     subquota: M::SUBQUOTA,
                 })
             })?;
+        // The payload's copy goes uncharged while the envelope's encoding waits for room. A request
+        // holding a place of the incoming queue is bounded by that place and leases its stream once
+        // its body is encoded. A request of a reserved kind holds no place, so it leases its stream
+        // before it encodes its payload: the streams the peer's connection has bound that copy.
+        let early_lease = if admission.holds_a_place() {
+            None
+        } else {
+            let leased = self.lease_byte_stream::<M>(node, timeout).await?;
+            Some(leased)
+        };
         let (payload, payload_reservation) = message
             .encode_rkyv(
                 self.inner.executor().clone(),
@@ -1927,22 +2019,25 @@ impl Transport {
             },
         };
         // The envelope's encoding copies the payload, whose charge is given back first so the
-        // encoding never waits for room while holding it; the outbound admission bounds the payload
-        // meanwhile.
+        // encoding never waits for room while holding it.
         drop(payload_reservation);
         let body = wire::encode_stream_request(self.inner.executor(), request)
             .await
             .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
+        let (lease, deadline) = match early_lease {
+            Some(leased) => leased,
+            None => self.lease_byte_stream::<M>(node, timeout).await?,
+        };
         self.inner
             .open_byte_stream(
                 node,
                 OutboundByteStreamRequest {
                     class: M::CLASS,
-                    subquota: M::SUBQUOTA,
                     name: M::NAME,
                     body,
-                    timeout,
+                    deadline,
                     admission,
+                    lease,
                 },
             )
             .await
@@ -2005,7 +2100,7 @@ impl Transport {
             }));
         }
         let operation = async {
-            let _admission = self
+            let admission = self
                 .inner
                 .requests()
                 .try_admit_outbound(M::SUBQUOTA)
@@ -2015,6 +2110,26 @@ impl Transport {
                         subquota: M::SUBQUOTA,
                     })
                 })?;
+            let deadline = self
+                .inner
+                .request_deadline(timeout_duration)
+                .map_err(|error| {
+                    RequestError::control_with_cause(error, node, M::NAME, timeout_duration)
+                })?;
+            // The payload's copy goes uncharged while the envelope's encoding waits for room, and so
+            // does the answer's payload while its typed decoding waits. A request holding a place of
+            // the incoming queue is bounded by that place and leases its stream only to exchange.
+            // A request of a reserved kind holds no place, so it leases its stream before it
+            // encodes its payload and keeps it until its answer is decoded: the streams the peer's
+            // connection has bound its copies.
+            let early_lease = if admission.holds_a_place() {
+                None
+            } else {
+                let lease = self
+                    .lease_control_stream::<M, F>(node, deadline, fence, timeout_duration)
+                    .await?;
+                Some(lease)
+            };
             let (payload, payload_reservation) = message
                 .encode_rkyv(
                     self.inner.executor().clone(),
@@ -2024,62 +2139,37 @@ impl Transport {
                 .await
                 .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
             // The envelope's encoding copies the payload, whose charge is given back first so the
-            // encoding and the answer never wait for room while holding it; the outbound admission
-            // bounds the payload meanwhile.
+            // encoding and the answer never wait for room while holding it.
             drop(payload_reservation);
             let request = ControlEnvelope::Request(RequestEnvelope {
                 class: M::CLASS,
                 request: M::NAME.to_string(),
                 payload,
             });
-            let response = {
-                let mapping_input = self
-                    .inner
-                    .round_trip_control(node, request, M::SUBQUOTA, timeout_duration, fence)
-                    .await;
-                match mapping_input {
-                    Ok(mapped_value) => Ok(mapped_value),
-                    Err(error) => Err({
-                        let request_error = match error.current_context() {
-                            super::TransportError::PeerProcessChanged {
-                                expected, actual, ..
-                            } => RequestError::PeerProcessChanged {
-                                node: node.clone(),
-                                request: M::NAME,
-                                expected: *expected,
-                                actual: *actual,
-                            },
-                            super::TransportError::ShuttingDown => RequestError::ShuttingDown {
-                                node: node.clone(),
-                                request: M::NAME,
-                            },
-                            super::TransportError::RequestTimeout { .. }
-                            | super::TransportError::ProgressTimeout { .. } => {
-                                RequestError::Timeout {
-                                    node: node.clone(),
-                                    request: M::NAME,
-                                    timeout: timeout_duration,
-                                }
-                            }
-                            super::TransportError::PoolExhausted => {
-                                RequestError::ConnectionCapacityExhausted {
-                                    node: node.clone(),
-                                    request: M::NAME,
-                                }
-                            }
-                            cause => RequestError::Transport {
-                                node: node.clone(),
-                                request: M::NAME,
-                                reason: cause.to_string(),
-                            },
-                        };
-                        error.change_context(request_error)
-                    }),
+            let lease = match early_lease {
+                Some(lease) => lease,
+                None => {
+                    self.lease_control_stream::<M, F>(node, deadline, fence, timeout_duration)
+                        .await?
                 }
-            }?;
+            };
+            let response = self
+                .inner
+                .exchange_control(&lease, request, deadline)
+                .await
+                .map_err(|error| {
+                    RequestError::control_with_cause(error, node, M::NAME, timeout_duration)
+                })?;
+            // Only a request whose stream bounds its answer's copy keeps the stream while that
+            // answer decodes.
+            let held_lease = if admission.holds_a_place() {
+                drop(lease);
+                None
+            } else {
+                Some(lease)
+            };
             // The typed answer's decoding copies the payload this envelope carries, so the envelope's
-            // charge is given back before that decoding waits for its own; the outbound admission
-            // bounds the envelope meanwhile.
+            // charge is given back before that decoding waits for its own.
             let (response, response_reservation) = response.into_parts();
             drop(response_reservation);
             let ControlEnvelope::Response(response) = response else {
@@ -2094,7 +2184,7 @@ impl Transport {
                     request: M::NAME,
                 }));
             }
-            match response.result {
+            let answer = match response.result {
                 Ok(payload) => {
                     // The peer already did the work, so a full queue holds the answer back until
                     // the request's own deadline rather than discarding it.
@@ -2114,7 +2204,10 @@ impl Transport {
                     request: M::NAME,
                     failure,
                 })),
-            }
+            };
+            // The answer is decoded, so a stream held for its copy goes back now.
+            drop(held_lease);
+            answer
         };
         let shutdown = self.inner.shutdown_token();
         let submitted_at = Instant::now();
