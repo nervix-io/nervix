@@ -20,6 +20,9 @@ use super::*;
 use crate::{
     runtime::{
         processor_branch_task::{ProcessorNodeChannels, run_processor_node_runtime},
+        processor_partition_moves::{
+            ClaimProgress, ClaimedKey, ProcessorPartitionMoves, ReleasedProcessorBranch,
+        },
         window_state::{
             WindowSnapshotLifetime, WindowSnapshotSchemas, decode_window_processor_snapshot,
             encode_window_processor_snapshot,
@@ -174,14 +177,15 @@ impl OpenWindowFixture {
         branch: &Option<BranchKey>,
     ) -> RuntimeStatePlacement {
         runtime
-            .state_placement(
+            .state_placement_for_unit(
                 domain,
                 RuntimeStateKind::WindowProcessor,
                 ModelKind::WindowProcessor,
                 self.processor.clone(),
+                self.template.owner.unit,
                 branch.clone(),
             )
-            .expect("the window processor has a published state identity")
+            .expect("the window processor's unit has a published state identity")
     }
 
     /// Store what a node writes before it stops: the processor's branch lifecycle at revision
@@ -275,7 +279,6 @@ impl OpenWindowFixture {
         let window = decode_window_processor_snapshot(
             &published.payload,
             runtime.executor(),
-            nervix_execution::QueueAdmission::RefuseWhenFull,
             WindowSnapshotSchemas {
                 input: &input,
                 arguments: &arguments,
@@ -493,7 +496,7 @@ async fn attempt_once(
     last_persisted_lru_lsm: &mut u64,
 ) -> error_stack::Result<(), ProcessorBranchTaskError> {
     let mut attempt = restore.begin(context, template);
-    while let RestoreProgress::Waiting = attempt.run_until_waiting().await {
+    while let AttemptProgress::Waiting = attempt.run_until_waiting().await {
         attempt.until_no_longer_waiting().await;
     }
     restore.finish(
@@ -621,6 +624,438 @@ async fn a_retired_transition_runs_the_input_its_processor_unit_parked() {
         held().is_empty(),
         "a retired unit withdraws the holdings it published"
     );
+    processor.stop().await;
+}
+
+/// A unit in a partition transition whose claim brings a key's state while the node's bulk class
+/// is full builds the key's branch as an attempt. The build waits for a place rather than being
+/// refused or tried again later. While it waits, the unit answers its commands and keeps the key's
+/// input parked. Once a place frees, the branch installs with the window the claim brought and runs
+/// the input the key parked.
+#[nervix_primitives::test]
+async fn a_claimed_branch_that_finds_the_bulk_class_full_waits_for_a_place_while_its_unit_answers()
+{
+    use nervix_models::StateInspectionBranchSelection as Selection;
+
+    let mut fixture = OpenWindowFixture::new();
+    let unit = Unit::partition(5);
+    let partitions = |count: u16| {
+        nervix_models::ResolvedParametrizerPartitions::Direct(
+            std::num::NonZeroU16::new(count).expect("the test counts are positive"),
+        )
+    };
+    // Unit 5 of a branch growing from four partitions to eight: four placed `beta` in unit 1.
+    let transition = partition_claims::UnitPartitionTransition {
+        parametrizer: named::<ParametrizerName>("by_tenant"),
+        epoch: nervix_models::PartitionEpochNumber::FIRST.next(),
+        current: RelayPartitioning::of_partitions(partitions(8)),
+        previous: RelayPartitioning::of_partitions(partitions(4)),
+        unit,
+    };
+    fixture.template.owner = NodeUnitRef::new(fixture.template.owner.node.clone(), unit);
+    fixture.template.partition_transition = Some(transition.clone());
+    let directory = tempfile::tempdir().expect("the state directory opens");
+    let executor = single_worker_executor();
+    let (runtime, domain) = fixture.runtime(executor.clone(), &directory);
+    runtime.publish_unit_state_assignment(
+        DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::WindowProcessor,
+                fixture.processor.clone(),
+            ),
+            unit,
+        ),
+        ScheduledStateAssignment {
+            identity: ScheduledStateIdentity {
+                schema_fingerprint: nervix_models::SchemaFingerprint::from_digest([7; 32]),
+                inferencer_model: None,
+                wasm_state_generations: None,
+            },
+            checkpoint_owners: None,
+        },
+    );
+    let input = RelayBroadcast::with_capacity(nonzero_capacity(4));
+    let processor = fixture.start_in_transition(&runtime, &domain, &input);
+    let held = || {
+        runtime.partition_transition_holdings(&domain, &transition.parametrizer, transition.epoch)
+    };
+    timeout(WAIT, async {
+        while held().is_empty() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the unit publishes its holdings once it restored its branches");
+
+    // A claim that brings a key's state stores the window under this unit's placements before it
+    // reports.
+    let beta = string_branch_key("tenant", "beta");
+    let claimed = OpenBranch {
+        key: beta.clone(),
+        incarnation: 4,
+        latency: 100,
+    };
+    let window = fixture.open_window(runtime.executor(), &claimed).await;
+    runtime
+        .inner
+        .state_store
+        .clone()
+        .expect("the runtime has a state store")
+        .persist_latest_snapshot(
+            &fixture.window_placement(&runtime, &domain, &beta),
+            1,
+            &window,
+        )
+        .expect("the claimed window checkpoint is stored");
+    input
+        .broadcast(fixture.input_batch(&beta, 20, AckSet::empty()))
+        .await
+        .expect("the input queues");
+    // A checkpoint first takes every queued input, so `beta`'s input is parked once it answers.
+    let parked = processor
+        .checkpoint()
+        .await
+        .expect("the processor checkpoints its branches");
+    assert_eq!(
+        branch_lifetimes(&parked),
+        Vec::new(),
+        "an input whose key may lie in another unit waits for its key's state"
+    );
+    let beta_key = beta.clone().expect("beta is a concrete key");
+    processor
+        .commands
+        .send(ProcessorNodeCommand::PartitionClaim(
+            ClaimProgress::CatalogRead(Ok(partition_claims::ReadCatalog::naming([
+                partition_claims::CatalogedKey {
+                    key: beta_key.clone(),
+                    holder: Unit::partition(1),
+                },
+            ]))),
+        ))
+        .await
+        .expect("the processor takes the catalog its peers answered");
+
+    let filled = FilledCpuClass::fill(&executor, nervix_execution::CpuClass::Bulk).await;
+    processor
+        .commands
+        .send(ProcessorNodeCommand::PartitionClaim(
+            ClaimProgress::Claimed {
+                key: beta_key,
+                result: Ok(ClaimedKey::Installed {
+                    holder: Unit::partition(1),
+                    incarnation: 4,
+                    last_activity: Timestamp::from_unix_nanos(1_000),
+                }),
+            },
+        ))
+        .await
+        .expect("the processor takes the claim's report");
+    timeout(WAIT, async {
+        while executor.snapshot().bulk_cpu.waiting == 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the claimed branch's window waits for a place on the full bulk class");
+    let inspected = processor
+        .inspected_branches(Selection::All)
+        .await
+        .expect("a unit whose claimed branch waits for a place still names its branches");
+    assert_eq!(
+        inspected,
+        Vec::new(),
+        "the claimed branch is not installed while its window waits for a place"
+    );
+    let waiting = processor
+        .checkpoint()
+        .await
+        .expect("a unit whose claimed branch waits for a place still checkpoints");
+    assert_eq!(
+        branch_lifetimes(&waiting),
+        Vec::new(),
+        "a unit checkpoints no branch for a key whose install still waits"
+    );
+    assert!(
+        executor.snapshot().bulk_cpu.waiting >= 1,
+        "the claimed branch still waits for a place while its unit answers"
+    );
+
+    filled.release().await;
+    timeout(WAIT, async {
+        loop {
+            let inspected = processor
+                .inspected_branches(Selection::All)
+                .await
+                .expect("the unit names its branches");
+            if inspected == vec![beta.clone()] {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the claimed branch installs once a place frees");
+    let installed = processor
+        .checkpoint()
+        .await
+        .expect("the processor checkpoints its branches");
+    assert_eq!(
+        branch_lifetimes(&installed),
+        vec![(beta.clone(), 4)],
+        "the claimed branch resumes with the lifetime its holder gave it"
+    );
+    assert_eq!(
+        fixture
+            .published_latencies(&runtime, &domain, &beta, 4)
+            .await,
+        Some(vec![100, 20]),
+        "the claimed branch keeps the window the claim brought and runs the input its key parked"
+    );
+    processor.stop().await;
+}
+
+/// A unit that released a key and then has the key's origin confirmed here resumes the key's
+/// retained branch. The built branch is installed only while the released slot still holds the
+/// lifetime it was built for: a forget, or the slot's expiry, can end the slot while the build waits
+/// for capacity, and then nothing is installed, so the key does not run here beside its claimant.
+#[nervix_primitives::test]
+async fn a_resumed_branch_is_installed_only_while_its_released_slot_holds_its_lifetime() {
+    let mut fixture = OpenWindowFixture::new();
+    let unit = Unit::partition(5);
+    let partitions = |count: u16| {
+        nervix_models::ResolvedParametrizerPartitions::Direct(
+            std::num::NonZeroU16::new(count).expect("the test counts are positive"),
+        )
+    };
+    let transition = partition_claims::UnitPartitionTransition {
+        parametrizer: named::<ParametrizerName>("by_tenant"),
+        epoch: nervix_models::PartitionEpochNumber::FIRST.next(),
+        current: RelayPartitioning::of_partitions(partitions(8)),
+        previous: RelayPartitioning::of_partitions(partitions(4)),
+        unit,
+    };
+    fixture.template.owner = NodeUnitRef::new(fixture.template.owner.node.clone(), unit);
+    fixture.template.partition_transition = Some(transition.clone());
+    let directory = tempfile::tempdir().expect("the state directory opens");
+    let (runtime, domain) = fixture.runtime(Executor::default(), &directory);
+    runtime.publish_unit_state_assignment(
+        DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::WindowProcessor,
+                fixture.processor.clone(),
+            ),
+            unit,
+        ),
+        ScheduledStateAssignment {
+            identity: ScheduledStateIdentity {
+                schema_fingerprint: nervix_models::SchemaFingerprint::from_digest([7; 32]),
+                inferencer_model: None,
+                wasm_state_generations: None,
+            },
+            checkpoint_owners: None,
+        },
+    );
+    let context = ProcessorRuntimeContext::new(runtime.clone(), domain.clone());
+    let template = Arc::new(fixture.template.clone());
+    let (commands, _command_rx) = mpsc::channel(1);
+    let beta = string_branch_key("tenant", "beta");
+    let beta_key = beta.clone().expect("beta is a concrete key");
+    let released_at = Timestamp::from_unix_nanos(1_000);
+
+    for forgotten_while_building in [false, true] {
+        let mut instances = ProcessorBranches::new();
+        instances.insert_restored(
+            beta.clone(),
+            released_at,
+            4,
+            ProcessorBranchSlot::Released(ReleasedProcessorBranch {
+                last_activity: released_at,
+                incarnation: 4,
+                checkpoints: Vec::new(),
+            }),
+        );
+        let mut moves = ProcessorPartitionMoves::begin(
+            &runtime,
+            &domain,
+            &template,
+            transition.clone(),
+            &instances,
+            commands.clone(),
+            4,
+        );
+        let outcome = moves.progress(
+            &context,
+            &template,
+            &mut instances,
+            ClaimProgress::Located {
+                key: beta_key.clone(),
+                result: Ok(Some(unit)),
+            },
+        );
+        let Some(install) = outcome.install else {
+            panic!("a released key whose origin is confirmed here resumes its retained branch");
+        };
+        let built = install.begin(&context, &template).outcome().await;
+        if forgotten_while_building {
+            instances.remove(&beta);
+        }
+        moves.finish_install(&context, &template, &mut instances, install, built);
+        let installed = match instances.get(&beta) {
+            Some(slot) => slot.live().is_some(),
+            None => false,
+        };
+        assert_eq!(
+            installed, !forgotten_while_building,
+            "a resumed branch is installed exactly when its released slot outlived its build \
+             (forgotten while building: {forgotten_while_building})"
+        );
+    }
+}
+
+/// A processor whose input brings a key it has no branch for builds that branch as an attempt. A
+/// build that waits for capacity, as an inferencer's does while it reads its carried state, goes on
+/// on a task of its own. Here a window's build waits instead, because the test stores window state
+/// under the very lifetime the new branch is built for, so the build decodes it on the full bulk
+/// class. While the build waits the processor takes no new input and still names its branches for
+/// an inspection. A checkpoint follows the build, and once a place frees the branch installs, runs
+/// the input that waited for it and is named by the checkpoint and by every later inspection.
+#[nervix_primitives::test]
+async fn a_new_keys_branch_that_waits_for_capacity_lets_its_processor_answer_inspections() {
+    use nervix_models::StateInspectionBranchSelection as Selection;
+
+    let fixture = OpenWindowFixture::new();
+    let directory = tempfile::tempdir().expect("the state directory opens");
+    let executor = single_worker_executor();
+    let (runtime, domain) = fixture.runtime(executor.clone(), &directory);
+    let alpha = string_branch_key("tenant", "alpha");
+    // A processor that never formed a lifecycle builds its first branch as lifetime 1.
+    let stored = fixture
+        .open_window(
+            runtime.executor(),
+            &OpenBranch {
+                key: alpha.clone(),
+                incarnation: 1,
+                latency: 10,
+            },
+        )
+        .await;
+    runtime
+        .inner
+        .state_store
+        .clone()
+        .expect("the runtime has a state store")
+        .persist_latest_snapshot(
+            &fixture.window_placement(&runtime, &domain, &alpha),
+            1,
+            &stored,
+        )
+        .expect("the window state is stored");
+    let input = RelayBroadcast::with_capacity(nonzero_capacity(4));
+    let processor = fixture.start(&runtime, &domain, &input, Vec::new());
+    let restored = processor.restored_lifecycle().await;
+    assert_eq!(
+        branch_lifetimes(&restored),
+        Vec::new(),
+        "a processor that never formed a lifecycle restores no branch"
+    );
+
+    let filled = FilledCpuClass::fill(&executor, nervix_execution::CpuClass::Bulk).await;
+    input
+        .broadcast(fixture.input_batch(&alpha, 20, AckSet::empty()))
+        .await
+        .expect("the input queues");
+    timeout(WAIT, async {
+        while executor.snapshot().bulk_cpu.waiting == 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the new branch's build waits for a place on the full bulk class");
+    assert_eq!(
+        processor
+            .inspected_branches(Selection::All)
+            .await
+            .expect("a processor whose new branch waits for capacity still names its branches"),
+        Vec::new(),
+        "the new branch is not installed while its build waits"
+    );
+
+    let (response, checkpoint) = oneshot::channel();
+    processor
+        .commands
+        .send(ProcessorNodeCommand::Checkpoint {
+            purpose: ProcessorCheckpointPurpose::OwnershipHandoff,
+            response,
+        })
+        .await
+        .expect("the processor takes its checkpoint");
+    // The processor's commands hold one at a time, so this inspection is taken only once the
+    // processor took the checkpoint, which follows the build.
+    let (response, inspected) = oneshot::channel();
+    timeout(
+        WAIT,
+        processor
+            .commands
+            .send(ProcessorNodeCommand::SelectStateBranches {
+                selection: Selection::All,
+                response,
+            }),
+    )
+    .await
+    .expect("the processor takes the checkpoint while its new branch waits")
+    .expect("the processor takes its command");
+    assert!(
+        executor.snapshot().bulk_cpu.waiting >= 1,
+        "the new branch still waits for a place while the checkpoint follows it"
+    );
+
+    filled.release().await;
+    let checkpointed = timeout(WAIT, checkpoint)
+        .await
+        .expect("the checkpoint is answered once the new branch is built")
+        .expect("the processor keeps the checkpoint's response")
+        .expect("the processor checkpoints its branches");
+    assert_eq!(
+        branch_lifetimes(&checkpointed),
+        vec![(alpha.clone(), 1)],
+        "a checkpoint that followed the build names the branch it built"
+    );
+    let inspected = timeout(WAIT, inspected)
+        .await
+        .expect("the inspection after the checkpoint is answered")
+        .expect("the processor keeps the inspection's response")
+        .expect("the processor names its branches");
+    let mut keys = Vec::with_capacity(inspected.branches.len());
+    for branch in inspected.branches {
+        keys.push(branch.key);
+    }
+    assert_eq!(
+        keys,
+        vec![alpha.clone()],
+        "an inspection after the build names the branch it built"
+    );
+    // A branch takes a checkpoint before input already queued for it, so the batch delivered as the
+    // branch started shows in a later checkpoint.
+    timeout(WAIT, async {
+        loop {
+            processor
+                .checkpoint()
+                .await
+                .expect("the processor checkpoints its branches");
+            if fixture
+                .published_latencies(&runtime, &domain, &alpha, 1)
+                .await
+                == Some(vec![20])
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the new branch begins a fresh window and runs the input that waited for it");
     processor.stop().await;
 }
 
@@ -891,10 +1326,9 @@ async fn a_restore_that_finds_the_bulk_class_full_waits_for_a_place_while_its_pr
         ),
         "the selection is refused as unrestored, found {inspection:?}"
     );
-    assert_eq!(
-        executor.snapshot().bulk_cpu.refused,
-        0,
-        "the restore waits for a place in the full bulk class rather than being refused"
+    assert!(
+        executor.snapshot().bulk_cpu.waiting >= 1,
+        "the restore waits for a place in the full bulk class"
     );
 
     filled.release().await;
@@ -920,11 +1354,6 @@ async fn a_restore_that_finds_the_bulk_class_full_waits_for_a_place_while_its_pr
             .await,
         Some(vec![100]),
         "branch beta keeps the window it had open"
-    );
-    assert_eq!(
-        executor.snapshot().bulk_cpu.refused,
-        0,
-        "no decode of the restore was ever refused"
     );
     processor.stop().await;
 }
@@ -1182,7 +1611,7 @@ async fn a_lifecycle_that_names_no_branch_restores_at_once_and_installs_nothing(
     let mut attempt = restore.begin(&context, &fixture.template);
     let progress = attempt.run_until_waiting().await;
     assert!(
-        matches!(progress, RestoreProgress::Built),
+        matches!(progress, AttemptProgress::Ended),
         "a lifecycle that names no branch has nothing to build"
     );
     restore

@@ -1699,26 +1699,14 @@ async fn a_recreated_window_branch_refuses_the_previous_lifetime_checkpoint() {
         .expect("the first lifetime should publish");
 
     let resumed = state
-        .restore_state(
-            &plan,
-            &input_schema,
-            7,
-            &Executor::default(),
-            nervix_execution::QueueAdmission::RefuseWhenFull,
-        )
+        .restore_state(&plan, &input_schema, 7, &Executor::default())
         .await
         .expect("the matching lifetime should restore");
     assert_eq!(resumed.incarnation, 7);
     assert!(!state.generations.is_live_dirty());
 
     let recreated = state
-        .restore_state(
-            &plan,
-            &input_schema,
-            8,
-            &Executor::default(),
-            nervix_execution::QueueAdmission::RefuseWhenFull,
-        )
+        .restore_state(&plan, &input_schema, 8, &Executor::default())
         .await
         .expect("a new lifetime should start empty");
     assert_eq!(recreated.incarnation, 8);

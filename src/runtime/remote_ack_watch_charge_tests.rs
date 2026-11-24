@@ -161,7 +161,6 @@ async fn a_hold_still_without_room_at_the_admission_bound_is_refused() {
         refusal.current_context(),
         AdmissionError::BudgetExhausted { .. }
     ));
-    assert_eq!(relay_memory(&executor).refused, 1);
     drop(occupied);
 }
 

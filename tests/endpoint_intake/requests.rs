@@ -126,6 +126,25 @@ async fn post(
     world.endpoint_requests.post(name, uri, host, payload);
 }
 
+/// The request is still held: the node has not answered it within `duration`, which leaves the
+/// request outstanding for a later observation.
+#[then(expr = "endpoint request {string} has not answered within {string}")]
+async fn has_not_answered_within(world: &mut ScenarioWorld, name: String, duration: String) {
+    let duration = nervix_models::parse_duration_text(&duration)
+        .expect("step duration must be a valid duration");
+    nervix_primitives::time::sleep(duration).await;
+    match world.endpoint_requests.requests.get(&name) {
+        Some(RequestState::Pending(task)) => assert!(
+            !task.is_finished(),
+            "endpoint request '{name}' answered within {duration:?} while the node held it"
+        ),
+        Some(RequestState::Complete(_)) => {
+            panic!("endpoint request '{name}' was already observed answered")
+        }
+        None => panic!("endpoint request '{name}' was not started"),
+    }
+}
+
 #[when(expr = "endpoint request {string} disconnects")]
 #[then(expr = "endpoint request {string} disconnects")]
 async fn disconnect(world: &mut ScenarioWorld, name: String) {

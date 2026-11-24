@@ -20,9 +20,7 @@ use std::{marker::PhantomData, ops::Deref};
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use meticulous::OptionExt as _;
-use nervix_execution::{
-    AdmissionError, Executor, MemoryClass, QueueAdmission, Reservation, StorageClass,
-};
+use nervix_execution::{AdmissionError, Executor, MemoryClass, Reservation, StorageClass};
 use nervix_primitives::sync::Arc;
 use nervix_recovery::Reported as _;
 
@@ -42,11 +40,12 @@ pub(crate) struct RetirementCharge<C> {
 }
 
 impl<C: NativeClient> RetirementCharge<C> {
-    /// Takes the charge of the job that will destroy a `C` on `executor`. That job carries the
-    /// client and nothing else.
-    pub(crate) fn reserve(executor: Executor) -> Result<Self, Report<AdmissionError>> {
-        let charge =
-            executor.try_reserve(MemoryClass::Commands, std::mem::size_of::<C>().arch_into())?;
+    /// Takes the charge of the job that will destroy a `C` on `executor`, waiting for room in a
+    /// full commands class. That job carries the client and nothing else.
+    pub(crate) async fn reserve(executor: Executor) -> Result<Self, Report<AdmissionError>> {
+        let charge = executor
+            .reserve(MemoryClass::Commands, std::mem::size_of::<C>().arch_into())
+            .await?;
         Ok(Self {
             executor,
             charge,
@@ -147,9 +146,8 @@ impl<C: NativeClient> OwnedClient<C> {
         } = self;
         nervix_primitives::task::spawn(async move {
             let destroyed = executor
-                .run_storage_with(
+                .run_storage(
                     StorageClass::Connector,
-                    QueueAdmission::WaitForPlace,
                     charge,
                     // Destruction cannot stop part way, so the job never checks its cancellation.
                     move |_charge, _cancellation| drop(client),

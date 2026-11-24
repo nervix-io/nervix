@@ -25,7 +25,7 @@ use arrow_data::{
 use arrow_schema::{DataType, FieldRef};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass, QueueAdmission};
+use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass};
 use nervix_primitives::{sync::StdArc, task::consume_budget};
 
 use super::{RetainedWindowRows, WindowArrival, retained_runs};
@@ -185,12 +185,9 @@ impl CollectedSequence {
             }
         }
         executor
-            .run_cpu_with(
-                CpuClass::Data,
-                QueueAdmission::WaitForPlace,
-                charge,
-                move |_charge, cancellation| selected.gather(cancellation),
-            )
+            .run_cpu(CpuClass::Data, charge, move |_charge, cancellation| {
+                selected.gather(cancellation)
+            })
             .await
             .change_context(WindowProcessorError::CollectionExecution)?
     }

@@ -355,9 +355,8 @@ impl ResourceArchiveReader {
             .assured("an archive reader returns its file after every completed storage job");
         let read = self
             .executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |charge, cancellation| {
                     let mut file = file;
@@ -414,11 +413,7 @@ impl ResourceArchiveStager {
                 limit: self.max_archive_bytes,
             }));
         }
-        let reservation = self
-            .executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(ResourceStoreError::BulkAdmission)?;
+        let reservation = self.executor.charge_nothing(MemoryClass::Bulk);
         let file = self
             .file
             .take()
@@ -429,9 +424,8 @@ impl ResourceArchiveStager {
             .assured("an archive stager returns its hasher after every completed storage job");
         let write =
             self.executor
-                .run_storage_with(
+                .run_storage(
                     StorageClass::Filesystem,
-                    nervix_execution::QueueAdmission::WaitForPlace,
                     reservation,
                     move |_charge, cancellation| {
                         let mut file = file;
@@ -466,11 +460,7 @@ impl ResourceArchiveStager {
 
     /// Flush and sync the staged file before returning its exact size and digest.
     pub async fn finish(mut self) -> Result<StagedResourceArchive, Report<ResourceStoreError>> {
-        let reservation = self
-            .executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(ResourceStoreError::BulkAdmission)?;
+        let reservation = self.executor.charge_nothing(MemoryClass::Bulk);
         let path = self
             .path
             .take()
@@ -485,9 +475,8 @@ impl ResourceArchiveStager {
             .assured("an unfinished archive stager owns its hasher");
         let archive_bytes = self.archive_bytes;
         self.executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| {
                     if cancellation.is_cancelled() {
@@ -535,15 +524,10 @@ impl ResourceBundleStager {
             .as_ref()
             .assured("an unfinished resource bundle stager owns its staging tree");
         let destination = root.join(&relative);
-        let reservation = self
-            .executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(ResourceStoreError::BulkAdmission)?;
+        let reservation = self.executor.charge_nothing(MemoryClass::Bulk);
         self.executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| -> Result<(), Report<ResourceStoreError>> {
                     cancellation
@@ -603,15 +587,10 @@ impl ResourceBundleStager {
             .as_ref()
             .assured("an unfinished resource bundle stager owns its staging tree");
         let destination = root.join(relative);
-        let reservation = self
-            .executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(ResourceStoreError::BulkAdmission)?;
+        let reservation = self.executor.charge_nothing(MemoryClass::Bulk);
         self.executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| {
                     cancellation
@@ -649,9 +628,8 @@ impl ResourceBundleStager {
             .assured("an unfinished resource bundle stager owns its staging tree");
         let limits = self.limits;
         self.executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| {
                     let result = build_bundle_archive(&root, limits, cancellation);
@@ -672,19 +650,14 @@ impl ResourceBundleStager {
 
     /// Recursively discard a partially received bundle on the filesystem worker pool.
     pub(crate) async fn abort(mut self) -> Result<(), Report<ResourceStoreError>> {
-        let reservation = self
-            .executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(ResourceStoreError::BulkAdmission)?;
+        let reservation = self.executor.charge_nothing(MemoryClass::Bulk);
         let root = self
             .root
             .take()
             .assured("an unfinished resource bundle stager owns its staging tree");
         self.executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, _cancellation| remove_tree_after_failure(&root),
             )
@@ -710,13 +683,10 @@ impl Drop for ResourceBundleStager {
         drop(runtime.spawn(async move {
             let cleanup: Result<(), Report<ResourceStoreError>> = async {
                 let reservation = executor
-                    .reserve(MemoryClass::Bulk, 1)
-                    .await
-                    .change_context(ResourceStoreError::BulkAdmission)?;
+                    .charge_nothing(MemoryClass::Bulk);
                 executor
-                    .run_storage_with(
+                    .run_storage(
                         StorageClass::Filesystem,
-                        nervix_execution::QueueAdmission::WaitForPlace,
                         reservation,
                         move |_charge, _cancellation| remove_tree_after_failure(&root),
                     )
@@ -840,17 +810,12 @@ impl ResourceStore {
     pub(crate) async fn create_bundle_stager(
         &self,
     ) -> Result<ResourceBundleStager, Report<ResourceStoreError>> {
-        let reservation = self
-            .executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(ResourceStoreError::BulkAdmission)?;
+        let reservation = self.executor.charge_nothing(MemoryClass::Bulk);
         let parent = self.root.clone();
         let root = self
             .executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| -> Result<PathBuf, Report<ResourceStoreError>> {
                     cancellation
@@ -881,17 +846,12 @@ impl ResourceStore {
     pub async fn create_archive_stager(
         &self,
     ) -> Result<ResourceArchiveStager, Report<ResourceStoreError>> {
-        let reservation = self
-            .executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(ResourceStoreError::BulkAdmission)?;
+        let reservation = self.executor.charge_nothing(MemoryClass::Bulk);
         let parent = self.root.clone();
         let opened = self
             .executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| {
                     if cancellation.is_cancelled() {
@@ -920,16 +880,11 @@ impl ResourceStore {
 
     /// Remove staging paths left by a process that stopped before atomic promotion.
     pub async fn cleanup_abandoned_staging(&self) -> Result<(), Report<ResourceStoreError>> {
-        let reservation = self
-            .executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(ResourceStoreError::BulkAdmission)?;
+        let reservation = self.executor.charge_nothing(MemoryClass::Bulk);
         let root = self.root.clone();
         self.executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| cleanup_staging_paths(&root, 2, cancellation),
             )
@@ -957,12 +912,9 @@ impl ResourceStore {
             .await
             .change_context(ResourceStoreError::BulkAdmission)?;
         self.executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                reservation,
-                move |_charge, cancellation| collect_manifest_entries(&content_root, cancellation),
-            )
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                collect_manifest_entries(&content_root, cancellation)
+            })
             .await
             .change_context(ResourceStoreError::JoinBlockingTask)?
     }
@@ -1005,15 +957,10 @@ impl ResourceStore {
     pub async fn remove_version(&self, id: &ResourceId) -> Result<(), Report<ResourceStoreError>> {
         let install_root = self.version_root(id);
         let staging_root = self.staging_root(id);
-        let reservation = self
-            .executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(ResourceStoreError::BulkAdmission)?;
+        let reservation = self.executor.charge_nothing(MemoryClass::Bulk);
         self.executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| {
                     remove_resource_paths(&install_root, &staging_root, cancellation)
@@ -1030,17 +977,12 @@ impl ResourceStore {
         &self,
         id: &ResourceId,
     ) -> Result<ResourceArchiveReader, Report<ResourceStoreError>> {
-        let reservation = self
-            .executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(ResourceStoreError::BulkAdmission)?;
+        let reservation = self.executor.charge_nothing(MemoryClass::Bulk);
         let archive_path = self.archive_path(id);
         let opened = self
             .executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| -> Result<OpenArchive, Report<ResourceStoreError>> {
                     if cancellation.is_cancelled() {
@@ -1086,9 +1028,8 @@ impl ResourceStore {
         let chunk_bytes = usize::try_from(self.executor.limits().bulk_chunk_bytes.as_u64())
             .change_context(ResourceStoreError::ReadFile)?;
         self.executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| {
                     if cancellation.is_cancelled() {
@@ -1204,9 +1145,8 @@ impl ResourceStore {
         let limits = self.limits();
         let chunk_bytes = self.executor.limits().bulk_chunk_bytes.as_u64();
         self.executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| {
                     install_archive(

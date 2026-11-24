@@ -353,8 +353,9 @@ impl RelayAdmissionStatus {
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum RelayGrantRefusal {
-    /// The relay memory budget has no room for the body, the largest decoded batch and the decode
-    /// scratch a grant reserves.
+    /// The receiver had no room for the grant within the wait its sender declared: relay memory for
+    /// the request, the body, the largest decoded batch and the decode scratch a grant reserves, or a
+    /// worker to decode the request. A grant larger than the whole budget is refused this way too.
     Memory,
     /// The application queue has no item left for another delivery.
     QueueItem,

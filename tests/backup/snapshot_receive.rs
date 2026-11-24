@@ -92,7 +92,7 @@ fn snapshot_tenant_placeholders(world: &mut ScenarioWorld, bytes: usize) {
 }
 
 #[then(
-    expr = "snapshot checkpoints in backup {string} refuse overlapping receive memory on node \
+    expr = "snapshot checkpoints in backup {string} wait for overlapping receive memory on node \
             {string} and transfer completely after release"
 )]
 async fn snapshot_receive_admission(world: &mut ScenarioWorld, file: String, node: String) {
@@ -138,7 +138,10 @@ async fn snapshot_receive_admission(world: &mut ScenarioWorld, file: String, nod
         .cluster()
         .verify_snapshot_receive_admission(&node, placements)
         .await
-        .assured("both actual snapshot receivers refuse promptly and recover complete checkpoints");
+        .assured(
+            "both actual snapshot receivers wait while the class is full and recover complete \
+             checkpoints",
+        );
 }
 
 /// The archive supplies the production lifecycle identity without reconstructing a schema digest.

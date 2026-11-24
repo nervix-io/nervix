@@ -606,6 +606,7 @@ async fn rejected_tls_replacement_keeps_the_previous_identity_usable() {
 }
 
 mod coordination;
+mod one_way_control;
 mod relay_grant_capacity;
 mod relay_owners;
 mod relay_send_progress;
@@ -1752,10 +1753,11 @@ async fn a_relay_grant_that_skips_its_channels_next_position_is_refused_out_of_o
     transport_b.shutdown().await;
 }
 
-/// A grant the receiver's relay budget has no room for is answered with a typed capacity refusal
-/// both ends count, and the same delivery is granted and received once the room returns.
+/// A grant the receiver's relay budget has no room for waits for that room instead of being refused
+/// for capacity, and the delivery is granted and received once the room returns. Neither end
+/// counts a capacity refusal.
 #[nervix_primitives::test]
-async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
+async fn a_grant_the_relay_budget_has_no_room_for_waits_and_is_granted_once_room_returns() {
     let ConnectedTransports {
         transport_a,
         transport_b,
@@ -1800,29 +1802,21 @@ async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
         snapshot.counters.relay_grant_refusals[direction.index()][RelayGrantRefusal::Memory.index()]
     };
 
-    let error = transport_a
-        .send(&node_b, Envelope::RelayPayload(payload.clone()))
-        .await
-        .expect_err("a receiver without room for the grant refuses it");
-    assert!(matches!(
-        error.current_context(),
-        TransportError::RelayGrantRefused(RelayGrantRefusal::Memory)
-    ));
-    assert!(RelayGrantRefusal::Memory.is_capacity());
-    assert_eq!(
-        refused(transport_b.snapshot(), ConnectionDirection::Inbound),
-        1
-    );
-    assert_eq!(
-        refused(transport_a.snapshot(), ConnectionDirection::Outbound),
-        1
+    let sender = transport_a.clone();
+    let sending = nervix_primitives::task::spawn(async move {
+        sender.send(&node_b, Envelope::RelayPayload(payload)).await
+    });
+    nervix_primitives::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !sending.is_finished(),
+        "a receiver without room for the grant holds it back instead of refusing it"
     );
 
     drop(occupied);
-    transport_a
-        .send(&node_b, Envelope::RelayPayload(payload))
+    sending
         .await
-        .expect("the same delivery is granted once the receiver has room");
+        .expect("the sending task is joined")
+        .expect("the delivery is granted once the receiver has room");
     let received = timeout(Duration::from_secs(2), incoming_b.recv())
         .await
         .expect("the granted relay should enter the application queue")
@@ -1830,7 +1824,13 @@ async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
     assert!(matches!(received.envelope, Envelope::RelayPayload(_)));
     assert_eq!(
         refused(transport_b.snapshot(), ConnectionDirection::Inbound),
-        1
+        0,
+        "the receiver refused no grant for capacity"
+    );
+    assert_eq!(
+        refused(transport_a.snapshot(), ConnectionDirection::Outbound),
+        0,
+        "the sender was refused no grant for capacity"
     );
     transport_a.shutdown().await;
     transport_b.shutdown().await;
@@ -2799,14 +2799,13 @@ async fn invalid_rkyv_is_rejected_before_dispatch() {
     let bytes = executor
         .try_charge_owned(MemoryClass::Commands, vec![0xff; 32])
         .expect("test payload should fit the command budget");
+    let decoding = executor
+        .try_reserve(MemoryClass::Commands, 32)
+        .expect("the decoding room should fit the command budget");
 
-    let result = wire::decode_rkyv::<ControlEnvelope>(
-        &executor,
-        MemoryClass::Commands,
-        CpuClass::Control,
-        bytes,
-    )
-    .await;
+    let result =
+        wire::decode_rkyv_within::<ControlEnvelope>(&executor, CpuClass::Control, bytes, decoding)
+            .await;
 
     let Err(error) = result else {
         panic!("invalid rkyv must be rejected before dispatch");

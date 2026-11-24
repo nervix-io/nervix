@@ -239,6 +239,18 @@ impl ReadCatalog {
     }
 }
 
+#[cfg(test)]
+impl ReadCatalog {
+    /// The catalog a read that every peer answered returns when the peers hold `keys`.
+    pub(super) fn naming(keys: impl IntoIterator<Item = CatalogedKey>) -> Self {
+        let mut catalog = Self::default();
+        for cataloged in keys {
+            catalog.insert(cataloged.key.fingerprint(), cataloged);
+        }
+        catalog
+    }
+}
+
 /// The input one claimant unit parks for the keys it is resolving or claiming, bounded by a count
 /// of parked inputs: once the bound is reached the unit stops taking input, so its relays hold the
 /// rest back, until a resolution releases what it parked.
@@ -737,7 +749,8 @@ impl Runtime {
         let _memory = self
             .inner
             .executor
-            .try_reserve(nervix_execution::MemoryClass::Bulk, bytes.max(1))
+            .reserve(nervix_execution::MemoryClass::Bulk, bytes.max(1))
+            .await
             .change_context_lazy(admission)?;
         let mut copies = Vec::new();
         let mut located = None::<Candidate>;

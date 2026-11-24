@@ -37,7 +37,7 @@ use futures_util::{Stream, StreamExt as _};
 use h2::{Reason, RecvStream, SendStream, server};
 use http::{Method, Request, Response, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{ChargedBytes, Executor, MemoryClass, QueueAdmission, Reservation};
+use nervix_execution::{ChargedBytes, Executor, MemoryClass, Reservation};
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{
     sync::{
@@ -49,7 +49,7 @@ use nervix_primitives::{
 
 use super::{
     BODY_CHUNK_BYTES, ClientConnection, DUPLEX_PATH, RawDuplexRequest, StreamLease, TransportState,
-    read_body, send_decode_refusal, send_static_error,
+    declared_length, read_body, send_decode_refusal, send_static_error, until_reset,
 };
 
 #[cfg(test)]
@@ -111,12 +111,15 @@ fn carry_limit(frame_limit: u64) -> u64 {
 ///
 /// The charge follows what the reader actually buffers rather than the largest frame its class
 /// allows. A stream carrying small frames therefore holds a small charge for its whole life, and
-/// only a stream that really receives a large frame grows to it.
+/// only a stream that really receives a large frame grows to it. A frame handed over takes its
+/// bytes out of the charge, so its decoding never waits for room behind the reader.
 pub(crate) struct FrameReader {
     body: RecvStream,
     carry: Vec<u8>,
     frame_limit: u64,
     charge: Reservation,
+    executor: Executor,
+    class: MemoryClass,
     finished: bool,
 }
 
@@ -136,6 +139,8 @@ impl FrameReader {
             carry: Vec::new(),
             frame_limit,
             charge,
+            executor: executor.clone(),
+            class,
             finished: false,
         })
     }
@@ -160,7 +165,7 @@ impl FrameReader {
                 continue;
             };
             let chunk = chunk.map_err(TransportError::from)?;
-            self.charge_for(chunk.len())?;
+            self.charge_for(chunk.len()).await?;
             self.body
                 .flow_control()
                 .release_capacity(chunk.len())
@@ -169,8 +174,12 @@ impl FrameReader {
         }
     }
 
-    /// Charge the room the arriving chunk needs before it is buffered.
-    fn charge_for(&mut self, additional: usize) -> Result<(), Report<TransportError>> {
+    /// Charge the room the arriving chunk needs before it is buffered. A class with no room for the
+    /// larger charge now holds the chunk back: the reader gives back what it holds and waits for
+    /// the whole charge, so it never waits for room while holding part of its class. Only a charge
+    /// larger than the whole class fails. The chunk and the partial frame it extends are already
+    /// in memory meanwhile, bounded by the stream's HTTP/2 receive window.
+    async fn charge_for(&mut self, additional: usize) -> Result<(), Report<TransportError>> {
         let carried = u64::try_from(self.carry.len())
             .assured("supported targets have a pointer width no larger than u64");
         let additional = u64::try_from(additional)
@@ -193,9 +202,23 @@ impl FrameReader {
         // a stream carrying small frames never holds room it will not use.
         let doubled = self.charge.bytes().checked_mul(2).unwrap_or(ceiling);
         let charged = target.max(doubled).min(ceiling);
-        self.charge
-            .grow_to(charged)
-            .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
+        if let Err(refusal) = self.charge.grow_to(charged) {
+            if !matches!(
+                refusal.current_context(),
+                nervix_execution::AdmissionError::BudgetExhausted { .. }
+            ) {
+                return Err(TransportError::with_cause(refusal, TransportError::Decode));
+            }
+            drop(std::mem::replace(
+                &mut self.charge,
+                self.executor.charge_nothing(self.class),
+            ));
+            self.charge = self
+                .executor
+                .reserve(self.class, charged)
+                .await
+                .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
+        }
         let charged: usize = usize::try_from(charged)
             .assured("a charge bounded by the class limit fits the address space");
         let room = charged
@@ -227,6 +250,19 @@ impl FrameReader {
         };
         let frame = frame.to_vec();
         self.carry.drain(..end);
+        // The frame leaves with its bytes, so the reader keeps only the charge for what it still
+        // carries, and the frame's decoding never waits for room behind the reader.
+        self.carry.shrink_to(self.carry.len());
+        let carried: u64 = self.carry.capacity().arch_into();
+        if carried < self.charge.bytes() {
+            let charge =
+                std::mem::replace(&mut self.charge, self.executor.charge_nothing(self.class));
+            let (kept, released) = charge
+                .split(carried)
+                .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
+            self.charge = kept;
+            drop(released);
+        }
         Ok(Some(frame))
     }
 }
@@ -424,74 +460,17 @@ impl DuplexCodec {
         }
     }
 
-    /// Encodes the opening message of a stream, within the class's payload limit. A class whose
-    /// queue is full refuses it at once, because the initiator still holds it and can open the
-    /// stream again. An encoding that would grow past the limit fails instead of being sent.
-    pub fn encode_opening<T: RkyvMessage>(
+    /// Encodes one message of a stream, its opening, an item or an answer, within the class's
+    /// payload limit. A full class holds the encoding back until a place or room frees, holding
+    /// nothing of the class meanwhile; its owner ends the wait by dropping it, an initiator with its
+    /// sender and a responder once the initiator resets the stream. An encoding that would grow
+    /// past the limit fails instead of being sent.
+    pub fn encode<T: RkyvMessage>(
         &self,
         message: T,
-    ) -> impl Future<Output = Result<EncodedMessage, Report<TransportError>>> + Send + use<T> {
-        self.encode(message, QueueAdmission::RefuseWhenFull)
-    }
-
-    /// Validates and decodes the opening message of a stream. A class whose queue is full refuses
-    /// it at once and it keeps no charge, because the initiator still holds it and opens again.
-    pub fn decode_opening<T: RkyvMessage>(
-        &self,
-        payload: Vec<u8>,
-    ) -> impl Future<Output = Result<ChargedItem<T>, Report<TransportError>>> + Send + use<T> {
-        self.decode(payload, QueueAdmission::RefuseWhenFull)
-    }
-
-    /// Encodes one item an initiator submits, within the class's payload limit. A class whose queue
-    /// is full holds the encoding back until a place frees; the initiator ends the wait by dropping
-    /// its sender. An encoding that would grow past the limit fails instead of being sent.
-    pub fn encode_item<T: RkyvMessage>(
-        &self,
-        message: T,
-    ) -> impl Future<Output = Result<EncodedMessage, Report<TransportError>>> + Send + use<T> {
-        self.encode(message, QueueAdmission::WaitForPlace)
-    }
-
-    /// Validates and decodes one item an initiator submitted. A class whose queue is full holds
-    /// the decoding back until a place frees; the responder ends the wait by dropping the stream's
-    /// items once the stream ends.
-    pub fn decode_item<T: RkyvMessage>(
-        &self,
-        payload: Vec<u8>,
-    ) -> impl Future<Output = Result<ChargedItem<T>, Report<TransportError>>> + Send + use<T> {
-        self.decode(payload, QueueAdmission::WaitForPlace)
-    }
-
-    /// Encodes one answer a responder produced, within the class's payload limit. The answer
-    /// carries work the responder already did, so a class whose queue is full holds the encoding
-    /// back until a place frees; the responder ends the wait by dropping it once the initiator
-    /// resets the stream. An encoding that would grow past the limit fails instead of being sent.
-    pub fn encode_answer<T: RkyvMessage>(
-        &self,
-        message: T,
-    ) -> impl Future<Output = Result<EncodedMessage, Report<TransportError>>> + Send + use<T> {
-        self.encode(message, QueueAdmission::WaitForPlace)
-    }
-
-    /// Validates and decodes one answer a responder produced. The answer carries work the responder
-    /// already did, so a class whose queue is full holds the decoding back until a place frees; the
-    /// initiator ends the wait by dropping it with its receiver.
-    pub fn decode_answer<T: RkyvMessage>(
-        &self,
-        payload: Vec<u8>,
-    ) -> impl Future<Output = Result<ChargedItem<T>, Report<TransportError>>> + Send + use<T> {
-        self.decode(payload, QueueAdmission::WaitForPlace)
-    }
-
-    fn encode<T: RkyvMessage>(
-        &self,
-        message: T,
-        admission: QueueAdmission,
     ) -> impl Future<Output = Result<EncodedMessage, Report<TransportError>>> + Send + use<T> {
         let limit = self.class.payload_limit(&self.executor);
-        let encoding =
-            message.encode_rkyv_with(self.executor.clone(), self.class, limit, admission);
+        let encoding = message.encode_rkyv(self.executor.clone(), self.class, limit);
         async move {
             let (bytes, charge) = encoding.await?;
             Ok(EncodedMessage { bytes, charge })
@@ -499,14 +478,14 @@ impl DuplexCodec {
     }
 
     /// Validates one encoded message within the decoder's depth bound and decodes it, handing it
-    /// over with the charge that covers it. The decoding borrows nothing, so a receive may keep it
-    /// across the calls that finish it.
-    fn decode<T: RkyvMessage>(
+    /// over with the charge that covers it. A full class holds the decoding back until a place or
+    /// room frees, and the frame it decodes holds no charge meanwhile. The decoding borrows
+    /// nothing, so a receive may keep it across the calls that finish it.
+    pub fn decode<T: RkyvMessage>(
         &self,
         payload: Vec<u8>,
-        admission: QueueAdmission,
     ) -> impl Future<Output = Result<ChargedItem<T>, Report<TransportError>>> + Send + use<T> {
-        let decoding = T::decode_rkyv_with(self.executor.clone(), self.class, admission, payload);
+        let decoding = T::decode_rkyv(self.executor.clone(), self.class, payload);
         async move {
             let (item, charge) = decoding.await?;
             Ok(ChargedItem { item, charge })
@@ -531,7 +510,7 @@ impl<M: InterconnectDuplexRequest> DuplexSender<M> {
     pub async fn send(&mut self, item: M::Item) -> Result<u64, Report<RequestError>> {
         let encoded = self
             .codec
-            .encode_item(item)
+            .encode(item)
             .await
             .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
         let frame = ChargedBytes::from_owned(encoded.bytes, encoded.charge);
@@ -587,7 +566,7 @@ impl<M: InterconnectDuplexRequest> DuplexReceiver<M> {
             let Some(frame) = frame else {
                 return Ok(None);
             };
-            let decoding = self.codec.decode_answer::<M::Response>(frame);
+            let decoding = self.codec.decode::<M::Response>(frame);
             self.decoding = Some(Box::pin(decoding));
         }
         let decoding = self
@@ -652,7 +631,7 @@ impl<T: RkyvMessage> DuplexItems<T> {
             let Some(frame) = frame else {
                 return Ok(None);
             };
-            let decoding = self.codec.decode_item::<T>(frame);
+            let decoding = self.codec.decode::<T>(frame);
             self.decoding = Some(Box::pin(decoding));
         }
         let decoding = self
@@ -745,10 +724,14 @@ impl ClientConnection {
             let response = response.await.map_err(TransportError::from)?;
             let status = response.status();
             if !status.is_success() {
+                let declared = declared_length(
+                    response.headers(),
+                    class.control_body_limit(&state.executor),
+                )?;
                 let message = read_body(
                     &state.executor,
                     class.memory_class(),
-                    class.control_body_limit(&state.executor),
+                    declared,
                     state.options.progress_timeout,
                     response.into_body(),
                 )
@@ -834,9 +817,18 @@ impl TransportState {
         mut respond: server::SendResponse<Bytes>,
     ) -> Result<(), Report<TransportError>> {
         let frame_limit = class.control_body_limit(&self.executor);
-        let mut reader =
-            FrameReader::open(&self.executor, class.memory_class(), frame_limit, body).await?;
-        let Some(opening) = reader.next_frame().await? else {
+        // The opening's reader, its frame and its decoding each wait for room or a place while the
+        // opening holds part of the class, so the peer's reset ends those waits with the stream.
+        let receiving = async {
+            let mut reader =
+                FrameReader::open(&self.executor, class.memory_class(), frame_limit, body).await?;
+            let opening = reader.next_frame().await?;
+            Ok::<_, Report<TransportError>>((reader, opening))
+        };
+        let Some((reader, opening)) = until_reset(&mut respond, receiving).await? else {
+            return Ok(());
+        };
+        let Some(opening) = opening else {
             send_static_error(
                 &mut respond,
                 StatusCode::BAD_REQUEST,
@@ -846,22 +838,30 @@ impl TransportState {
             .await?;
             return Ok(());
         };
-        let opening = wire::decode_rkyv_payload::<RequestEnvelope>(
-            &self.executor,
-            class.memory_class(),
-            class.cpu_class(),
-            opening,
+        let opening = until_reset(
+            &mut respond,
+            wire::decode_rkyv_payload::<RequestEnvelope>(
+                &self.executor,
+                class.memory_class(),
+                class.cpu_class(),
+                opening,
+            ),
         )
         .await;
         let opening = match opening {
-            Ok(opening) => opening,
+            Ok(Some(opening)) => opening,
+            Ok(None) => return Ok(()),
             Err(error) => {
                 send_decode_refusal(&mut respond, class, error, self.options.progress_timeout)
                     .await?;
                 return Ok(());
             }
         };
-        let (opening, _opening_reservation) = opening.into_parts();
+        // The handler owns the opening from here, and its own work takes charges of this class, so
+        // the opening's charge is given back before it runs. The connection's stream places bound
+        // the opening meanwhile.
+        let (opening, opening_reservation) = opening.into_parts();
+        drop(opening_reservation);
         if opening.class != class {
             send_static_error(
                 &mut respond,

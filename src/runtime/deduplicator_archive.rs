@@ -227,12 +227,11 @@ impl PublishedKeyspace {
         let schema = StdArc::clone(schema);
         RuntimeRecordBatch::encode_arrow_snapshot_projection(
             executor,
-            nervix_execution::QueueAdmission::RefuseWhenFull,
             projection_bytes,
             encoded_estimate,
             move || {
-                let batch = keyspace.key_batch(&schema, group)?;
-                RuntimeRecordBatch::from_record_batch(schema, batch)
+                let batch = keyspace.key_batch(&schema, group.clone())?;
+                RuntimeRecordBatch::from_record_batch(StdArc::clone(&schema), batch)
                     .change_context(DeduplicatorArchiveError::Columns)
             },
         )
@@ -325,6 +324,18 @@ pub(crate) struct ArchivedDeduplicatorKeys {
 }
 
 impl ArchivedDeduplicatorKeys {
+    /// The restore metadata a keyspace charges before its first key: one resident growth increment.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a keyspace's first restore metadata charge is one resident growth increment"
+        )
+    )]
+    pub(crate) const FIRST_CHARGE_BYTES: u64 = RESIDENT_GROWTH_BYTES;
+
+    /// An empty keyspace whose charges are drawn through `executor`, which draws from its
+    /// conversion's share of restore metadata.
     pub(crate) fn new(executor: &Executor) -> error_stack::Result<Self, DeduplicatorArchiveError> {
         let charge = executor
             .try_reserve(MemoryClass::RestoreMetadata, RESIDENT_GROWTH_BYTES)
@@ -348,9 +359,9 @@ impl ArchivedDeduplicatorKeys {
         self.encoded_bound
     }
 
-    /// Charge `bytes` more to the restore metadata budget before they are allocated. Growth the
-    /// budget cannot back now is refused rather than awaited, because the keys already held cannot
-    /// free it.
+    /// Charge `bytes` more to the restore metadata budget before they are allocated. Growth its
+    /// conversion's share cannot back fails with the share the conversion needs, which gives back
+    /// everything, keys included, and runs again within it: the keys already held cannot free it.
     fn charge_more(&mut self, bytes: u64) -> error_stack::Result<(), DeduplicatorArchiveError> {
         let target = self
             .charged_bytes
@@ -767,7 +778,6 @@ mod tests {
                 .assured("a bounded key group encodes");
             let decoded = RuntimeRecordBatch::decode_arrow_snapshot_section(
                 executor,
-                nervix_execution::QueueAdmission::RefuseWhenFull,
                 StdArc::clone(schema),
                 bytes,
             )

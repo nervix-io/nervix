@@ -41,7 +41,7 @@ use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dns::{LookupShare, OperationBudget};
 use nervix_execution::{
-    BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, QueueAdmission, Reservation,
+    BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
 };
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, NodeEndpoint, RemoteAckOutcome, RemoteAckRegistration,
@@ -93,6 +93,7 @@ mod client_requests;
 mod control;
 mod dial;
 mod duplex;
+mod inbound_control;
 mod join;
 mod published_tls;
 mod receive_window;
@@ -107,8 +108,9 @@ pub(crate) mod stream_slots;
 mod targets;
 
 use body::{
-    exchange_reset, read_body, read_body_in_free_room, read_body_into, read_error_response,
-    send_body, send_decode_refusal, send_response, send_static_error,
+    ReceivedBody, declared_length, exchange_reset, read_body, read_body_into, read_body_to_decode,
+    read_error_response, send_body, send_decode_refusal, send_response, send_static_error,
+    until_reset,
 };
 use dial::{DialedStream, OutboundDial};
 pub(crate) use duplex::FrameReader;
@@ -171,6 +173,16 @@ const ACK_PATH: &str = "/v1/ack";
     )
 )]
 const RELAY_GRANT_PATH: &str = "/v1/relay-grants";
+/// How long, in nanoseconds, a grant's receiver may hold it back for room before it answers the
+/// capacity refusal its sender holds the delivery back on.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "this header names a field of the current interconnect wire contract"
+    )
+)]
+const GRANT_WAIT_HEADER: &str = "x-nervix-grant-wait-nanos";
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
@@ -1661,14 +1673,14 @@ impl TransportState {
                 .await?;
             drop(binding_window);
             // The answer carries the binding the accepting node already validated and registered,
-            // so a full control queue holds its decoding back rather than setting the connection
-            // up again. The setup deadline around this exchange bounds the wait.
-            let answer = wire::decode_rkyv_with::<ConnectionAnswer>(
+            // so a full class holds its decoding back rather than setting the connection up again.
+            // It was read with the room its decoding takes, and the setup deadline around this
+            // exchange bounds the wait.
+            let answer = wire::decode_rkyv_within::<ConnectionAnswer>(
                 &self.executor,
-                MemoryClass::Management,
                 CpuClass::Control,
-                QueueAdmission::WaitForPlace,
-                accepted,
+                accepted.bytes,
+                accepted.decoding,
             )
             .await?
             .into_value();
@@ -1904,14 +1916,13 @@ impl TransportState {
                         );
                     }
                     // An ack carries the outcome of a delivery this node already resolved, which
-                    // nothing presents again if it is lost. A full data queue therefore holds the
+                    // nothing presents again if it is lost. A full class therefore holds the
                     // encoding back, within the send's own deadline.
-                    let encoding = wire::encode_rkyv_with(
+                    let encoding = wire::encode_rkyv(
                         &self.executor,
                         class.memory_class(),
                         CpuClass::Data,
                         class.control_body_limit(&self.executor),
-                        QueueAdmission::WaitForPlace,
                         ack,
                     );
                     let bytes = match timeout_at(deadline, encoding).await {
@@ -2176,19 +2187,23 @@ impl TransportState {
                     "first HTTP/2 stream must POST the connection binding".to_string(),
                 )));
             }
-            let hello_bytes = read_body(
+            let declared = declared_length(
+                request.headers(),
+                self.executor.limits().management_event_bytes.as_u64(),
+            )?;
+            let hello = read_body_to_decode(
                 &self.executor,
                 MemoryClass::Management,
-                self.executor.limits().management_event_bytes.as_u64(),
+                declared,
                 self.options.progress_timeout,
                 request.into_body(),
             )
             .await?;
-            let hello = wire::decode_rkyv::<ConnectionHello>(
+            let hello = wire::decode_rkyv_within::<ConnectionHello>(
                 &self.executor,
-                MemoryClass::Management,
                 CpuClass::Control,
-                hello_bytes,
+                hello.bytes,
+                hello.decoding,
             )
             .await?
             .into_value();
@@ -2423,7 +2438,7 @@ impl TransportState {
                 peer.advertised_host,
                 peer.process_epoch,
                 peer.class,
-                request.into_body(),
+                request,
                 respond,
             )
             .await?;
@@ -2442,8 +2457,7 @@ impl TransportState {
             return Ok(());
         }
         if path == CONTROL_PATH {
-            self.handle_control(peer, request.into_body(), respond)
-                .await?;
+            self.handle_control(peer, request, respond).await?;
             return Ok(());
         }
         if path == ACK_PATH {
@@ -2457,24 +2471,35 @@ impl TransportState {
                 .await?;
                 return Ok(());
             }
-            let bytes = read_body(
+            let declared = declared_length(
+                request.headers(),
+                peer.class.control_body_limit(&self.executor),
+            )?;
+            // An ack carries the outcome of a delivery the peer already resolved, so a full class
+            // holds it back rather than losing that outcome, until the peer gives up on it.
+            let reading = read_body_to_decode(
                 &self.executor,
                 MemoryClass::Management,
-                peer.class.control_body_limit(&self.executor),
+                declared,
                 self.options.progress_timeout,
                 request.into_body(),
+            );
+            let Some(received) = until_reset(&mut respond, reading).await? else {
+                return Ok(());
+            };
+            let Some(decoded) = until_reset(
+                &mut respond,
+                wire::decode_rkyv_within::<nervix_models::RemoteAckResolution>(
+                    &self.executor,
+                    CpuClass::Control,
+                    received.bytes,
+                    received.decoding,
+                ),
             )
-            .await?;
-            // An ack carries the outcome of a delivery the peer already resolved, so a full control
-            // queue holds it back rather than losing that outcome.
-            let decoded = wire::decode_rkyv_with::<nervix_models::RemoteAckResolution>(
-                &self.executor,
-                MemoryClass::Management,
-                CpuClass::Control,
-                QueueAdmission::WaitForPlace,
-                bytes,
-            )
-            .await?;
+            .await?
+            else {
+                return Ok(());
+            };
             let (ack, reservation) = decoded.into_parts();
             let terminal_admission = if ack.outcome.is_progress() {
                 None
@@ -2529,7 +2554,7 @@ impl TransportState {
                     peer.process_epoch,
                     peer.relay_owner,
                     path == RELAY_CANCEL_PATH,
-                    request.into_body(),
+                    request,
                     respond,
                 )
                 .await;
@@ -2550,7 +2575,7 @@ impl TransportState {
                     peer.node_id,
                     peer.process_epoch,
                     peer.relay_owner,
-                    request.into_body(),
+                    request,
                     respond,
                 )
                 .await;
@@ -2576,107 +2601,6 @@ impl TransportState {
         )
         .await?;
         Ok(())
-    }
-
-    async fn handle_control(
-        &self,
-        peer: InboundPeer,
-        body: RecvStream,
-        mut respond: server::SendResponse<Bytes>,
-    ) -> Result<(), Report<TransportError>> {
-        let bytes = read_body(
-            &self.executor,
-            peer.class.memory_class(),
-            peer.class.control_body_limit(&self.executor),
-            self.options.progress_timeout,
-            body,
-        )
-        .await?;
-        let decoded = wire::decode_rkyv::<ControlEnvelope>(
-            &self.executor,
-            peer.class.memory_class(),
-            peer.class.cpu_class(),
-            bytes,
-        )
-        .await?;
-        let (control, reservation) = decoded.into_parts();
-        if control.pool_class() != peer.class {
-            send_response(
-                respond,
-                StatusCode::FORBIDDEN,
-                None,
-                self.options.progress_timeout,
-            )
-            .await?;
-            return Ok(());
-        }
-
-        if let ControlEnvelope::Request(request) = control {
-            let response = nervix_primitives::select! {
-                response = self.requests.handle(
-                    &self.executor,
-                    peer.node_id,
-                    peer.advertised_host,
-                    peer.process_epoch,
-                    request,
-                ) => response,
-                reset = poll_fn(|context| respond.poll_reset(context)) => {
-                    reset.map_err(TransportError::from)?;
-                    return Ok(());
-                }
-            };
-            let (response, _payload_reservation) = response.into_parts();
-            // The handler already ran, so a full queue holds its answer back rather than throwing
-            // the work away. The request still decoded under a refusing admission above, so a
-            // burst beyond the class is refused before it takes any charge. The caller's reset
-            // ends the wait.
-            let encoding = wire::encode_answer(
-                &self.executor,
-                peer.class.memory_class(),
-                peer.class.cpu_class(),
-                peer.class.control_body_limit(&self.executor),
-                ControlEnvelope::Response(response),
-                exchange_reset(&mut respond),
-            )
-            .await?;
-            let response = match encoding {
-                AnswerEncoding::Encoded(response) => response,
-                AnswerEncoding::Ended => return Ok(()),
-            };
-            send_response(
-                respond,
-                StatusCode::OK,
-                Some(response),
-                self.options.progress_timeout,
-            )
-            .await?;
-            return Ok(());
-        }
-
-        if let ControlEnvelope::Response(_) = control {
-            send_response(
-                respond,
-                StatusCode::BAD_REQUEST,
-                None,
-                self.options.progress_timeout,
-            )
-            .await?;
-            return Ok(());
-        }
-
-        self.deliver_incoming(
-            peer.addr,
-            peer.node_id,
-            Envelope::Control(control),
-            Some(reservation),
-        )?;
-        send_response(
-            respond,
-            StatusCode::NO_CONTENT,
-            None,
-            self.options.progress_timeout,
-        )
-        .await
     }
 
     /// Counts one more connection of `node_id`.
@@ -2842,7 +2766,7 @@ impl StreamLease {
         &self,
         state: &TransportState,
         request: RawRequest<'_>,
-    ) -> Result<ChargedBytes, Report<TransportError>> {
+    ) -> Result<ReceivedBody, Report<TransportError>> {
         self.connection.request_raw(state, request).await
     }
 }

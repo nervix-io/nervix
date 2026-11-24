@@ -28,6 +28,8 @@ pub struct EmitterHostObservations {
     pub payloads: Vec<EmitterPayloadMeasurement>,
     pub subdivisions: u64,
     pub events: BTreeMap<ConnectorEvent, u64>,
+    /// The transient status the emitter shows now, as `DESCRIBE EMITTER` would.
+    pub transient_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -141,8 +143,31 @@ impl EmitterPayloadObserver for FakeEmitterHost {
 }
 
 impl EmitterTransientErrorStatus for FakeEmitterHost {
-    fn record_transient_error(&self, _reason: String, _retry_after: Duration) {}
-    fn clear_transient_error(&self) {}
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            key = "one native emitter observation log",
+            bound = "one synchronous status replacement; no guard crosses await",
+            reason = "the harness records the status the emitter shows before its test inspects it"
+        )
+    )]
+    fn record_transient_error(&self, reason: String, _retry_after: Duration) {
+        self.observations.lock().transient_error = Some(reason);
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            key = "one native emitter observation log",
+            bound = "one synchronous status removal; no guard crosses await",
+            reason = "the harness records that the emitter cleared its status"
+        )
+    )]
+    fn clear_transient_error(&self) {
+        self.observations.lock().transient_error = None;
+    }
 }
 
 impl nervix_connector::EmitterReadiness for FakeEmitterHost {

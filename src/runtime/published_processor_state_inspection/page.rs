@@ -14,7 +14,7 @@ impl PublishedPage {
         now: Timestamp,
         after: Option<(Option<nervix_models::BranchKeyFingerprint>, u64)>,
         bounds: ProcessorStatePageBounds,
-        memory: Reservation,
+        memory: GrowingCharge,
         cancellation: &Cancellation,
     ) -> ReadResult<ProcessorStatePage> {
         let start = match after {
@@ -109,7 +109,7 @@ impl PublishedPage {
             runs: page.metadata_runs,
             sections,
             memory: Some(ProcessorStatePageMemory {
-                _reservation: page.memory,
+                _reservation: page.memory.into_reservation(),
                 _windows: windows,
             }),
         })
