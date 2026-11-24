@@ -869,10 +869,12 @@ wasmtime = { version = "49.0.0", default-features = false, features = [
   "async",
   "cranelift",
   "parallel-compilation",
+  "reexport-wasmparser",
   "runtime",
   "std",
   "wat",
 ] }
+wat = "1.263"
 web-sys = "0.3"
 webpki-roots = "1"
 x509-parser = "0.18"

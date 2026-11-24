@@ -984,6 +984,11 @@ fn main() -> anyhow::Result<()> {
             "--check-cfg=cfg(nervix_lint)",
             "-Zcrate-attr=feature(register_tool,custom_inner_attributes)",
             "-Zcrate-attr=register_tool(nervix)",
+            // A nightly build of rustc solves every trait goal with the next-generation solver by
+            // default, while a stable build, the product compiler among them, uses it for coherence
+            // alone. The analysis checks the code as the product compiler does, whose solver also
+            // keeps the server library's analysis within its memory admission.
+            "-Znext-solver=coherence",
             "-Funfulfilled_lint_expectations",
             "-Fnervix::invalid_contract",
         ]

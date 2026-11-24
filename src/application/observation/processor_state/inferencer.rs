@@ -8,43 +8,96 @@
     nervix::layer(control_plane, reason = "owns inferencer inspection layouts")
 )]
 
-use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass, Reservation};
+use nervix_execution::{
+    Attempt, Cancellation, CpuClass, Executor, GrowingCharge, MemoryClass, Reservation,
+};
 use nervix_models::CreateInferencer;
 
 use super::*;
 
+/// Lay out an inferencer's inspection sections under a charge for their metadata. A bulk class
+/// without room for that charge holds the layout back: it runs again, from the same owned schedule,
+/// once the whole charge is free.
 pub(super) async fn prepare(
     executor: &Executor,
     mut schedule: ClusterSchedule,
     domain: &DomainName,
     processor: &NodeRef,
 ) -> Result<ProcessorLayout, StateInspectionRejection> {
-    let memory = executor
-        .try_reserve(MemoryClass::Bulk, 1)
-        .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
-    let domain = domain.clone();
+    let schedule = schedule
+        .domains
+        .remove(domain)
+        .ok_or(StateInspectionRejection::UnknownEntity)?;
     let processor = processor.clone();
     executor
-        .run_cpu(CpuClass::Bulk, memory, move |memory, cancellation| {
-            cancellation
-                .check()
-                .map_err(|error| inspection_refusal(error, StateInspectionRejection::Deadline))?;
-            let schedule = schedule
-                .domains
-                .remove(&domain)
-                .ok_or(StateInspectionRejection::UnknownEntity)?;
-            layout(schedule, &processor, memory, cancellation)
-        })
+        .run_cpu_growing(
+            CpuClass::Bulk,
+            MemoryClass::Bulk,
+            1,
+            schedule,
+            move |schedule, memory, cancellation| {
+                if let Err(cancelled) = cancellation.check() {
+                    return Attempt::Finished(Err(inspection_refusal(
+                        cancelled,
+                        StateInspectionRejection::Deadline,
+                    )));
+                }
+                layout(schedule, &processor, memory, cancellation)
+            },
+        )
         .await
         .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?
 }
 
+/// The metadata a layout admitted before it takes the processor's node out of its schedule.
+struct MeasuredLayout {
+    moving_partitions: Option<nervix_models::ResolvedParametrizerPartitions>,
+    sections: Vec<SectionLayout>,
+    memory: Reservation,
+}
+
+/// How measuring a layout's metadata went: admitted, or short of room in the bulk class.
+enum Measured {
+    Admitted(MeasuredLayout),
+    Short { needed: u64 },
+}
+
+/// One attempt at a layout. Only the last step takes the node out of `schedule`, so an attempt
+/// short of room hands the schedule back whole.
 fn layout(
     mut schedule: DomainSchedule,
     processor: &NodeRef,
     memory: Reservation,
     cancellation: &Cancellation,
-) -> Result<ProcessorLayout, StateInspectionRejection> {
+) -> Attempt<Result<ProcessorLayout, StateInspectionRejection>, DomainSchedule> {
+    let measured = match measure(&schedule, processor, memory, cancellation) {
+        Ok(Measured::Admitted(measured)) => measured,
+        Ok(Measured::Short { needed }) => {
+            return Attempt::Short {
+                input: schedule,
+                needed,
+            };
+        }
+        Err(rejection) => return Attempt::Finished(Err(rejection)),
+    };
+    // Move the node from the owned snapshot instead of copying its model and INITIAL expressions.
+    let Some(node) = schedule.nodes.swap_remove(processor) else {
+        return Attempt::Finished(Err(StateInspectionRejection::UnknownEntity));
+    };
+    Attempt::Finished(Ok(ProcessorLayout {
+        node,
+        moving_partitions: measured.moving_partitions,
+        sections: measured.sections,
+        _metadata: Some(measured.memory),
+    }))
+}
+
+fn measure(
+    schedule: &DomainSchedule,
+    processor: &NodeRef,
+    memory: Reservation,
+    cancellation: &Cancellation,
+) -> Result<Measured, StateInspectionRejection> {
     let inferencer = schedule
         .scheduled::<CreateInferencer>(processor.identifier.clone())
         .ok_or(StateInspectionRejection::UnknownEntity)?;
@@ -92,24 +145,34 @@ fn layout(
             break;
         }
     }
-    let (sections, memory) = admitted_sections(
+    let admitted = admitted_sections(
         inferencer.config.state.len(),
         sensitive,
         branch,
         memory,
         cancellation,
     )?;
-    // Move the node from the owned snapshot instead of copying its model and INITIAL expressions.
-    let node = schedule
-        .nodes
-        .swap_remove(processor)
-        .ok_or(StateInspectionRejection::UnknownEntity)?;
-    Ok(ProcessorLayout {
-        node,
+    let (sections, memory) = match admitted {
+        AdmittedSections::Admitted { sections, memory } => (sections, memory),
+        AdmittedSections::Short { needed } => return Ok(Measured::Short { needed }),
+    };
+    Ok(Measured::Admitted(MeasuredLayout {
         moving_partitions,
         sections,
-        _metadata: Some(memory),
-    })
+        memory,
+    }))
+}
+
+/// The declared sections under their charge, or the charge they need when the bulk class has no
+/// room for it now.
+enum AdmittedSections {
+    Admitted {
+        sections: Vec<SectionLayout>,
+        memory: Reservation,
+    },
+    Short {
+        needed: u64,
+    },
 }
 
 fn schema_bytes(
@@ -157,9 +220,9 @@ fn admitted_sections(
     entries: usize,
     sensitive: bool,
     branch: &[SchemaField],
-    mut memory: Reservation,
+    memory: Reservation,
     cancellation: &Cancellation,
-) -> Result<(Vec<SectionLayout>, Reservation), StateInspectionRejection> {
+) -> Result<AdmittedSections, StateInspectionRejection> {
     let header = ProcessorStateSection::Header.inferencer_fields(false);
     let tensor = ProcessorStateSection::Tensor(0).inferencer_fields(sensitive);
     let branch_bytes = schema_bytes(branch, cancellation)?;
@@ -189,9 +252,11 @@ fn admitted_sections(
     let bytes = bytes
         .checked_mul(4)
         .ok_or(StateInspectionRejection::ReplyTooLarge)?;
-    memory
-        .grow_to(bytes)
-        .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
+    let mut charge = GrowingCharge::new(memory);
+    if let InspectionGrowth::Short { needed } = grow_inspection(&mut charge, bytes)? {
+        return Ok(AdmittedSections::Short { needed });
+    }
+    let memory = charge.into_reservation();
     let mut sections = Vec::with_capacity(count);
     sections.push(SectionLayout {
         section: ProcessorStateSection::Header,
@@ -211,7 +276,7 @@ fn admitted_sections(
             sensitive_keys: Vec::new(),
         });
     }
-    Ok((sections, memory))
+    Ok(AdmittedSections::Admitted { sections, memory })
 }
 
 #[cfg(all(test, not(any(feature = "shuttle", feature = "loom"))))]
@@ -234,7 +299,11 @@ mod tests {
                 .await
                 .assured("the bounded metadata job completes");
             if admitted {
-                let (sections, memory) = result.assured("six tensor sections fit the class");
+                let AdmittedSections::Admitted { sections, memory } =
+                    result.assured("six tensor sections fit the class")
+                else {
+                    panic!("an empty bulk class has room for six tensor sections");
+                };
                 assert_eq!(sections.len(), 7);
                 assert!(memory.bytes() > 1);
                 for section in sections.iter().skip(1) {
@@ -244,5 +313,31 @@ mod tests {
                 assert!(matches!(result, Err(StateInspectionRejection::NotReady)));
             }
         }
+    }
+
+    /// A bulk class without room for the layout's metadata is backpressure: the attempt reports
+    /// the charge it needs rather than refusing the inspection.
+    #[nervix_primitives::test]
+    async fn a_full_bulk_class_holds_the_layout_back_instead_of_refusing_it() {
+        let executor = Executor::default();
+        let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+        let memory = executor
+            .try_reserve(MemoryClass::Bulk, 1)
+            .assured("fixture admission");
+        let _held = executor
+            .try_reserve(MemoryClass::Bulk, capacity - 1)
+            .assured("the test holds the rest of the bulk class");
+        let result = executor
+            .run_cpu(CpuClass::Bulk, memory, move |memory, cancellation| {
+                admitted_sections(6, true, &[], memory, cancellation)
+            })
+            .await
+            .assured("the bounded metadata job completes");
+        let AdmittedSections::Short { needed } =
+            result.assured("a full class is no reason to refuse the layout")
+        else {
+            panic!("a full bulk class has no room for the layout's metadata");
+        };
+        assert!(needed > 1);
     }
 }

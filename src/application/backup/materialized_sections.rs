@@ -21,7 +21,7 @@ use nervix_backup::{
     MaterializedIdentitiesRecord, MaterializedRecordIdentity, MaterializedRelayDescriptor,
     SectionContent, SectionPath, StateField,
 };
-use nervix_execution::{ChargedBytes, CpuClass, MemoryClass};
+use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass};
 use nervix_interconnect::{RemoteOperationFailure, RuntimeState};
 use nervix_models::{DomainSchedule, NodeRef};
 
@@ -37,12 +37,12 @@ use crate::{
 impl SessionServiceImpl {
     pub(super) async fn stage_materialized_sections(
         &self,
+        executor: &Executor,
         captured: Vec<CapturedMaterializedRelay>,
         schedule: Option<&DomainSchedule>,
         request: &CaptureDomainStateRequest,
     ) -> Result<Vec<CapturedSection>, Report<RemoteOperationFailure>> {
         let mut staged = Vec::new();
-        let executor = self.inner.runtime.executor();
         for captured in captured {
             nervix_primitives::task::consume_budget().await;
             let placement = captured.placement;
@@ -87,7 +87,9 @@ impl SessionServiceImpl {
             let bytes = descriptor.encode().change_context_lazy(|| {
                 failure_context(&request.domain, "backup state section operation failed")
             })?;
-            let artifact = self.stage_captured_section(bytes, &request.domain).await?;
+            let artifact = self
+                .stage_captured_section(executor, bytes, &request.domain)
+                .await?;
             let key = |path: SectionPath| CaptureSectionKey {
                 coordination: request.coordination.clone(),
                 domain: request.domain.clone(),

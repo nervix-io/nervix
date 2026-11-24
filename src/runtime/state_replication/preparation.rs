@@ -149,14 +149,10 @@ impl Runtime {
         self.record_rejected_forced_recovery_round(&request.round);
         let runtime = self.clone();
         let executor = self.executor();
-        let charge = executor
-            .try_reserve(nervix_execution::MemoryClass::Bulk, 1)
-            .change_context(RuntimePersistenceError::StorageAdmission)
-            .change_context(OwnershipHandoffError::Persistence)?;
+        let charge = executor.charge_nothing(nervix_execution::MemoryClass::Bulk);
         executor
-            .run_storage_with(
+            .run_storage(
                 nervix_execution::StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 charge,
                 move |_charge, cancellation| {
                     cancellation

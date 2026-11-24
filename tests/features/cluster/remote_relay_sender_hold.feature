@@ -68,9 +68,13 @@ Feature: Remote relay senders held back while relay memory is full
       {"event_id":"held-7"}
       {"event_id":"held-8"}
       """
-    Then within "60s" node "node-2" observability metric "nervix_execution_memory_rejections_total" with labels eventually reaches at least 1
+    # The grant waits for relay room for as long as its sender lets the receiver hold it, half the
+    # delivery's dispatch timeout, and is then answered with the capacity refusal the delivery is
+    # held back on.
+    Then within "60s" node "node-2" observability metric "nervix_interconnect_relay_grant_refusals_total" with labels eventually reaches at least 1
       """
-      class="relay"
+      direction="inbound"
+      reason="memory"
       """
     When node "node-2" keeps its relay memory filled for "8s" before releasing it
     Then within "60s" the observed broker receives exactly these payloads

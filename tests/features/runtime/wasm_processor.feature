@@ -2206,6 +2206,58 @@ Feature: WASM processor runtime behavior
       | 1            | tables   | wasm module defines 2 tables, but a guest defines at most 1          |
       | 3            | tables   | wasm module defines 2 tables, but a guest defines at most 1          |
 
+  Scenario Outline: A WASM module whose memory <memory> prevents runtime startup and names the proposal it needs
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has a WASM fixture whose memory <memory> in resource directory "wasm_processor"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_refused_proposal;
+      UPLOAD RESOURCE wasm_refused_proposal VERSION '{{wasm_processor}}';
+      """
+    And these Plexus commands fail with "wasm processor 'filter_even_rows' module compilation failed (resource 'wasm_refused_proposal' version 1 file 'processors/filter_even.wasm'): wasm module uses the <proposal> proposal, which a guest may not use"
+      """
+      CREATE SCHEMA metric ( value I32 );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
+      CREATE VHOST edge refused-proposal-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR metric_ingestor
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
+        USING RESOURCE wasm_refused_proposal VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
+        UNBRANCHED
+        TO filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      START;
+      """
+
+    Examples:
+      | cluster_size | memory                    | proposal          |
+      | 1            | is shared between threads | threads           |
+      | 3            | is shared between threads | threads           |
+      | 1            | has one-byte pages        | custom page sizes |
+      | 3            | has one-byte pages        | custom page sizes |
+
   Scenario Outline: A WASM processor output whose generated column <defect> reports a runtime error
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

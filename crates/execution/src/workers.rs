@@ -30,30 +30,14 @@ use crate::{
     memory::Reservation,
 };
 
-/// What a class whose wait queue is full does with the next job it is handed.
-///
-/// The wait queue bounds how much work a class may hold in front of its workers. Work that answers
-/// a request is refused when it is full, because its sender can present the work again and the
-/// caller must answer rather than wait behind a queue it cannot bound. Work the node already
-/// accepted and keeps, such as a payload a quiesce buffer retained, cannot be presented again, so
-/// it waits for a place instead. Either way the job then waits for a worker like every admitted
-/// job, and its charge is released when it exits or when its caller stops waiting for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueueAdmission {
-    /// Refuse the job at once with [`ExecutionError::QueueFull`].
-    RefuseWhenFull,
-    /// Hold the job until a place frees. Places go to waiting jobs in the order they asked, ahead
-    /// of any job asking afterwards, so a job refused when full never overtakes one that waits.
-    /// The caller bounds the wait by dropping the future, which gives up its place in line and
-    /// returns its charge; nothing else ends it while the class's jobs keep their workers.
-    WaitForPlace,
-}
-
 /// Why a job did not produce a value.
+///
+/// A full wait queue is not among the reasons. The queue bounds how much work a class holds in
+/// front of its workers, and a job that finds it full waits for a place: places go to waiting jobs
+/// in the order they asked. The caller bounds that wait by dropping the future, which gives up its
+/// place in line and returns its charge.
 #[derive(Debug, Error)]
 pub enum ExecutionError {
-    #[error("the {class} pool already holds {pending} jobs waiting for a worker")]
-    QueueFull { class: &'static str, pending: usize },
     #[error("the {class} pool was shut down")]
     PoolClosed { class: &'static str },
     #[error("the {class} job panicked")]
@@ -67,16 +51,14 @@ pub struct WorkerClassSnapshot {
     pub running: usize,
     pub pending: usize,
     /// How many jobs the class may hold waiting for a worker. A job submitted while `pending` is
-    /// at this capacity is refused, unless its caller waits for a place.
+    /// at this capacity waits for a place.
     pub queue_capacity: usize,
-    /// Jobs whose callers found the wait queue full and wait for a place in it rather than being
-    /// refused. A job stops counting here once it takes a place or its caller stops waiting.
+    /// Jobs whose callers found the wait queue full and wait for a place in it. A job stops
+    /// counting here once it takes a place or its caller stops waiting.
     pub waiting: usize,
     /// Jobs this class has admitted since the node started. A caller that must prove it submitted
     /// one job rather than several reads the difference across its own operation.
     pub admitted: u64,
-    /// Jobs refused because the class already held its whole wait queue.
-    pub refused: u64,
     /// Jobs that have left a worker, whether they produced a value or the caller stopped waiting.
     pub completed: u64,
     /// Time admitted jobs spent waiting for a worker of this class. Divided by `admitted` it is
@@ -148,7 +130,6 @@ struct PoolShared {
     pending: AtomicUsize,
     waiting: AtomicUsize,
     admitted: AtomicU64,
-    refused: AtomicU64,
     completed: AtomicU64,
     queued_nanos: AtomicU64,
     worked_nanos: AtomicU64,
@@ -179,7 +160,6 @@ impl WorkerPool {
                 pending: AtomicUsize::new(0),
                 waiting: AtomicUsize::new(0),
                 admitted: AtomicU64::new(0),
-                refused: AtomicU64::new(0),
                 completed: AtomicU64::new(0),
                 queued_nanos: AtomicU64::new(0),
                 worked_nanos: AtomicU64::new(0),
@@ -198,7 +178,6 @@ impl WorkerPool {
             queue_capacity: self.inner.queue_capacity,
             waiting: self.inner.waiting.load(Ordering::Acquire),
             admitted: self.inner.admitted.load(Ordering::Acquire),
-            refused: self.inner.refused.load(Ordering::Acquire),
             completed: self.inner.completed.load(Ordering::Acquire),
             queued: Duration::from_nanos(self.inner.queued_nanos.load(Ordering::Acquire)),
             worked: Duration::from_nanos(self.inner.worked_nanos.load(Ordering::Acquire)),
@@ -207,7 +186,6 @@ impl WorkerPool {
 
     pub(crate) async fn run<T>(
         &self,
-        admission: QueueAdmission,
         waits: Option<&CapacityWaits>,
         reservation: Reservation,
         job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
@@ -215,8 +193,7 @@ impl WorkerPool {
     where
         T: Send + 'static,
     {
-        let RunningJob { handle, obligation } =
-            self.start(admission, waits, reservation, job).await?;
+        let RunningJob { handle, obligation } = self.start(waits, reservation, job).await?;
         self.finish(handle.await, obligation)
     }
 
@@ -237,8 +214,8 @@ impl WorkerPool {
     }
 
     /// Return once the job has been handed to a worker, waiting for a place in the class's queue
-    /// rather than being refused. Until then the submitting future still owns queued cancellation;
-    /// afterwards the job runs independently of its submitter.
+    /// like every job. Until then the submitting future still owns queued cancellation; afterwards
+    /// the job runs independently of its submitter.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "adapts the caller's synchronous callback for its admitted \
@@ -252,12 +229,7 @@ impl WorkerPool {
         job: impl FnOnce(Reservation) + Send + 'static,
     ) -> Result<(), Report<ExecutionError>> {
         let RunningJob { handle, obligation } = self
-            .start(
-                QueueAdmission::WaitForPlace,
-                waits,
-                reservation,
-                move |reservation, _| job(reservation),
-            )
+            .start(waits, reservation, move |reservation, _| job(reservation))
             .await?;
         obligation.disarm();
         drop(handle);
@@ -266,7 +238,6 @@ impl WorkerPool {
 
     async fn start<T>(
         &self,
-        admission: QueueAdmission,
         waits: Option<&CapacityWaits>,
         reservation: Reservation,
         job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
@@ -274,7 +245,7 @@ impl WorkerPool {
     where
         T: Send + 'static,
     {
-        let slot = self.enter_queue(admission, waits).await?;
+        let slot = self.enter_queue(waits).await?;
         let StartingJob { running, started } = self.enqueue(slot, reservation, job);
         started.await.map_err(|cause| self.closed(cause))?;
         Ok(running)
@@ -282,12 +253,11 @@ impl WorkerPool {
 
     pub(crate) async fn prepare(
         &self,
-        admission: QueueAdmission,
         waits: Option<&CapacityWaits>,
     ) -> Result<PreparedWork<'_>, Report<ExecutionError>> {
         Ok(PreparedWork {
             pool: self,
-            slot: self.enter_queue(admission, waits).await?,
+            slot: self.enter_queue(waits).await?,
         })
     }
 
@@ -355,54 +325,32 @@ impl WorkerPool {
         }
     }
 
-    /// Take a place in the class's wait queue as `admission` says. A job that waits for its place
-    /// tells `waits`, when the caller has one, for as long as it waits.
+    /// Take a place in the class's queue, waiting for one while the queue is full. Places go to
+    /// waiting jobs in the order they asked; the wait ends with a place, or with `PoolClosed` once
+    /// the class admits no more work. A free place is taken at once; only a job that finds the
+    /// queue full counts as waiting, in its class and to the owner its caller reports waits to,
+    /// and it waits behind every job that asked before it.
     async fn enter_queue(
         &self,
-        admission: QueueAdmission,
         waits: Option<&CapacityWaits>,
     ) -> Result<QueueSlot, Report<ExecutionError>> {
-        let permit = match admission {
-            QueueAdmission::RefuseWhenFull => {
-                match StdArc::clone(&self.inner.queue_permits).try_acquire_owned() {
-                    Ok(permit) => permit,
-                    Err(TryAcquireError::NoPermits) => {
-                        self.inner.refused.fetch_add(1, Ordering::AcqRel);
-                        return Err(Report::new(ExecutionError::QueueFull {
-                            class: self.inner.class.as_str(),
-                            pending: self.inner.pending.load(Ordering::Acquire),
-                        }));
-                    }
-                    Err(TryAcquireError::Closed) => {
-                        return Err(Report::new(ExecutionError::PoolClosed {
-                            class: self.inner.class.as_str(),
-                        }));
-                    }
-                }
+        let permit = match StdArc::clone(&self.inner.queue_permits).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(TryAcquireError::Closed) => {
+                return Err(Report::new(ExecutionError::PoolClosed {
+                    class: self.inner.class.as_str(),
+                }));
             }
-            QueueAdmission::WaitForPlace => {
-                // A free place is taken exactly as a refusing job takes it. Only a job that finds
-                // the queue full counts as waiting, in its class and to the owner its caller
-                // reports waits to, and it waits behind every job that asked before it.
-                match StdArc::clone(&self.inner.queue_permits).try_acquire_owned() {
-                    Ok(permit) => permit,
-                    Err(TryAcquireError::Closed) => {
-                        return Err(Report::new(ExecutionError::PoolClosed {
+            Err(TryAcquireError::NoPermits) => {
+                let _waiting = WaitingForPlace::enter(&self.inner, waits);
+                StdArc::clone(&self.inner.queue_permits)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| {
+                        Report::new(ExecutionError::PoolClosed {
                             class: self.inner.class.as_str(),
-                        }));
-                    }
-                    Err(TryAcquireError::NoPermits) => {
-                        let _waiting = WaitingForPlace::enter(&self.inner, waits);
-                        StdArc::clone(&self.inner.queue_permits)
-                            .acquire_owned()
-                            .await
-                            .map_err(|_| {
-                                Report::new(ExecutionError::PoolClosed {
-                                    class: self.inner.class.as_str(),
-                                })
-                            })?
-                    }
-                }
+                        })
+                    })?
             }
         };
         self.inner.pending.fetch_add(1, Ordering::AcqRel);
@@ -739,10 +687,10 @@ mod queue_admission_checks {
     use super::*;
     use crate::{CpuClass, Executor, MemoryClass};
 
-    /// A class whose wait queue is full refuses a job that answers a request, and holds a job the
-    /// node keeps until a place frees, then runs it like any other admitted job.
+    /// A class whose wait queue is full holds the next job until a place frees, then runs it like
+    /// any other admitted job. The job keeps its charge while it waits and takes no place.
     #[nervix_primitives::test]
-    async fn a_full_wait_queue_holds_a_job_that_waits_for_a_place_until_one_frees() {
+    async fn a_full_wait_queue_holds_the_next_job_until_a_place_frees() {
         let pool = WorkerPool::new(
             WorkerClassName::Cpu(CpuClass::Extension),
             NonZeroUsize::MIN,
@@ -754,12 +702,7 @@ mod queue_admission_checks {
         let queued_charge = executor
             .try_reserve(MemoryClass::Relay, 1024)
             .assured("the untouched relay budget has room");
-        let mut queued = Box::pin(pool.start(
-            QueueAdmission::RefuseWhenFull,
-            None,
-            queued_charge,
-            |_, _| (),
-        ));
+        let mut queued = Box::pin(pool.start(None, queued_charge, |_, _| ()));
         let queued_state = poll_fn(|context| Poll::Ready(queued.as_mut().poll(context))).await;
         assert!(
             queued_state.is_pending(),
@@ -767,44 +710,20 @@ mod queue_admission_checks {
         );
         assert_eq!(pool.snapshot().pending, 1);
 
-        let refused_charge = executor
-            .try_reserve(MemoryClass::Relay, 1024)
-            .assured("the relay budget has room for the refused job");
-        let refused = pool
-            .start(
-                QueueAdmission::RefuseWhenFull,
-                None,
-                refused_charge,
-                |_, _| (),
-            )
-            .await;
-        assert!(
-            matches!(
-                refused,
-                Err(error) if matches!(
-                    error.current_context(),
-                    ExecutionError::QueueFull { pending: 1, .. }
-                )
-            ),
-            "a full wait queue refuses a job that answers a request"
-        );
-
         let waiting_charge = executor
             .try_reserve(MemoryClass::Relay, 4096)
             .assured("the relay budget has room for the waiting job");
-        let mut waiting =
-            Box::pin(pool.start(QueueAdmission::WaitForPlace, None, waiting_charge, |_, _| 7));
+        let mut waiting = Box::pin(pool.start(None, waiting_charge, |_, _| 7));
         let waiting_state = poll_fn(|context| Poll::Ready(waiting.as_mut().poll(context))).await;
         assert!(
             waiting_state.is_pending(),
-            "a full wait queue holds a job that waits for a place"
+            "a full wait queue holds the next job instead of refusing it"
         );
         let held = pool.snapshot();
         assert_eq!(
             held.pending, 1,
             "a waiting job takes no place until one frees"
         );
-        assert_eq!(held.refused, 1, "a waiting job is not refused");
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 1024 + 4096);
 
         drop(occupied);
@@ -830,7 +749,6 @@ mod queue_admission_checks {
 
         let drained = pool.snapshot();
         assert_eq!(drained.admitted, 2);
-        assert_eq!(drained.refused, 1);
         assert_eq!(drained.pending, 0);
         assert_eq!(drained.running, 0);
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
@@ -861,35 +779,26 @@ mod simulation_checks {
         let queued_charge = executor
             .try_reserve(MemoryClass::Relay, 1024)
             .assured("the untouched relay budget has room");
-        let mut queued = Box::pin(pool.start(
-            QueueAdmission::RefuseWhenFull,
-            None,
-            queued_charge,
-            |_, _| (),
-        ));
+        let mut queued = Box::pin(pool.start(None, queued_charge, |_, _| ()));
         let state = poll_fn(|context| Poll::Ready(queued.as_mut().poll(context))).await;
         assert!(matches!(state, Poll::Pending));
         assert_eq!(pool.snapshot().pending, 1);
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 1024);
 
-        let refused_charge = executor
+        let waiting_charge = executor
             .try_reserve(MemoryClass::Relay, 2048)
             .assured("worker queue pressure does not consume memory admission");
-        let refused = pool
-            .start(
-                QueueAdmission::RefuseWhenFull,
-                None,
-                refused_charge,
-                |_, _| (),
-            )
-            .await;
-        assert!(matches!(
-            refused,
-            Err(error) if matches!(error.current_context(), ExecutionError::QueueFull { pending: 1, .. })
-        ));
-        assert_eq!(pool.snapshot().refused, 1);
-        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 1024);
+        let mut waiting = Box::pin(pool.start(None, waiting_charge, |_, _| ()));
+        let state = poll_fn(|context| Poll::Ready(waiting.as_mut().poll(context))).await;
+        assert!(
+            matches!(state, Poll::Pending),
+            "a full wait queue holds the next job"
+        );
+        assert_eq!(pool.snapshot().pending, 1);
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 1024 + 2048);
 
+        drop(waiting);
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 1024);
         drop(queued);
         assert_eq!(pool.snapshot().pending, 0);
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
@@ -899,7 +808,7 @@ mod simulation_checks {
             .try_reserve(MemoryClass::Relay, 4096)
             .assured("the dropped waiter returned its charge");
         let next = pool
-            .start(QueueAdmission::RefuseWhenFull, None, next_charge, |_, _| ())
+            .start(None, next_charge, |_, _| ())
             .await
             .assured("the dropped waiter returned its queue place");
         next.handle
@@ -924,32 +833,22 @@ mod simulation_checks {
             .try_reserve(MemoryClass::Relay, 1024)
             .assured("the untouched relay budget admits the first job");
         let first_completed = completed.clone();
-        let mut first = Box::pin(pool.start(
-            QueueAdmission::RefuseWhenFull,
-            None,
-            first_charge,
-            move |_, _| {
-                first_completed
-                    .send(1)
-                    .assured("the test holds the completion receiver");
-            },
-        ));
+        let mut first = Box::pin(pool.start(None, first_charge, move |_, _| {
+            first_completed
+                .send(1)
+                .assured("the test holds the completion receiver");
+        }));
         let first_state = poll_fn(|context| Poll::Ready(first.as_mut().poll(context))).await;
         assert!(matches!(first_state, Poll::Pending));
 
         let second_charge = executor
             .try_reserve(MemoryClass::Relay, 1024)
             .assured("the relay budget admits the second job");
-        let mut second = Box::pin(pool.start(
-            QueueAdmission::RefuseWhenFull,
-            None,
-            second_charge,
-            move |_, _| {
-                completed
-                    .send(2)
-                    .assured("the test holds the completion receiver");
-            },
-        ));
+        let mut second = Box::pin(pool.start(None, second_charge, move |_, _| {
+            completed
+                .send(2)
+                .assured("the test holds the completion receiver");
+        }));
         let second_state = poll_fn(|context| Poll::Ready(second.as_mut().poll(context))).await;
         assert!(matches!(second_state, Poll::Pending));
         assert_eq!(pool.snapshot().pending, 2);
@@ -990,17 +889,12 @@ mod simulation_checks {
             .assured("the untouched management budget has room");
         let observed = executor.clone();
         let RunningJob { handle, obligation } = pool
-            .start(
-                QueueAdmission::RefuseWhenFull,
-                None,
-                charge,
-                move |_, cancellation| {
-                    (
-                        cancellation.check().is_err(),
-                        observed.snapshot().management_memory.reserved_bytes,
-                    )
-                },
-            )
+            .start(None, charge, move |_, cancellation| {
+                (
+                    cancellation.check().is_err(),
+                    observed.snapshot().management_memory.reserved_bytes,
+                )
+            })
             .await
             .assured("the running job took its worker permit");
         assert_eq!(pool.snapshot().running, 1);

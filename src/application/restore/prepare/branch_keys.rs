@@ -439,10 +439,7 @@ impl VerifiedArchive {
         let data = self.data.clone();
         let domain = domain.clone();
         let executor = runtime.executor();
-        let charge = executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(RestoreRefusal::MetadataAdmission)?;
+        let charge = executor.charge_nothing(MemoryClass::Bulk);
         executor
             .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
                 let states = &data.contents.description.domains[domain_index].state;

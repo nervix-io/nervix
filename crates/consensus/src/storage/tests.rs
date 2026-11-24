@@ -1174,8 +1174,9 @@ async fn exhausted_log_chunks_leave_room_for_another_reader_and_source_control()
 #[test]
 fn the_store_has_as_many_commands_turns_as_leave_room_beside_its_working_sets()
 -> Result<(), Box<dyn std::error::Error>> {
-    // Command state working sets are 16 MiB with the default operation limits.
-    for (commands, turns) in [(16, 1), (24, 1), (32, 1), (48, 2)] {
+    // Command state working sets are 16 MiB with the default operation limits, and the smallest
+    // budget a node starts with holds one beside a follower's 8 MiB resident window.
+    for (commands, turns) in [(24, 1), (32, 1), (48, 2)] {
         let executor = Executor::new(ExecutionConfig {
             budgets: MemoryBudgets {
                 commands: ByteUnit::Mebibyte(commands),

@@ -357,8 +357,8 @@ impl<'a> InferencerAdmission<'a> {
             .remote_ack_timing
             .keep_alive_while_pending(
                 batch.acks.as_slice(),
-                execute_accepted_program_with_selection_in_context(
-                    self.branch.runtime.executor().accepted_work(),
+                execute_program_with_selection_in_context(
+                    self.branch.runtime.executor(),
                     &self.program.compiled,
                     &projected,
                     &VmExecutionContext {

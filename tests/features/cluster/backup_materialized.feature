@@ -55,7 +55,7 @@ Feature: Materialized backup and archived lifecycle resumption
     Then node "node-2" reuses its remote materialized generation across five complete observations of round 2 with 64 KiB rows
 
   @materialized_read_admission @restore_installation @deloxide_stress_restore
-  Scenario: A relocated materialized generator releases refused snapshot reads and resumes after bulk contention
+  Scenario: A relocated materialized generator waits for bulk room to open its fetched snapshot and resumes after bulk contention
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And node-3 starts with execution-bulk-memory-bytes = 32MiB
@@ -96,11 +96,15 @@ Feature: Materialized backup and archived lifecycle resumption
       """
       class="bulk",direction="received"
       """
-    And within "60s" node "node-3" observability metric "nervix_execution_memory_rejections_total" with labels eventually reaches at least 1
+    # The fetched snapshot's open waits for a section and its decoder's room as one bulk charge
+    # while it holds nothing else of the class; nothing is refused for room.
+    And node "node-3" observability metric "nervix_execution_memory_rejections_total" with labels eventually equals 0
       """
       class="bulk"
       """
-    And within "60s" node "node-3" observability metric "nervix_execution_memory_reserved_bytes" with labels eventually equals 31457280
+    # A charge waiting in the class's queue takes every byte the class frees, so the open's wait
+    # holds the room the scenario left free until the hold ends.
+    And within "60s" node "node-3" observability metric "nervix_execution_memory_reserved_bytes" with labels eventually equals 33554432
       """
       class="bulk"
       """
@@ -108,6 +112,11 @@ Feature: Materialized backup and archived lifecycle resumption
     Then within "180s" the materialized generators report round 1, 512 KiB, 1 relays and 2 tenants
     When round 2 of 512 KiB materialized rows is submitted for 2 tenants
     Then within "180s" the materialized generators report round 2, 512 KiB, 1 relays and 2 tenants
+    # Nothing the waits took stays charged once the generator resumed.
+    And within "60s" node "node-3" observability metric "nervix_execution_memory_reserved_bytes" with labels eventually equals 0
+      """
+      class="bulk"
+      """
 
   Scenario Outline: RESUME reproduces an unpaced archived lifecycle in a fresh cluster
     Given a <cluster_size> node nervix cluster is started

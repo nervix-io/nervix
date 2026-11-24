@@ -16,23 +16,19 @@ use std::{
 
 use meticulous::ResultExt as _;
 use nervix_connector::IngestorConnector as _;
-use nervix_execution::{AdmissionError, Executor, MemoryClass};
+use nervix_execution::{Executor, MemoryClass};
 use nervix_models::ClientConfigEntry;
-use nervix_primitives::{sync::oneshot, time::timeout};
+use nervix_primitives::sync::oneshot;
 use rdkafka::{mocking::MockCluster, producer::DefaultProducerContext};
 
 use super::{
     GroupCommitRequest, KafkaConsumer, KafkaGroupCommit, KafkaOffsetPosition, KafkaTopicIngestor,
-    KafkaTopicIngestorError, KafkaTopicIngestorPlan, TopicPartitionInspector,
+    KafkaTopicIngestorPlan, TopicPartitionInspector,
     commit_tests::{GROUP, HELD_ROUND_TRIP, cluster, plan, publish, read_positions},
 };
 use crate::topic::retirement_tests::{
     FullConnectorQueue, connector_workers_reach, single_connector_worker,
 };
-
-/// How long a commit job held back by a full connector queue is watched for a refusal, which the
-/// executor would record at once.
-const REFUSAL_WINDOW: Duration = Duration::from_millis(500);
 
 /// The plan of an ingestor in the test group that runs its driver jobs on `executor`.
 fn plan_on(
@@ -101,6 +97,7 @@ async fn a_dropped_partition_inspector_destroys_its_consumer_on_a_connector_work
         "orders-inspector".to_string(),
         executor.clone(),
     )
+    .await
     .assured("the inspector accepts the test broker's configuration");
     inspector
         .partitions("orders")
@@ -140,9 +137,7 @@ async fn a_destruction_waits_for_a_place_in_a_full_connector_queue() {
         &executor,
         "the consumer is destroyed by a connector job once a queue place frees",
         |workers| {
-            workers.admitted == before.admitted + 1
-                && workers.refused == before.refused
-                && workers.completed == before.completed + 3
+            workers.admitted == before.admitted + 1 && workers.completed == before.completed + 3
         },
     )
     .await;
@@ -181,32 +176,13 @@ async fn a_commit_waiting_for_a_place_after_its_ingestor_was_dropped_runs_and_th
     drop(commit);
 
     drop(ingestor);
-
-    // A refusal would show at once; the job holds back instead for as long as the queue is full.
-    let refused = timeout(REFUSAL_WINDOW, async {
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            if executor.snapshot().connector_storage.refused > before.refused {
-                return;
-            }
-            nervix_primitives::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
-    assert!(
-        refused.is_err(),
-        "a full connector queue refuses no commit job; connector workers: {:?}",
-        executor.snapshot().connector_storage
-    );
     full.release().await;
     connector_workers_reach(
         &executor,
         "the commit's job runs once a place frees, and the consumer it held last is destroyed by \
          a connector job",
         |workers| {
-            workers.refused == before.refused
-                && workers.admitted == before.admitted + 2
-                && workers.completed == before.completed + 4
+            workers.admitted == before.admitted + 2 && workers.completed == before.completed + 4
         },
     )
     .await;
@@ -319,7 +295,8 @@ async fn a_control_job_that_outlives_its_ingestor_destroys_the_consumer_on_a_con
 }
 
 /// A consumer takes the charge of the job that will destroy it before it exists, so a node whose
-/// commands budget has no room refuses to create it, and its retirement gives that charge back.
+/// commands budget has no room holds its creation back until it has, and its retirement gives
+/// that charge back.
 #[nervix_primitives::test]
 async fn a_consumer_holds_the_charge_of_its_retirement_from_its_creation() {
     let broker = cluster();
@@ -329,24 +306,15 @@ async fn a_consumer_holds_the_charge_of_its_retirement_from_its_creation() {
         .try_reserve(MemoryClass::Commands, capacity)
         .assured("the test occupies the command budget before opening");
 
-    let refused = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0).await;
-
-    let Err(report) = refused else {
-        panic!("a full commands budget refuses the consumer's retirement charge");
-    };
-    assert!(matches!(
-        report.downcast_ref::<KafkaTopicIngestorError>(),
-        Some(KafkaTopicIngestorError::RetirementAdmission)
-    ));
-    assert!(matches!(
-        report.downcast_ref::<AdmissionError>(),
-        Some(AdmissionError::BudgetExhausted {
-            class: "commands",
-            ..
-        })
-    ));
+    let plan = plan_on(&broker, &executor);
+    let mut opening = Box::pin(KafkaTopicIngestor::open(&plan, 0));
+    let first_poll = poll_fn(|context| Poll::Ready(opening.as_mut().poll(context))).await;
+    assert!(
+        first_poll.is_pending(),
+        "a full commands budget holds the consumer's creation back instead of refusing it"
+    );
     drop(occupied);
-    let ingestor = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
+    let ingestor = opening
         .await
         .assured("the ingestor opens once the budget has room");
     let charge = u64::try_from(std::mem::size_of::<KafkaConsumer>())

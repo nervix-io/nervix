@@ -811,6 +811,7 @@ impl IngestorConnector for KafkaTopicIngestor {
         let control = KafkaControl::new(&config, plan.executor.clone())
             .change_context(IngestorError::Open { connector: KAFKA })?;
         let consumer = KafkaConsumerHandle::create(&config, plan.executor.clone())
+            .await
             .change_context(IngestorError::Open { connector: KAFKA })?;
         let mut offset_mode = plan.offset_mode.clone();
         // A consumer-group member services its group whenever the host holds its reads back: for
@@ -1653,7 +1654,7 @@ impl GroupCommits {
         }
         // Install before awaiting: cancellation of this future must not detach an untracked
         // commit and let the next request submit another one.
-        self.unanswered = Some(control.start_commit(consumer, request)?);
+        self.unanswered = Some(control.start_commit(consumer, request));
         let pending = self
             .unanswered
             .as_mut()
@@ -1666,7 +1667,7 @@ impl GroupCommits {
         let executed = joined.change_context(KafkaTopicIngestorError::CommitTask {
             group: group_id.to_owned(),
         })?;
-        let committed = executed.change_context(KafkaTopicIngestorError::ControlExecution)?;
+        let committed = executed?;
         committed.change_context(KafkaTopicIngestorError::CommitOffset {
             group: group_id.to_owned(),
         })
@@ -1998,14 +1999,14 @@ pub struct TopicPartitionInspector {
 }
 
 impl TopicPartitionInspector {
-    pub fn new(
+    pub async fn new(
         config: &[ClientConfigEntry],
         group_id: String,
         executor: Executor,
     ) -> Result<Self, Report<KafkaTopicIngestorError>> {
         let client_config = consumer_config(config, &group_id, false);
         let control = KafkaControl::new(&client_config, executor.clone())?;
-        let consumer = KafkaConsumerHandle::create(&client_config, executor)?;
+        let consumer = KafkaConsumerHandle::create(&client_config, executor).await?;
         Ok(Self { control, consumer })
     }
 

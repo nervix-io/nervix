@@ -170,8 +170,10 @@ still cannot fit.
 
 The count limit bounds prepared members in a candidate and the byte limit bounds encoded output.
 They do not bound arbitrary jaq working memory or execution time. Transform-backed preparation
-and re-encoding use the node's extension workers through the bounded executor. Admission refusal
-judges no record: the emitter retains its rows and retries, preserving backpressure. See
+and re-encoding use the node's extension workers through the bounded executor. While every worker
+is busy, the encoding waits for a place with the rows the emitter already accepted, which holds the
+emitter back as backpressure; only a node that is stopping refuses it, and that refusal judges no
+record. See
 [Execution Primitives](./execution-primitives.md) and the
 [jaq execution contract](./schemas-and-codecs.md#codecs).
 

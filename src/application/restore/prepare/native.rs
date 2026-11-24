@@ -32,10 +32,20 @@ impl VerifiedArchive {
     pub(in crate::application::restore) async fn reserve_native_checkpoint_encoding(
         executor: &Executor,
     ) -> error_stack::Result<Reservation, AdmissionError> {
-        let buffer = StagedSnapshotWriter::encoding_buffer_bytes(executor);
         executor
-            .reserve(MemoryClass::Bulk, RESTORE_STATE_WORKING_BYTES.max(buffer))
+            .reserve(
+                MemoryClass::Bulk,
+                Self::native_checkpoint_encoding_bytes(executor),
+            )
             .await
+    }
+
+    /// The bulk charge [`Self::reserve_native_checkpoint_encoding`] takes.
+    pub(in crate::application::restore) fn native_checkpoint_encoding_bytes(
+        executor: &Executor,
+    ) -> u64 {
+        let buffer = StagedSnapshotWriter::encoding_buffer_bytes(executor);
+        RESTORE_STATE_WORKING_BYTES.max(buffer)
     }
 
     /// The description and its reservation travel into the admitted job together. Conversion
