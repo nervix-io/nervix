@@ -11,8 +11,9 @@
 //!   with Rust's test runner, and the stand-in nodes, clients, images and processes those regressions
 //!   talk to.
 //!   It also owns registration of generator cadence, paced-interconnect cadence, bounded
-//!   subscription payload observations, declared scenario weights, admission fairness and the
-//!   per-node execution readings of timed probes.
+//!   subscription payload observations, declared scenario weights, admission fairness, the
+//!   per-node execution readings of timed probes and the unit owner and replica readings of status
+//!   and `DESCRIBE` outputs.
 //!   It also registers causal reply/pause ordering checks for command recovery probes and
 //!   the in-process status reader's committed-uniform readiness cases, and the client suite's
 //!   declared action/confirmation exchange.
@@ -27,7 +28,7 @@
 //!   node is read through, and the client wire session protocol the stand-in nodes answer status
 //!   requests with.
 //!   It also depends on the focused generator cadence, paced-interconnect cadence, subscription
-//!   payload observation and node execution reading owners.
+//!   payload observation, node execution reading and unit placement reading owners.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #![cfg_attr(
@@ -204,6 +205,10 @@ mod syslog_tls_tests;
 mod unaccepted_address;
 #[path = "common/unaccepted_address_tests.rs"]
 mod unaccepted_address_tests;
+#[path = "common/unit_placement.rs"]
+mod unit_placement;
+#[path = "common/unit_placement_tests.rs"]
+mod unit_placement_tests;
 #[path = "common/websocket_close.rs"]
 mod websocket_close;
 #[path = "common/websocket_close_tests.rs"]
