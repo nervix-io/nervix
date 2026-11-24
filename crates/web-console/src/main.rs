@@ -67,7 +67,7 @@ use nervix_primitives::unmodeled::futures::{AbortHandle, Abortable};
 use nervix_recovery::Discarded as _;
 use nervix_web_console::graph::{
     GraphEdgeId, GraphSearch, LiveGraphLayout, graph_layout_edge, graph_layout_item,
-    layout::{EdgeTravel, GroupRegion, Rect},
+    layout::{GroupRegion, Rect},
     viewport::{Extent, GraphBounds, Viewport},
 };
 use thiserror::Error;
@@ -6574,7 +6574,6 @@ fn GraphPanel(
                                             data-kind=kind_label
                                             data-source=id.source.clone()
                                             data-target=id.target.clone()
-                                            data-feedback=edge.feedback_data()
                                             data-input-side=edge.input_side_data()
                                             data-routes=edge.routes.to_string()
                                             data-messages-per-second=move || {
@@ -7707,7 +7706,6 @@ impl GraphView {
             let drawn = GraphViewEdge {
                 points,
                 badge: route.and_then(|route| route.badge),
-                feedback: route.is_some_and(|route| route.travel == EdgeTravel::Return),
                 id: id.clone(),
                 input_side: edge.input_side,
                 routes: edge.routes,
@@ -8522,8 +8520,6 @@ struct GraphViewEdge {
     points: Vec<(i32, i32)>,
     /// Where the rate badge sits, when this edge carries traffic worth reporting.
     badge: Option<Rect>,
-    /// A return path: it travels right to left against the flow.
-    feedback: bool,
 }
 
 impl GraphViewEdge {
@@ -8619,15 +8615,10 @@ impl GraphViewEdge {
         } else {
             String::new()
         };
-        let feedback = if self.feedback { " · return path" } else { "" };
         format!(
-            "{} → {}{side}: {subject}{routes}{feedback}",
+            "{} → {}{side}: {subject}{routes}",
             self.id.source, self.id.target
         )
-    }
-
-    fn feedback_data(&self) -> String {
-        self.feedback.to_string()
     }
 
     fn input_side_data(&self) -> String {
@@ -13237,7 +13228,6 @@ mod tests {
         };
 
         assert_eq!(edge.input_side_data(), "RIGHT");
-        assert_eq!(edge.feedback_data(), "false");
         assert_eq!(edge.marker(), "url(#graph-arrow)");
         assert_eq!(
             edge.route_summary(),
@@ -14419,7 +14409,6 @@ mod tests {
             branches: branch_statistics(branches),
             points: Vec::new(),
             badge: None,
-            feedback: false,
         }
     }
 
