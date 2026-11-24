@@ -1,18 +1,25 @@
-//! Public observations of session bounds, control-plane cadences and idle forwarding links.
+//! Public observations of session bounds and pacing, control-plane cadences and idle forwarding
+//! links.
 //!
 //! Outside the layer order: a scenario harness.
-//! Owns: advertised-bound, public cadence and mixed-link progress assertions.
-//! Depends on: the native client, public gRPC codec, endpoints and fixture credentials.
+//! Owns: advertised-bound, announced-pacing, public cadence and mixed-link progress assertions.
+//! Depends on: the native client, public gRPC and WebSocket codecs, endpoints and fixture
+//! credentials.
 //! Must not know: server settings, transport internals or the link heartbeat implementation.
 
 use std::time::Duration;
 
 use cucumber::{gherkin::Step, then, when};
-use nervix_client_wire::{SessionLimits, grpc::ClientExchangeCodec};
+use futures_util::StreamExt as _;
+use nervix_client_wire::{SessionLimits, SessionOpened, SessionPacing, grpc::ClientExchangeCodec};
 use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc};
+use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest as _};
 use tonic::{Request, codegen::http::uri::PathAndQuery};
 
-use crate::{ScenarioWorld, common::raw_session::session_channel};
+use crate::{
+    ScenarioWorld,
+    common::{cluster::test_basic_auth_token_for_password, raw_session::session_channel},
+};
 
 #[then(expr = "node {string} control-plane cadence metric for {string} eventually equals {float}")]
 async fn cadence_metric(world: &mut ScenarioWorld, node: String, operation: String, expected: f64) {
@@ -249,4 +256,84 @@ async fn session_bounds(world: &mut ScenarioWorld, node: String, #[step] step: &
     }
     drop(response);
     drop(sender);
+}
+
+/// The text of the pacing value `name` names, as the scenario's table writes it: durations in the
+/// edge's human form, an absent retry validity as `absent`, and the restore queue as its count.
+fn announced_pacing_value(pacing: &SessionPacing, name: &str) -> String {
+    let web_console = pacing.web_console();
+    match name {
+        "snapshot_interval" => nervix_models::timing_text(pacing.snapshot_interval()),
+        "command_retry_validity" => match pacing.command_retry_validity() {
+            Some(validity) => nervix_models::timing_text(validity),
+            None => "absent".to_string(),
+        },
+        "web_console_request_timeout" => nervix_models::timing_text(web_console.request_timeout()),
+        "web_console_connect_timeout" => nervix_models::timing_text(web_console.connect_timeout()),
+        "web_console_retry_backoff" => nervix_models::timing_text(web_console.retry_backoff()),
+        "web_console_retry_max_backoff" => {
+            nervix_models::timing_text(web_console.retry_max_backoff())
+        }
+        "web_console_restoration_backoff" => {
+            nervix_models::timing_text(web_console.restoration_backoff())
+        }
+        "web_console_restore_frame_capacity" => web_console.restore_frame_capacity().to_string(),
+        other => panic!("the scenario names an unknown pacing value '{other}'"),
+    }
+}
+
+/// Opens an authenticated console session on the named node's console listener and checks that
+/// its first frame announces exactly the pacing the table states.
+#[then(expr = "node {string} announces session pacing when a console session opens")]
+async fn console_session_pacing(world: &mut ScenarioWorld, node: String, #[step] step: &Step) {
+    let cluster = world
+        .cluster
+        .as_ref()
+        .expect("the scenario started its cluster");
+    let table = step
+        .table
+        .as_ref()
+        .expect("the scenario supplies the complete pacing");
+    assert_eq!(table.rows.len(), 2, "one row specifies the pacing");
+    let console = cluster
+        .web_console_url(&node)
+        .expect("the named node serves a console");
+    let mut address = url::Url::parse(&console).expect("the harness builds a valid console URL");
+    address.set_query(None);
+    address.set_path("/console/ws");
+    address
+        .set_scheme("ws")
+        .expect("an http console URL can take the ws scheme");
+    let token = test_basic_auth_token_for_password(crate::common::cluster::TEST_AUTH_PASSWORD);
+    address.query_pairs_mut().append_pair("auth", &token);
+    let request = address
+        .as_str()
+        .into_client_request()
+        .expect("the console session address is a valid request");
+    let (mut socket, _) = nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .expect("the console session upgrades within the harness bound")
+    .expect("the fixture authenticates the console session");
+    let first = nervix_primitives::time::timeout(Duration::from_secs(60), socket.next())
+        .await
+        .expect("the console session announces its opening within the harness bound");
+    let Some(Ok(Message::Binary(payload))) = first else {
+        panic!("a console session starts with a binary opening, got {first:?}");
+    };
+    let opened = SessionOpened::verify(payload.into())
+        .expect("the console session's opening is complete and valid");
+    for (name, expected) in table.rows[0].iter().zip(&table.rows[1]) {
+        assert_eq!(
+            announced_pacing_value(&opened.pacing, name),
+            *expected,
+            "the console session must announce {name} at its opening",
+        );
+    }
+    socket
+        .close(None)
+        .await
+        .expect("the harness closes the console session it opened");
 }

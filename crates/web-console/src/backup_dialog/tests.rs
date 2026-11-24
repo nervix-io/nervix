@@ -7,7 +7,7 @@ mod properties;
 mod records;
 mod restores;
 
-use std::num::NonZeroU64;
+use std::{num::NonZeroU64, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
@@ -48,13 +48,43 @@ fn reference() -> CommandExecutionReference {
         .assured("the test reference is a valid literal")
 }
 
+/// When the tests' execution reference was issued: its UUIDv7 time, where the in-memory browser's
+/// clock starts.
+fn issued_at() -> Timestamp {
+    reference()
+        .retry_issued_at()
+        .assured("the test reference is a UUIDv7")
+}
+
+#[test]
+fn the_in_memory_clock_starts_when_the_test_reference_was_issued() {
+    assert_eq!(super::browser::in_memory::clock_start(), issued_at());
+}
+
+/// The summary of a backup of `bytes` whose archive the server retains for `retention` after the
+/// tests' reference was issued.
+fn summary_retained_for(bytes: &[u8], retention: Duration) -> BackupArchiveSummary {
+    BackupArchiveSummary {
+        retained_until: issued_at()
+            .checked_add(retention)
+            .assured("a test retention stays inside the timestamp range"),
+        ..summary(bytes)
+    }
+}
+
+/// The summary of a backup of `bytes`, whose archive the server retains for the declared retry
+/// validity of fifteen minutes after the tests' reference was issued.
 fn summary(bytes: &[u8]) -> BackupArchiveSummary {
     let length = u64::try_from(bytes.len()).assured("a test archive is short");
     BackupArchiveSummary {
         total_bytes: NonZeroU64::new(length).assured("a test archive has bytes"),
         digest: ArchiveDigest::from_bytes(*blake3::hash(bytes).as_bytes()),
-        captured_at: Timestamp::from_unix_nanos(1_790_000_000_000_000_000),
-        retained_until: Timestamp::from_unix_nanos(1_790_000_900_000_000_000),
+        captured_at: issued_at()
+            .checked_add(Duration::from_secs(1))
+            .assured("a second after the reference is inside the timestamp range"),
+        retained_until: issued_at()
+            .checked_add(Duration::from_secs(15 * 60))
+            .assured("fifteen minutes after the reference is inside the timestamp range"),
         resources: BackupResources::Included,
         users: Some(2),
         domains: vec![
@@ -1087,6 +1117,7 @@ fn console_handles() -> super::ConsoleHandles {
         auth_token: leptos::prelude::RwSignal::new(None),
         terminal_lines: leptos::prelude::RwSignal::new(crate::TermLineHistory::default()),
         transaction_status: leptos::prelude::RwSignal::new(None),
+        pacing: leptos::prelude::RwSignal::new(crate::pacing::ConsolePacing::default()),
     }
 }
 

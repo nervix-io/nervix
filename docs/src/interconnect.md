@@ -549,7 +549,9 @@ That claim carries the size of the volume holding the node's database directory 
 limit of each of the node's databases, and a parameter conflict can carry the typed refusal of a
 resource quota above an admitted node's volume or of a node-unavailability timeout that an admitted
 node's health-probe interval does not fit. Its listener bounds carry the gRPC listener's HTTP/2
-windows, send buffer and reset limits, the HTTP/1 header count and the WebSocket write buffer.
+windows, send buffer and reset limits, the HTTP/1 header count and the WebSocket write buffer, and
+its operational capabilities carry the web console pacing the node announces to its console
+sessions.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup. The fingerprint also covers
 the opening of a client consumer stream with the largest delivery chunk its serving node announces.

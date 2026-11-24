@@ -2590,13 +2590,36 @@ table LeadershipObserved {
   leadership: Leadership (required);
 }
 
-/// First server message on each authenticated WebSocket. All five bounds are required and nonzero.
+/// First server message on each authenticated WebSocket: the five session bounds, then how the
+/// serving node paces the session and the web console it serves. Every field but
+/// command_retry_validity_nanos is required, and every present value is nonzero.
 table SessionOpened {
   frame_bytes: ulong = null;
   transfer_bytes: ulong = null;
   nesting_depth: ulong = null;
   collection_entries: ulong = null;
   string_bytes: ulong = null;
+  /// How often the node sends the selected domain's snapshot, in nanoseconds.
+  snapshot_interval_nanos: ulong = null;
+  /// How long the cluster recognizes a command's execution reference from the time the reference
+  /// was issued, in nanoseconds. Absent while the node has not applied the cluster's committed
+  /// parameters.
+  command_retry_validity_nanos: ulong = null;
+  /// How long the web console waits for a download's or a restore's next frame, room or reply, in
+  /// nanoseconds. Each web console wait is a whole number of milliseconds from 1 ms through a day.
+  web_console_request_timeout_nanos: ulong = null;
+  /// How long the web console waits for its credential check, in nanoseconds.
+  web_console_connect_timeout_nanos: ulong = null;
+  /// The web console's first reconnect and command-repetition wait, in nanoseconds.
+  web_console_retry_backoff_nanos: ulong = null;
+  /// The longest wait the web console's doubling backoffs reach, in nanoseconds. At least the
+  /// retry and restoration backoffs.
+  web_console_retry_max_backoff_nanos: ulong = null;
+  /// The web console's first subscription restoration wait, session retry tick and pause before a
+  /// download or restore streams again, in nanoseconds.
+  web_console_restoration_backoff_nanos: ulong = null;
+  /// The restore frames the web console keeps queued on its connection.
+  web_console_restore_frame_capacity: ulong = null;
 }
 
 table DomainsObserved {

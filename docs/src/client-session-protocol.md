@@ -193,13 +193,29 @@ ordinary response body is decoded:
 | `nervix-session-string-bytes` | String bytes |
 
 Each console session, backup-download and restore WebSocket starts with a `SessionOpened`
-`NXSM` frame carrying the same five values. Its
-opening frame fits within the protocol's 1 KiB announcement bound. The client validates the
-complete announcement before sending requests or decoding ordinary session frames. Missing,
-duplicated or invalid native metadata, or an invalid WebSocket announcement, ends that opening.
-Every reconnect reads a new announcement from the node it reaches. The selected limits belong
-to that exchange: an earlier exchange's reader, queued work or transfer cannot change a later
-exchange's bounds.
+`NXSM` frame carrying the same five values, followed by how the node paces the session and the
+web console it serves:
+
+| Field | Value |
+| --- | --- |
+| `snapshot_interval_nanos` | The node's `--session-snapshot-interval`: how often it sends the selected domain's snapshot |
+| `command_retry_validity_nanos` | The committed `COMMAND_RETRY_VALIDITY`: how long the cluster recognizes an execution reference from the time it was issued. Absent while the node has not applied the cluster's committed parameters |
+| `web_console_request_timeout_nanos`, `web_console_connect_timeout_nanos`, `web_console_retry_backoff_nanos`, `web_console_retry_max_backoff_nanos`, `web_console_restoration_backoff_nanos` | The node's [web console pacing](node-settings.md#web-console-pacing) waits |
+| `web_console_restore_frame_capacity` | The restore frames the web console keeps queued on its connection |
+
+Every duration is a count of nanoseconds. Its opening frame fits within the protocol's 1 KiB
+announcement bound. The client validates the complete announcement before sending requests or
+decoding ordinary session frames, each value through the definition that owns it: a positive
+snapshot interval and retry validity within their bounds, web console waits of whole
+milliseconds from 1ms through 24 hours, a longest backoff at least each first wait, and a restore
+queue the browser can count. Missing, duplicated or invalid native metadata, or an invalid
+WebSocket announcement, ends that opening. Every reconnect reads a new announcement from the node
+it reaches. The selected limits belong to that exchange: an earlier exchange's reader, queued work
+or transfer cannot change a later exchange's bounds. The browser console follows the pacing of the
+last opening it read, keeps it across reconnects and uses each value's declared default before its
+first opening; an opening without a retry validity leaves the one it learned before.
+[Web Console](client-tools-web-console.md) describes what each value paces. Native sessions carry
+no pacing: a native client's waits are its own local options.
 
 Native upload and restore requests offer all five bounds in request metadata. The client captures
 the last announced values with its channel and can stream immediately under that complete offer.

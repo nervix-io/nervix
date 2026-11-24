@@ -86,8 +86,8 @@ The source digest identifies which schedule produced the installed revision. A p
 also carries its predecessor digest, so an incremental application is attempted only when the
 currently installed revision is the predecessor it was planned against. Application plans each
 domain's change from the schedule that domain's execution runs ([Installation And
-Publication](#installation-and-publication)), so the two differ only for an execution installed
-outside schedule application. The handoff fingerprint
+Publication](#installation-and-publication)), and schedule application installs every domain
+execution a node runs, so the two match. The handoff fingerprint
 has a separate purpose: ownership preparation and activation must agree on the exact committed
 schedule, including its assignments and state generations. Planning preserves its established
 encoding and does not substitute the source digest for it.
@@ -270,9 +270,12 @@ runtime holds and records for that domain the committed schedule that produced i
 revision's schedule, or the one the domain kept. The next attempt, of the same revision or a later
 one, therefore plans every domain from the revision it runs, and a later revision reaches a domain
 a failed attempt moved forward in place, as it reaches every other domain. A domain without an
-execution records nothing and is planned as a domain the node does not run yet. So is a domain
-whose execution runs a revision schedule application did not install, which application reports
-as a warning: its next change replaces its execution
+execution records nothing and is planned as a domain the node does not run yet. Schedule
+application installs every domain execution, so no execution runs a revision it did not install;
+an activation request for a planned ownership move only waits for the application that activates
+it ([Planned Ownership Handoffs And Failover](control-plane.md#planned-ownership-handoffs-and-failover)).
+Should such an execution ever be found, application reports it as a warning and plans the domain
+as one the node does not run yet, so its next change replaces the execution
 ([Incremental Changes And Rebuilds](#incremental-changes-and-rebuilds)). A node starting after a
 forced ending first establishes its committed-state catch-up fence before installing execution;
 an earlier owner's local state cannot make it act under an obsolete assignment.
@@ -392,7 +395,7 @@ contains only typed runtime instructions:
 | Entity labels only | Publish the committed metadata while retaining execution, state, allowances, bindings, connections, buffers and ACK obligations. No pause, force flush, rebuild or relocation is required. |
 | Dynamic | Apply the typed capacity, processor, WASM reset, emitter flush, VHOST TLS or retired partition transition update; bind and publish the desired processor and error plans. A retired transition gates nothing and force-flushes nothing: each local unit the schedule keeps ends its claims in its own task, and each holding unit ends with its placement tasks. |
 | Entity swap | Fence affected input relays, force-flush as required, rebind reassigned placement and selected node tasks, then publish the desired revision and release the gates. A new partition epoch first gives every relay of the branch new boundary services for the new count on the same fan-out. Unaffected nodes and their branch state stay in place. |
-| Rebuild | Stop the preceding domain execution and install the complete desired running or passive revision. Domain-wide changes, a domain this node does not run yet, an execution installed outside schedule application, and lifecycle changes can require this path. |
+| Rebuild | Stop the preceding domain execution and install the complete desired running or passive revision. Domain-wide changes, a domain this node does not run yet, and lifecycle changes can require this path. |
 
 The schedule classifier retains Model-based change-aspect and quiescence decisions in the
 registry. The runtime receives typed dynamic values, affected node identities, state purges,

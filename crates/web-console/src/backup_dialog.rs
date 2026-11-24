@@ -27,6 +27,7 @@ mod archive_download;
 mod backup_draft;
 mod browser;
 mod pending_backup;
+mod redirect_chain;
 mod reports;
 mod restore_draft;
 mod restore_stream;
@@ -37,8 +38,6 @@ mod restore_stream;
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests;
-
-use std::time::Duration;
 
 use error_stack::Report;
 use leptos::{ev, prelude::*};
@@ -65,35 +64,9 @@ use self::{
 };
 use crate::{
     CommandPurpose, ConsoleRequest, SESSION_UNAVAILABLE, TermLine, TermLineHistory,
-    command_execution_reference, command_outcome_lines, request_handoff::RequestSender,
-    transaction_inspector::ImpactReportView, transaction_is_active,
+    command_execution_reference, command_outcome_lines, pacing::ConsolePacing,
+    request_handoff::RequestSender, transaction_inspector::ImpactReportView, transaction_is_active,
 };
-
-/// How long a download waits for its next frame, and a restore for its connection to take a
-/// chunk or for its reply once the last chunk was sent, before the call counts as stalled.
-#[cfg_attr(
-    nervix_lint,
-    expect(
-        nervix::hidden_tunable,
-        reason = "how long a frame may take depends on the network and the cluster, and the \
-                  console has no settings carrier yet; it stays fixed until its repair task serves \
-                  it with the session opening https://app.clickup.com/t/86bd5vvdq"
-    )
-)]
-const FRAME_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// The pause before a download starts again from its first byte, and before a restore is streamed
-/// again.
-#[cfg_attr(
-    nervix_lint,
-    expect(
-        nervix::hidden_tunable,
-        reason = "how long a retry should wait depends on the network and the cluster, and the \
-                  console has no settings carrier yet; it stays fixed until its repair task serves \
-                  it with the session opening https://app.clickup.com/t/86bd5vvdq"
-    )
-)]
-const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// The two forms of the dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -427,6 +400,9 @@ pub(crate) struct ConsoleHandles {
     pub(crate) auth_token: RwSignal<Option<String>>,
     pub(crate) terminal_lines: RwSignal<TermLineHistory>,
     pub(crate) transaction_status: RwSignal<Option<TransactionStatus>>,
+    /// The pacing the session's last opening announced, which a download or a restore starts
+    /// with until its own opening announces its node's.
+    pub(crate) pacing: RwSignal<ConsolePacing>,
 }
 
 /// The dialog's state, shared by its forms, the REPL and the dispatcher.
@@ -727,6 +703,7 @@ impl BackupSignals {
             base_url: self.console.base_url.get_untracked(),
             auth_token,
             file_name: command.file_name.clone(),
+            pacing: self.console.pacing.get_untracked(),
         };
         let backup = self.backup;
         let backup_attempt = self.backup_attempt;
@@ -905,6 +882,7 @@ impl BackupSignals {
         self.plan_domain.set(None);
         self.restore_transfer.set(None);
         let base_url = self.console.base_url.get_untracked();
+        let pacing = self.console.pacing.get_untracked();
         let (abort, registration) = AbortHandle::new_pair();
         if let Some(previous) = self.restore_abort.get_untracked() {
             previous.abort();
@@ -924,6 +902,7 @@ impl BackupSignals {
                 file,
                 base_url,
                 auth_token,
+                pacing,
             };
             let uploading = move |done: u64, total: u64| {
                 self.transfer(attempt, TransferPhase::Uploading, done, total);

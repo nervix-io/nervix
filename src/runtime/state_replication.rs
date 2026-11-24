@@ -1613,7 +1613,10 @@ impl Runtime {
         }
         let committed_transition =
             prepared.belongs_to_committed_transition(node, schedule_fingerprint);
-        if !prepared.activation_authorization.is_authorized() && !committed_transition {
+        if !prepared
+            .activation_authorization
+            .activates(committed_transition)
+        {
             return Ok(());
         }
         if let Some(store) = self.inner.state_store.as_ref() {
@@ -1923,17 +1926,16 @@ impl Runtime {
         Ok(())
     }
 
-    /// Authorizes recovered state and awaits its retained activation state.
+    /// Waits until this node activates the prepared state of the move `request` names.
     ///
-    /// Taking the schedule lock before subscribing makes the activation check and subscription
-    /// atomic with respect to ordinary schedule application. Every recovered activation attempt
-    /// rebuilds because an earlier attempt may have failed before it published `Activated`;
-    /// otherwise ordinary reconciliation owns schedule application and publishes `Activated`.
-    pub(crate) async fn activate_persisted_ownership_handoff(
+    /// The node's application of the committed schedule activates every prepared move and
+    /// publishes `Activated`, installing only the moved unit while the domain's other entities
+    /// keep running. A request therefore changes nothing on the node: it checks the preparation
+    /// and waits. Taking the schedule lock before subscribing makes that check and the
+    /// subscription atomic with respect to schedule application.
+    pub(crate) async fn wait_for_ownership_handoff_activation(
         &self,
-        local_node_id: &ClusterNodeName,
         request: &nervix_interconnect::ActivateOwnershipHandoffStateRequest,
-        revision: Arc<ExecutionRevision>,
     ) -> OwnershipHandoffResult<()> {
         let mut activation = {
             let _apply = self.inner.schedule_application.lock().await;
@@ -1946,25 +1948,12 @@ impl Runtime {
                 transition.entity.in_domain(transition.domain),
                 transition.unit,
             );
-            let mut prepared = self
+            let prepared = self
                 .inner
                 .prepared_runtime_state_handoffs
-                .get_mut(&key)
+                .get(&key)
                 .verified("the preparation was found and checked directly above");
-            let activation = prepared.activation.subscribe();
-            let requires_reapply = prepared.activation_authorization.authorize();
-            drop(prepared);
-            if requires_reapply {
-                self.rebuild_domain_from_revision(
-                    local_node_id,
-                    &request.domain,
-                    Some(revision),
-                    true,
-                )
-                .await
-                .map_err(|error| OwnershipHandoffError::state(format!("{error:#}")))?;
-            }
-            activation
+            prepared.activation.subscribe()
         };
         activation
             .wait_for(|state| *state == OwnershipHandoffActivation::Activated)
