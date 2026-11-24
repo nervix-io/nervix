@@ -32,6 +32,29 @@ module RubySuite
         NX::Session.connect('http://127.0.0.1:1', connection_window_bytes: 65_534)
       end
       assert_match(/connection-window-bytes/, narrow.message)
+      [0, -1].each do |invalid|
+        error = assert_raises(NX::InvalidArgumentError) do
+          NX::Session.connect('http://127.0.0.1:1', call_queue_capacity: invalid)
+        end
+        assert_match(/call_queue_capacity/, error.message)
+      end
+      [0, -1, 1 << 32].each do |invalid|
+        %i[header_list_bytes send_buffer_bytes max_error_reset_streams
+           remembered_reset_streams].each do |option|
+          error = assert_raises(NX::InvalidArgumentError) do
+            NX::Session.connect('http://127.0.0.1:1', **{option => invalid})
+          end
+          assert_match(/#{option}/, error.message)
+        end
+      end
+      duration = assert_raises(NX::InvalidArgumentError) do
+        NX::Session.connect('http://127.0.0.1:1', reset_stream_duration: Float::NAN)
+      end
+      assert_match(/reset_stream_duration/, duration.message)
+      hasty = assert_raises(NX::InvalidArgumentError) do
+        NX::Session.connect('http://127.0.0.1:1', connection_attempt_delay: 0.005)
+      end
+      assert_match(/connection-attempt-delay/, hasty.message)
       NX::Cancel.new(deadline: nil)
       assert_raises(NX::InvalidArgumentError) { NX::Session.connect('http://127.0.0.1:1', tls: -1) }
       assert_raises(NX::InvalidArgumentError) { NX::Session.connect('http://127.0.0.1:1', seeds: ['not a URL']) }

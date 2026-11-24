@@ -13606,7 +13606,7 @@ checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
 [[package]]
 name = "tonic"
 version = "0.13.1"
-source = "git+https://github.com/nervix-io/grpc-rust.git?rev=86e4a338006f63f9fdef9f397326155cc5238cc7#86e4a338006f63f9fdef9f397326155cc5238cc7"
+source = "git+https://github.com/nervix-io/grpc-rust.git?rev=dba49c9fc39bfbecf6ed42e9a42e797527150b68#dba49c9fc39bfbecf6ed42e9a42e797527150b68"
 dependencies = [
  "async-trait",
  "axum",

@@ -158,10 +158,53 @@ values take the deadline bounds above. `stream_window_bytes` (2 MiB by default) 
 `connection_window_bytes` (5 MiB) are the HTTP/2 receive windows: how many bytes of one call, and of
 all calls on the connection together, the node may send before the client has read them. A stream
 window takes 1 through 2,147,483,647 bytes, the HTTP/2 maximum; a connection window takes 65,535
-bytes, the window every HTTP/2 connection starts with, through the same maximum. Two transport
-choices are fixed rather than options: the client does not ping a connection that has no call open,
-because the next call's connect and request deadlines find a dead connection, and it never sizes its
-windows adaptively, because adaptive sizing would grow them past the declared windows.
+bytes, the window every HTTP/2 connection starts with, through the same maximum.
+
+The rest of every connection's limits are options too, each defaulting to the value the libraries
+beneath the client used before it declared them:
+
+- `call_queue_capacity` (1,024): how many calls queue for a connection while it is opened. The next
+  caller waits until one of them is sent; no call fails for want of room.
+- `header_list_bytes` (16 KiB): the largest header list, headers or trailers, the client accepts
+  from the node on one call, each field counted as HTTP/2 counts it, its name and value plus 32
+  bytes. A list that reaches the bound refuses that call; the node's own answers are far smaller.
+- `send_buffer_bytes` (1 MiB): how many request bytes one call queues for the connection before it
+  waits for the node to read.
+- `max_error_reset_streams` (1,024): how many calls the client resets for the node's protocol errors
+  before it ends the connection with `ENHANCE_YOUR_CALM`, the same protection the node's listener
+  keeps against its clients.
+- `remembered_reset_streams` (50) and `reset_stream_duration` (1 second): how many calls the client
+  cancelled it remembers at once, and for how long, so that frames the node sent before it learned of
+  a cancellation are ignored rather than counted as protocol errors.
+- `connection_attempt_delay` (300 milliseconds): when a node's host name has both IPv4 and IPv6
+  addresses, how long the attempt to the family the resolver answered first runs before the other
+  family is tried too, RFC 8305's Connection Attempt Delay. It takes 10 milliseconds, the shortest
+  RFC 8305 permits, through 2 seconds, its maximum.
+
+The header list, send buffer and both reset counts each take every positive 32-bit value, and the
+reset duration the deadline bounds above; a host binding refuses zero, or a value beyond 32 bits,
+before it connects.
+
+The other transport choices are fixed rather than options, each for the reason given:
+
+- The client does not ping a connection that has no call open, because the next call's connect and
+  request deadlines find a dead connection, and it never sizes its windows adaptively, because
+  adaptive sizing would grow them past the declared windows.
+- The largest frame it accepts is 16 KiB, the `SETTINGS_MAX_FRAME_SIZE` RFC 9113 starts every
+  connection with and every peer must accept; the node's listener fixes the same, and the windows,
+  not the frame size, bound what a connection buffers.
+- The header compression table the node may use is 4,096 bytes, the `SETTINGS_HEADER_TABLE_SIZE`
+  RFC 7541 and RFC 9113 start every connection with.
+- Before the node's first SETTINGS frame says how many calls it allows, the client opens at most 100,
+  the number RFC 9113 recommends every peer allows.
+- The node may open no call towards the client: the client sends `SETTINGS_ENABLE_PUSH` as 0 and a
+  `SETTINGS_MAX_CONCURRENT_STREAMS` of 0, so no call the node opens can wait to be accepted either.
+- Every connection sends small writes at once, without Nagle's delay, since pings, window updates and
+  the session's request frames are small writes the node waits for, and asks the kernel for no TCP
+  keepalive, since HTTP/2 pings already watch every connection with a call open.
+- The channel applies none of tonic's optional request timeout, concurrency limit or rate limit: every
+  call carries the client's own deadlines above, and each session's request frames are bounded by
+  `request_frame_capacity`.
 
 `ConnectOptions::seed_servers` lists the further servers the client opens its first session on,
 after the server it connects to, and reconnects through later. It holds at most
