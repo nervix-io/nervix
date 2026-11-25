@@ -566,9 +566,9 @@ Edge style carries meaning:
   with `USING MATERIALIZED STATE`. State is looked up rather than delivered, so these edges carry
   no rate
 
-A graph that feeds back on itself — a reingestor writing a relay that reaches it again — draws that
-one edge as a marked return path above the items it spans, so backwards travel is never mistaken
-for forward flow. Disconnected parts of a graph are stacked as separate bands.
+A domain's graph never feeds back on itself: Nervix refuses any change that would close a loop
+([Runtime Nodes](processors.md#shared-input-and-branch-contracts)), so every edge of the execution
+graph travels from left to right. Disconnected parts of a graph are stacked as separate bands.
 
 When traffic is flowing, each edge carries its own rate, with the full messages, bytes, and batches
 per second on hover, and a pulse travelling along the edge. Where a node declares several routes to

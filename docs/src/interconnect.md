@@ -371,9 +371,11 @@ It first commits a consensus barrier and sends its log position with the reconci
 the replication pool. Each participant applies through that position before consulting its local
 committed schedule. An exact ownership transition in that schedule preserves its preparation even
 when the original coordinator or destination process has gone. An uncommitted preparation remains
-only while the original coordinator process and both bound participant incarnations are live and
-the exact ownership-handoff gate is still held; every other preparation is discarded durably. A
-second pass after the gate deadline reclaims work that was active during the first pass.
+while the original coordinator process still leads and the domain's committed schedule is still the
+move's base, with the moved unit on its source, because that coordinator can still commit the move.
+A participant's restart or the end of the hold does not remove it, and the coordinator discards the
+preparations of a move it does not commit. Every other preparation is discarded durably. A second
+pass after the gate deadline reclaims work whose move could still commit during the first pass.
 
 An ownership handoff sends engagement, drain status and release only to the hold's participants:
 the live nodes that run part of the moved unit's boundary, as

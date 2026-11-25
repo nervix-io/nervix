@@ -709,6 +709,10 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - Select `BRANCHED BY <parametrizer>` or `UNBRANCHED` explicitly. Normal processors preserve their named
   branch. Use a reingestor to enter a parametrization distinct from every input relay's or to
   send records unbranched. See [Runtime Nodes](../../../docs/src/processors.md#reingestor).
+- Never design a loop: no route, `SEND TO` error route, correlation timeout or `USING MATERIALIZED
+  STATE` read may lead data back to a relay it already passed, so a node never writes into a relay
+  it reads, and a retry or feedback path goes through an outside system. Nervix refuses such a
+  graph; see [Runtime Nodes](../../../docs/src/processors.md#shared-input-and-branch-contracts).
 - Treat placement rules as path-gated overlays, not connectivity-independent groups. Use
   `REQUIRE COLOCATION` only for a hard same-cluster-node constraint; `PREFER COLOCATION` and
   `SUGGEST SEPARATION` are soft, `NEUTRAL` leaves scheduler heuristics active, and no hard
