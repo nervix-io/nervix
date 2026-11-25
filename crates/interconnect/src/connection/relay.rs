@@ -30,41 +30,46 @@ use nervix_primitives::time::timeout_at;
 
 use super::*;
 
-/// Whether the sends of one relay delivery started an exchange with its receiver.
+/// Whether the sends of one relay delivery started an exchange with its receiver, and with which
+/// run of it.
 ///
 /// A send records the start immediately before it registers the delivery's outbound attempt and
 /// asks the receiver for a grant, which is the first step of a delivery that a receiver can act
 /// on. The sender reads it once a send has ended or been abandoned. A delivery whose sends never
 /// started an exchange left no attempt on its receiver, so the receiver cannot have admitted it
 /// and the sender may hand the delivery to another receiver.
+///
+/// Only the sender's task touches the record: a send borrows it, so no other task can hold it, and
+/// the sender reads it after awaiting or dropping the send. Program order on that one task orders
+/// every store before every later load, so two relaxed atomics hold it without a lock. Together
+/// they describe one optional process epoch: `addressed` means something only once
+/// `exchange_started` is set, and [`Self::receiver_run`] is the only reader.
 #[derive(Debug, Default)]
 pub struct RelaySendProgress {
     exchange_started: AtomicBool,
-    /// The process epoch of the receiver run the delivery's latest exchange addressed, once one
-    /// started.
-    addressed: nervix_primitives::sync::blocking::Mutex<Option<u64>>,
+    /// The process epoch of the receiver run the delivery's latest exchange addressed, meaningful
+    /// once `exchange_started` is set.
+    addressed: AtomicU64,
 }
 
 impl RelaySendProgress {
-    /// Whether a send of the delivery started an exchange, so that its receiver may hold an
-    /// attempt of it.
-    pub fn exchange_started(&self) -> bool {
-        // Relaxed: the send that records the start runs on the sender's task, which awaits it or
-        // drops it before reading, and that orders the store before this load.
-        self.exchange_started.load(Ordering::Relaxed)
-    }
-
-    /// The process epoch of the receiver run the delivery's latest exchange addressed: the run
-    /// that holds the delivery's attempt, and that admits it if anything does. A grant or status
-    /// that another run answers is indeterminate, so an admitted delivery was always admitted by
-    /// this run.
+    /// The process epoch of the receiver run the delivery's latest exchange addressed, or `None`
+    /// when no send of the delivery started an exchange, so that its receiver holds no attempt of
+    /// it. The addressed run holds the delivery's attempt and admits it if anything does: a grant
+    /// or status that another run answers is indeterminate, so an admitted delivery was always
+    /// admitted by this run.
     pub fn receiver_run(&self) -> Option<u64> {
-        *self.addressed.lock()
+        // Relaxed: the sends that record a start run on the sender's task, which awaits them or
+        // drops them before reading, and that orders their stores before these loads.
+        if !self.exchange_started.load(Ordering::Relaxed) {
+            return None;
+        }
+        Some(self.addressed.load(Ordering::Relaxed))
     }
 
     fn record_exchange_start(&self, receiver_epoch: u64) {
+        self.addressed.store(receiver_epoch, Ordering::Relaxed);
         self.exchange_started.store(true, Ordering::Relaxed);
-        *self.addressed.lock() = Some(receiver_epoch);
     }
 }
 

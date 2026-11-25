@@ -56,8 +56,9 @@ async fn an_abandoned_relay_send_that_found_no_connection_started_no_exchange() 
         "a send to a peer without a target waits for one"
     );
     drop(send);
-    assert!(
-        !progress.exchange_started(),
+    assert_eq!(
+        progress.receiver_run(),
+        None,
         "a send abandoned while it waited for a connection reached no receiver"
     );
 
@@ -65,7 +66,7 @@ async fn an_abandoned_relay_send_that_found_no_connection_started_no_exchange() 
     transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
-/// A send that reaches its receiver records the exchange.
+/// A send that reaches its receiver records the exchange, with the receiver run it addressed.
 #[nervix_primitives::test]
 async fn a_relay_send_that_reached_its_receiver_records_the_exchange() {
     let mut pair = connected_transports().await;
@@ -80,9 +81,15 @@ async fn a_relay_send_that_reached_its_receiver_records_the_exchange() {
         .expect("the body arrives within the fixture deadline")
         .expect("the receiver remains connected");
     assert!(matches!(received.envelope, Envelope::RelayPayload(_)));
-    assert!(
-        progress.exchange_started(),
-        "a delivery whose body reached its receiver started an exchange"
+    let receiver_run = pair
+        .transport_b
+        .next_coordination_identity()
+        .expect("the receiver allocates an identity of its own run")
+        .process_epoch();
+    assert_eq!(
+        progress.receiver_run(),
+        Some(receiver_run),
+        "a delivery whose body reached its receiver started an exchange with the receiver's run"
     );
 
     pair.transport_a

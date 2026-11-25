@@ -1545,9 +1545,12 @@ A delivery has something to reconcile only once one of its sends started an exch
 records that start immediately before it registers the delivery's outbound attempt and sends the
 grant request, the first step a receiver can act on. A send that ends or is abandoned earlier, while
 it still waits for a connection to the receiver, leaves no attempt there. The sender keeps that
-record across every send of one delivery (`RelaySendProgress`). When a delivery ends without any of
-its sends having started an exchange, the sender asks the receiver nothing: the delivery fails as
-never having reached that node, and the channel's next delivery takes its unused position.
+record across every send of one delivery (`RelaySendProgress`), with the process epoch of the
+receiver run its latest exchange addressed: that run holds the delivery's attempt and admits it if
+anything does. Only the sender's task touches the record, so it takes no lock. When a delivery
+ends without any of its sends having started an exchange, the sender asks the receiver nothing: the
+delivery fails as never having reached that node, and the channel's next delivery takes its unused
+position.
 
 The [relay reconciliation and receiver-restart simulations](./interconnect-simulation.md#relay-reconciliation-and-cancellation)
 check this boundary through the production authenticated connection. They lose the reply after an
