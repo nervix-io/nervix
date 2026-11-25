@@ -375,6 +375,12 @@ impl PendingRemoteAck {
     /// Counts one sweep of this record, and whether the record is given up: a delivery that never
     /// reported its admission within its admission bound, or a receiver run that ended. A record
     /// whose receiver run lives is never given up, however long it reports nothing.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the membership view that judges the \
+                                   record's receiver run: the transport's published membership \
+                                   and peer runs, or an owner test's view")
+    )]
     fn swept(
         &mut self,
         timing: SweepPolicy,

@@ -34,6 +34,16 @@ use super::*;
 type RelayProgressReports = BTreeMap<RemoteAckRegistration, StdWeak<RelayAdmissionRecord>>;
 
 impl TransportState {
+    /// Binds `node`'s relay owner to the run with process epoch `epoch`, installing the owner on
+    /// the peer's first connection, and republishes the peer runs. Only a connection binding calls
+    /// it, outbound or inbound.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a connection binding installs or rebinds its peer's relay owner"
+        )
+    )]
     pub(super) fn bind_relay_owner(
         &self,
         node: &ClusterNodeName,
@@ -86,6 +96,16 @@ impl TransportState {
         self.peer_runs.ended(node, epoch).await;
     }
 
+    /// Applies the live membership `live` to the relay owners: activates the owners of live peers,
+    /// ends and withdraws those of departed peers unless they still await membership, and
+    /// republishes the peer runs. Only a membership change calls it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a membership change retires the relay owners of departed peers"
+        )
+    )]
     pub(super) fn retire_departed_relay_owners(&self, live: &BTreeSet<ClusterNodeName>) {
         loop {
             let current = self.relay_owners.load_full();
