@@ -15,7 +15,8 @@
 use arrow_array::{ArrayRef, Int64Array, RecordBatch};
 use nervix_execution::{ExecutionOverrides, ExecutionSettings, Executor};
 use nervix_models::{
-    ModelKind, ModelName, ParseAsType, SchemaFingerprint, SessionBounds, StateInspectionSettings,
+    DomainName, ModelKind, ModelName, ParseAsType, SchemaFingerprint, SessionBounds,
+    StateInspectionSettings, Unit,
 };
 use nervix_primitives::{
     sync::atomic::{AtomicBool, Ordering},

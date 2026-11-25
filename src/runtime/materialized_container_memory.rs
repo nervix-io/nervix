@@ -179,7 +179,9 @@ impl SealedContainerLayout {
                 }));
             }
             let identities = identity_metadata_bytes(group.identities)?;
-            kept_metadata = kept_metadata.checked_add(identities).ok_or_else(too_large)?;
+            kept_metadata = kept_metadata
+                .checked_add(identities)
+                .ok_or_else(too_large)?;
             if rows.exceeds_ceiling(kept_metadata, relay_budget) {
                 return Err(too_large());
             }
@@ -327,17 +329,39 @@ impl EncodingCharges {
                 .reserve(MemoryClass::Bulk, bytes.max(1))
                 .await
                 .change_context(MaterializedSnapshotError::Admission),
-            Self::SetAside(memory) => {
-                let left = memory
-                    .take()
-                    .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
-                let (taken, rest) = left
-                    .split(bytes)
-                    .change_context(MaterializedSnapshotError::Admission)?;
-                *memory = Some(rest);
-                Ok(taken)
-            }
+            Self::SetAside(_) => self.draw(executor, bytes).await,
         }
+    }
+
+    /// Takes `bytes` from what the page set aside, and what that lacks as a charge the encoding
+    /// requires: the page encodes within its allowance, so a share without room for it runs the
+    /// page again within a larger one.
+    async fn draw(
+        &mut self,
+        executor: &Executor,
+        bytes: u64,
+    ) -> Result<Reservation, Report<MaterializedSnapshotError>> {
+        let Self::SetAside(memory) = self else {
+            return Err(Report::new(MaterializedSnapshotError::Admission));
+        };
+        let left = memory
+            .take()
+            .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
+        let Some(lacking) = bytes.checked_sub(left.bytes()) else {
+            let (taken, rest) = left
+                .split(bytes)
+                .change_context(MaterializedSnapshotError::Admission)?;
+            *memory = Some(rest);
+            return Ok(taken);
+        };
+        // Everything set aside goes to this step; nothing is left for the next.
+        *memory = Some(executor.charge_nothing(MemoryClass::Bulk));
+        let more = executor
+            .reserve(MemoryClass::Bulk, lacking)
+            .await
+            .change_context(MaterializedSnapshotError::Admission)?;
+        left.merge(more)
+            .change_context(MaterializedSnapshotError::Admission)
     }
 
     /// Gives back what a step only borrowed: to the pool, or to what the page set aside.
@@ -392,10 +416,7 @@ impl EncodingCharges {
         let projection = self.take(executor, charge.projection).await?;
         let encoded = self.take(executor, charge.encoded.min(limit)).await?;
         let (body, projection) = RuntimeRecordBatch::encode_arrow_snapshot_projection_within(
-            executor,
-            projection,
-            encoded,
-            project,
+            executor, projection, encoded, project,
         )
         .await
         .map_err(unwritable)?;
@@ -420,31 +441,14 @@ impl EncodingCharges {
     }
 
     /// The container of `length` bytes. From the pool it waits for room. From what the page set
-    /// aside, a container whose sections came out larger than the plan bounded them tops up from
-    /// the bulk pool at once, or the encoding is refused.
+    /// aside, a container whose sections came out larger than the plan bounded them takes the rest
+    /// as a charge it requires, within the page's allowance.
     pub(super) async fn container(
         &mut self,
         executor: &Executor,
         length: u64,
     ) -> Result<Reservation, Report<MaterializedSnapshotError>> {
-        let Self::SetAside(memory) = self else {
-            return self.take(executor, length).await;
-        };
-        let left = memory
-            .take()
-            .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
-        let Some(lacking) = length.checked_sub(left.bytes()) else {
-            let (taken, rest) = left
-                .split(length)
-                .change_context(MaterializedSnapshotError::Admission)?;
-            *memory = Some(rest);
-            return Ok(taken);
-        };
-        let more = executor
-            .try_reserve(MemoryClass::Bulk, lacking)
-            .change_context(MaterializedSnapshotError::Admission)?;
-        left.merge(more)
-            .change_context(MaterializedSnapshotError::Admission)
+        self.take(executor, length).await
     }
 }
 
@@ -491,6 +495,20 @@ impl ResidentEncodingPlan {
             payload: 0,
             rows: 0,
         }
+    }
+
+    /// What encoding a container of one group whose columns take `payload` bytes takes at most
+    /// under `executor`'s bounds, by this plan's own charges: the most a page that may return that
+    /// much sets aside for its container. A payload past the section bound counts as one full
+    /// section.
+    pub(in crate::runtime) fn bound(
+        executor: &Executor,
+        payload: u64,
+    ) -> Result<u64, Report<MaterializedSnapshotError>> {
+        let mut plan = Self::new(executor, &ArrowSchema::empty());
+        plan.payload = payload.min(plan.section_limit);
+        plan.rows = 1;
+        plan.need()
     }
 
     /// The plan with `record` added as the container's next record. A record whose columns alone

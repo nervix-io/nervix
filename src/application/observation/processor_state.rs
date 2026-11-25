@@ -37,14 +37,15 @@ use nervix_primitives::time::timeout;
 
 use super::inspection_pages::{
     InspectionGrowth, add_counts, distinct_field, grow_inspection, inspection_owner,
-    inspection_refusal, rendered_inspection, resume_position,
+    inspection_refusal, owner_page_refusal, rendered_inspection, resume_position,
+    within_owner_page_shares,
 };
 use crate::{
     application::{AppError, command_result::CommandResult, session_service::SessionServiceImpl},
     client_row::{ArrowRowBatch, write_runtime_value},
     runtime::{
         BranchKey, PageReply, ProcessorStatePageBounds, ProcessorStatePageError,
-        ProcessorStateSelection,
+        ProcessorStatePageRead, ProcessorStateSelection,
         state_inspection_exchange::{
             ProcessorPageSection, ReceivedProcessorPage, receive_processor_page,
             stream_processor_page,
@@ -618,22 +619,16 @@ pub(in crate::application) struct OwnerPage {
 impl SessionServiceImpl {
     async fn prepared_processor_layout(
         &self,
+        executor: &nervix_execution::Executor,
         schedule: ClusterSchedule,
         domain: &DomainName,
         processor: &NodeRef,
     ) -> Result<ProcessorLayout, StateInspectionRejection> {
         match processor.kind {
             ModelKind::Inferencer => {
-                inferencer::prepare(
-                    self.inner.runtime.inspection_executor(),
-                    schedule,
-                    domain,
-                    processor,
-                )
-                .await
+                inferencer::prepare(executor, schedule, domain, processor).await
             }
             ModelKind::Deduplicator | ModelKind::WindowProcessor => {
-                let executor = self.inner.runtime.inspection_executor();
                 let charge = executor.charge_nothing(nervix_execution::MemoryClass::Bulk);
                 let domain = domain.clone();
                 let processor = processor.clone();
@@ -696,7 +691,12 @@ impl SessionServiceImpl {
         let processor = inspected_node(&show.processor);
         let state = self.inner.consensus.current_runtime_state().await;
         let layout = self
-            .prepared_processor_layout(state.schedule, domain, &processor)
+            .prepared_processor_layout(
+                self.inner.runtime.inspection_executor(),
+                state.schedule,
+                domain,
+                &processor,
+            )
             .await?;
         let branching = layout
             .node
@@ -1047,11 +1047,34 @@ impl SessionServiceImpl {
             .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?
     }
 
-    /// Reads one page of a local unit's processor state and projects its columns into the
-    /// sections' complete fields. `reply` says how the page reaches its reader.
+    /// Reads one page of a local unit's processor state within the allowances it draws every
+    /// charge from ([`within_owner_page_shares`]), and projects its columns into the sections'
+    /// complete fields. `reply` says how the page reaches its reader.
     pub(in crate::application) async fn native_processor_state_page(
         &self,
         request: ReadProcessorStatePage,
+        reply: PageReply,
+    ) -> Result<OwnerPage, StateInspectionRejection> {
+        let request = &request;
+        let executor = self.inner.runtime.inspection_executor();
+        let share = reply.initial_share(executor, request.max_rows, request.max_bytes);
+        let read = within_owner_page_shares(executor, share, |page_executor| async move {
+            self.native_processor_state_page_with(&page_executor, request, reply)
+                .await
+        })
+        .await;
+        match read {
+            Ok(page) => page,
+            Err(refusal) => Err(owner_page_refusal(refusal)),
+        }
+    }
+
+    /// One attempt at this node's page of a processor unit's state, every charge drawn through
+    /// `executor`, the page's allowance.
+    async fn native_processor_state_page_with(
+        &self,
+        executor: &nervix_execution::Executor,
+        request: &ReadProcessorStatePage,
         reply: PageReply,
     ) -> Result<OwnerPage, StateInspectionRejection> {
         let local = ClusterNodeIdentity::new(
@@ -1066,7 +1089,12 @@ impl SessionServiceImpl {
             return Err(StateInspectionRejection::StaleContinuation);
         }
         let layout = self
-            .prepared_processor_layout(state.schedule, &request.domain, &request.processor)
+            .prepared_processor_layout(
+                executor,
+                state.schedule,
+                &request.domain,
+                &request.processor,
+            )
             .await?;
         if layout.node.schema_fingerprint != request.schema {
             return Err(StateInspectionRejection::StaleContinuation);
@@ -1082,21 +1110,24 @@ impl SessionServiceImpl {
             .inner
             .runtime
             .local_processor_state_page(
-                &request.domain,
-                &request.processor,
-                request.unit,
-                ProcessorStateSelection {
-                    branch: request.selection,
-                    partition_exclusions: request.partition_exclusions,
-                },
-                request.after,
-                ProcessorStatePageBounds {
-                    rows,
-                    bytes: request.max_bytes.min(
-                        u64::try_from(SessionLimits::DEFAULT.transfer_bytes())
-                            .assured("session limits fit u64"),
-                    ),
-                    reply,
+                executor,
+                ProcessorStatePageRead {
+                    domain: &request.domain,
+                    processor: &request.processor,
+                    unit: request.unit,
+                    selection: ProcessorStateSelection {
+                        branch: request.selection,
+                        partition_exclusions: request.partition_exclusions.clone(),
+                    },
+                    after: request.after,
+                    bounds: ProcessorStatePageBounds {
+                        rows,
+                        bytes: request.max_bytes.min(
+                            u64::try_from(SessionLimits::DEFAULT.transfer_bytes())
+                                .assured("session limits fit u64"),
+                        ),
+                        reply,
+                    },
                 },
             )
             .await
@@ -1107,7 +1138,6 @@ impl SessionServiceImpl {
                 return Err(inspection_refusal(error, reason));
             }
         };
-        let executor = self.inner.runtime.inspection_executor();
         let admission = executor.charge_nothing(nervix_execution::MemoryClass::Bulk);
         let sections_layout = layout.sections.clone();
         let page_sections = page.sections;
@@ -1199,27 +1229,44 @@ impl SessionServiceImpl {
             .read_timeout
             .value();
         let executor = self.inner.runtime.inspection_executor();
-        // The page travels to another node, so admitting its rows also sets aside its reply.
+        // The page travels to another node, so admitting its rows also sets aside its reply. The
+        // read and its stream are one attempt within the page's allowances: the stream encodes
+        // while the page holds its charges, so both draw from the shares.
         let reply = PageReply::remote(executor);
-        let mut memory = None;
-        let result = match timeout(deadline, self.native_processor_state_page(request, reply)).await
-        {
-            Ok(Ok(page)) => {
-                memory = page.memory;
-                Ok((
-                    page.descriptor,
-                    page.sections
-                        .into_iter()
-                        .map(|section| ProcessorPageSection {
-                            batches: section.batches,
-                        })
-                        .collect::<Vec<_>>(),
-                ))
-            }
-            Ok(Err(reason)) => Err(reason),
-            Err(_) => Err(StateInspectionRejection::Deadline),
+        let share = reply.initial_share(executor, request.max_rows, max_bytes);
+        let request = &request;
+        let answered = timeout(
+            deadline,
+            within_owner_page_shares(executor, share, |page_executor| async move {
+                let read = self
+                    .native_processor_state_page_with(&page_executor, request, reply)
+                    .await;
+                let mut memory = None;
+                let result = match read {
+                    Ok(page) => {
+                        memory = page.memory;
+                        Ok((
+                            page.descriptor,
+                            page.sections
+                                .into_iter()
+                                .map(|section| ProcessorPageSection {
+                                    batches: section.batches,
+                                })
+                                .collect::<Vec<_>>(),
+                        ))
+                    }
+                    Err(reason) => Err(reason),
+                };
+                stream_processor_page(&page_executor, result, max_bytes, memory).await
+            }),
+        )
+        .await;
+        let refusal = match answered {
+            Ok(Ok(streamed)) => return streamed,
+            Ok(Err(refusal)) => owner_page_refusal(refusal),
+            Err(_) => StateInspectionRejection::Deadline,
         };
-        stream_processor_page(executor, result, max_bytes, memory).await
+        stream_processor_page(executor, Err(refusal), max_bytes, None).await
     }
 
     /// The `branches:`, `rows:` and `state bytes:` lines `DESCRIBE` reports for each unit of a

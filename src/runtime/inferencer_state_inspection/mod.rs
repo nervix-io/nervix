@@ -24,10 +24,10 @@ use std::collections::BTreeSet;
 use arrow_array::builder::{Float32Builder, ListBuilder, StringBuilder, UInt64Builder};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{Cancellation, CpuClass, MemoryClass, Reservation};
+use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass, Reservation};
 use nervix_models::{
-    BranchKeyFingerprint, ClusterNodeName, DomainName, ModelKind, NodeRef, NodeUnitRef,
-    ProcessorStateSection, StateInspectionBranchSelection, StateInspectionCounts, Unit,
+    BranchKeyFingerprint, ClusterNodeName, ModelKind, NodeUnitRef, ProcessorStateSection,
+    StateInspectionBranchSelection, StateInspectionCounts, Unit,
 };
 use nervix_primitives::sync::StdArc;
 
@@ -36,8 +36,8 @@ use super::{
     inferencer_state::{InferencerGeneration, ReplicatedInferencerState},
     processor_state_inspection::{
         PageReply, ProcessorStatePage, ProcessorStatePageBounds, ProcessorStatePageError,
-        ProcessorStatePageMemory, ProcessorStateRun, ProcessorStateSectionColumns,
-        ProcessorStateSelection, ReplyMemory, extend_runs,
+        ProcessorStatePageMemory, ProcessorStatePageRead, ProcessorStateRun,
+        ProcessorStateSectionColumns, ReplyMemory, extend_runs,
     },
     published_generation::Generation,
 };

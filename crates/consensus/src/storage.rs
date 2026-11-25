@@ -95,14 +95,24 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_np_liveness_logs";
-const KEYSPACE_META: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_np_liveness_meta";
-const KEYSPACE_STATE_MACHINE: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_np_liveness_state";
-const KEYSPACE_SNAPSHOT: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_np_liveness_snapshots";
+const KEYSPACE_LOGS: &str = "raft_giveup_np_liveness_logs";
+const KEYSPACE_META: &str = "raft_giveup_np_liveness_meta";
+const KEYSPACE_STATE_MACHINE: &str = "raft_giveup_np_liveness_state";
+const KEYSPACE_SNAPSHOT: &str = "raft_giveup_np_liveness_snapshots";
+/// The longest keyspace name the database stores: it keeps a name's length in one byte and refuses
+/// a longer name when the keyspace opens.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "fjall keeps a keyspace name's length in one byte and refuses a longer name"
+    )
+)]
+const MAX_KEYSPACE_NAME_BYTES: usize = 255;
+const _: () = assert!(KEYSPACE_LOGS.len() <= MAX_KEYSPACE_NAME_BYTES);
+const _: () = assert!(KEYSPACE_META.len() <= MAX_KEYSPACE_NAME_BYTES);
+const _: () = assert!(KEYSPACE_STATE_MACHINE.len() <= MAX_KEYSPACE_NAME_BYTES);
+const _: () = assert!(KEYSPACE_SNAPSHOT.len() <= MAX_KEYSPACE_NAME_BYTES);
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
 

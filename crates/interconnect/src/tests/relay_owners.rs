@@ -482,6 +482,10 @@ async fn a_cancellation_that_fences_a_position_waits_for_its_watermark_charge() 
             .assured("the receiver answers the status of a fenced position"),
         RelayAdmissionStatus::Cancelled
     );
-    pair.transport_a.shutdown(crate::test_teardown_ceiling()).await;
-    pair.transport_b.shutdown(crate::test_teardown_ceiling()).await;
+    pair.transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    pair.transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }

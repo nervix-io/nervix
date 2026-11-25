@@ -969,6 +969,35 @@ async fn a_charge_drawn_from_an_allowance_keeps_its_share_and_reports_growth_bey
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
+/// An optional extra an operation goes without, a growth its share has no room for now, never
+/// makes the operation run again: its own answer without the extra stands.
+#[nervix_primitives::test]
+async fn an_optional_growth_its_share_has_no_room_for_never_runs_the_operation_again() {
+    let executor = small_executor();
+    let mut attempts = 0_u32;
+    let went_without = executor
+        .within_allowance(MemoryClass::Bulk, 8192, |bulk| {
+            attempts += 1;
+            async move {
+                let mut charge = bulk.reserve(MemoryClass::Bulk, 4096).await?;
+                charge
+                    .try_grow_to(8192)
+                    .expect("the share has room for the first extra");
+                let refused = charge.try_grow_to(12_288).is_err();
+                Ok::<_, error_stack::Report<AdmissionError>>(refused)
+            }
+        })
+        .await
+        .expect("the class grants the share")
+        .expect("the operation answers");
+    assert!(went_without, "the share has no room for the second extra");
+    assert_eq!(
+        attempts, 1,
+        "an optional growth the share has no room for runs nothing again"
+    );
+    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+}
+
 /// A charge in a class without room for it outside any allowance still waits, and a growth
 /// refusal there reports the charge's own target.
 #[nervix_primitives::test]

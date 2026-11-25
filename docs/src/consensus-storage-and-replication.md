@@ -569,11 +569,14 @@ Transaction commit plans and step effects hold no lifecycle step.
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_np_liveness_logs`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_np_liveness_meta`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_np_liveness_state`, and
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_np_liveness_snapshots`. Opening it validates the complete
-keyspace namespace before reading any records. The committed cluster-parameter record
+`raft_giveup_np_liveness_logs`,
+`raft_giveup_np_liveness_meta`,
+`raft_giveup_np_liveness_state`, and
+`raft_giveup_np_liveness_snapshots`. Opening it validates the complete
+keyspace namespace before reading any records. The database keeps a keyspace name's length in one
+byte, so every name stays within 255 bytes, which the consensus crate asserts at compile time; the
+namespace therefore names only the changes since it last started short, and a stored state in any
+earlier namespace is refused as a whole. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement
 group, payload unfold policy and UDF compile budget. Their durations use validated, lossless seconds

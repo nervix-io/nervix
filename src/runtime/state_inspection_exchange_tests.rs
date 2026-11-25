@@ -1079,11 +1079,12 @@ async fn a_page_holding_most_of_the_pool_is_answered_without_waiting_for_room() 
     .assured("the page's reply is framed");
 }
 
-/// A page that set nothing aside for its reply takes each body's memory at once. A further body of
-/// a split section without room refuses the page as not ready, since waiting would hold the
-/// section's earlier bodies.
+/// A page that set nothing aside for its reply draws each body through the page's allowance. A
+/// further body of a split section the share has no room for runs the reply again within a larger
+/// share, which it waits for holding nothing: it never waits while it holds the section's earlier
+/// bodies, never refuses the read, and frames every body once the pool has room.
 #[nervix_primitives::test]
-async fn a_split_section_of_a_page_without_reply_memory_never_waits_for_a_further_body() {
+async fn a_split_section_of_a_page_without_reply_memory_runs_again_within_a_share_that_holds_it() {
     let executor = narrow_sections();
     let capacity = executor.snapshot().bulk_memory.capacity_bytes;
     // Room for the first body, at most one section bound, but not for a second as well.
@@ -1101,36 +1102,47 @@ async fn a_split_section_of_a_page_without_reply_memory_never_waits_for_a_furthe
     // 48 rows of 4 KiB text travel in four bodies under a 64 KiB section bound.
     let rows = wide_rows(&declared_fields(), &sequences, 4096);
     let request = read(held);
-    let PageReplyParts { reply, bodies, .. } = nervix_primitives::time::timeout(
-        std::time::Duration::from_secs(30),
-        processor_page_reply(
-            &executor,
-            Ok((
-                whole_page(held),
-                vec![ProcessorPageSection {
-                    batches: vec![rows],
-                }],
-            )),
-            request.max_bytes,
-            None,
-        ),
-    )
-    .await
-    .assured("the owner never waits for a further body's room")
-    .assured("the owner answers");
+    let rows = &rows;
+    let mut replying =
+        std::pin::pin!(
+            executor.within_allowance(MemoryClass::Bulk, 1, |share| async move {
+                processor_page_reply(
+                    &share,
+                    Ok((
+                        whole_page(held),
+                        vec![ProcessorPageSection {
+                            batches: vec![rows.clone()],
+                        }],
+                    )),
+                    request.max_bytes,
+                    None,
+                )
+                .await
+            })
+        );
     assert!(
-        matches!(reply, Err(StateInspectionRejection::NotReady)),
-        "a further body without room refuses the page as not ready, found {reply:?}"
+        nervix_primitives::time::timeout(std::time::Duration::from_millis(200), replying.as_mut())
+            .await
+            .is_err(),
+        "the reply waits, holding nothing, for a share that holds its bodies"
     );
-    assert!(bodies.is_empty(), "a refused page names no body");
     drop(held_memory);
+    let PageReplyParts { reply, bodies, .. } =
+        nervix_primitives::time::timeout(std::time::Duration::from_secs(30), replying)
+            .await
+            .assured("the reply is framed once the pool has room")
+            .assured("the pool grants the share")
+            .assured("the owner answers");
+    assert!(reply.is_ok(), "the page is framed, found {reply:?}");
+    assert_eq!(bodies.len(), 4, "the section travels in its four bodies");
 }
 
 /// A page that set nothing aside for its reply never waits for room while it holds a body it
-/// already encoded: the next section's body takes its memory at once, and without room for it the
-/// page is refused as not ready, so the owner never waits for memory only it could free.
+/// already encoded: the next section's body draws through the page's allowance, and a share
+/// without room for it runs the reply again within a larger share, which it waits for holding
+/// nothing. The page is framed once the pool has room, and the read is never refused.
 #[nervix_primitives::test]
-async fn a_page_without_reply_memory_never_waits_for_a_body_while_it_holds_another() {
+async fn a_page_without_reply_memory_runs_again_within_a_share_that_holds_its_bodies() {
     let executor = Executor::default();
     let capacity = executor.snapshot().bulk_memory.capacity_bytes;
     // Room for the first section's body, its 1 MiB row and its framing, but not for the second's.
@@ -1168,34 +1180,46 @@ async fn a_page_without_reply_memory_never_waits_for_a_body_while_it_holds_anoth
     let mut request = read(2);
     // A reply bound that holds both bodies, so only the memory decides.
     request.max_bytes = 16 * 1024 * 1024;
-    let PageReplyParts { reply, bodies, .. } = nervix_primitives::time::timeout(
-        std::time::Duration::from_secs(30),
-        processor_page_reply(
-            &executor,
-            Ok((
-                page,
-                vec![
-                    ProcessorPageSection {
-                        batches: vec![first],
-                    },
-                    ProcessorPageSection {
-                        batches: vec![second],
-                    },
-                ],
-            )),
-            request.max_bytes,
-            None,
-        ),
-    )
-    .await
-    .assured("the owner never waits for a body's room while it holds another body")
-    .assured("the owner answers");
+    let page = &page;
+    let first = &first;
+    let second = &second;
+    let mut replying =
+        std::pin::pin!(
+            executor.within_allowance(MemoryClass::Bulk, 1, |share| async move {
+                processor_page_reply(
+                    &share,
+                    Ok((
+                        page.clone(),
+                        vec![
+                            ProcessorPageSection {
+                                batches: vec![first.clone()],
+                            },
+                            ProcessorPageSection {
+                                batches: vec![second.clone()],
+                            },
+                        ],
+                    )),
+                    request.max_bytes,
+                    None,
+                )
+                .await
+            })
+        );
     assert!(
-        matches!(reply, Err(StateInspectionRejection::NotReady)),
-        "a body without room refuses the page as not ready, found {reply:?}"
+        nervix_primitives::time::timeout(std::time::Duration::from_millis(200), replying.as_mut())
+            .await
+            .is_err(),
+        "the reply waits, holding nothing, for a share that holds both bodies"
     );
-    assert!(bodies.is_empty(), "a refused page names no body");
     drop(held_memory);
+    let PageReplyParts { reply, bodies, .. } =
+        nervix_primitives::time::timeout(std::time::Duration::from_secs(30), replying)
+            .await
+            .assured("the reply is framed once the pool has room")
+            .assured("the pool grants the share")
+            .assured("the owner answers");
+    assert!(reply.is_ok(), "the page is framed, found {reply:?}");
+    assert_eq!(bodies.len(), 2, "each section travels in its body");
 }
 
 /// An executor whose bulk class has one worker and one place in its wait queue.

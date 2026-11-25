@@ -521,7 +521,7 @@ async fn received_page_bytes(world: &ScenarioWorld, node: &str) -> f64 {
 }
 
 #[when(expr = "inspection client {string} connects away from the last relay owner when possible")]
-async fn nonowner(world: &mut ScenarioWorld, name: String) {
+pub(crate) async fn nonowner(world: &mut ScenarioWorld, name: String) {
     let StateInspectionResult::Page(page) = &last_state(world).result else {
         panic!("page");
     };
@@ -575,7 +575,7 @@ async fn reader_memory_released(world: &mut ScenarioWorld) {
 
 /// The background read answered a JSON page that another node's unit owner served, returning
 /// `returned` rows of the `complete` rows its counts name.
-#[then(expr = "the background read answered {int} rows of {int} from a remote owner")]
+#[then(expr = "the background read answered {int} row(s) of {int} from a remote owner")]
 fn background_page(world: &mut ScenarioWorld, returned: usize, complete: u64) {
     let output = world
         .last_command_output

@@ -469,6 +469,20 @@ impl Reservation {
     /// writer's owner gives back what it holds and waits for that charge, rather than waiting
     /// while holding part of the class.
     pub fn grow_to(&mut self, bytes: u64) -> Result<(), Report<AdmissionError>> {
+        self.grow(bytes, true)
+    }
+
+    /// Grow this charge to cover `bytes` when its budget has room for the growth now, as an
+    /// optional extra its operation goes without otherwise. Unlike [`Self::grow_to`], a growth an
+    /// allowance's share has no room for is not recorded on the allowance, so the operation's own
+    /// answer without the extra stands and it does not run again within a larger share.
+    pub fn try_grow_to(&mut self, bytes: u64) -> Result<(), Report<AdmissionError>> {
+        self.grow(bytes, false)
+    }
+
+    /// Grow this charge to `bytes`. A growth the operation `required` that its allowance has no
+    /// room for is recorded on the allowance, so its owner runs it again within a larger share.
+    fn grow(&mut self, bytes: u64, required: bool) -> Result<(), Report<AdmissionError>> {
         // A charge drawn from an allowance can grow past the share by a larger share, but none can
         // grow past its class.
         let ceiling = self.ceiling();
@@ -512,7 +526,9 @@ impl Reservation {
                 let needed = match &self.allowance {
                     Some(hold) => {
                         let needed = hold.needed(self.drawn(), additional.into());
-                        hold.wanted(needed);
+                        if required {
+                            hold.wanted(needed);
+                        }
                         needed
                     }
                     None => target.into(),

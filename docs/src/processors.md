@@ -404,8 +404,9 @@ task starts or takes the unit over, refuses the read as `not_ready` instead of r
 branches it has not restored as empty. Gathering the copied rows' columns charges the owner's bulk
 memory the rows' bytes, and a page read through another node also sets each row's body aside, so a
 page ends before a row the bulk memory left cannot hold, with complete counts and a continuation,
-as a [window page](#inspect-retained-window-state) does. The read is refused as `not_ready` only
-when not even its first row can be held.
+as a [window page](#inspect-retained-window-state) does. A page always returns its first row: when
+the owner's bulk memory cannot hold even that row now, the read waits for room for it rather than
+being refused.
 
 `DESCRIBE REORDERER` reports, for each execution unit, the concrete branches the reorderer runs and
 the rows and bytes they hold, after its placement lines:
@@ -529,7 +530,8 @@ columns charges the owner's bulk memory twice the row's bytes, after every selec
 metadata is charged. A page read through another node also sets the row's bytes aside once more for
 the Arrow body that carries it, so it holds fewer rows than one its owner presents. A page therefore
 also ends before a row the bulk memory left cannot hold, with complete counts and a continuation,
-and the read is refused as `not_ready` only when not even its first row can be held. Read through
+and it always returns its first row: when the owner's bulk memory cannot hold even that row now,
+the read waits for room for it rather than being refused. Read through
 another node, a single row whose encoded columns exceed the owner's snapshot section bound, 8 MiB,
 refuses the page as `reply_too_large`. Every section uses the same captured publication, and a changed publication
 or branch lifetime invalidates its continuation. Branch selectors, formats and owner routing use the shared inspection contract.
@@ -812,8 +814,9 @@ the reply's section and byte bounds separately. A page retains the publication o
 returns tensors from only while it copies them, charging the owner's bulk memory the publication's
 footprint, and building a tensor row takes four times its bytes; a page read through another node
 also sets each row's bytes aside for the body that carries it. A page therefore ends before a row
-the bulk memory left cannot hold, with complete counts and a continuation, and the read is refused
-as `not_ready` only when not even its first row can be held. A continuation names the complete selected
+the bulk memory left cannot hold, with complete counts and a continuation, and it always returns its
+first row: when the owner's bulk memory cannot hold even that row now, the read waits for room for
+it rather than being refused. A continuation names the complete selected
 publication cut, owner incarnations, committed revision and selector. Changed tensors, branch
 membership, ownership or configuration make it stale. Start a new read after
 `stale_continuation`; do not combine rows from different cuts. During repartitioning, the

@@ -584,12 +584,14 @@ async fn an_answers_decoding_waits_for_a_place_and_is_decoded_whole() {
         .split(length)
         .assured("a charge splits at a size it holds");
     let full = FullBulkClass::fill(&executor).await;
-    let mut decoding = std::pin::pin!(super::decode_rkyv_within::<crate::request::ResponseEnvelope>(
-        &executor,
-        CpuClass::Bulk,
-        ChargedBytes::from_owned(bytes, input),
-        room,
-    ));
+    let mut decoding = std::pin::pin!(
+        super::decode_rkyv_within::<crate::request::ResponseEnvelope>(
+            &executor,
+            CpuClass::Bulk,
+            ChargedBytes::from_owned(bytes, input),
+            room,
+        )
+    );
     assert!(
         decoding.as_mut().now_or_never().is_none(),
         "a full class holds an answer's decoding back"

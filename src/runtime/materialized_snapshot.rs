@@ -739,10 +739,9 @@ impl MaterializedGeneration {
                         watermarks: record.row.metadata().to_remote(),
                     });
                 }
-                let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&SealedRecordIdentities {
-                    identities,
-                })
-                .map_err(MaterializedSnapshotError::encoding)?;
+                let encoded =
+                    rkyv::to_bytes::<rkyv::rancor::Error>(&SealedRecordIdentities { identities })
+                        .map_err(MaterializedSnapshotError::encoding)?;
                 let size = encoded.len().arch_into();
                 if size > limit {
                     return Err(Report::new(MaterializedSnapshotError::RecordTooLarge {
@@ -1184,25 +1183,21 @@ impl RestoredMaterializedSnapshot {
         layout: &SealedContainerLayout,
         memory: Reservation,
     ) -> Result<Self, Report<MaterializedSnapshotError>> {
-        let differs =
-            || MaterializedSnapshotError::decoding("the container differs from its declared layout");
         let length: u64 = sealed.len().arch_into();
         let opening = layout.relay_opening(executor, length)?;
         let (scratch, share) = memory
             .split(opening.scratch)
             .change_context(MaterializedSnapshotError::Admission)?;
         let mut cursor = SealedSource::memory_with_working(sealed, scratch);
-        let section_limit = executor.limits().snapshot_section_bytes.as_u64();
-        let groups = u32::try_from(layout.groups.len()).map_err(|_| differs())?;
-        if cursor.scanned_retained_bytes(groups, section_limit) != Some(opening.sections) {
-            return Err(differs());
-        }
         let attempt = Self::open_within(
             executor,
             schema,
             &mut cursor,
             RestoredRows::Relay,
-            ShareSource::Provided(share),
+            ShareSource::Provided {
+                share,
+                sections: opening.sections,
+            },
         )
         .await?;
         let OpenAttempt::Opened(snapshot) = attempt else {
@@ -1272,8 +1267,14 @@ impl RestoredMaterializedSnapshot {
         let mut share = None;
         loop {
             nervix_primitives::task::consume_budget().await;
-            match Self::open_within(executor, schema, &mut cursor, rows, ShareSource::Reserve(share))
-                .await?
+            match Self::open_within(
+                executor,
+                schema,
+                &mut cursor,
+                rows,
+                ShareSource::Reserve(share),
+            )
+            .await?
             {
                 OpenAttempt::Opened(snapshot) => return Ok(snapshot),
                 OpenAttempt::Short {
@@ -1322,7 +1323,16 @@ impl RestoredMaterializedSnapshot {
                 };
                 RetainedShare::reserve(executor, share.max(metadata_bytes)).await?
             }
-            ShareSource::Provided(spare) => RetainedShare::provided(spare),
+            ShareSource::Provided { share, sections } => {
+                // A container opened within memory admitted for its declared layout has exactly
+                // that layout: what its sections keep is what the admission counted for them.
+                if cursor.scanned_retained_bytes(header.groups, section_limit) != Some(sections) {
+                    return Err(MaterializedSnapshotError::decoding(
+                        "the container differs from its declared layout",
+                    ));
+                }
+                RetainedShare::provided(share)
+            }
         };
         // Admit the row views and uniqueness table before either grows. The columns become
         // materialized runtime state; these arrays are transient until installation consumes them.
@@ -1510,8 +1520,9 @@ enum ShareSource {
     /// A state-read share the attempt waits for: of this many bytes, or of what the container's
     /// size suggests.
     Reserve(Option<u64>),
-    /// A share its caller already holds.
-    Provided(Reservation),
+    /// A share its caller already holds, admitted for a container whose sections keep exactly
+    /// `sections` bytes once decoded.
+    Provided { share: Reservation, sections: u64 },
 }
 
 /// The state-read share one attempt to open a snapshot draws the charges it keeps from.

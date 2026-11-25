@@ -742,6 +742,17 @@ async fn every_node_reads_every_row(world: &mut ScenarioWorld, kind: String, nam
     }
 }
 
+/// Connects inspection client `name` to a node other than the owner of the unit the last read
+/// inspected, so its next read crosses the interconnect, or to the first node when only the owner
+/// runs.
+#[when(
+    expr = "inspection client {string} connects away from the last read processor's owner when \
+            possible"
+)]
+async fn away_from_processor_owner(world: &mut ScenarioWorld, name: String) {
+    crate::materialized_state_inspection::nonowner(world, name).await;
+}
+
 /// Holds every byte of bulk memory but `room` on the node that owns the one unit of the processor
 /// the last read inspected, so that node's pages end where its memory runs out while every node
 /// that reads them keeps the room it takes to receive them.

@@ -172,8 +172,11 @@ impl From<&MaterializedStatePageGroup> for SealedGroupLayout {
 /// then the native Arrow container, whose layout the descriptor names.
 ///
 /// The page set aside its reply's memory as it selected its rows, so encoding the container, the
-/// digest, the descriptor and its length draw only on that memory and never wait for room the page
-/// holds. A typed refusal holds nothing while it waits for room for its descriptor.
+/// digest, the descriptor and its length draw on that memory. The caller runs the page and its
+/// stream within the page's allowance (`Executor::within_allowance`), so anything they lack is a
+/// charge the reply requires: a share without room for it runs the read again within a larger
+/// share, and nothing waits for room the page holds. A typed refusal holds nothing while it waits
+/// for room for its descriptor.
 pub(crate) async fn stream_materialized_page(
     executor: &Executor,
     result: Result<
@@ -299,16 +302,13 @@ pub(crate) async fn stream_processor_page(
             .reserve(MemoryClass::Bulk, framed)
             .await
             .map_err(StreamHandlerError::with_cause)?,
-        // A reply that holds bodies takes no memory it would wait for while it holds them:
-        // without room for its descriptor now, the page is not ready.
-        (None, false) => match executor.try_reserve(MemoryClass::Bulk, framed) {
-            Ok(charge) => charge,
-            Err(_refused) => {
-                drop(bodies);
-                let refusal: ProcessorStatePageReply = Err(StateInspectionRejection::NotReady);
-                return stream_refusal(executor, refusal).await;
-            }
-        },
+        // A reply that holds bodies draws its descriptor's room as a charge it requires, through
+        // the page's allowance: a share without room for it runs the read again within a larger
+        // one, so the reply never waits for room while it holds its bodies.
+        (None, false) => executor
+            .reserve(MemoryClass::Bulk, framed)
+            .await
+            .map_err(StreamHandlerError::with_cause)?,
     };
     let (prefix, charge) = share
         .split(PageReply::DESCRIPTOR_LENGTH_BYTES)
@@ -316,12 +316,7 @@ pub(crate) async fn stream_processor_page(
     // The reply is the owner's answer to a read it already served, so a full bulk queue holds its
     // encoding back; the caller's reset of the page stream ends the wait.
     let (header, charge) = reply
-        .encode_rkyv_within(
-            executor.clone(),
-            PoolClass::Bulk,
-            limit,
-            charge,
-        )
+        .encode_rkyv_within(executor.clone(), PoolClass::Bulk, limit, charge)
         .await
         .map_err(StreamHandlerError::with_cause)?;
     page_stream(executor, header, charge, prefix, bodies)
@@ -347,12 +342,7 @@ async fn stream_refusal<R: RkyvMessage>(
         .split(PageReply::DESCRIPTOR_LENGTH_BYTES)
         .map_err(StreamHandlerError::with_cause)?;
     let (header, charge) = reply
-        .encode_rkyv_within(
-            executor.clone(),
-            PoolClass::Bulk,
-            limit,
-            charge,
-        )
+        .encode_rkyv_within(executor.clone(), PoolClass::Bulk, limit, charge)
         .await
         .map_err(StreamHandlerError::with_cause)?;
     page_stream(executor, header, charge, prefix, Vec::new())
@@ -382,10 +372,11 @@ impl PageReplyParts {
 /// The reply a processor page stream frames and the bodies it names: each section that returns
 /// rows as one or more native Arrow snapshot sections, in row order and each within the node's
 /// section bound, in the descriptor's section order. The bodies take their memory from what the
-/// page set aside in `set_aside`, and what that lacks from the bulk pool at once. A page whose
-/// bodies exceed `max_bytes`, or that returns a row whose own body exceeds the section bound, is
-/// refused as too large, and one whose bodies its set-aside memory and the pool cannot hold at
-/// once is not ready. A refusal names no body.
+/// page set aside in `set_aside`, and what that lacks as a charge the reply requires: the caller
+/// runs the page and its reply within the page's allowance, so a share without room for it runs
+/// the read again within a larger share. A page whose bodies exceed `max_bytes`, or that returns a
+/// row whose own body exceeds the section bound, is refused as too large. A refusal names no
+/// body.
 async fn processor_page_reply(
     executor: &Executor,
     result: Result<
@@ -444,17 +435,13 @@ async fn processor_page_reply(
                     StateInspectionRejection::ReplyTooLarge,
                 ));
             }
-            // A page that set nothing aside takes its digest job at once, or is not ready.
+            // A page that set nothing aside takes its digest job as a charge the reply requires.
             let charge = match job.take() {
                 Some(charge) => charge,
-                None => {
-                    match executor.try_reserve(MemoryClass::Bulk, PageReply::DIGEST_JOB_BYTES) {
-                        Ok(charge) => charge,
-                        Err(_refused) => {
-                            return Ok(PageReplyParts::refused(StateInspectionRejection::NotReady));
-                        }
-                    }
-                }
+                None => executor
+                    .reserve(MemoryClass::Bulk, PageReply::DIGEST_JOB_BYTES)
+                    .await
+                    .map_err(StreamHandlerError::with_cause)?,
             };
             let identified = identified_body(executor, body, charge).await?;
             job = Some(identified.job);
@@ -470,9 +457,9 @@ async fn processor_page_reply(
 }
 
 /// Where a page's Arrow bodies take their memory: what the page set aside for them when it admitted
-/// their rows, and only what that lacks from the bulk pool, at once. Each body takes its rows'
-/// bytes and `framing`. A body never waits for room, since it would wait while the reply holds the
-/// bodies before it and the rows' own memory.
+/// their rows, and what that lacks as a charge the reply requires. Each body takes its rows' bytes
+/// and `framing`. A body never waits for room it holds: the reply draws through the page's
+/// allowance, where a share without room for a body runs the read again within a larger share.
 struct BodyCharges {
     /// What is left of the memory the page set aside; absent once it is spent, or for a page that
     /// set nothing aside.
@@ -486,8 +473,6 @@ enum PartBody {
     Encoded(ChargedBytes),
     /// The part's body would pass the section bound.
     PastLimit,
-    /// The memory for the part's body cannot be had at once.
-    Declined,
 }
 
 impl BodyCharges {
@@ -500,9 +485,7 @@ impl BodyCharges {
         limit: u64,
     ) -> Result<PartBody, Report<StreamHandlerError>> {
         let wanted = body_charge(payload, self.framing, limit);
-        let Some(charge) = take_body_charge(executor, &mut self.remaining, wanted)? else {
-            return Ok(PartBody::Declined);
-        };
+        let charge = take_body_charge(executor, &mut self.remaining, wanted).await?;
         // The part holds rows the owner already read, so a full bulk queue holds its encoding
         // back; the caller's reset of the page stream ends the wait.
         let encoded = part
@@ -510,12 +493,12 @@ impl BodyCharges {
             .await;
         match encoded {
             Ok(body) => Ok(PartBody::Encoded(body)),
-            Err(error) => match error.current_context() {
-                ArrowBodyError::EncodedPastLimit { .. } => Ok(PartBody::PastLimit),
-                // The body outgrew its charge while the pool had no room for the rest at once.
-                ArrowBodyError::Admission => Ok(PartBody::Declined),
-                _ => Err(StreamHandlerError::with_cause(error)),
-            },
+            Err(error) => {
+                if let ArrowBodyError::EncodedPastLimit { .. } = error.current_context() {
+                    return Ok(PartBody::PastLimit);
+                }
+                Err(StreamHandlerError::with_cause(error))
+            }
         }
     }
 }
@@ -529,43 +512,40 @@ fn body_charge(payload: u64, framing: u64, limit: u64) -> u64 {
     }
 }
 
-/// Takes `wanted` bytes for one body from what the page set aside, topping them up from the bulk
-/// pool at once when the set-aside memory falls short. `None` when the pool has no room for the
-/// rest now.
-fn take_body_charge(
+/// Takes `wanted` bytes for one body from what the page set aside, and what the set-aside memory
+/// lacks as a charge the reply requires, through the page's allowance.
+async fn take_body_charge(
     executor: &Executor,
     remaining: &mut Option<Reservation>,
     wanted: u64,
-) -> Result<Option<Reservation>, Report<StreamHandlerError>> {
+) -> Result<Reservation, Report<StreamHandlerError>> {
     let Some(held) = remaining.take() else {
-        // Nothing is left of what the page set aside: all of it from the pool now, or none.
-        return match executor.try_reserve(MemoryClass::Bulk, wanted) {
-            Ok(charge) => Ok(Some(charge)),
-            Err(_refused) => Ok(None),
-        };
+        // Nothing is left of what the page set aside: all of the body is required now.
+        return executor
+            .reserve(MemoryClass::Bulk, wanted)
+            .await
+            .map_err(StreamHandlerError::with_cause);
     };
     let available = held.bytes();
     if available >= wanted {
         let (charge, rest) = held.split(wanted).map_err(StreamHandlerError::with_cause)?;
         *remaining = Some(rest);
-        return Ok(Some(charge));
+        return Ok(charge);
     }
     let lacking = wanted
         .checked_sub(available)
         .verified("the set-aside memory falls short of the body");
-    match executor.try_reserve(MemoryClass::Bulk, lacking) {
-        Ok(extra) => {
-            let charge = held.merge(extra).map_err(StreamHandlerError::with_cause)?;
-            Ok(Some(charge))
-        }
-        Err(_refused) => Ok(None),
-    }
+    let extra = executor
+        .reserve(MemoryClass::Bulk, lacking)
+        .await
+        .map_err(StreamHandlerError::with_cause)?;
+    held.merge(extra).map_err(StreamHandlerError::with_cause)
 }
 
 /// One section's returned rows as the native Arrow snapshot sections a page carries them in, in
 /// row order, each within the node's section bound. Rows whose body would pass the bound travel
 /// in halves until each part fits. The page goes without them as too large when a single row's
-/// body passes the bound, and as not ready when the memory for a body cannot be had at once.
+/// body passes the bound.
 async fn section_bodies(
     executor: &Executor,
     batches: Vec<RecordBatch>,
@@ -595,7 +575,6 @@ async fn section_bodies(
             };
             match encoded {
                 PartBody::Encoded(body) => bodies.push(body),
-                PartBody::Declined => return Ok(Err(StateInspectionRejection::NotReady)),
                 PartBody::PastLimit => {
                     if rows.len() == 1 {
                         return Ok(Err(StateInspectionRejection::ReplyTooLarge));
@@ -894,14 +873,10 @@ async fn read_descriptor<R: RkyvMessage>(
     // The reply is the owner's answer to a read it already served, so a full bulk queue holds its
     // decoding back rather than discarding that answer; the caller's own read deadline bounds the
     // wait.
-    let (reply, decoded_charge) = R::decode_rkyv_charged_within(
-        executor.clone(),
-        PoolClass::Bulk,
-        header,
-        decoded_charge,
-    )
-    .await
-    .change_context(StatePageExchangeError::Descriptor)?;
+    let (reply, decoded_charge) =
+        R::decode_rkyv_charged_within(executor.clone(), PoolClass::Bulk, header, decoded_charge)
+            .await
+            .change_context(StatePageExchangeError::Descriptor)?;
     drop(decoded_charge);
     let bodies = length
         .checked_sub(after_header)
@@ -1190,8 +1165,7 @@ fn page_body_need(
             return Err(framing());
         }
         for identity in &transfer.bodies {
-            let decoding =
-                RuntimeRecordBatch::snapshot_section_scratch(executor, identity.bytes);
+            let decoding = RuntimeRecordBatch::snapshot_section_scratch(executor, identity.bytes);
             need.bytes = need.bytes.checked_add(identity.bytes).ok_or_else(framing)?;
             need.total = need.total.checked_add(identity.bytes).ok_or_else(framing)?;
             need.total = need.total.checked_add(decoding).ok_or_else(framing)?;

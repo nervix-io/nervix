@@ -587,7 +587,19 @@ pub(crate) enum ProcessorStatePageError {
     Columns,
 }
 
+/// One owner-side read of a processor unit's state page: the unit, what it selects, where it
+/// resumes and the bounds of what it returns.
+pub(crate) struct ProcessorStatePageRead<'a> {
+    pub(crate) domain: &'a DomainName,
+    pub(crate) processor: &'a NodeRef,
+    pub(crate) unit: Unit,
+    pub(crate) selection: ProcessorStateSelection,
+    pub(crate) after: Option<(Option<BranchKeyFingerprint>, u64)>,
+    pub(crate) bounds: ProcessorStatePageBounds,
+}
+
 /// Effective owner-side bounds after the coordinator and local capability checks.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ProcessorStatePageBounds {
     pub(crate) rows: usize,
     pub(crate) bytes: u64,
@@ -654,6 +666,33 @@ impl PageReply {
     /// to its rows' bytes under `executor`'s bounds: the bound on one sealed snapshot header.
     pub(crate) fn body_framing(executor: &nervix_execution::Executor) -> u64 {
         executor.limits().snapshot_header_bytes.as_u64()
+    }
+
+    /// The bulk share an owner page of at most `max_rows` rows and `max_bytes` bytes starts its
+    /// read from. A page that returns no row starts from the least share, since everything it
+    /// takes is required. Any other starts from the room the class has free now
+    /// ([`Executor::memory`]), up to the most such a page takes by the charges its rows take: each
+    /// row's columns twice over, the selected views and their gathered buffers, and for a reply to
+    /// another node the body that carries the row, beside what the reply sets aside ahead. A page
+    /// that requires more runs again within a larger share, and one whose optional rows find no
+    /// room in its share ends before them.
+    pub(crate) fn initial_share(self, executor: &Executor, max_rows: u64, max_bytes: u64) -> u64 {
+        if max_rows == 0 {
+            return 1;
+        }
+        // Saturating sums: a page bound past `u64` is past the class, which clamps the share.
+        let columns = max_bytes.saturating_mul(2);
+        let (bodies, ahead) = match self {
+            Self::Local => (0, 0),
+            Self::Remote {
+                descriptor,
+                framing,
+            } => (max_bytes, descriptor.saturating_add(framing)),
+        };
+        let most = columns.saturating_add(bodies).saturating_add(ahead);
+        let class = executor.memory(MemoryClass::Bulk);
+        let free = class.capacity_bytes.saturating_sub(class.reserved_bytes);
+        most.min(free).max(1)
     }
 }
 
@@ -771,25 +810,25 @@ impl Runtime {
     /// whole read with the inspection deadline.
     pub(crate) async fn local_processor_state_page(
         &self,
-        domain: &DomainName,
-        processor: &NodeRef,
-        unit: Unit,
-        selection: ProcessorStateSelection,
-        after: Option<(Option<BranchKeyFingerprint>, u64)>,
-        bounds: ProcessorStatePageBounds,
+        executor: &Executor,
+        read: ProcessorStatePageRead<'_>,
     ) -> error_stack::Result<ProcessorStatePage, ProcessorStatePageError> {
-        if let ModelKind::Inferencer = processor.kind {
+        if let ModelKind::Inferencer = read.processor.kind {
+            return self.local_inferencer_state_page(executor, read).await;
+        }
+        if let ModelKind::Deduplicator | ModelKind::WindowProcessor = read.processor.kind {
             return self
-                .local_inferencer_state_page(domain, processor, unit, selection, after, bounds)
+                .local_published_processor_state_page(executor, read)
                 .await;
         }
-        if let ModelKind::Deduplicator | ModelKind::WindowProcessor = processor.kind {
-            return self
-                .local_published_processor_state_page(
-                    domain, processor, unit, selection, after, bounds,
-                )
-                .await;
-        }
+        let ProcessorStatePageRead {
+            domain,
+            processor,
+            unit,
+            selection,
+            after,
+            bounds,
+        } = read;
         if selection.partition_exclusions.is_some() {
             return Err(Report::new(ProcessorStatePageError::Columns));
         }
@@ -906,8 +945,14 @@ impl Runtime {
             generation,
             digest,
         };
-        self.held_rows_page(processor.kind, bounds.reply, bounds.rows != 0, copied)
-            .await
+        self.held_rows_page(
+            executor,
+            processor.kind,
+            bounds.reply,
+            bounds.rows != 0,
+            copied,
+        )
+        .await
     }
 
     /// The page of the rows `copied` holds for a `kind` unit: admitted to the bulk memory the
@@ -915,6 +960,7 @@ impl Runtime {
     /// that `returns_rows` admits rows; a count-only read admits none.
     async fn held_rows_page(
         &self,
+        executor: &Executor,
         kind: ModelKind,
         reply: PageReply,
         returns_rows: bool,
@@ -928,8 +974,10 @@ impl Runtime {
             digest,
         } = copied;
         let sections = held_row_sections(kind)?;
-        let memory = HeldRowsMemory::new(&self.inner.executor, reply, sections, returns_rows)?;
-        let held = self.processor_state_sections(kind, copies, memory).await?;
+        let memory = HeldRowsMemory::new(executor, reply, sections, returns_rows)?;
+        let held = self
+            .processor_state_sections(executor, kind, copies, memory)
+            .await?;
         let offset = start
             .checked_add(held.admitted.returned)
             .ok_or_else(|| Report::new(ProcessorStatePageError::Position))?;
@@ -957,6 +1005,7 @@ impl Runtime {
     /// section, on the bulk executor, before any column is built.
     async fn processor_state_sections(
         &self,
+        executor: &Executor,
         kind: ModelKind,
         mut copies: Vec<CopiedBranch>,
         memory: HeldRowsMemory,
@@ -966,7 +1015,6 @@ impl Runtime {
             reply,
             bodies,
         } = memory;
-        let executor = self.inner.executor.clone();
         executor
             .run_cpu(CpuClass::Bulk, charge, move |charge, cancellation| {
                 cancellation
@@ -1049,11 +1097,8 @@ impl HeldRowsMemory {
         sections: u64,
         returns_rows: bool,
     ) -> error_stack::Result<Self, ProcessorStatePageError> {
-        let memory = executor
-            .try_reserve(MemoryClass::Bulk, 1)
-            .change_context(ProcessorStatePageError::Admission)?;
         let mut page = Self {
-            memory,
+            memory: executor.charge_nothing(MemoryClass::Bulk),
             reply,
             bodies: 0,
         };
@@ -1074,7 +1119,8 @@ impl HeldRowsMemory {
         Ok(page)
     }
 
-    /// Reserves `bytes` more, at once.
+    /// Takes `bytes` more, as a charge the page requires: drawn from the page's allowance, a share
+    /// without room for it runs the read again within a larger one.
     fn reserve(&mut self, bytes: u64) -> error_stack::Result<(), ProcessorStatePageError> {
         let total = self
             .memory
@@ -1086,10 +1132,10 @@ impl HeldRowsMemory {
             .change_context(ProcessorStatePageError::Admission)
     }
 
-    /// Admits the copied rows in page order while the bulk memory can hold each now, and keeps only
-    /// those. Every row after the page's first is optional, so the page ends before the first row
-    /// the memory left cannot hold, with its complete counts. Only a page that cannot hold its
-    /// first row is refused.
+    /// Admits the copied rows in page order while the page's share has room for each now, and
+    /// keeps only those. Every row after the page's first is optional, so the page ends before the
+    /// first row the share has no room for, with its complete counts. The first row is required: a
+    /// share without room for it runs the read again within a larger one.
     fn admit_copies(
         &mut self,
         copies: &mut [CopiedBranch],
@@ -1128,9 +1174,8 @@ impl HeldRowsMemory {
         Ok(admitted)
     }
 
-    /// Admits one row whose columns, and for another node its body, take `cost`, if the bulk
-    /// memory can hold them now. A page's `first` row is required: without room for it, the page
-    /// is refused.
+    /// Admits one row whose columns, and for another node its body, take `cost`. A page's `first`
+    /// row is required; every later row joins only while the share has room for it now.
     fn admit(
         &mut self,
         cost: HeldRowCost,
@@ -1149,10 +1194,11 @@ impl HeldRowsMemory {
             .bytes()
             .checked_add(charge)
             .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
-        if let Err(refusal) = self.memory.grow_to(target) {
-            if first {
-                return Err(refusal.change_context(ProcessorStatePageError::Admission));
-            }
+        if first {
+            self.memory
+                .grow_to(target)
+                .change_context(ProcessorStatePageError::Admission)?;
+        } else if self.memory.try_grow_to(target).is_err() {
             return Ok(false);
         }
         self.bodies = self

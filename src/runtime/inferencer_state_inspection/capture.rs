@@ -6,15 +6,21 @@
 use super::*;
 
 impl Runtime {
+    /// Reads one page of an inferencer unit's state, drawing its charges through `executor`, the
+    /// allowance its caller runs the read within.
     pub(crate) async fn local_inferencer_state_page(
         &self,
-        domain: &DomainName,
-        processor: &NodeRef,
-        unit: Unit,
-        selection: ProcessorStateSelection,
-        after: Option<(Option<BranchKeyFingerprint>, u64)>,
-        bounds: ProcessorStatePageBounds,
+        executor: &Executor,
+        read: ProcessorStatePageRead<'_>,
     ) -> ReadResult<ProcessorStatePage> {
+        let ProcessorStatePageRead {
+            domain,
+            processor,
+            unit,
+            selection,
+            after,
+            bounds,
+        } = read;
         let routing = self
             .domain_routing(domain)
             .ok_or_else(|| Report::new(ProcessorStatePageError::Unavailable))?
@@ -37,9 +43,9 @@ impl Runtime {
         let assignment = slot
             .load_full()
             .ok_or_else(|| Report::new(ProcessorStatePageError::Unavailable))?;
-        let executor = self.inner.executor.clone();
         let memory = executor
-            .try_reserve(MemoryClass::Bulk, 1)
+            .reserve(MemoryClass::Bulk, 1)
+            .await
             .change_context(ProcessorStatePageError::Admission)?;
         let runtime = self.clone();
         let processor = processor.clone();

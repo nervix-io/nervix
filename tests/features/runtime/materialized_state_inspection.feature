@@ -266,6 +266,54 @@ Feature: Bounded typed materialized relay inspection
     And the background read answered 2 rows of 2 from a remote owner
 
   @materialized_state_inspection
+  Scenario: A materialized page read from another node waits for the owner's bulk memory to hold its first row
+    Given a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( tenant STRING, value I64, message STRING );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer, message string );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY events SCHEMA event BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE VHOST edge first-row-relay-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingest FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 4MiB RESPOND IMMEDIATE DECODE USING event_codec
+        TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload for tenant "north" with value 1 and a 1048576 byte message is posted to host "first-row-relay-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "south" with value 2 and a 1048576 byte message is posted to host "first-row-relay-{{test_id}}.example.com" path "/events"
+    Then within "30s" a client of every node sees relay "events" hold 2 materialized rows
+    Given client "reader" is connected to node "node-1"
+    When client "reader" executes these Plexus commands
+      """
+      SHOW RELAY events MATERIALIZED STATE FOR ALL BRANCHES LIMIT 2 FORMAT JSON;
+      """
+    Then the last typed inspection has 2 returned rows and 2 complete rows
+    # The owner keeps room for the page's descriptor, but not for encoding its first row, which
+    # carries a 1 MiB message. The first row is what makes the read progress, so the owner waits
+    # for room for it, holding nothing, rather than refusing the read.
+    When inspection client "reader" connects away from the last relay owner when possible
+    And bulk memory on the owner of the last read relay keeps only "524288" bytes free
+    And client "reader" begins executing these Plexus commands in the background
+      """
+      SHOW RELAY events MATERIALIZED STATE FOR ALL BRANCHES LIMIT 2 FORMAT JSON;
+      """
+    Then the background Plexus execution is still running after "2s"
+    # Once the memory is released, the owner's page runs again within the share its first row
+    # needed: it returns that row, and its continuation carries the other.
+    When bulk memory on every node is released
+    Then within "30s" the background Plexus execution reaches a successful outcome
+    And the background read answered 1 row of 2 from a remote owner
+
+  @materialized_state_inspection
   Scenario: A materialized relay read the owner's bulk memory cannot hold in one page pages through every row
     Given a 3 node nervix cluster is started
     And the leader node is configured with these Plexus commands

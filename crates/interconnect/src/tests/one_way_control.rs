@@ -145,8 +145,14 @@ async fn assert_waits_while_its_exchange_lives(frame: ControlEnvelope) {
             )
             .await;
         }
-        transports.transport_a.shutdown(crate::test_teardown_ceiling()).await;
-        transports.transport_b.shutdown(crate::test_teardown_ceiling()).await;
+        transports
+            .transport_a
+            .shutdown(crate::test_teardown_ceiling())
+            .await;
+        transports
+            .transport_b
+            .shutdown(crate::test_teardown_ceiling())
+            .await;
     }
 }
 

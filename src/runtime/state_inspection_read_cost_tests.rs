@@ -155,7 +155,7 @@ async fn measure() {
 
     // A page the reader holds keeps the generation it captured however far the owner moves on.
     let held = runtime
-        .capture_materialized_state_page(&domain, &relay, query())
+        .capture_materialized_state_page(runtime.inspection_executor(), &domain, &relay, query())
         .await
         .assured("the owner answers a page")
         .page;
@@ -194,7 +194,12 @@ async fn measure() {
                         let mut page_rows = 0_usize;
                         while !stop.load(Ordering::SeqCst) {
                             let page = runtime
-                                .capture_materialized_state_page(&domain, &relay, query())
+                                .capture_materialized_state_page(
+                                    runtime.inspection_executor(),
+                                    &domain,
+                                    &relay,
+                                    query(),
+                                )
                                 .await
                                 .assured("the owner answers every page")
                                 .page;
@@ -249,7 +254,7 @@ async fn measure() {
         "a captured page never sees the owner's later applications"
     );
     let latest = runtime
-        .capture_materialized_state_page(&domain, &relay, query())
+        .capture_materialized_state_page(runtime.inspection_executor(), &domain, &relay, query())
         .await
         .assured("the owner answers after the measurement")
         .page;

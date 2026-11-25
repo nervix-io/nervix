@@ -52,8 +52,13 @@ pub(super) async fn read_error_response(
         Ok(declared) => declared,
         Err(error) => return error,
     };
-    let message = match read_body(executor, class.memory_class(), declared, response.into_body())
-        .await
+    let message = match read_body(
+        executor,
+        class.memory_class(),
+        declared,
+        response.into_body(),
+    )
+    .await
     {
         Ok(message) => message,
         Err(error) => return error,

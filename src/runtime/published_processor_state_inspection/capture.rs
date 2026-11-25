@@ -164,15 +164,22 @@ impl CaptureSelection {
 }
 
 impl Runtime {
+    /// Reads one page of a deduplicator's or window processor's published state, drawing every
+    /// charge through `executor`, the allowance its caller runs the read within: the page holds
+    /// what it captured while it opens window layouts and builds its rows.
     pub(crate) async fn local_published_processor_state_page(
         &self,
-        domain: &DomainName,
-        processor: &NodeRef,
-        unit: Unit,
-        selection: ProcessorStateSelection,
-        after: Option<(Option<nervix_models::BranchKeyFingerprint>, u64)>,
-        bounds: ProcessorStatePageBounds,
+        executor: &Executor,
+        read: ProcessorStatePageRead<'_>,
     ) -> ReadResult<ProcessorStatePage> {
+        let ProcessorStatePageRead {
+            domain,
+            processor,
+            unit,
+            selection,
+            after,
+            bounds,
+        } = read;
         let routing = self
             .domain_routing(domain)
             .ok_or_else(|| Report::new(ProcessorStatePageError::Unavailable))?
@@ -198,7 +205,7 @@ impl Runtime {
             .snapshot()
             .change_context(ProcessorStatePageError::Unavailable)?
             .now();
-        let executor = self.inner.executor.clone();
+        let executor = executor.clone();
         let memory = executor
             .reserve(MemoryClass::Bulk, 1)
             .await

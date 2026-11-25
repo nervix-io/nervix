@@ -44,8 +44,14 @@ async fn every_registered_peer_keeps_its_target_however_many_there_are() {
     }
 
     assert_eq!(state.targets.load().len(), usize::from(PEERS));
-    fixture.transport_a.shutdown(crate::test_teardown_ceiling()).await;
-    fixture.transport_b.shutdown(crate::test_teardown_ceiling()).await;
+    fixture
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    fixture
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 #[nervix_primitives::test]
@@ -66,8 +72,14 @@ async fn every_published_peer_keeps_its_target_however_many_there_are() {
         .collect::<BTreeSet<_>>();
     let published = endpoints.into_keys().collect::<BTreeSet<_>>();
     assert_eq!(registered, published);
-    fixture.transport_a.shutdown(crate::test_teardown_ceiling()).await;
-    fixture.transport_b.shutdown(crate::test_teardown_ceiling()).await;
+    fixture
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    fixture
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 #[nervix_primitives::test]
@@ -121,8 +133,14 @@ async fn a_replacement_retires_only_the_peers_it_withdraws_or_moves() {
         !Arc::ptr_eq(&moved_before.pool, &moved_after.pool),
         "a peer published at a new endpoint is dialled through a new pool"
     );
-    fixture.transport_a.shutdown(crate::test_teardown_ceiling()).await;
-    fixture.transport_b.shutdown(crate::test_teardown_ceiling()).await;
+    fixture
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    fixture
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 #[nervix_primitives::test]
@@ -138,8 +156,14 @@ async fn an_authentication_at_the_registered_endpoint_keeps_its_target() {
         Arc::ptr_eq(&first, &again),
         "authenticating the same endpoint again keeps the registered target"
     );
-    fixture.transport_a.shutdown(crate::test_teardown_ceiling()).await;
-    fixture.transport_b.shutdown(crate::test_teardown_ceiling()).await;
+    fixture
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    fixture
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 // This real-network fixture enters the ordinary runtime from external contender threads.
@@ -178,6 +202,12 @@ async fn racing_registrations_each_publish_their_target() {
         BTreeSet::from([peer(0), peer(1)]),
         "both racing registrations published their target"
     );
-    fixture.transport_a.shutdown(crate::test_teardown_ceiling()).await;
-    fixture.transport_b.shutdown(crate::test_teardown_ceiling()).await;
+    fixture
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    fixture
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }

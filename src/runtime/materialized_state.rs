@@ -398,8 +398,9 @@ impl MaterializedRelayStateRead {
 
     /// Capture the shared row views an operator inspects into `charge`, memory the inspection
     /// admitted for [`Self::inspection_records`] of them, and give that charge back with them.
-    /// Records added since they were counted take their room from the bulk pool at once, or the
-    /// capture is refused.
+    /// Records added since they were counted grow the charge as the inspection requires: drawn
+    /// from the inspection's allowance, a share without room for them runs it again within a
+    /// larger one.
     #[cfg_attr(
         nervix_lint,
         nervix::context(

@@ -460,12 +460,15 @@ async fn a_unit_still_restoring_its_branches_refuses_its_page_without_reading_a_
     let page = timeout(
         ANSWERS_WITHIN,
         runtime.local_processor_state_page(
-            &domain,
-            &processor,
-            Unit::SINGLE,
-            StateInspectionBranchSelection::All.into(),
-            None,
-            bounds(),
+            runtime.inspection_executor(),
+            crate::runtime::ProcessorStatePageRead {
+                domain: &domain,
+                processor: &processor,
+                unit: Unit::SINGLE,
+                selection: StateInspectionBranchSelection::All.into(),
+                after: None,
+                bounds: bounds(),
+            },
         ),
     )
     .await
@@ -532,12 +535,15 @@ async fn a_unit_still_restoring_its_branches_refuses_its_page_without_reading_a_
     let page = timeout(
         ANSWERS_WITHIN,
         runtime.local_processor_state_page(
-            &domain,
-            &processor,
-            Unit::SINGLE,
-            StateInspectionBranchSelection::All.into(),
-            None,
-            bounds(),
+            runtime.inspection_executor(),
+            crate::runtime::ProcessorStatePageRead {
+                domain: &domain,
+                processor: &processor,
+                unit: Unit::SINGLE,
+                selection: StateInspectionBranchSelection::All.into(),
+                after: None,
+                bounds: bounds(),
+            },
         ),
     )
     .await
@@ -690,15 +696,18 @@ impl HoldingReorderer {
         timeout(
             ANSWERS_WITHIN,
             runtime.local_processor_state_page(
-                &self.domain,
-                &self.processor,
-                Unit::SINGLE,
-                StateInspectionBranchSelection::All.into(),
-                after,
-                ProcessorStatePageBounds {
-                    rows: 1024,
-                    bytes: TRANSFER_BOUND,
-                    reply,
+                runtime.inspection_executor(),
+                crate::runtime::ProcessorStatePageRead {
+                    domain: &self.domain,
+                    processor: &self.processor,
+                    unit: Unit::SINGLE,
+                    selection: StateInspectionBranchSelection::All.into(),
+                    after,
+                    bounds: ProcessorStatePageBounds {
+                        rows: 1024,
+                        bytes: TRANSFER_BOUND,
+                        reply,
+                    },
                 },
             ),
         )

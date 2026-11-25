@@ -4185,17 +4185,23 @@ memory-ordering or delivery guarantee.
 
 Operator inspection uses the published unit routing index and the existing materialized assignment
 barrier to capture shared row views. It adds no lock ordering, async synchronization or per-record
-publication work. The capture counts the unit's records first, holding nothing, then admits ahead,
-waiting for room within the read deadline, everything capturing and selecting them takes: the
+publication work. The owner runs the capture, and for a page another node reads its stream too,
+within allowances of the state-read, restore metadata and bulk classes
+(`Executor::within_allowance`): every charge the page requires draws from a share it waited for
+while it held nothing, and a page whose share has no room for one gives everything back and runs
+again within the share it needed, so a full class holds the read back and never refuses it. The
+bulk share starts from the room the class has free, up to the most the page can take. The capture
+counts the unit's records first, then takes everything capturing and selecting them requires: the
 views it copies, its states' identities, the largest state's own capture, the selected views, the
 requested key catalog and, for a page another node reads, the reply's descriptor and stream
-framing. A capture the whole bulk class could never hold is refused at once as too large, and
-records added after the count take their room from the pool at once or leave the page not ready.
-A page another node reads also sets aside, for every row it selects, what encoding that row into
-its container adds, by the container encoder's own charges; it ends with its continuation and
-complete counts where the bulk memory cannot hold the next row, and is not ready when it cannot
-hold the first. Its owner encodes the container, the digest, the descriptor and its length only
-from that memory. Selection, hashing and native encoding run on the bounded Bulk executor with
+framing; records added after the count grow those charges as required. A capture the whole bulk
+class could never hold is refused at once as too large. A page another node reads also sets aside,
+for every row it selects, what encoding that row into its container adds, by the container
+encoder's own charges: its first row is required, and every later row is optional, taken only
+while the share has room for it now (`Reservation::try_grow_to`), so the page ends with its
+continuation and complete counts where the share's room ends. Its owner encodes the container, the
+digest, the descriptor and its length from that memory, and anything they lack is a charge the
+reply requires. Selection, hashing and native encoding run on the bounded Bulk executor with
 cancellation checks. A Runtime-owned selected
 atomic assigns each constructed state an inspection lifetime; that identity is combined with process
 incarnation and captured source/row metadata to fence continuations across retirement and recreation.
@@ -4300,10 +4306,12 @@ the read as `owner_unavailable` rather than waiting. The command channel's capac
 what the request queues, and the inspection read deadline, `StateInspectionReadTimeout`, bounds the
 reader's whole wait, from the unit selection to the last branch's answer; a reply to a reader that
 left is discarded. Gathering the copies into Arrow columns runs on the bounded Bulk executor after
-the branch tasks answered. Before any column is built, the page admits the copied rows in order:
-each row after the first takes the bytes of its columns, and for a page another node reads the
-bytes of its body, from the bulk class at once, and the page ends before the first row the class
-cannot hold. The page keeps that charge until its rows are presented or carried.
+the branch tasks answered. Before any column is built, the page admits the copied rows in order,
+within the allowances its owner runs the read in: the first row takes the bytes of its columns,
+and for a page another node reads the bytes of its body, as a charge the page requires, so a share
+without room for it runs the read again within a larger one; every later row takes them only while
+the share has room for them now, and the page ends before the first row it has none for. The page
+keeps that charge until its rows are presented or carried.
 
 Answering takes the branch task time proportional to the batches a reorderer's routes hold and the
 records a correlator's sides hold, plus the copied rows: a reorderer counts the rows of each held

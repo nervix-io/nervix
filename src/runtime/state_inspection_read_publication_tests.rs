@@ -23,7 +23,6 @@ use nervix_primitives::{
 
 use super::{
     MaterializedPageBounds, MaterializedPageQuery, MaterializedPageReply, ResidentEncodingPlan,
-    StatePageReadError,
 };
 use crate::{
     runtime::{
@@ -115,6 +114,7 @@ async fn subscription_delivery_can_precede_the_materialized_inspection_generatio
         };
         let before = runtime
             .capture_materialized_state_page(
+                runtime.inspection_executor(),
                 &domain,
                 &relay,
                 MaterializedPageQuery {
@@ -160,6 +160,7 @@ async fn subscription_delivery_can_precede_the_materialized_inspection_generatio
         );
         let after_subscription = runtime
             .capture_materialized_state_page(
+                runtime.inspection_executor(),
                 &domain,
                 &relay,
                 MaterializedPageQuery {
@@ -210,6 +211,7 @@ async fn subscription_delivery_can_precede_the_materialized_inspection_generatio
         .assured("the actual materialized task drains and publishes its queued update");
         let after_application = runtime
             .capture_materialized_state_page(
+                runtime.inspection_executor(),
                 &domain,
                 &relay,
                 MaterializedPageQuery {
@@ -385,6 +387,7 @@ async fn a_materialized_capture_waits_for_the_memory_its_census_names() {
     } = &tenant_relay(4, 1024).await;
     let held = hold_all_but(runtime, 0);
     let mut capturing = std::pin::pin!(runtime.capture_materialized_state_page(
+        runtime.inspection_executor(),
         domain,
         relay,
         page_query(None, MaterializedPageReply::Local),
@@ -415,6 +418,7 @@ async fn container_need(
 ) -> u64 {
     let page = runtime
         .capture_materialized_state_page(
+            runtime.inspection_executor(),
             domain,
             relay,
             page_query(None, MaterializedPageReply::Local),
@@ -449,7 +453,12 @@ async fn a_remote_materialized_page_ends_where_bulk_memory_cannot_hold_its_next_
     // Room for the capture's own admission, small beside a 1 MiB row, and two rows' container.
     let held = hold_all_but(runtime, two + (three - two) / 2);
     let captured = runtime
-        .capture_materialized_state_page(domain, relay, page_query(None, remote(runtime)))
+        .capture_materialized_state_page(
+            runtime.inspection_executor(),
+            domain,
+            relay,
+            page_query(None, remote(runtime)),
+        )
         .await
         .assured("the owner answers what fits");
     let page = captured.page;
@@ -474,7 +483,12 @@ async fn a_remote_materialized_page_ends_where_bulk_memory_cannot_hold_its_next_
     drop(page);
     drop(held);
     let rest = runtime
-        .capture_materialized_state_page(domain, relay, page_query(after, remote(runtime)))
+        .capture_materialized_state_page(
+            runtime.inspection_executor(),
+            domain,
+            relay,
+            page_query(after, remote(runtime)),
+        )
         .await
         .assured("the owner answers the rest")
         .page;
@@ -482,9 +496,11 @@ async fn a_remote_materialized_page_ends_where_bulk_memory_cannot_hold_its_next_
     assert!(!rest.more, "the second page returns the rest");
 }
 
-/// A page another node reads that cannot set aside even its first row's share is not ready.
+/// A page another node reads whose share cannot set aside even its first row's part runs again
+/// within the share it needed: it waits for that share while it holds nothing, rather than
+/// refusing the read, and answers its first row once the pool has room.
 #[nervix_primitives::test]
-async fn a_remote_materialized_page_without_room_for_its_first_row_is_not_ready() {
+async fn a_remote_materialized_page_waits_for_a_share_that_holds_its_first_row() {
     let TenantRelay {
         runtime,
         domain,
@@ -493,17 +509,36 @@ async fn a_remote_materialized_page_without_room_for_its_first_row_is_not_ready(
     } = &tenant_relay(2, 1024 * 1024).await;
     let one = container_need(runtime, domain, relay, 1).await;
     let held = hold_all_but(runtime, one / 2);
-    let refused = runtime
-        .capture_materialized_state_page(domain, relay, page_query(None, remote(runtime)))
-        .await;
-    let Err(error) = refused else {
-        panic!("a page without room for its first row was answered");
-    };
+    let executor = runtime.inspection_executor();
+    let mut capturing = std::pin::pin!(executor.within_allowance(
+        nervix_execution::MemoryClass::Bulk,
+        one / 2,
+        |share| async move {
+            runtime
+                .capture_materialized_state_page(
+                    &share,
+                    domain,
+                    relay,
+                    page_query(None, remote(runtime)),
+                )
+                .await
+        }
+    ));
+    let early = timeout(std::time::Duration::from_millis(200), capturing.as_mut()).await;
     assert!(
-        matches!(error.current_context(), StatePageReadError::Admission),
-        "{error:?}"
+        early.is_err(),
+        "a page without room for its first row waits for a share that holds it"
     );
     drop(held);
+    let captured = timeout(std::time::Duration::from_secs(30), capturing)
+        .await
+        .assured("the page answers once the pool has room")
+        .assured("the pool grants the share")
+        .assured("the page is captured");
+    assert!(
+        !captured.page.generation.records().is_empty(),
+        "the page returns its first row"
+    );
 }
 
 /// A page another node reads encodes its container, digest, descriptor and length only from what
@@ -517,7 +552,12 @@ async fn a_remote_materialized_page_encodes_its_reply_from_what_it_set_aside() {
         ..
     } = &tenant_relay(3, 64 * 1024).await;
     let captured = runtime
-        .capture_materialized_state_page(domain, relay, page_query(None, remote(runtime)))
+        .capture_materialized_state_page(
+            runtime.inspection_executor(),
+            domain,
+            relay,
+            page_query(None, remote(runtime)),
+        )
         .await
         .assured("an idle owner answers a page");
     let page = captured.page;

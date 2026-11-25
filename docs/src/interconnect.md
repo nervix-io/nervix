@@ -2950,10 +2950,14 @@ resolved branch selector, optional branch/offset position, row/byte limits and e
 The handler verifies the current control cut, schema, unit owner and target incarnation before
 capturing shared Arrow views. Selection and row/byte bounds run on the bounded Bulk executor before
 transport; source metadata and stored-column lifetimes retain their memory admission. The owner
-admits what capturing and selecting the page takes before it captures anything, and sets aside, as
-it selects each row, what encoding the row into the page's container adds, so the page ends where
-its bulk memory cannot hold the next row and its container, digest, descriptor and length are
-encoded from memory it already holds.
+captures the page and encodes its stream as one attempt within allowances of the state-read,
+restore metadata and bulk classes, starting the bulk share from the room the class has free, up to
+the most the page can take: a charge the page requires and its share has no room for runs the
+attempt again within the share it needed, waited for while it holds nothing. It admits what
+capturing and selecting the page takes before it captures anything, and sets aside, as it selects
+each row, what encoding the row into the page's container adds. The first row is required; every
+later row joins only while the share has room for it now, so the page ends where the share's room
+ends, and its container, digest, descriptor and length are encoded from memory it already holds.
 
 The stream has an eight-byte little-endian descriptor length, a bounded typed rkyv descriptor and
 an optional native Arrow snapshot container. A zero-row/count-only page has no body. A body declares
@@ -3073,17 +3077,18 @@ coordinator writes Row frames at the session reporting boundary, as for material
 The read's own deadline is the caller's deadline of the stream's opening, as for the materialized
 page operation.
 
-An owner that serves a processor page to another node sets aside, before it admits any row, what
-encoding the descriptor, the eight-byte length that frames it on the stream, the job that computes
-each body's digest and each section body's Arrow framing take, and every row it admits sets aside
-the bytes of the body that carries it. The page therefore ends where the bulk pool cannot
-hold a row's working memory and its body together, with complete counts and a continuation. The
-owner encodes the bodies and the descriptor from that memory and never waits for memory while the
-reply holds a body: a body the set-aside memory falls short of takes the rest from the pool at once,
-or the page is refused as `not_ready`, and so does the descriptor of a reply that holds bodies but
-set nothing aside. Only a reply that holds no body, a refusal or a page that returns no row, waits
-for room for its descriptor. The memory that held the rows goes back to the pool as soon as the
-bodies carry them.
+An owner that serves a processor page to another node reads the page and encodes its stream as one
+attempt within allowances of the state-read, restore metadata and bulk classes, as for a
+materialized page. It sets aside, before it admits any row, what encoding the descriptor, the
+eight-byte length that frames it on the stream, the job that computes each body's digest and each
+section body's Arrow framing take, and every row it admits sets aside the bytes of the body that
+carries it. The first row is required; every later row joins only while the share has room for its
+working memory and its body together, so the page ends where the share's room ends, with complete
+counts and a continuation. The owner encodes the bodies and the descriptor from that memory and
+never waits for memory while the reply holds a body: what the set-aside memory falls short of, and
+the descriptor of a reply that holds bodies but set nothing aside, is a charge the reply requires,
+and a share without room for it runs the attempt again within a larger one. The memory that held
+the rows goes back to the pool as soon as the bodies carry them.
 
 Duplex setup selects its bound through `DuplexSetupDeadline`. Client producer and consumer links
 select the active transport connection-setup budget; every other duplex stream, the consensus

@@ -122,8 +122,7 @@ pub use settings::{
     InterconnectLiveness, MAX_HTTP2_WINDOW_BYTES, MaxReconnectBackoff, PeerReceiveOverrides,
     PeerReceiveSettings, PeerReceiveSettingsError, PingInterval, PingTimeout, ReconnectBackoff,
     ReconnectJitterPermille, RelayBatchBytes, RelayChannelRetention, RelayDecodedBytes,
-    StreamReceiveWindow, TransportSettingValues,
-    TransportSettings, TransportSettingsError,
+    StreamReceiveWindow, TransportSettingValues, TransportSettings, TransportSettingsError,
 };
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,

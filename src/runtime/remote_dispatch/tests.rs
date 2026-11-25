@@ -179,12 +179,10 @@ async fn a_runtime_stop_ends_an_envelope_sent_again_to_a_node_nothing_answers_fo
     let gone = ClusterNodeName::parse("node-9").expect("the fixture node name is valid");
     // Nothing listens on port 1, so every connection to the node is refused, while no published
     // live set says the node left.
-    dispatcher
-        .interconnect
-        .register_outbound_target(
-            gone.clone(),
-            nervix_models::NodeEndpoint::from(std::net::SocketAddr::from(([127, 0, 0, 1], 1))),
-        );
+    dispatcher.interconnect.register_outbound_target(
+        gone.clone(),
+        nervix_models::NodeEndpoint::from(std::net::SocketAddr::from(([127, 0, 0, 1], 1))),
+    );
     let sending = {
         let dispatcher = dispatcher.clone();
         let gone = gone.clone();

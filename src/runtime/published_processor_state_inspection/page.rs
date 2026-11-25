@@ -240,9 +240,10 @@ impl PublishedPage {
 
     /// Whether the next row of `section`, of `bytes` payload bytes and a resident item charging
     /// `item` bytes, joins the page. The page ends before the row at its row limit, at its byte
-    /// allowance, and where the bulk class cannot hold everything the row needs to finish: its
+    /// allowance, and where its share has no room now for everything the row needs to finish: its
     /// columns and, when another node reads the page, its body. That leaves the read a
-    /// continuation. A page that has no row yet refuses instead, since it has nothing to return.
+    /// continuation. A page's first row is required instead, since without it the read makes no
+    /// progress: a share without room for it runs the read again within a larger one.
     fn admit(
         &mut self,
         key: &Option<BranchKey>,
@@ -267,10 +268,11 @@ impl PublishedPage {
         };
         let charge = add_bytes(charge, body)?;
         let target = add_bytes(self.memory.bytes(), charge)?;
-        if let Err(refusal) = self.memory.grow_to(target) {
-            if self.returned == 0 {
-                return Err(refusal.change_context(ProcessorStatePageError::Admission));
-            }
+        if self.returned == 0 {
+            self.memory
+                .grow_to(target)
+                .change_context(ProcessorStatePageError::Admission)?;
+        } else if self.memory.try_grow_to(target).is_err() {
             self.rows_left = 0;
             return Ok(false);
         }

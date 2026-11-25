@@ -2184,7 +2184,8 @@ impl Transport {
             let lease = match early_lease {
                 Some(lease) => lease,
                 None => {
-                    self.lease_control_stream::<M, F>(node, deadline, fence).await?
+                    self.lease_control_stream::<M, F>(node, deadline, fence)
+                        .await?
                 }
             };
             let response = self

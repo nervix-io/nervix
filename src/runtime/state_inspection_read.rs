@@ -86,6 +86,34 @@ pub(crate) enum MaterializedPageReply {
     Remote { descriptor: u64 },
 }
 
+impl MaterializedPageReply {
+    /// The bulk share a page of at most `max_rows` rows and `max_bytes` bytes starts its capture
+    /// from. Every charge a page this node presents, or one that returns no row, takes is
+    /// required, so it starts from the least share and a capture whose share has no room for one
+    /// runs again within the share it needed. A page another node reads starts from the room the
+    /// class has free now ([`Executor::memory`]), up to the most its reply takes by its own
+    /// charges: its container's encoding of `max_bytes` of columns and the descriptor it sets
+    /// aside ahead. Its rows after the first are optional, so a page whose share has no room for
+    /// one ends before it.
+    pub(crate) fn initial_share(self, executor: &Executor, max_rows: u64, max_bytes: u64) -> u64 {
+        let Self::Remote { descriptor } = self else {
+            return 1;
+        };
+        if max_rows == 0 {
+            return 1;
+        }
+        // A bound past what the plan can count is past the class, which clamps the share.
+        let container = match ResidentEncodingPlan::bound(executor, max_bytes) {
+            Ok(bound) => bound,
+            Err(_beyond) => u64::MAX,
+        };
+        let most = container.saturating_add(descriptor);
+        let class = executor.memory(MemoryClass::Bulk);
+        let free = class.capacity_bytes.saturating_sub(class.reserved_bytes);
+        most.min(free).max(1)
+    }
+}
+
 /// What a page another node reads set aside for its reply.
 pub(crate) struct MaterializedReplyMemory {
     /// Encodes the descriptor and frames the stream.
@@ -126,20 +154,24 @@ impl Runtime {
         self.inner.inspection_settings
     }
 
-    /// Captures one unit's materialized records and selects a bounded page of them.
+    /// Captures one unit's materialized records and selects a bounded page of them, taking every
+    /// charge through `executor`.
     ///
-    /// The capture takes its memory one step ahead of what spends it. It first counts the unit's
-    /// records, holding nothing, then admits everything capturing and selecting them takes, waiting
-    /// for room: the views it copies, the identities of their states, the largest state's own
-    /// capture, the selected page's views, the requested key catalog and, for a page another node
-    /// reads, the reply's descriptor. A capture the whole bulk class could never hold is refused at
-    /// once. Records added after they were counted take their room from the bulk pool at once, or
-    /// the page is not ready. A page another node reads also sets aside, for every row it selects,
-    /// what encoding that row into its container adds; it ends early, with its continuation and
-    /// complete counts, where the bulk pool cannot hold the next row, and is not ready when it
-    /// cannot hold the first.
+    /// The caller runs the capture within allowances of the state-read and bulk classes
+    /// (`Executor::within_allowance`): every charge the capture requires draws from a share the
+    /// caller waited for while it held nothing, and a capture whose share has no room for one runs
+    /// again within the share it needed. The capture first counts the unit's records, then takes
+    /// everything capturing and selecting them requires: the views it copies, the identities of
+    /// their states, the largest state's own capture, the selected page's views, the requested key
+    /// catalog and, for a page another node reads, the reply's descriptor. Records added after
+    /// they were counted grow those charges, as required. A capture the whole bulk class could
+    /// never hold is refused at once. A page another node reads also sets aside, for every row it
+    /// selects, what encoding that row into its container adds: its first row is required, and
+    /// every later row is optional, taken only while the share has room for it now, so the page
+    /// ends early, with its continuation and complete counts, where the share's room ends.
     pub(crate) async fn capture_materialized_state_page(
         &self,
+        executor: &Executor,
         domain: &DomainName,
         relay: &RelayName,
         query: MaterializedPageQuery,
@@ -164,7 +196,7 @@ impl Runtime {
             .ok_or_else(|| Report::new(StatePageReadError::NotReady))?
             .schema
             .clone();
-        let executor = self.inner.executor.clone();
+        let executor = executor.clone();
         let census = UnitCensus::count(&executor, &routing, relay, query.unit).await?;
         let memory = CaptureMemory::admit(&executor, &census, &query).await?;
         let CaptureMemory {
@@ -308,12 +340,13 @@ impl Runtime {
             .checked_mul(std::mem::size_of::<MaterializedGenerationRecord>())
             .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
         let views = executor
-            .try_reserve(
+            .reserve(
                 MemoryClass::Bulk,
                 u64::try_from(bytes)
                     .map_err(|_| Report::new(StatePageReadError::Admission))?
                     .max(1),
             )
+            .await
             .change_context(StatePageReadError::Admission)?;
         let generation = match &stored {
             Some(stored) => MaterializedGeneration::new(
@@ -579,12 +612,15 @@ struct ReplySetAside {
 }
 
 impl ReplySetAside {
-    /// Sets aside what encoding `record` into the container adds, at once from the bulk pool.
-    /// `Ok(false)` when the pool cannot hold it now; a record whose columns no container section
-    /// can hold is too large.
+    /// Sets aside what encoding `record` into the container adds. The page's `first` row is
+    /// required: its part grows the container's charge, and a share without room for it runs the
+    /// capture again within a larger one. Every later row is optional: it joins only while the
+    /// share has room for its part now, and `Ok(false)` ends the page before it. A record whose
+    /// columns no container section can hold is too large.
     fn admit(
         &mut self,
         record: &MaterializedGenerationRecord,
+        first: bool,
     ) -> Result<bool, Report<StatePageReadError>> {
         let next = self
             .plan
@@ -593,7 +629,11 @@ impl ReplySetAside {
         let need = next
             .need()
             .change_context(StatePageReadError::RowTooLarge)?;
-        if self.container.grow_to(need).is_err() {
+        if first {
+            self.container
+                .grow_to(need)
+                .change_context(StatePageReadError::Admission)?;
+        } else if self.container.try_grow_to(need).is_err() {
             return Ok(false);
         }
         self.plan = next;
@@ -895,13 +935,9 @@ impl PageWalk {
             return Ok(());
         }
         if let Some(reply) = &mut self.reply
-            && !reply.admit(record)?
+            && !reply.admit(record, self.selected.is_empty())?
         {
-            // The bulk pool cannot hold the row's share of the reply now: the page ends before it,
-            // unless it has no row yet.
-            if self.selected.is_empty() {
-                return Err(Report::new(StatePageReadError::Admission));
-            }
+            // The share has no room for the row's part of the reply now: the page ends before it.
             self.full = true;
             return Ok(());
         }
@@ -986,8 +1022,8 @@ impl PageWalk {
 }
 
 /// Room for `additional` more of `values` in the memory `charge` admitted for them. The census
-/// admitted every counted view, so this grows only for records added since; that growth takes its
-/// room from the bulk pool at once, geometrically, or the capture is refused.
+/// admitted every counted view, so this grows only for records added since, geometrically, as a
+/// required charge: a share without room for it runs the capture again within a larger one.
 fn reserve_views<T>(
     values: &mut Vec<T>,
     additional: usize,

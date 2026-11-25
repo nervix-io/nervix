@@ -216,10 +216,13 @@ impl Page {
         };
         let charge = checked_add(checked_add(working, retained)?, body)?;
         let target = checked_add(self.memory.bytes(), charge)?;
-        if let Err(refusal) = self.memory.grow_to(target) {
-            if self.returned == 0 {
-                return Err(refusal.change_context(ProcessorStatePageError::Admission));
-            }
+        // The page's first row is required: a share without room for it runs the read again
+        // within a larger one. Every later row joins only while the share has room for it now.
+        if self.returned == 0 {
+            self.memory
+                .grow_to(target)
+                .change_context(ProcessorStatePageError::Admission)?;
+        } else if self.memory.try_grow_to(target).is_err() {
             self.rows_left = 0;
             return Ok(false);
         }
