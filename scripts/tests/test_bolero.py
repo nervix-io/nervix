@@ -626,7 +626,7 @@ class InventoryTests(unittest.TestCase):
             "registry-stored-models": 68,
             "registry-stored-models-corruption": 68,
             "cluster-identity-record-rkyv": 4,
-            "node-settings-command-line": 29,
+            "node-settings-command-line": 30,
             "node-records": 24,
             "runtime-state-replication-wire": 31,
             "runtime-state-replication-malformed": 31,
