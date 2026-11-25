@@ -70,40 +70,6 @@ Feature: Cluster licensing release and transfer
       | 1            |
       | 3            |
 
-  Scenario Outline: Release retains a previously granted transition on <cluster_size> nodes
-    Given an HTTPS licensing test service is available
-    And a <cluster_size> node nervix cluster is started
-    When a persistent license is activated through the running quorum
-    And these Plexus commands are executed on the leader node
-      """
-      CREATE UNPACED DOMAIN {{domain}};
-      CREATE UNPACED DOMAIN {{domain}}_second;
-      """
-    And the licensing service reduces the domain quota with a transition
-    And these Plexus commands are executed on the leader node
-      """
-      REFRESH LICENSE;
-      RELEASE LICENSE;
-      """
-    Then node "node-1" eventually describes this license without a selected domain
-      """
-      mode: released
-      release: confirmed
-      policy: releasing
-      """
-    And the released cluster retains a grant until its signed deadline
-    When the cluster licensing clock passes the "grants_until" deadline
-    Then node "node-1" eventually describes this license without a selected domain
-      """
-      mode: free
-      policy: free
-      """
-
-    Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
-
   Scenario Outline: The former cluster observes transfer and a rebuilt cluster activates anew on <cluster_size> nodes
     Given an HTTPS licensing test service is available
     And the licensing service allows one persistent activation

@@ -307,11 +307,71 @@ The shared variables are:
   record rejection: Nervix retries the still-unconfirmed records as an infrastructure failure.
   The broker may have accepted a timed-out record, so confirming modes are at least once and can
   duplicate on this path.
-- `RETRY POLICY BACKOFF <duration> MAX <duration>` is required by every mode. Infrastructure retry
-  delays begin at `BACKOFF`, double on each attempt, and cap at `MAX`. A server-requested delay,
-  such as an HTTP rate-limit interval, can extend an individual delay; one the node's monotonic
-  clock cannot schedule extends nothing. Retries continue with backpressure until the external
-  system recovers or an operator repairs its provisioning.
+- `RETRY POLICY BACKOFF <duration> MAX <duration> [GIVE UP AFTER <duration>]` is required by every
+  mode. Infrastructure retry delays begin at `BACKOFF`, double on each attempt, and cap at `MAX`. A
+  server-requested delay, such as an HTTP rate-limit interval, can extend an individual delay; one
+  the node's monotonic clock cannot schedule extends nothing. Without `GIVE UP AFTER`, retries
+  continue with backpressure until the external system recovers or an operator repairs its
+  provisioning. [Giving up](#giving-up) describes the limit `GIVE UP AFTER` puts on them.
+
+### Giving up
+
+`GIVE UP AFTER <duration>` limits how long an emitter retries one unit of work, measured on the
+node's physical clock from the unit's first failed attempt, across reconnects. Until the limit
+passes, a retried unit is not an error: it waits and holds back its sources as it would without the
+clause. Once it passes, the emitter stops retrying the unit, and every row the unit still holds
+fails with an `unavailable` error of the `publish` operation, which the route's `ON MESSAGE ERROR`
+handles like any row error. The error's message names the limit and the latest failure, such as
+`gave up after 10m of retries: HTTP request returned status 503 Service Unavailable`, and its
+`error.external_code` carries the outside system's own code for that failure where the connector
+reported one. `GIVE UP AFTER 0s` never retries: the first failed attempt fails its unit's rows.
+
+```text
+MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s GIVE UP AFTER 10m
+```
+
+- A unit of work is a batch of rows the emitter received together. Its clock starts at the first
+  attempt that held it and failed to reach or use the destination, including an attempt that found
+  no open connection. A batch that only waits for a retry already scheduled has not been attempted
+  and has no clock yet. An encoding the node's bounded execution could not take yet judged nothing
+  about the destination, so it neither starts nor ends a clock.
+- A payload the emitter already wrote once, with its exact bytes and members, is retried as one
+  unit, so every batch whose rows that payload carries gives up together with the batch whose limit
+  passed first.
+- A `CLIENT CONSUMER` emitter retries each delivery by itself, so it measures the limit per delivery:
+  a failed attempt is a consumer answering that it wants the delivery again, an attempt its
+  consumer leaves unanswered for `ACK TIMEOUT`, or a consumer detaching while it holds one. A
+  delivery that waits for a consumer to attach has not been attempted. Once the limit has passed,
+  the delivery is offered no more and its rows fail as above, the message naming how its latest
+  attempt ended.
+- Rows the destination already confirmed are never failed, even when the limit passed while the
+  attempt that confirmed them was in flight: the emitter decides only between attempts. An attempt
+  in flight therefore holds its unit until it ends, which the client's deadline, such as its
+  `timeout_ms`, bounds where the entity declares one.
+- An attempt that succeeds resolves what it carried, so its rows never give up. Work the emitter
+  holds after giving up keeps its own clocks, and once the emitter holds nothing it publishes the
+  next rows at once.
+- What an Iceberg emitter staged for a catalog commit has its own clock, started at the first
+  failed commit attempt. When the limit passes, the emitter drops the staged rows and their staging
+  files. The emitter no longer holds those rows, so the failure names none of them: the emitter's
+  `ON GENERAL ERROR` policy reports it with the class `unavailable` and resolves the rows'
+  acknowledgements. Giving up undoes nothing the catalog applied, such as a commit it applied
+  without its answer reaching the emitter.
+- `GIVE UP AFTER` belongs to emitters only. An ingestor's retry policy paces how soon a payload is
+  presented again, and writing `GIVE UP AFTER` on it is a parse error, as
+  [Delivery Modes](ingestors.md#delivery-modes) explains.
+
+A destination that refuses the writes as it is configured, such as an OTLP receiver answering with
+a status the protocol never asks a client to retry, is retried on the same policy as an outage:
+nothing is wrong with the rows, so none of them fails while the emitter waits for an operator to
+repair the setup. `DESCRIBE EMITTER` shows the reason on its `misconfigured:` line instead of
+`transient error:`, and the connector-interaction metrics count those attempts as
+`misconfigured`. Under `GIVE UP AFTER` the limit counts the wait like any other.
+
+`DESCRIBE EMITTER` writes the clause on its `mode:` line and shows `give up in:` with how long
+remains before the emitter gives up the oldest unit it retries, or `-` while no unit's clock runs.
+`nervix_emitter_give_ups_total` counts the units given up, and every failed row also counts in
+`nervix_message_errors_total` under the class `unavailable`.
 
 Request/response emitters—SQS, Sentry, OTEL, HTTP, the databases, and Iceberg—do not take
 `ACK TIMEOUT`. Except for Iceberg, their client request timeout bounds the response. SQS clients
@@ -409,7 +469,10 @@ Only `ack` confirms the batch. A retry keeps the original IPC bytes, member posi
 and execution snapshot and waits on physical backoff before a fresh attempt. A timeout or lost
 consumer revokes its ACK reference before reassignment. A later ACK for that reference is stale;
 repeating a confirmed ACK is idempotent while its bounded result is retained. `reject` applies the
-route's message error policy to every batch member with a bounded, non-sensitive reason. An
+route's message error policy to every batch member with a bounded, non-sensitive reason. With
+[`GIVE UP AFTER`](#giving-up), a batch whose attempts keep ending in a retry, a timeout or a lost
+consumer stops being offered once the limit has passed since its first such attempt, and its
+members fail as `unavailable`. An
 `ATTACHED` emitter keeps its source acknowledgement waiting for the application ACK; a `DETACHED`
 emitter keeps its existing earlier source boundary. There is no durable consumer cursor or
 delivery history: an owner loss can require upstream replay, and a lost ACK can duplicate an
@@ -4317,18 +4380,18 @@ charges them to the node's bulk memory class, which holds 32 MiB. It reads the s
 in groups, each the run of consecutive staged batches the class can hold together, whichever
 staging files hold them. Before it reads a group it charges every Arrow IPC byte of the group's
 staged batches, and once their rows are in data files it returns the charge before it reads the
-next group; the data files of every group are appended in the one catalog commit. It takes a charge only when the class has room for it now rather than waiting in
-the class's queue, where a commit's charge would take every byte the class frees and hold the
-node's other bulk work behind it. When the class has no room, the commit keeps its staged rows and
-their acknowledgements, `DESCRIBE EMITTER` shows `Iceberg commit waits for room in the bulk memory
-class for <bytes> staged bytes` as the emitter's transient error, and the emitter retries the
-commit on its declared retry policy. A staged batch holds one input carrier's mapped rows, or one
-bounded segment of them when `BATCH` is declared. Without `BATCH` it can be larger than the class
-when a route on the same node flushes batches above 32 MiB.
-Such a batch is read alone once the whole class is free, charged with the whole class: that is every
-byte of it the class can account for, and it leaves no room for other bulk work beside the read.
-Until then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole bulk memory class of
-<capacity> bytes for a staged batch of <bytes> bytes`, and the emitter retries the commit as before.
+next group; the data files of every group are appended in the one catalog commit. When the class has
+no room for a group's charge now, the commit waits for it in the class's queue, holding nothing of
+the class: the previous group's charge ended with its data files. It keeps its staged rows and their
+acknowledgements while it waits, and `DESCRIBE EMITTER` shows `Iceberg commit waits for room in the
+bulk memory class for <bytes> staged bytes` as the emitter's transient status until the charge is
+granted. A staged batch holds one input carrier's mapped rows, or one bounded segment of them when
+`BATCH` is declared. Without `BATCH` it can be larger than the class when a route on the same node
+flushes batches above 32 MiB. Such a batch is read alone once the whole class is free, charged with
+the whole class: that is every byte of it the class can account for, and it leaves no room for other
+bulk work beside the read. Until then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole
+bulk memory class of <capacity> bytes for a staged batch of <bytes> bytes`. Only a class closed
+because the node stops fails the commit, which the emitter retries on its declared retry policy.
 
 #### Iceberg data files
 
@@ -4447,6 +4510,10 @@ began, so those rows are not in its data files: they start a staging file of the
 retry first appends what the commit began with and then commits the newer rows in a commit of
 their own. A retry still publishes
 everything staged, and acknowledges only rows a catalog commit holds.
+
+Under `GIVE UP AFTER`, the staged rows give up once the limit has passed since the first failed
+commit attempt: the emitter drops them with their staging files and reports them through its
+`ON GENERAL ERROR` policy, as [Giving up](#giving-up) describes, and takes new input again.
 
 Each commit names its append with an identity it records in the snapshot it adds. A commit whose
 catalog answer fails or is lost reloads the table, and the commit and every retry of it look for

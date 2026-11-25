@@ -1576,8 +1576,8 @@ fn a_new_process_epoch_clears_the_retired_channel_floor() {
 
 /// A cancellation that fences a channel's position before its grant records that position for the
 /// retention its delivery captured, charged to relay memory, and is answered as cancelled; the fence
-/// refuses the grant that follows. Without room for its charge it records nothing and is answered
-/// `Unknown`, so its sender asks again.
+/// refuses the grant that follows. Without its charge, which only a closed budget leaves it, it
+/// records nothing and is answered `Unknown`, so its sender asks again.
 #[test]
 fn a_cancellation_fence_records_its_position_for_the_retention_its_delivery_captured() {
     let fixture = PeerFixture::new(1);

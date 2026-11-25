@@ -279,10 +279,7 @@ async fn a_payload_for_a_relay_this_node_has_not_instantiated_names_its_domain_a
     let batch_ipc = test_schema(&[("value", ParseAsType::I64)])
         .batch_from_test_rows([[("value".to_string(), RuntimeValue::I64(1))]])
         .expect("batch should build")
-        .encode_arrow_ipc(
-            runtime.executor(),
-            nervix_execution::QueueAdmission::RefuseWhenFull,
-        )
+        .encode_arrow_ipc(runtime.executor())
         .await
         .expect("batch ipc should serialize");
     let payload = |kind, target: &DomainName| RelayPayload {

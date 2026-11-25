@@ -1,12 +1,12 @@
 @full_queue_waits
 Feature: Work no caller waits on waits for a place in a full worker class
-  A worker class whose workers are all busy and whose wait queue is full refuses only a request
-  whose caller still holds it. Work the node or a peer already accepted, which no caller waits to
-  be answered about, waits for a place instead: relay slices and subscription deliveries on the
-  data workers, checkpoints, state captures, partition moves and the compilation of a committed
-  change on the bulk workers, and checkpoint and resource files on the filesystem workers. Each
-  scenario brings that work up to its full class, sees a job of the class wait for a place while
-  no node refuses one, releases the class and sees the work complete once.
+  A worker class whose workers are all busy and whose wait queue is full refuses no job. Work the
+  node or a peer already accepted, which no caller waits to be answered about, waits for a place
+  like every other job: relay slices and subscription deliveries on the data workers, checkpoints,
+  state captures, partition moves and the compilation of a committed change on the bulk workers,
+  and checkpoint and resource files on the filesystem workers. Each scenario brings that work up
+  to its full class, sees a job of the class wait for a place, releases the class and sees the
+  work complete once.
 
   # A batch the receiving node's relay bound cannot take whole is sent again as slices, and every
   # slice is encoded again on the sending node's data workers. Slicing exists only between nodes.
@@ -54,7 +54,6 @@ Feature: Work no caller waits on waits for a place in a full worker class
     Then consumer "output" receives 8 interleaved rows with 512-byte ids exactly once and acknowledges them
     And batch "sliced" completes
     And relay payloads to node "node-2" in domain "{{domain}}" respect "2KiB" with largest slice 2
-    And no node refused a data job while it was saturated
 
   # A relay's owner encodes a batch once, on its data workers, for every session on another node
   # that subscribes to the relay. A remote subscriber exists only between nodes.
@@ -109,7 +108,6 @@ Feature: Work no caller waits on waits for a place in a full worker class
       """
       "id":"barrier" | "value":2
       """
-    And no node refused a data job while it was saturated
 
   # A STOP seals the final checkpoint of every state owner on the bulk workers before it answers.
   # With the periodic snapshot ten minutes away, that final checkpoint is the only state the
@@ -168,7 +166,6 @@ Feature: Work no caller waits on waits for a place in a full worker class
     And the background Plexus execution is still running after "1s"
     When bulk execution is released on every node
     Then the background Plexus execution succeeds
-    And no node refused a bulk job while it was saturated
     When these Plexus commands are executed on the leader node
       """
       START;
@@ -188,12 +185,146 @@ Feature: Work no caller waits on waits for a place in a full worker class
       | 1            |
       | 3            |
 
+  # A state inspection reads its page on the window's owner, whose bulk workers capture and encode
+  # it. With every bulk place on the owner taken, the inspection waits for one instead of answering
+  # that the owner is unavailable, and answers with the window's rows once the class frees.
+  Scenario Outline: A window state inspection waits for a bulk place on the window's owner and answers once it frees on a <cluster_size> node cluster
+    Given runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA reading ( value I64 );
+      CREATE SCHEMA reading_summary ( samples I64, total I64 );
+      CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( value integer );
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
+      CREATE RELAY readings SCHEMA reading UNBRANCHED;
+      CREATE RELAY reading_summaries SCHEMA reading_summary UNBRANCHED;
+      CREATE VHOST edge inspection-wait-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
+        TO readings INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR sliding_readings FROM readings
+        WIDTH 2 MESSAGES STEP 1 MESSAGES UNBRANCHED
+        TO reading_summaries SET samples = COUNT(input.value), total = SUM(input.value)
+        ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION reading_summaries_subscription TO reading_summaries;
+      START;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "window_processor" "sliding_readings" is saved as placeholder "window_owner"
+    And node "node-1" eventually accepts http traffic for host "inspection-wait-{{test_id}}.example.com" path "/readings"
+      """
+      {"value":10}
+      """
+    When http payload is posted to node "node-1" with host "inspection-wait-{{test_id}}.example.com" path "/readings"
+      """
+      {"value":20}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "samples":2,"total":30
+      """
+    When bulk execution on node "{{window_owner}}" is saturated
+    And these Plexus commands begin executing in the background
+      """
+      SHOW WINDOW PROCESSOR sliding_readings STATE FOR UNBRANCHED FORMAT JSON;
+      """
+    Then within "30s" a bulk job waits for a place on node "{{window_owner}}"
+    And the background Plexus execution is still running after "1s"
+    When bulk execution is released on every node
+    Then the background Plexus execution succeeds
+    And the last command output contains
+      """
+      "outcome": "page"
+      """
+    And the last command output contains
+      """
+      "value": 20
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # A backup captures each primary's state on the node that owns it and then fetches every captured
+  # section from that node. With every bulk place on the window's owner taken, the capture and the
+  # fetch wait for a place instead of failing the backup, which completes once the class frees.
+  Scenario Outline: A backup waits for bulk places on the window's owner and completes once they free on a <cluster_size> node cluster
+    Given runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA reading ( value I64 );
+      CREATE SCHEMA reading_summary ( samples I64, total I64 );
+      CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( value integer );
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
+      CREATE RELAY readings SCHEMA reading UNBRANCHED;
+      CREATE RELAY reading_summaries SCHEMA reading_summary UNBRANCHED;
+      CREATE VHOST edge backup-wait-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
+        TO readings INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR sliding_readings FROM readings
+        WIDTH 2 MESSAGES STEP 1 MESSAGES UNBRANCHED
+        TO reading_summaries SET samples = COUNT(input.value), total = SUM(input.value)
+        ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION reading_summaries_subscription TO reading_summaries;
+      START;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "window_processor" "sliding_readings" is saved as placeholder "window_owner"
+    And node "node-1" eventually accepts http traffic for host "backup-wait-{{test_id}}.example.com" path "/readings"
+      """
+      {"value":10}
+      """
+    When http payload is posted to node "node-1" with host "backup-wait-{{test_id}}.example.com" path "/readings"
+      """
+      {"value":20}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "samples":2,"total":30
+      """
+    And the current leader node is saved as placeholder "leader"
+    When bulk execution on node "{{window_owner}}" is saturated
+    And the CLI begins backing up "domain {{domain}} --timeout 2m --backup-wait-timeout 3m" from node "{{leader}}" into "held-bulk.nvxb" in the background
+    Then within "30s" a bulk job waits for a place on node "{{window_owner}}"
+    And the background CLI backup remains pending for "1s"
+    When bulk execution is released on every node
+    Then the background CLI backup finishes
+    And the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When the CLI describes backup archive "held-bulk.nvxb" as text
+    Then the CLI output contains "sliding_readings"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   # A materialized relay's checkpoint writer seals its rows into snapshot staging files and
   # publishes them to the owner's state store, on the filesystem workers, at each snapshot interval
   # its state changed in. The node's own maintenance also waits in a full filesystem class, so the
   # checkpoint is held before it seals, and the job it adds once let go is the one that must wait.
-  # A refused checkpoint would be tried again later, so the refusal count tells waiting from
-  # refusing; a restarted node reads the rows back.
+  # A restarted node reads the rows back.
   @full_queue_checkpoint_files
   Scenario Outline: A relay's checkpoint waits for filesystem places and a restarted <cluster_size> node cluster reads its rows back
     Given runtime replication is configured with replica count 0 and snapshot interval "200ms"
@@ -241,8 +372,7 @@ Feature: Work no caller waits on waits for a place in a full worker class
     When the checkpoint of relay "profiles" is released from its pause
     Then within "30s" another filesystem storage job waits for a place on node "{{relay_owner}}"
     When filesystem storage execution is released on every node
-    Then no node refused a filesystem storage job while it was saturated
-    And within "30s" node "node-1" eventually reports materialized state for relay "profiles" containing
+    Then within "30s" node "node-1" eventually reports materialized state for relay "profiles" containing
       """
       {"branch":{"tenant":"beta"},"fields":{"tenant":"beta","tier":"silver"}}
       """
@@ -313,7 +443,6 @@ Feature: Work no caller waits on waits for a place in a full worker class
     And the background Plexus execution is still running after "1s"
     When bulk execution is released on every node
     Then the background Plexus execution succeeds
-    And no node refused a bulk job while it was saturated
     And within "30s" node "node-2" eventually reports materialized state for relay "profiles" containing
       """
       {"branch":{"tenant":"alpha"},"fields":{"tenant":"alpha","tier":"gold"}}
@@ -391,7 +520,6 @@ Feature: Work no caller waits on waits for a place in a full worker class
       """
       "tenant":"beta" | "seq":1 | "tier":"bronze"
       """
-    And no node refused a bulk job while it was saturated
 
     Examples:
       | cluster_size | side     |
@@ -400,8 +528,154 @@ Feature: Work no caller waits on waits for a place in a full worker class
       | 1            | claimant |
       | 3            | claimant |
 
+  # Growing the branch moves beta from partition 1 to partition 5. The first record that reaches
+  # partition 5 claims beta, and once beta's holder has released its window, the claiming unit
+  # reopens that window on its node's bulk workers. With every bulk place taken, the reopen waits
+  # for a place instead of being refused and the claim tried again, while the unit keeps beta's
+  # record parked. The window then continues from the row beta's holder kept.
+  @full_queue_window_claim
+  Scenario Outline: A moved window key's claimed branch waits for a bulk place and continues its window once on a <cluster_size> node cluster
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA metric ( value I32, tenant STRING );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
+      CREATE SCHEMA summary (
+        tenant STRING,
+        samples I64,
+        first_value I32 OPTIONAL,
+        last_value I32 OPTIONAL
+      );
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE RELAY summaries SCHEMA summary BRANCHED BY by_tenant;
+      CREATE VHOST edge window-claim-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT metric_ingress ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR metric_ingestor FROM metric_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
+        TO metrics INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR pair_window FROM metrics
+        WIDTH 2 MESSAGES
+        STEP 1 MESSAGES
+        BRANCHED BY by_tenant
+        TO summaries
+          SET tenant = FIRST(input.tenant), samples = COUNT(input.value),
+              first_value = FIRST(input.value), last_value = LAST(input.value)
+          ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION summaries_seen TO summaries;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "window-claim-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","value":11}
+      """
+    And http payload is posted to node "node-1" with host "window-claim-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","value":12}
+      """
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "tenant":"beta" | "samples":2 | "first_value":11 | "last_value":12
+      """
+    When the next partition install of window processor "pair_window" is held
+    And these Plexus commands are executed on the leader node
+      """
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 8;
+      CREATE SUBSCRIPTION summaries_after_change TO summaries;
+      """
+    And http payload is posted to node "node-1" with host "window-claim-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","value":71}
+      """
+    Then within "60s" the partition install of window processor "pair_window" reaches its hold
+    When bulk execution is saturated on every node
+    And the held partition install of window processor "pair_window" is released
+    Then within "30s" a bulk job waits for a place on some node
+    When bulk execution is released on every node
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "tenant":"beta" | "samples":2 | "first_value":12 | "last_value":71
+      """
+    And within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "node-1" reports no partition transition
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # A junction on node-3 reads the profile row of a materialized relay whose state node-2 owns, so it
+  # asks node-2 to describe and send the row, which node-2 serves on its bulk workers. With every
+  # bulk place taken, the fetch waits for one instead of being refused, so the event is held back
+  # rather than dropped as an internal error. The class frees within the fetch's request deadline,
+  # and the event is enriched and delivered once.
+  @full_queue_remote_materialized_fetch
+  Scenario: A junction's remote materialized fetch waits for a bulk place on the state's owner and delivers its event once
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA profile ( tenant STRING, tier STRING );
+      CREATE WIRE JSON SCHEMA profile_wire MODE STRICT ( tenant string, tier string );
+      CREATE WIRE JSON CODEC profile_codec FROM WIRE SCHEMA profile_wire TO SCHEMA profile;
+      CREATE SCHEMA event ( tenant STRING, seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA enriched_event ( tenant STRING, seq I64, tier STRING );
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE RELAY profiles SCHEMA profile BRANCHED BY by_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
+      CREATE RELAY enriched_events SCHEMA enriched_event BRANCHED BY by_tenant;
+      CREATE VHOST edge remote-fetch-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT profile_ingress ON edge PATH '/profiles';
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR profile_ingestor FROM profile_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING profile_codec TIMESTAMP NOW
+        TO profiles INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
+        TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE JUNCTION enrich FROM events BRANCHED BY by_tenant
+        USING MATERIALIZED STATE profiles REQUIRED SKIP
+        TO enriched_events INHERIT ALL SET tier = relay_state.profiles.tier
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE PLACEMENT profiles_on_node_2 FOR profiles REQUIRE NODES WHERE node.name = 'node-2';
+      CREATE PLACEMENT enrich_on_node_3 FOR enrich REQUIRE NODES WHERE node.name = 'node-3';
+      CREATE SUBSCRIPTION enriched_subscription TO enriched_events;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "remote-fetch-{{test_id}}.example.com" path "/profiles"
+      """
+      {"tenant":"beta","tier":"bronze"}
+      """
+    Then within "30s" node "node-2" eventually reports materialized state for relay "profiles" containing
+      """
+      {"branch":{"tenant":"beta"},"fields":{"tenant":"beta","tier":"bronze"}}
+      """
+    When bulk execution is saturated on every node
+    And http payload is posted to node "node-1" with host "remote-fetch-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","seq":1}
+      """
+    Then within "20s" a bulk job waits for a place on node "node-2"
+    When bulk execution is released on every node
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "tenant":"beta" | "seq":1 | "tier":"bronze"
+      """
+
   # A committed change compiles each user-defined function it adds on the bulk workers. The change
-  # is already decided, so a full bulk class holds the compilation back rather than refusing it.
+  # is already decided, and a full bulk class holds the compilation back until a place frees.
   @full_queue_committed_compilation
   Scenario Outline: A committed CREATE UDF waits for a bulk place to compile and its function runs once on a <cluster_size> node cluster
     Given a <cluster_size> node nervix cluster is started
@@ -436,7 +710,6 @@ Feature: Work no caller waits on waits for a place in a full worker class
     And the background Plexus execution is still running after "1s"
     When bulk execution is released on every node
     Then the background Plexus execution succeeds
-    And no node refused a bulk job while it was saturated
     When http payload is posted to node "node-1" with host "compile-udf-{{test_id}}.example.com" path "/events"
       """
       {"id":"compiled","value":41}
@@ -504,7 +777,6 @@ Feature: Work no caller waits on waits for a place in a full worker class
     And the background Plexus execution is still running after "1s"
     When bulk execution is released on every node
     Then the background Plexus execution succeeds
-    And no node refused a bulk job while it was saturated
     When http payload is posted to node "node-1" with host "compile-wasm-{{test_id}}.example.com" path "/metrics"
       """
       {"value":1,"tenant":"alpha"}
@@ -554,7 +826,6 @@ Feature: Work no caller waits on waits for a place in a full worker class
     And the background Plexus execution is still running after "1s"
     When filesystem storage execution is released on every node
     Then the background Plexus execution succeeds
-    And no node refused a filesystem storage job while it was saturated
     When these Plexus commands are executed on node "node-1"
       """
       DESCRIBE RESOURCE proto;

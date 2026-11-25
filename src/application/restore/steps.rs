@@ -161,9 +161,6 @@ impl SessionServiceImpl {
             RestoreStep::CreateDomain(target) => {
                 let domain = planned_domain(plan, target)?;
                 let effect = RestoreStepEffect::Domain {
-                    domain_quota: self
-                        .admit_domain_creation(target, true)
-                        .map_err(|error| StepFailure::Failed(format!("{error:#}")))?,
                     state: Box::new(domain.state.clone()),
                     resources: domain.resources.clone(),
                 };
@@ -490,7 +487,7 @@ impl SessionServiceImpl {
                         let declarations = RestoredBranchDeclarations::of(scheduled, &reference)
                             .map_err(|error| StepFailure::Failed(format!("{error:#}")))?;
                         let artifact = Arc::new(
-                            super::materialized::prepare_materialized_checkpoint(
+                            super::materialized::convert_materialized_checkpoint(
                                 &self.inner.runtime,
                                 archive,
                                 descriptor,
@@ -807,7 +804,7 @@ impl SessionServiceImpl {
                 nervix_primitives::task::consume_budget().await;
                 // The unit's own archived rows come first, so a key archived twice keeps them.
                 archived.sort_by_key(|source| source.descriptor.unit != *unit);
-                let artifact = super::materialized::prepare_regrouped_materialized_checkpoint(
+                let artifact = super::materialized::regroup_materialized_checkpoint(
                     &self.inner.runtime,
                     regrouped.archive,
                     &archived,
@@ -994,7 +991,6 @@ impl SessionServiceImpl {
 
     /// The failure a consensus refusal of a restore step stands for.
     async fn consensus_step_failure(&self, error: &Report<ConsensusError>) -> StepFailure {
-        self.inner.licensing.record_refusal(error);
         if let ConsensusError::LeadershipLost { observed } = error.current_context() {
             let redirect = self.not_leader_response("", observed.clone()).await;
             return StepFailure::LeadershipLost(Box::new(redirect));

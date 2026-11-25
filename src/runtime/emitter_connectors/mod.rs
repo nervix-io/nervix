@@ -304,6 +304,7 @@ mod tests {
                 backoff: Duration::from_millis(10),
                 max_backoff: Duration::from_millis(100),
             },
+            give_up_after: None,
             connector,
         }
     }

@@ -98,7 +98,7 @@ enum StandaloneSetback {
 /// What recording a commit refusal as the command's outcome came to.
 enum StandaloneRefusalRecord {
     /// The command's outcome, recorded or reported.
-    Answered(CommandResult),
+    Answered(Box<CommandResult>),
     /// The transaction's preview moved after the refusal was planned, as an allowed planning
     /// change moves it, so the ledger kept the preview that now stands and recorded nothing: the
     /// command plans its commit again against it.
@@ -510,7 +510,7 @@ impl SessionServiceImpl {
                         .await
                     {
                         StandaloneRefusalRecord::Answered(result) => {
-                            return Err(Box::new(result));
+                            return Err(result);
                         }
                         StandaloneRefusalRecord::PreviewMoved(moved) => moved,
                     };
@@ -628,12 +628,12 @@ impl SessionServiceImpl {
             )
             .await;
         match failed {
-            Ok(Some(transaction)) => {
-                StandaloneRefusalRecord::Answered(standalone_transaction_result(&transaction))
-            }
-            Ok(None) => StandaloneRefusalRecord::Answered(command_error(
-                transaction_commit_error_message(refusal),
+            Ok(Some(transaction)) => StandaloneRefusalRecord::Answered(Box::new(
+                standalone_transaction_result(&transaction),
             )),
+            Ok(None) => StandaloneRefusalRecord::Answered(Box::new(command_error(
+                transaction_commit_error_message(refusal),
+            ))),
             Err(error)
                 if matches!(
                     error.current_context(),
@@ -645,9 +645,9 @@ impl SessionServiceImpl {
             {
                 StandaloneRefusalRecord::PreviewMoved(error)
             }
-            Err(error) => StandaloneRefusalRecord::Answered(
+            Err(error) => StandaloneRefusalRecord::Answered(Box::new(
                 self.transaction_consensus_error_response(error).await,
-            ),
+            )),
         }
     }
 

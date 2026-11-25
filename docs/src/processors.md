@@ -23,6 +23,19 @@ Ordinary multi-source processors require every `FROM` relay to reference the sam
 Model. Merely having structurally equal schemas is not enough. The relays must also use the same
 exact parametrizer, or all be unbranched.
 
+A domain's graph has no loops. Data never comes back to a relay it already passed: no chain of
+routes, `ON MESSAGE ERROR SEND TO` routes, `ON CORRELATION TIMEOUT SEND TO` actions and reads of a
+relay's materialized state, a generator's `USING MATERIALIZED STATE` source included, leads from a
+relay back to itself. A node never writes into a relay it reads or whose state it reads, and two
+nodes never feed each other. Nervix refuses a statement, a transaction or a restore that would
+close a loop before any of it applies. The refusal names the loop in the order data would travel
+it, starting at the relay whose name sorts first, and names every hop that is not an ordinary
+route as `[error route]`, `[correlation timeout]` or `[state read]`:
+
+```text
+the graph of domain 'shop' would contain a loop: RELAY 'orders' → JUNCTION 'enrich' →[error route] RELAY 'orders'
+```
+
 Relay inputs may optionally collect incoming Arrow batches before node execution:
 
 ```plexus,ignore

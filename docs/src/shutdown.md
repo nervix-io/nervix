@@ -353,9 +353,12 @@ is turning off, and it takes part in no service work any more. It logs `this nod
 stopped taking part in service work` with how many such tasks were still running, and each of them
 ends at its next await: a transaction commit, a command, a restore or a resource upload's recovery,
 and the coordination the node runs for the cluster, such as acting as leader for another stopping
-node. Their replicated progress survives, and the recovery that completes a stopped node's work
-resumes each from its recorded step, after a restart or by the leader that follows, so a cancelled
-commit's transaction reaches `COMMITTED` after the node restarts. A leader that is turning off
+node. The node waits for every one of them to end before it begins its save, so none of them sees a
+later step of the stop and none records an outcome of its own about the node stopping. Their
+replicated progress survives, and the recovery that completes a stopped node's work resumes each
+from its recorded step, after a restart or by the leader that follows, so a cancelled commit's
+transaction reaches `COMMITTED` after the node restarts, and a `START` that waited for a node its
+node rules admit goes on waiting on the leader that follows. A leader that is turning off
 answers another stopping node's request to move its units as a node that does not lead, so that
 node asks the leader that follows, within its own shutdown timeout.
 
@@ -805,15 +808,22 @@ The current leader reconciles durable preparations after a leadership or live-in
 first commits a consensus barrier and sends its log position with the reconciliation request; each
 participant applies through that position before consulting its own committed schedule. A
 preparation survives when its exact transition is the committed owner change, regardless of which
-processes have since restarted. An uncommitted preparation survives only while the original
-coordinator process and both bound participant incarnations are live, the base schedule still has
-the source owning the entity, and the exact gate is still held. Every other preparation is discarded
-durably. Discard is exact and idempotent over the operation identity, so a delayed discard for one
-operation cannot remove a replacement prepared by another.
+processes have since restarted. An uncommitted preparation survives while the original coordinator
+process still leads and the base schedule is still committed with the source owning the entity,
+because that coordinator can still commit the move; a participant's restart or the end of the hold
+does not end it, and the coordinator discards the preparations of a move it does not commit. Every
+other preparation is discarded durably. Discard is exact and idempotent over the operation
+identity, so a delayed discard for one operation cannot remove a replacement prepared by another.
 
-A destination that restarts between preparation and activation invalidates the handoff: the
-operation fails with `destination node '<node_id>' changed process incarnation during ownership
-handoff`, the schedule is unchanged, and a later relocation onto that node succeeds normally.
+A destination that restarts before every participant confirmed its preparation invalidates the
+handoff: the operation fails with `destination node '<node_id>' changed process incarnation during
+ownership handoff`, the schedule is unchanged, and a later relocation onto that node succeeds
+normally. A destination that restarts after it confirmed its preparation keeps that copy while the
+move can still commit. When its new run is recorded before the commit, the commit is refused
+because it was planned against the earlier record, and nothing moves. Otherwise the move commits,
+the destination activates the copy it kept, and the operation still reports that it could not
+confirm the activation, because the coordinator's activation request names the destination's
+earlier run.
 
 ### When The Former Owner Is Gone
 
@@ -1122,9 +1132,9 @@ expire branch state mid-handoff. Nothing about shutdown merges branches or moves
 Terminal teardown begins once the moves end, whatever they came to.
 
 It stops the node's background tasks, giving each at most the configured cooperative task-stop
-grace, and waits for the service work the node ended when it began turning off to reach its next
-await. An installation of the committed state that one of those tasks, or a request handler, had
-begun is not cut short with it: it runs in a task of the runtime admission that holds the node's
+grace; the service work the node ended when it began turning off has already ended before the save.
+An installation of the committed state that one of those tasks, a service task or a request handler
+had begun is not cut short with it: it runs in a task of the runtime admission that holds the node's
 installation turn. Terminal teardown takes that turn and keeps it before it stops the runtime, so it
 first waits for the installation still under way and no other begins afterwards
 ([Installation And Publication](./execution-plans.md#installation-and-publication)). It then stops

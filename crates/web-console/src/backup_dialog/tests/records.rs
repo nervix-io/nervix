@@ -320,7 +320,10 @@ fn a_dialog_without_session_storage_backs_up_and_resumes_nothing() {
 fn a_restore_stream_that_failed_shows_whether_its_outcome_is_unknown() {
     Owner::new().with(|| {
         let backups = dialog_signals();
-        backups.restore_failed(reference(), &Report::new(RestoreStreamError::NoReply));
+        let no_reply = RestoreStreamError::NoReply {
+            timeout: std::time::Duration::from_secs(120),
+        };
+        backups.restore_failed(reference(), &Report::new(no_reply));
         let RestoreProgress::Unknown {
             reference: unknown,
             reason,

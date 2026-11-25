@@ -41,6 +41,12 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) ingestor_quiescence:
         Arc<DashMap<DomainNodeUnitRef, Arc<IngestorQuiesceControl>, RandomState>>,
     pub(in crate::runtime) memory_pressure: MemoryPressurePause,
+    /// The retirements the MQTT ingestor instances this node runs owe their broker sessions, by
+    /// domain and ingestor. They outlive any one domain execution, so a stop, a start or a rebuild
+    /// hands each to the instance that starts next here; schedule application records, settles
+    /// and forgets them, and an instance reads its own once as it starts.
+    pub(in crate::runtime) mqtt_session_retirements:
+        DashMap<DomainNodeRef, super::ingestors::mqtt::OwedMqttSessionRetirements, RandomState>,
     pub(in crate::runtime) ingestor_statuses:
         DashMap<DomainNodeUnitRef, Arc<IngestorStatus>, RandomState>,
     pub(in crate::runtime) ingestor_readiness:

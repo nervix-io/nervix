@@ -990,7 +990,10 @@ mod tests {
         let mut emitter = emitter(
             EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
                 mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
-                    retry_policy: retry_policy(),
+                    retry_policy: nervix_models::EmitterRetryPolicy {
+                        pacing: retry_policy(),
+                        give_up_after: None,
+                    },
                 },
                 client: named("emitter"),
             })),
@@ -1157,7 +1160,10 @@ mod tests {
         let mut direct = emitter(
             EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
                 mode: nervix_models::HttpRequestPublishingMode::Ack {
-                    retry_policy: retry_policy(),
+                    retry_policy: nervix_models::EmitterRetryPolicy {
+                        pacing: retry_policy(),
+                        give_up_after: None,
+                    },
                 },
                 client: named::<ClientName>("api"),
                 method: expression("'POST'"),
@@ -1175,7 +1181,10 @@ mod tests {
 
         *direct.connector = EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
             mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
-                retry_policy: retry_policy(),
+                retry_policy: nervix_models::EmitterRetryPolicy {
+                    pacing: retry_policy(),
+                    give_up_after: None,
+                },
             },
             client: named("emitter"),
         }));
@@ -1195,7 +1204,10 @@ mod tests {
         let http = emitter(
             EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
                 mode: nervix_models::HttpRequestPublishingMode::Ack {
-                    retry_policy: retry_policy(),
+                    retry_policy: nervix_models::EmitterRetryPolicy {
+                        pacing: retry_policy(),
+                        give_up_after: None,
+                    },
                 },
                 client: named("api"),
                 method: expression("'POST'"),
@@ -1221,7 +1233,10 @@ mod tests {
         let sqs = emitter(
             EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
                 mode: nervix_models::SqsQueuePublishingMode::Ack {
-                    retry_policy: retry_policy(),
+                    retry_policy: nervix_models::EmitterRetryPolicy {
+                        pacing: retry_policy(),
+                        give_up_after: None,
+                    },
                 },
                 client: named("queue_client"),
                 queue: named("events.fifo"),
@@ -1243,7 +1258,10 @@ mod tests {
         emitter(
             EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
                 mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
-                    retry_policy: retry_policy(),
+                    retry_policy: nervix_models::EmitterRetryPolicy {
+                        pacing: retry_policy(),
+                        give_up_after: None,
+                    },
                 },
                 client: named("emitter"),
             })),
@@ -1316,7 +1334,10 @@ mod tests {
                 EmitterEntity::RabbitMq(nervix_models::RabbitMqEmitter::Exchange(
                     nervix_models::RabbitMqExchangeEmitter {
                         mode: nervix_models::RabbitMqExchangePublishingMode::NoAck {
-                            retry_policy: retry_policy(),
+                            retry_policy: nervix_models::EmitterRetryPolicy {
+                                pacing: retry_policy(),
+                                give_up_after: None,
+                            },
                         },
                         client: named("emitter"),
                         exchange: nervix_models::RabbitMqExchangeName::parse("events")
@@ -1414,7 +1435,10 @@ mod tests {
             emitter(
                 EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
                     mode: nervix_models::HttpRequestPublishingMode::Ack {
-                        retry_policy: retry_policy(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: retry_policy(),
+                            give_up_after: None,
+                        },
                     },
                     client: named::<ClientName>("api"),
                     method: expression("'POST'"),

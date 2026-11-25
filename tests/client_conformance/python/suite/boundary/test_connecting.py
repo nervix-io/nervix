@@ -41,6 +41,29 @@ def test_an_option_the_session_cannot_use_is_refused_before_anything_is_sent(
     with pytest.raises(nx.InvalidArgumentError) as narrow:
         nx.Session(server, connection_window_bytes=65_534)
     assert "connection-window-bytes" in narrow.value.message
+    for capacity in (0, -1):
+        with pytest.raises(nx.InvalidArgumentError) as queue:
+            nx.Session(server, call_queue_capacity=capacity)
+        assert "call_queue_capacity" in queue.value.message
+    for limit in (0, -1, 1 << 32):
+        with pytest.raises(nx.InvalidArgumentError) as header_list:
+            nx.Session(server, header_list_bytes=limit)
+        assert "header_list_bytes" in header_list.value.message
+        with pytest.raises(nx.InvalidArgumentError) as send_buffer:
+            nx.Session(server, send_buffer_bytes=limit)
+        assert "send_buffer_bytes" in send_buffer.value.message
+        with pytest.raises(nx.InvalidArgumentError) as error_resets:
+            nx.Session(server, max_error_reset_streams=limit)
+        assert "max_error_reset_streams" in error_resets.value.message
+        with pytest.raises(nx.InvalidArgumentError) as remembered:
+            nx.Session(server, remembered_reset_streams=limit)
+        assert "remembered_reset_streams" in remembered.value.message
+    with pytest.raises(nx.InvalidArgumentError) as duration:
+        nx.Session(server, reset_stream_duration=float("nan"))
+    assert "reset_stream_duration" in duration.value.message
+    with pytest.raises(nx.InvalidArgumentError) as hasty:
+        nx.Session(server, connection_attempt_delay=0.005)
+    assert "connection-attempt-delay" in hasty.value.message
     with pytest.raises(nx.InvalidArgumentError):
         nx.Session(server, domain="not a domain")
     with pytest.raises(nx.InvalidArgumentError):

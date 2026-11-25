@@ -86,8 +86,8 @@ The source digest identifies which schedule produced the installed revision. A p
 also carries its predecessor digest, so an incremental application is attempted only when the
 currently installed revision is the predecessor it was planned against. Application plans each
 domain's change from the schedule that domain's execution runs ([Installation And
-Publication](#installation-and-publication)), so the two differ only for an execution installed
-outside schedule application. The handoff fingerprint
+Publication](#installation-and-publication)), and schedule application installs every domain
+execution a node runs, so the two match. The handoff fingerprint
 has a separate purpose: ownership preparation and activation must agree on the exact committed
 schedule, including its assignments and state generations. Planning preserves its established
 encoding and does not substitute the source digest for it.
@@ -270,9 +270,12 @@ runtime holds and records for that domain the committed schedule that produced i
 revision's schedule, or the one the domain kept. The next attempt, of the same revision or a later
 one, therefore plans every domain from the revision it runs, and a later revision reaches a domain
 a failed attempt moved forward in place, as it reaches every other domain. A domain without an
-execution records nothing and is planned as a domain the node does not run yet. So is a domain
-whose execution runs a revision schedule application did not install, which application reports
-as a warning: its next change replaces its execution
+execution records nothing and is planned as a domain the node does not run yet. Schedule
+application installs every domain execution, so no execution runs a revision it did not install;
+an activation request for a planned ownership move only waits for the application that activates
+it ([Planned Ownership Handoffs And Failover](control-plane.md#planned-ownership-handoffs-and-failover)).
+Should such an execution ever be found, application reports it as a warning and plans the domain
+as one the node does not run yet, so its next change replaces the execution
 ([Incremental Changes And Rebuilds](#incremental-changes-and-rebuilds)). A node starting after a
 forced ending first establishes its committed-state catch-up fence before installing execution;
 an earlier owner's local state cannot make it act under an obsolete assignment.
@@ -392,7 +395,7 @@ contains only typed runtime instructions:
 | Entity labels only | Publish the committed metadata while retaining execution, state, allowances, bindings, connections, buffers and ACK obligations. No pause, force flush, rebuild or relocation is required. |
 | Dynamic | Apply the typed capacity, processor, WASM reset, emitter flush, VHOST TLS or retired partition transition update; bind and publish the desired processor and error plans. A retired transition gates nothing and force-flushes nothing: each local unit the schedule keeps ends its claims in its own task, and each holding unit ends with its placement tasks. |
 | Entity swap | Fence affected input relays, force-flush as required, rebind reassigned placement and selected node tasks, then publish the desired revision and release the gates. A new partition epoch first gives every relay of the branch new boundary services for the new count on the same fan-out. Unaffected nodes and their branch state stay in place. |
-| Rebuild | Stop the preceding domain execution and install the complete desired running or passive revision. Domain-wide changes, a domain this node does not run yet, an execution installed outside schedule application, and lifecycle changes can require this path. |
+| Rebuild | Stop the preceding domain execution and install the complete desired running or passive revision. Domain-wide changes, a domain this node does not run yet, and lifecycle changes can require this path. |
 
 The schedule classifier retains Model-based change-aspect and quiescence decisions in the
 registry. The runtime receives typed dynamic values, affected node identities, state purges,
@@ -436,6 +439,17 @@ state of a relay that is no longer materialized, is deleted only once nothing el
 fail. Every stored state goes before any state held in memory, so a deletion that fails still finds
 the previous execution's state in memory, and a processor unit whose state is deleted starts its
 replacement only after the deletion.
+
+What an ingestor's input keeps at its broker is retired on the same terms. When a swap replaces an
+MQTT or Pulsar ingestor whose replacement no longer uses the preceding broker session or owned
+subscription, it stops the ingestor's units and, while it can still be undone, only prepares a
+replacement session at a broker session the preceding input never connected. It retires the
+preceding sessions and the owned subscription once nothing else of the swap can fail, before the
+revision publishes and the replacement starts. A failed swap therefore starts the previous ingestor
+again on what it left at its broker, with what the broker kept for it meanwhile. A retirement an MQTT
+replacement instance still owes its shared session outlives the domain execution on its node. A
+swap or rebuild that would let that instance run elsewhere under the same session and subscription
+retires the session first, while the change can still fail, and its failure fails the change there.
 
 The swap then fails. The node keeps the previous revision as the one it applied, records the
 failure and its reason in its [application progress](./command-completion.md#application-progress),
@@ -516,9 +530,10 @@ Transport headers remain connector-owned and enter a relay only when copied into
 fields.
 
 An input that owns external session state is retired from its previous typed plan after its ingestor
-tasks stop. `IngestorStartPlan` decides whether the ingestor changed, independently of codec or route
-changes. Runtime installation snapshots locally owned retiring inputs before withdrawing the
-installed revision, and the composition root dispatches retirement. Passive revisions retain the
+tasks stop, and in an entity swap only once nothing else of the swap can fail. `IngestorStartPlan`
+decides whether the ingestor changed, independently of codec or route changes. Runtime installation
+snapshots locally owned retiring inputs before withdrawing the installed revision, and the
+composition root dispatches retirement. Passive revisions retain the
 same plans, so removing an ingestor after `STOP` can still release its MQTT sessions. The MQTT
 host prepares its rendered client configurations, connector plan and resource mounts once
 per logical declaration on a node. Unit starts clone that immutable plan with their own read-ahead

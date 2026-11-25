@@ -20,19 +20,21 @@ use error_stack::{FrameKind, Report, ResultExt as _};
 use futures_util::stream;
 use meticulous::OptionExt as _;
 use nervix_backup::{RecordKind, SectionContent};
-use nervix_execution::{ChargedBytes, MemoryClass};
+use nervix_execution::{ChargedBytes, Executor, MemoryClass};
 use nervix_interconnect::{
     HandlerRegistrationError, RemoteOperationFailure, RemoteOperationSubject,
     StatePlacementEnvelope, StreamHandlerError, StreamingResponse, Transport,
 };
-use nervix_models::{DomainName, DomainStatus, ModelKind, NodeUnitRef, RestoreStateAuthority};
+use nervix_models::{
+    DomainName, DomainSchedule, DomainStatus, ModelKind, NodeUnitRef, RestoreStateAuthority,
+};
 use nervix_primitives::{
     sync::{Arc, Mutex as AsyncMutex, watch},
     time::Instant,
 };
 
 use super::{
-    CaptureSectionKey, CapturedSectionStage,
+    CaptureSectionKey, CapturedSection, CapturedSectionStage,
     cut_progress::{CaptureContext, CutPhase, CutProgress},
     restore_storage::RestoredStateSource,
 };
@@ -43,6 +45,41 @@ use crate::{
         RestoredRuntimeState, StagedArtifact, StagedSnapshotWriter,
     },
 };
+
+/// The restore metadata share a capture starts from. A capture that needs more is cut again within
+/// a share at least twice as large.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a capture's restore metadata share starts at one MiB and doubles to what its \
+                  cut needs"
+    )
+)]
+const CAPTURE_METADATA_SHARE: u64 = 1024 * 1024;
+
+/// The cut's progress, which every attempt of the capture records its phases in.
+pub(super) type SharedProgress<'p> = nervix_primitives::sync::blocking::Mutex<&'p mut CutProgress>;
+
+/// One node's share of a cut: the domain, whether it is quiesced, its status, and the entities
+/// the cut's schedule names this node the primary of.
+#[derive(Clone, Copy)]
+pub(super) struct LocalCut<'a> {
+    pub(super) domain: &'a DomainName,
+    pub(super) quiesced: bool,
+    pub(super) status: &'a DomainStatus,
+    pub(super) primaries: &'a ahash::HashSet<NodeUnitRef>,
+}
+
+/// What every attempt of one capture cuts and stages again.
+#[derive(Clone, Copy)]
+struct CaptureAttempt<'a, 'p> {
+    request: &'a CaptureDomainStateRequest,
+    status: &'a DomainStatus,
+    primaries: &'a ahash::HashSet<NodeUnitRef>,
+    schedule: Option<&'a DomainSchedule>,
+    progress: &'a SharedProgress<'p>,
+}
 
 /// A receiving node keeps one bounded install in its staging area until all chunks verify.
 pub(in crate::application) struct RestoreUploadEntry {
@@ -306,47 +343,42 @@ impl SessionServiceImpl {
     }
 
     /// Captures this node's share of a cut: the state of `primaries`, the entities the cut's
-    /// schedule names this node the primary of.
+    /// schedule names this node the primary of, charging everything the cut holds through
+    /// `executor`, which draws from the capture's allowances.
     pub(super) async fn capture_local_state(
         &self,
-        domain: &DomainName,
-        quiesced: bool,
-        status: DomainStatus,
-        primaries: ahash::HashSet<NodeUnitRef>,
-        progress: &mut CutProgress,
+        executor: &Executor,
+        cut: LocalCut<'_>,
+        progress: &SharedProgress<'_>,
     ) -> Result<CapturedDomainState, Report<RemoteOperationFailure>> {
+        let LocalCut {
+            domain,
+            quiesced,
+            status,
+            primaries,
+        } = cut;
         let runtime = self.inner.runtime.clone();
-        let checkpoint_primaries = primaries
-            .iter()
-            .filter(|primary| quiesced || primary.node.kind == ModelKind::Inferencer)
-            .cloned()
-            .collect::<ahash::HashSet<_>>();
-        if !checkpoint_primaries.is_empty() {
-            progress.enter(CutPhase::LifecycleCheckpoints);
-            runtime
-                .checkpoint_backup_branch_lifecycles(domain, &checkpoint_primaries)
-                .await
-                .change_context_lazy(|| {
-                    failure_context(domain, "backup state section operation failed")
-                })?;
-        }
-        progress.enter(CutPhase::StorageCapture);
+        progress.lock().enter(CutPhase::StorageCapture);
         let domain_owned = domain.clone();
-        let executor = runtime.executor().clone();
-        let reservation = executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context_lazy(|| failure_context(domain, "state capture admission failed"))?;
+        let status = status.clone();
+        let primaries = primaries.clone();
+        let cut_executor = executor.clone();
+        // The cut's job allocates nothing its token could be charged for: what the cut holds is
+        // charged through the capture's shares.
+        let reservation = executor.charge_nothing(MemoryClass::Bulk);
         let read = executor
             .run_storage(
                 nervix_execution::StorageClass::Filesystem,
                 reservation,
                 move |_charge, cancellation| {
                     runtime.capture_backup_state(
-                        &domain_owned,
-                        quiesced,
-                        status,
-                        &primaries,
+                        &cut_executor,
+                        crate::runtime::BackupCut {
+                            domain: &domain_owned,
+                            quiesced,
+                            status: &status,
+                            primaries: &primaries,
+                        },
                         cancellation,
                     )
                 },
@@ -356,6 +388,34 @@ impl SessionServiceImpl {
         read.change_context_lazy(|| {
             failure_context(domain, "backup state section operation failed")
         })
+    }
+
+    /// Checkpoint the branch lifecycles a cut of `primaries` reads, before the capture takes its
+    /// shares: the checkpoints run on the entities' own tasks, which take charges of their own,
+    /// so the capture never holds its shares while it waits for them.
+    async fn checkpoint_cut_lifecycles(
+        &self,
+        domain: &DomainName,
+        quiesced: bool,
+        primaries: &ahash::HashSet<NodeUnitRef>,
+        progress: &mut CutProgress,
+    ) -> Result<(), Report<RemoteOperationFailure>> {
+        let checkpoint_primaries = primaries
+            .iter()
+            .filter(|primary| quiesced || primary.node.kind == ModelKind::Inferencer)
+            .cloned()
+            .collect::<ahash::HashSet<_>>();
+        if checkpoint_primaries.is_empty() {
+            return Ok(());
+        }
+        progress.enter(CutPhase::LifecycleCheckpoints);
+        self.inner
+            .runtime
+            .checkpoint_backup_branch_lifecycles(domain, &checkpoint_primaries)
+            .await
+            .change_context_lazy(|| {
+                failure_context(domain, "backup state section operation failed")
+            })
     }
 
     pub(crate) async fn handle_backup_capture_request(
@@ -415,61 +475,54 @@ impl SessionServiceImpl {
             if let Some(schedule) = capture.schedule.domain(&request.domain) {
                 primaries.extend(schedule.primary_units_on(self.inner.consensus.local_node_id()));
             }
-            let state = self
-                .capture_local_state(
-                    &request.domain,
-                    request.quiesced,
-                    status,
-                    primaries,
-                    &mut progress,
-                )
-                .await?;
-            progress.enter(CutPhase::Staging);
-            let mut staged = self
-                .stage_guest_state_sections(
-                    state.guest_saves,
-                    capture.schedule.domain(&request.domain),
-                    &request,
-                )
-                .await?;
-            staged.extend(
-                self.stage_native_metadata_sections(
-                    state.native_metadata,
-                    capture.schedule.domain(&request.domain),
-                    &request,
-                )
-                .await?,
-            );
-            match state.materialized {
-                CapturedMaterializedState::Current(captured) => {
-                    staged.extend(
-                        self.stage_materialized_sections(
-                            captured,
-                            capture.schedule.domain(&request.domain),
-                            &request,
-                        )
-                        .await?,
-                    );
-                }
-                CapturedMaterializedState::Stored(captured) => {
-                    staged.extend(
-                        self.stage_stored_materialized_sections(
-                            captured,
-                            capture.schedule.domain(&request.domain),
-                            &request,
-                        )
-                        .await?,
-                    );
-                }
-            }
-            staged.extend(
-                self.stage_branch_state_sections(
-                    state.branch_states,
-                    capture.schedule.domain(&request.domain),
-                    &request,
-                )
-                .await?,
-            );
+            // The cut keeps what it captured while it stages it, and staging takes more of the same
+            // classes, so the cut and its staging are one attempt within shares of restore metadata
+            // and then bulk memory, which the capture waits for while it holds nothing of either.
+            // A capture that needs more gives everything back and is cut again within larger
+            // shares, so a full class holds the capture back and never refuses it.
+            self.checkpoint_cut_lifecycles(
+                &request.domain,
+                request.quiesced,
+                &primaries,
+                &mut progress,
+            )
+            .await?;
+            let schedule = capture.schedule.domain(&request.domain);
+            let bulk_share = self
+                .inner
+                .runtime
+                .backup_capture_bulk_bytes(&request.domain, &primaries);
+            let staged = {
+                let shared = SharedProgress::new(&mut progress);
+                let attempt = CaptureAttempt {
+                    request: &request,
+                    status: &status,
+                    primaries: &primaries,
+                    schedule,
+                    progress: &shared,
+                };
+                let executor = self.inner.runtime.executor();
+                let domain = &request.domain;
+                executor
+                    .within_allowance(
+                        MemoryClass::RestoreMetadata,
+                        CAPTURE_METADATA_SHARE,
+                        |metadata| async move {
+                            metadata
+                                .within_allowance(MemoryClass::Bulk, bulk_share, |bulk| async move {
+                                    self.capture_and_stage(&bulk, attempt).await
+                                })
+                                .await
+                                .change_context_lazy(|| {
+                                    failure_context(domain, "state capture admission failed")
+                                })?
+                        },
+                    )
+                    .await
+                    .change_context_lazy(|| {
+                        failure_context(&request.domain, "state capture admission failed")
+                    })??
+            };
             self.inner.captured_backup_sections.retain(|key, _| {
                 key.coordination != request.coordination || key.domain != request.domain
             });
@@ -497,8 +550,64 @@ impl SessionServiceImpl {
         result.map_err(project_failure)
     }
 
+    /// One attempt at this node's share of a cut and its staging, charging everything through
+    /// `executor`, which draws from the capture's shares. Everything it holds ends with it.
+    async fn capture_and_stage(
+        &self,
+        executor: &Executor,
+        attempt: CaptureAttempt<'_, '_>,
+    ) -> Result<Vec<CapturedSection>, Report<RemoteOperationFailure>> {
+        let CaptureAttempt {
+            request,
+            status,
+            primaries,
+            schedule,
+            progress,
+        } = attempt;
+        let state = self
+            .capture_local_state(
+                executor,
+                LocalCut {
+                    domain: &request.domain,
+                    quiesced: request.quiesced,
+                    status,
+                    primaries,
+                },
+                progress,
+            )
+            .await?;
+        progress.lock().enter(CutPhase::Staging);
+        let mut staged = self
+            .stage_guest_state_sections(executor, state.guest_saves, schedule, request)
+            .await?;
+        staged.extend(
+            self.stage_native_metadata_sections(executor, state.native_metadata, schedule, request)
+                .await?,
+        );
+        match state.materialized {
+            CapturedMaterializedState::Current(captured) => {
+                staged.extend(
+                    self.stage_materialized_sections(executor, captured, schedule, request)
+                        .await?,
+                );
+            }
+            CapturedMaterializedState::Stored(captured) => {
+                staged.extend(
+                    self.stage_stored_materialized_sections(executor, captured, schedule, request)
+                        .await?,
+                );
+            }
+        }
+        staged.extend(
+            self.stage_branch_state_sections(executor, state.branch_states, schedule, request)
+                .await?,
+        );
+        Ok(staged)
+    }
+
     pub(super) async fn stage_captured_section(
         &self,
+        executor: &Executor,
         bytes: Vec<u8>,
         domain: &DomainName,
     ) -> Result<StagedArtifact, Report<RemoteOperationFailure>> {
@@ -511,10 +620,7 @@ impl SessionServiceImpl {
             .await
             .change_context_lazy(|| failure_context(domain, "state staging quota is full"))?;
         if !bytes.is_empty() {
-            let charge = self
-                .inner
-                .runtime
-                .executor()
+            let charge = executor
                 .reserve(MemoryClass::Bulk, length)
                 .await
                 .change_context_lazy(|| {
@@ -1050,7 +1156,7 @@ mod tests {
         domain: &DomainName,
     ) -> CaptureSectionKey {
         let artifact = service
-            .stage_captured_section(vec![1, 2, 3], domain)
+            .stage_captured_section(service.inner.runtime.executor(), vec![1, 2, 3], domain)
             .await
             .assured("a three-byte section fits the staging quota");
         let key = CaptureSectionKey {

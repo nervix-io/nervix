@@ -337,9 +337,8 @@ pub use names::{
 pub use nervix_licensing_vocabulary::ActivationKind;
 pub use node_capabilities::{
     ConnectorHostCapabilities, ConsensusCapabilities, DnsAddressFamilies, DnsCapabilities,
-    EngineCapabilities, InterconnectCapabilities, InvalidPeerCapacity, MaxPeers,
-    MembershipCapabilities, NodeCapabilities, NodeCapabilityRecord, PeerReceiveBounds,
-    ShutdownCapabilities,
+    EngineCapabilities, InterconnectCapabilities, MembershipCapabilities, NodeCapabilities,
+    NodeCapabilityRecord, PeerReceiveBounds, ShutdownCapabilities,
 };
 pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
@@ -469,9 +468,9 @@ pub use statement::{
     DescribeLicense, DescribeLookup, DescribeParametrizer, DescribePlacement, DescribeReingestor,
     DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf,
     DescribeWindowProcessor, DomainConfig, DomainLifecycleCommand, DomainPace, DomainStartPoint,
-    DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EndpointKind,
-    EndpointType, ErrorPolicies, GeneralErrorPolicy, IngestTimestampSource, InspectionFormat,
-    LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind,
+    DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EmitterRetryPolicy,
+    EndpointKind, EndpointType, ErrorPolicies, GeneralErrorPolicy, IngestTimestampSource,
+    InspectionFormat, LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind,
     ParametrizerEviction, PartitionSeed, RelayBranching, Relocation, RelocationMember,
     RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
     RelocationUnitSelection, ResolvedBranching, ResolvedCodecWireFormat, RetryPolicy,

@@ -134,13 +134,11 @@ impl SessionServiceImpl {
         applied: Option<ClusterParameterRecord>,
     ) -> CommandResult {
         if applied.is_none() {
+            // Only the end of this command's task ends the loop's retries: a node that turns off
+            // ends that task with the rest of its service work, before any later step of its stop,
+            // and the leader that follows resumes the command from its record.
             loop {
                 nervix_primitives::task::consume_budget().await;
-                if self.inner.drain_support_shutdown.is_cancelled() {
-                    return command_error(
-                        "node stopped while applying cluster parameters".to_string(),
-                    );
-                }
                 let Some(inputs) = self.inner.consensus.cluster_parameter_planning_inputs() else {
                     return command_error(ConsensusConflict::ClusterParametersUnseeded.to_string());
                 };

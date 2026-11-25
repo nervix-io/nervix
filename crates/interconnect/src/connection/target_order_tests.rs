@@ -31,13 +31,11 @@ fn install_peers(state: &TransportState) -> Vec<ClusterNodeName> {
     for (index, peer) in PEERS.iter().enumerate() {
         let node = ClusterNodeName::parse(peer).expect("the peer names are valid node names");
         let port = 7500 + u16::try_from(index).expect("eight peers fit a port offset");
-        state
-            .install_outbound_target(
-                node.clone(),
-                NodeEndpoint::new("localhost", port),
-                OutboundDial::Advertised,
-            )
-            .expect("eight peers fit the default peer limit");
+        state.install_outbound_target(
+            node.clone(),
+            NodeEndpoint::new("localhost", port),
+            OutboundDial::Advertised,
+        );
         nodes.push(node);
     }
     nodes.sort();

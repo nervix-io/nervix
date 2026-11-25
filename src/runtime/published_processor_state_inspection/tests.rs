@@ -312,7 +312,6 @@ async fn sealed_window_rows_and_metadata_use_the_same_page_contract_as_resident_
     let mut decoded = decode_window_processor_layout(
         &bytes,
         &executor,
-        nervix_execution::QueueAdmission::RefuseWhenFull,
         WindowSnapshotSchemas {
             input: &input,
             arguments: &arguments,

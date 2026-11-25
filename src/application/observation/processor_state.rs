@@ -36,8 +36,8 @@ use nervix_models::{
 use nervix_primitives::time::timeout;
 
 use super::inspection_pages::{
-    add_counts, distinct_field, inspection_owner, inspection_refusal, rendered_inspection,
-    resume_position,
+    InspectionGrowth, add_counts, distinct_field, grow_inspection, inspection_owner,
+    inspection_refusal, rendered_inspection, resume_position,
 };
 use crate::{
     application::{AppError, command_result::CommandResult, session_service::SessionServiceImpl},
@@ -634,11 +634,7 @@ impl SessionServiceImpl {
             }
             ModelKind::Deduplicator | ModelKind::WindowProcessor => {
                 let executor = self.inner.runtime.inspection_executor();
-                let charge = executor
-                    .try_reserve(nervix_execution::MemoryClass::Bulk, 1)
-                    .map_err(|error| {
-                        inspection_refusal(error, StateInspectionRejection::NotReady)
-                    })?;
+                let charge = executor.charge_nothing(nervix_execution::MemoryClass::Bulk);
                 let domain = domain.clone();
                 let processor = processor.clone();
                 executor
@@ -1038,9 +1034,7 @@ impl SessionServiceImpl {
         let branch = plan.branch.clone();
         let limits = plan.limits;
         let executor = self.inner.runtime.inspection_executor();
-        let admission = executor
-            .try_reserve(nervix_execution::MemoryClass::Bulk, 1)
-            .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
+        let admission = executor.charge_nothing(nervix_execution::MemoryClass::Bulk);
         executor
             .run_cpu(
                 nervix_execution::CpuClass::Bulk,
@@ -1114,9 +1108,7 @@ impl SessionServiceImpl {
             }
         };
         let executor = self.inner.runtime.inspection_executor();
-        let admission = executor
-            .try_reserve(nervix_execution::MemoryClass::Bulk, 1)
-            .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
+        let admission = executor.charge_nothing(nervix_execution::MemoryClass::Bulk);
         let sections_layout = layout.sections.clone();
         let page_sections = page.sections;
         let sections = executor

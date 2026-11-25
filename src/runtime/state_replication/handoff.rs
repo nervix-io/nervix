@@ -37,31 +37,25 @@ pub(in crate::runtime) struct PreparedRuntimeStateHandoff {
     pub(in crate::runtime) checkpoints: Vec<(RuntimeStatePlacement, PersistedRuntimeStateEntry)>,
 }
 
+/// What lets the node's application of a schedule activate a prepared handoff state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runtime) enum OwnershipHandoffActivationAuthorization {
+    /// This run of the node prepared the state for the coordinator that holds the move, so the
+    /// schedule the move targets activates it.
     AuthorizedByPreparation,
-    RecoveredAwaitingRequest,
-    RecoveredAuthorized,
+    /// The node reloaded the preparation from its state store at startup. It names an earlier run
+    /// of this node, and this run refuses every activation request that names an earlier run, so
+    /// only its exact committed transition activates it.
+    AuthorizedByCommittedTransition,
 }
 
 impl OwnershipHandoffActivationAuthorization {
-    pub(super) fn is_authorized(self) -> bool {
-        self != Self::RecoveredAwaitingRequest
-    }
-
-    /// Authorizes activation and reports whether the recovered schedule must be rebuilt.
-    ///
-    /// A recovered preparation continues to request a rebuild until activation removes it. This
-    /// keeps a failed or cancelled rebuild retriable without making an ordinary handoff race its
-    /// normal schedule reconciliation with a second rebuild.
-    pub(super) fn authorize(&mut self) -> bool {
+    /// Whether applying a schedule that carries the preparation's target fingerprint activates the
+    /// preparation, given whether that schedule commits its exact transition.
+    pub(super) fn activates(self, committed_transition: bool) -> bool {
         match self {
-            Self::AuthorizedByPreparation => false,
-            Self::RecoveredAwaitingRequest => {
-                *self = Self::RecoveredAuthorized;
-                true
-            }
-            Self::RecoveredAuthorized => true,
+            Self::AuthorizedByPreparation => true,
+            Self::AuthorizedByCommittedTransition => committed_transition,
         }
     }
 }
@@ -198,14 +192,16 @@ impl ActivatedRuntimeStateHandoff {
 
 impl Runtime {
     /// Reconciles destination preparations against one applied schedule under the current leader
-    /// process. An exact committed transition always wins. An uncommitted preparation remains only
-    /// while the same coordinator process and both participant processes are still present and its
-    /// exact gate is held.
+    /// process. An exact committed transition always wins. An uncommitted preparation remains while
+    /// its move can still be committed: the leader process that prepared it still reconciles, and
+    /// the domain's committed schedule is still the base it was planned against, with the moved
+    /// unit still on its source. A participant's restart and the end of the hold do not end it,
+    /// because neither stops that leader from committing the move, and the coordinator discards
+    /// the preparations of a move it does not commit itself.
     pub(crate) fn reconcile_prepared_ownership_handoffs(
         &self,
         authority: &CoordinationIdentity,
         revision_plan: &PlannedClusterRevision,
-        node_incarnations: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
     ) -> OwnershipHandoffResult<usize> {
         let preparations = self
             .inner
@@ -215,7 +211,7 @@ impl Runtime {
             .collect::<Vec<_>>();
         let mut discarded = 0_usize;
         for (entity, prepared) in preparations {
-            let committed_or_active =
+            let committed_or_pending =
                 if let Some(change) = revision_plan.domains.get(&entity.entity.domain) {
                     let schedule_fingerprint = change.revision.ownership_handoff_fingerprint;
                     let scheduled = change.revision.nodes.get(&entity.entity.node);
@@ -225,11 +221,9 @@ impl Runtime {
                     if committed {
                         true
                     } else {
-                        let source_incarnation = node_incarnations.get(&prepared.source);
-                        let destination_incarnation = node_incarnations.get(&prepared.destination);
-                        let participants_match = source_incarnation
-                            == Some(&prepared.source_incarnation)
-                            && destination_incarnation == Some(&prepared.destination_incarnation);
+                        let same_leader = prepared.coordination.same_process_as(authority);
+                        let base_is_committed =
+                            prepared.base_schedule_fingerprint == schedule_fingerprint;
                         let source_still_owns_entity = if let Some(node) = scheduled
                             && let Some(unit) = node.units.get(&entity.unit)
                         {
@@ -244,21 +238,12 @@ impl Runtime {
                                     })
                             })
                         };
-                        prepared.coordination.same_process_as(authority)
-                            && participants_match
-                            && prepared.base_schedule_fingerprint == schedule_fingerprint
-                            && source_still_owns_entity
-                            && self.entity_gate_operation_owns_unit(
-                                &prepared.coordination,
-                                &entity.entity.domain,
-                                &NodeUnitRef::new(entity.entity.node.clone(), entity.unit),
-                                EntityGatePurpose::OwnershipHandoff,
-                            )
+                        same_leader && base_is_committed && source_still_owns_entity
                     }
                 } else {
                     false
                 };
-            if committed_or_active {
+            if committed_or_pending {
                 continue;
             }
             self.discard_prepared_ownership_handoff_state(

@@ -14,13 +14,16 @@ use nervix_lint_report::{CompilerReport, origin::SourceOrigins};
 
 use crate::{
     admission::{Compiled, Policy, target_kind},
-    configuration::{Configuration, Declaration, TOOLCHAIN},
+    configuration::{Configuration, Declaration, TOOLCHAIN, TOOLCHAIN_RUSTFLAGS},
     error::{Error, Issue, Result},
     evidence::{CargoArtifact, CargoMessage, ExpectedTarget, Measurement, Metadata},
     identity,
     identity::Identity,
     io, process,
 };
+
+/// Cargo separates the flags of `CARGO_ENCODED_RUSTFLAGS` with the ASCII unit separator.
+const ENCODED_FLAG_SEPARATOR: char = '\u{1f}';
 
 pub struct Runner {
     pub root: PathBuf,
@@ -87,6 +90,7 @@ impl Runner {
         );
         environment.insert("NERVIX_RATCHET_ROOT".into(), root.display().to_string());
         environment.insert("CARGO_TARGET_DIR".into(), target.display().to_string());
+        Self::select_toolchain_flags(&mut environment);
         if environment
             .get("NERVIX_NATIVE_COVERAGE_ATTEMPT")
             .is_some_and(|value| !value.is_empty())
@@ -144,6 +148,25 @@ impl Runner {
             environment,
             work,
         })
+    }
+
+    /// Ends the compiler flags Cargo reads from `environment` with [`TOOLCHAIN_RUSTFLAGS`], after
+    /// the caller's own. The workspace wrapper hands only workspace crates to the driver, so these
+    /// flags are what the dependencies of every Cargo command the runner starts compile with.
+    fn select_toolchain_flags(environment: &mut BTreeMap<String, String>) {
+        // Cargo reads the encoded flags alone when they are set.
+        if let Some(encoded) = environment.get_mut("CARGO_ENCODED_RUSTFLAGS") {
+            if !encoded.is_empty() {
+                encoded.push(ENCODED_FLAG_SEPARATOR);
+            }
+            encoded.push_str(TOOLCHAIN_RUSTFLAGS);
+            return;
+        }
+        let flags = environment.entry("RUSTFLAGS".into()).or_default();
+        if !flags.is_empty() {
+            flags.push(' ');
+        }
+        flags.push_str(TOOLCHAIN_RUSTFLAGS);
     }
 
     pub fn failure(

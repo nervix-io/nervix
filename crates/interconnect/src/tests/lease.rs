@@ -15,54 +15,6 @@
 use super::*;
 use crate::connection::StreamLease;
 
-// This real-network fixture enters the ordinary runtime from external contender threads.
-// Production slot ownership has its separately registered Shuttle check.
-#[cfg(not(feature = "shuttle"))]
-#[nervix_primitives::test]
-async fn concurrent_peer_registration_preserves_the_publication_limit() {
-    let options = TransportOptions {
-        max_peers: 1,
-        ..TransportOptions::default()
-    };
-    let ConnectedTransports {
-        transport_a,
-        transport_b,
-        ..
-    } = bound_transports_with_options(options).await;
-    let barrier =
-        nervix_primitives::sync::Arc::new(nervix_primitives::sync::blocking::Barrier::new(3));
-    let runtime = nervix_primitives::runtime::Handle::current();
-    let mut contenders = Vec::new();
-    for name in ["peer-left", "peer-right"] {
-        let transport = transport_a.clone();
-        let barrier = barrier.clone();
-        let runtime = runtime.clone();
-        let endpoint = NodeEndpoint::new("localhost", transport_b.local_addr().port());
-        contenders.push(nervix_primitives::thread::spawn(move || {
-            let _entered = runtime.enter();
-            barrier.wait();
-            transport.register_outbound_target(
-                ClusterNodeName::parse(name).expect("valid contender identity"),
-                endpoint,
-            )
-        }));
-    }
-    barrier.wait();
-    let results = contenders
-        .into_iter()
-        .map(|contender| contender.join().expect("registration contender finishes"))
-        .collect::<Vec<_>>();
-    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-    for error in results.into_iter().filter_map(Result::err) {
-        assert!(matches!(
-            error.current_context(),
-            TransportError::PoolExhausted
-        ));
-    }
-    transport_a.shutdown(crate::test_teardown_ceiling()).await;
-    transport_b.shutdown(crate::test_teardown_ceiling()).await;
-}
-
 #[nervix_primitives::test]
 async fn leasing_a_stream_from_an_established_pool_does_not_allocate() {
     let ConnectedTransports {

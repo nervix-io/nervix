@@ -310,6 +310,8 @@ Feature: Emitter metrics
       | 1            |
       | 3            |
 
+  # A refused destination is retried like an outage; GIVE UP AFTER 0s never retries, so the emitter
+  # makes exactly one attempt and fails its row.
   @emitter_outcomes
   Scenario Outline: A receiver that refuses the OTEL endpoint counts one misconfigured destination attempt
     Given HTTP receiver "collector" is running
@@ -332,7 +334,7 @@ Feature: Emitter metrics
         'timeout_ms' = 5000
       };
       CREATE OTEL LOGS EMITTER refused_logs FROM events TO collector
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s GIVE UP AFTER 0s
         VALUES { 'time' = now(), 'body' = 'event' } ATTRIBUTES { 'event.seq' = input.seq }
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;

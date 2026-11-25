@@ -81,8 +81,17 @@ installers a single winner, replacement, teardown, and observers.
 
 MQTT input retirement is a cold lifecycle path. It snapshots locally owned typed entrypoint
 plans from the installed execution, releases the registry guard, stops the ingestor tasks, and
-then performs network cleanup and replacement preparation. Each connection has one mutable
-owner; simultaneous attempts are bounded by the declared ingestor instance count. Matching session
+then performs replacement preparation and network cleanup; an entity swap cleans the preceding
+sessions only once nothing else of it can fail. Each connection has one mutable
+owner; simultaneous attempts are bounded by the declared ingestor instance count. The
+`MqttSessionRetirement` a replacement instance carries is one flag on its own allocation: the
+instance completes it from its own task once subscribed, and the host completes it before any
+instance starts, or reads it when it starts the unit's next instance or settles it before a move,
+after the previous instance's task ended. It publishes nothing else, so its relaxed loads and stores
+make no ordering claim. The node keeps the flags in `RuntimeInner::mqtt_session_retirements`, one
+entry per domain and ingestor, which only schedule application writes and which a unit start reads
+once; no record, batch or acknowledgement path reaches it, and no guard is held across a
+retirement's connection. Matching session
 identities keep their broker state across instance-count changes. The public drop, topic-change
 and unavailable-endpoint scenarios are registered for active, order and stressed lifecycle
 diagnostics. MQTT sockets, asynchronous waits and concurrent-map internals remain outside the
@@ -494,10 +503,12 @@ Materialized capture shares row carriers under the existing assignment barrier, 
 revision, ownership fence and branch generation. Membership insertion and eviction use that same
 barrier; ordinary updates of existing branches keep their existing admission protocol. Fresh
 backup capture admits its bounded row-view metadata before allocation. Archive conversion stages
-one identity/Arrow group at a time. Native loading bounds row-view metadata by the resolved relay memory budget, admits its
-metadata through State Read, charges retained decoded columns to relay memory through installation, and
-uses bulk memory for one section's decoding scratch. A cumulative relay admission refusal ends
-loading instead of waiting while retaining earlier groups. A pinned database reader retains one
+one identity/Arrow group at a time. Native loading bounds row-view metadata by the resolved relay
+memory budget. Its row metadata and the decoded columns it retains through installation are drawn
+from one State Read share, which it waits for while it holds nothing of that class; a load that
+outgrows its share gives everything back and reads the container again within the share it
+needed, so it never waits for more while retaining earlier groups. Each section's bytes and its
+decoding scratch are one bulk charge, taken while the load holds nothing else of the bulk class. A pinned database reader retains one
 snapshot and one stored chunk through all section reads. Replica installation checks monotonic
 revision under the existing exclusive assignment barrier before replacing any entry.
 
@@ -846,6 +857,64 @@ Publication, acknowledgement and retry scheduling read no counter. A scenario re
 per armed name until its injector ends. This observation does not supply protocol ordering or
 concurrency evidence; production-owner checks and public delivery assertions keep their own
 contracts.
+
+## Control Commands Beside Data Work
+
+A runtime owner serves two planes that want opposite things. Its control commands are light and
+rare, and someone waits for each answer: lifecycle steps, checkpoints, handoffs, resets,
+partition-move steps, inspections and stops. Its data work is heavy and backpressured: batches,
+branch builds, restores, encodes and decodes wait for a place on a worker class or for room in a
+memory class whenever the node is busy, as [Execution Primitives](./execution-primitives.md)
+requires.
+
+So a command never triggers heavy work by blocking the answers to its owner's other commands. Heavy
+work a command needs runs on the owner's data side, and the command is answered when that work
+completes, while the owner keeps answering its other commands. The owner never refuses that work to
+stay responsive either: the work still waits for capacity, and only the other commands stop waiting
+behind it.
+
+New owners serve the two planes from separate tasks. A processor unit still serves both from one
+supervisor loop, which dispatches the unit's input to its branches and handles every
+`ProcessorNodeCommand`. A checkpoint, a handoff and a WASM reset's preparation drain that input
+before they are handled, which orders them within the data stream.
+
+Until the planes are separate there, the loop runs three heavy steps as attempts, each of which can
+wait for a place on the workers or for room in a memory class:
+
+- restoring the unit's branches, which reopens the retained state of the lifetimes they resume;
+- building a claimed key's branch, which reopens the state the claim brought;
+- building the branch of a key the unit has not seen, as an inferencer does while it reads its
+  carried state.
+
+An attempt runs alone while it makes progress, so commands keep their order behind work that moves.
+Once it waits, the loop answers its commands beside it:
+
+- While the restore waits, the loop answers commands that need the branches as unrestored, as
+  [Restoring Processor Branches](./shutdown.md#restoring-processor-branches) states. Those answers
+  are light, so the loop is soon back driving the restore.
+- A claimed key's build that waits goes on on a task of its own and reports the built branch back
+  through the unit's commands. Meanwhile the loop goes on with everything else, further claims build
+  beside it, and the key's input stays parked until the report installs the branch ([Partition
+  transitions and key claims](#partition-transitions-and-key-claims)).
+- A new key's build that waits goes on on a task of its own too, and its first batch waits with it.
+  Meanwhile the loop takes no new input. It answers state inspections and runs its lifecycle
+  snapshots and claim retries beside the build. Every other event follows the build, in the order it
+  arrived: input a drain delivers, and every command that drains input, changes the unit's branches
+  or dispatches input. An expiry scan waits too, since it would change the branch registry the
+  build's lifetime was allocated from. A stop or a handoff waits for the build, which holds a batch
+  the unit accepted.
+
+A build that waits leaves the loop because of how the executor grants capacity. It hands a freed
+place, or freed room, to the waiter first in line, and only that waiter's own progress uses it. So a
+build the loop stopped driving, while it handled a command that itself waits for capacity, could
+hold what that command waits for.
+
+A WASM reset's rebuilds build branches whose guest their branch task instantiates later, so they
+wait for nothing in the loop. The reset's preparation, which builds a fresh guest for each branch
+it reaches, and its commit still run inline. They are heavy work a command starts in a loop that
+still serves both planes: commands queued behind them wait with them until the planes are separate
+tasks. So does data work in that loop, such as a batch dispatched to a branch whose input is full,
+which waits for capacity as backpressure.
 
 ## Mutable Execution State
 
@@ -1899,9 +1968,15 @@ it in. Its key is `(domain, entity, epoch, branch key)`.
    checkpoint. Batches the branch held for `REQUIRED WAIT` are refused, since their
    acknowledgements cannot move between nodes. A materialized holder answers with the key's row.
 3. A processor claimant fetches each checkpoint through `FetchStateCheckpoint` on the bulk pool,
-   writes it under its own placement as the placement's newest revision, starts the branch as a
-   restored lifetime with the holder's incarnation, persists its lifecycle and runs the parked
-   input in arrival order. A materialized claimant takes the released row as one Arrow section of
+   writes it under its own placement as the placement's newest revision, and builds the branch as
+   a restored lifetime with the holder's incarnation. The build reopens the branch's retained state
+   on the node's bulk workers and memory classes, and when they are full it waits for a place or
+   for room rather than being refused and the claim tried again. It runs as an attempt: alone in
+   the unit's supervisor while it makes progress, and once it waits, on a task of its own that
+   reports the built branch back through the unit's commands. Meanwhile the unit answers its
+   commands and takes its other keys' input, the key's input stays parked, and further claims
+   build beside it. The claimant then starts the branch, persists its lifecycle and runs the
+   parked input in arrival order. A materialized claimant takes the released row as one Arrow section of
    the relay's schema, installs it in its state task before anything else of the key, and applies
    the parked batches in arrival order, keeping each key's latest record by timestamp.
 4. Only then does the claimant ask the holder to forget the key: a processor claimant once its
@@ -1914,7 +1989,11 @@ retries the claim, and a holder that restarted restores the released key as a li
 releases it again. A released slot or row expires by the branch TTL counted from its release. Claim
 results reach the claimant's supervisor or state task through its own command channel, so a unit
 keeps answering its holders' requests while its own claims are in flight and two units claiming
-from each other cannot deadlock. A failed step is tried again after the runtime's reconnect backoff,
+from each other cannot deadlock. A claimed branch's build that waits for capacity reports the same
+way, and the end of the unit's moves (its stop, its handoff or its retired transition) ends that
+wait. A retained branch that resumes once its origin is confirmed builds the same way, and a
+forget or the expiry of its released slot while the build waits drops what was built: the key's
+location then resolves as if the slot had never been retained. A failed step is tried again after the runtime's reconnect backoff,
 which grows with each failure; each request is bounded by the partition-transition request's
 deadline.
 
@@ -3678,6 +3757,32 @@ claim. The turn is an async mutex, outside Deloxide's tracked-lock detection. Th
 `@abandoned_installation` scenario cover the stopped domain's teardown that a dropped drain-status
 request handler began.
 
+A node's licensing requests take one request turn, `LicensingRequests` in
+`src/application/licensing/request_turn.rs`: an operator's statement through `foreground`, and an
+automatic refresh, a resumed release or an activation's preparation through `background`. The turn
+publishes how many operators wait for it through a watch, counting each request from the moment it
+asks until it holds the turn or its statement stops waiting. The attempt holding the turn waits on
+that watch, which observes every change after the value it last read: a release gives the turn back
+while any operator waits, and a refresh between retries retries at once for every operator request
+it has not been hurried for. One stored wakeup could not carry this: two operators asking together
+leave one, and a release that took the turn between them never learned that the second still
+waited. `shuttle_a_release_holding_the_turn_always_gives_it_back_to_a_waiting_operator` and
+`shuttle_a_refresh_retry_holding_the_turn_is_always_hurried_for_a_waiting_operator` in
+`src/application/licensing/request_turn_shuttle_tests.rs` race two operators against a background
+attempt holding the turn; the model has no clock, so a request that reaches no attempt leaves an
+operator waiting behind an attempt that never wakes, which Shuttle reports as a deadlock. The
+checks found that schedule against the stored wakeup.
+`shuttle_an_uncontended_operator_request_leaves_no_wakeup_for_the_next_attempt` requires that an
+operator's own request never hurries the attempt it makes, and that nothing hurries or interrupts
+the next attempt once every operator has had its turn;
+`shuttle_a_notification_hurries_a_refresh_retry_but_never_takes_an_operators_place` that a service
+notification hurries a refresh retry and never makes a release give its turn away; and
+`shuttle_a_queued_background_attempt_consumes_the_notification_that_preceded_its_turn` that an
+attempt's first retry keeps its backoff against a notification it already represents. This is a
+control-plane ordering check without a memory-ordering claim. The turn, the watch and the
+notification are asynchronous and outside Deloxide's tracked-lock detection; the owner tests beside
+the turn replay the found order step by step.
+
 Consensus storage admits each Commands or Bulk working set through independent class-specific
 turns before asking its memory class, and a working set returns its bytes before its turn passes.
 Each Shuttle check holds one working set while a second admission waits for its turn and a progress
@@ -3703,7 +3808,7 @@ A family of names means each member runs independently through the recipe.
 | Application progress (`src/application/completion/progress.rs`) | `shuttle_a_barrier_that_observes_before_it_reads_sees_every_racing_report_and_advance` requires an advance or report racing a barrier's observation to wake that barrier. `shuttle_racing_reports_of_one_incarnation_keep_its_newest_progress` requires late reports to preserve every phase's newest revision. Both drive the production watch owner. |
 | Authority delivery attachments (`src/application/domain_clock/attachments/tests.rs`) | `shuttle_attachment_replacement_and_stop_wake_the_exact_delivery_lifetime` checks that replacement and stop cancel the selected lifetime. `shuttle_an_attachment_survives_a_preceding_availability_snapshot` and `shuttle_a_duplicate_attachment_survives_a_preceding_availability_snapshot` require an attachment accepted during observation to survive the earlier availability read. These checks drive the production attachment owner; network delivery remains outside their scope. |
 | Waiter registration and cancellation (`crates/primitives/src/tests/shuttle_races.rs`) | `shuttle_reaches_a_notify_waiters_published_between_a_read_and_the_registration` and `shuttle_reaches_a_send_between_a_read_and_the_subscription` require a waiter that reads before it registers to deadlock in some schedule, which shows the scheduler reaches a publication between the read and the registration; `shuttle_registering_before_reading_never_misses_a_notify_waiters` and `shuttle_subscribing_before_reading_never_misses_a_send` require the correct order never to lose one. `shuttle_reaches_a_wake_between_a_read_and_the_waker_registration` and `shuttle_registering_the_waker_before_reading_never_misses_a_wake` hold an atomic waker to the same pair. `shuttle_a_notify_one_between_a_read_and_the_registration_is_kept_as_the_permit` shows a single notification's permit makes the other order correct for `notify_one`, and `shuttle_a_waiter_cancelled_as_it_is_notified_passes_the_notification_on` requires the surviving waiter to complete however a cancellation and a notification interleave. |
-| Execution budgets and storage jobs (`crates/execution/src/tests.rs`) | `shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity` keeps live reservations within each class capacity, including optional state-read retention while the live relay class is full; `shuttle_occupied_bulk_execution_leaves_control_execution_untouched` keeps bulk saturation from charging control; `shuttle_occupied_connector_leaves_filesystem_and_consensus_execution_untouched` keeps a held connector call from consuming filesystem or consensus admission; `shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot` and `shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit` balance queue slots and permits across drop and cancellation; `shuttle_full_wait_queue_is_exact_typed_backpressure` checks a full wait queue's typed rejection; `shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place` requires a job that waits for a place to take the first one freed and run before a job refused when full that asks after it; `shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge` returns a dropped waiter's charge, stops counting it among the class's waiting jobs and hands its place to the job waiting after it; `shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit` checks storage admission order and permit return. |
+| Execution budgets and storage jobs (`crates/execution/src/tests.rs`) | `shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity` keeps live reservations within each class capacity, including optional state-read retention while the live relay class is full; `shuttle_occupied_bulk_execution_leaves_control_execution_untouched` keeps bulk saturation from charging control; `shuttle_occupied_connector_leaves_filesystem_and_consensus_execution_untouched` keeps a held connector call from consuming filesystem or consensus admission; `shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot` and `shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit` balance queue slots and permits across drop and cancellation; `shuttle_a_full_wait_queue_holds_the_next_job_until_a_place_frees` holds the next job of a full queue without a place or a worker until one frees; `shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place` requires a job that waits for a place to take the first one freed and run before a job that asks after it; `shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge` returns a dropped waiter's charge, stops counting it among the class's waiting jobs and hands its place to the job waiting after it; `shuttle_cpu_preparation_returns_waiting_and_reserved_places_with_their_charges` returns a dropped preparation's place and charge whether it waited or held its place; `shuttle_a_growing_job_that_ran_short_waits_for_its_charge_holding_nothing` grants a charge queued behind a growing job the room the job gave back before it waits for its larger charge; `shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit` checks storage admission order and permit return. |
 | Force-flush obligations (`src/runtime/force_flush.rs`) | `shuttle_two_participant_generation_waits_for_every_obligation` prevents completion before all participants live at publication complete and redelivers a dropped, unhandled completion; `shuttle_stale_completions_never_clear_a_newer_generation` prevents an old completion from clearing new work; `shuttle_published_generation_wakes_a_waiting_participant` catches a lost publication wakeup; `shuttle_participant_lifecycle_balances_obligations_through_close` balances `pending()` across subscribe, request, participant drop, and close. |
 | Ingestor intake (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestor_quiesce.rs`) | `shuttle_broker_ingestor_observes_engagement_during_dispatch`, `shuttle_paced_ingestor_observes_engagement_during_dispatch`, and `shuttle_request_ingestor_observes_engagement_during_dispatch` exercise host-loop engagement for memory pressure, entity gate, handoff, and shutdown: after engagement returns, no further payload dispatches, and a change during dispatch is observed. `shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads` keeps the open decision independent of a retained-payload lock. `shuttle_a_new_quiesce_ends_a_delivery_waiting_for_extension_room` and `shuttle_a_shutdown_ends_a_delivery_waiting_for_extension_room` race the engagement or the stop against a retained payload's delivery waiting for a place the extension class never frees: the waiter registers before it reads, so the delivery always ends, and its payload is back at the front of the buffer counted as it was. `shuttle_a_new_quiesce_decides_again_on_a_live_payload_waiting_for_extension_room` and `shuttle_a_stop_ends_a_live_payload_waiting_for_extension_room` race a `BUFFER` engagement or the stop against a live payload waiting for such a place: the wait always ends, a new decision becomes the one the payload is decided under next and its buffer retains it, counted with its bytes, and a stop leaves nothing retained. `shuttle_a_payload_racing_the_stop_of_a_paused_buffering_ingestor_is_retained_for_the_cut_or_dispatched` races a domain stop's intake engagement against a payload a paused `BUFFER` ingestor receives: a payload decided under the pause is retained and stays counted for the stop's teardown to discard and report, one decided once the stop holds dispatches and is never retained, nothing retained replays while the stop holds, polling ends and endpoint admission refuses, and a stop called off replays everything the pause retained. |
 | Broker ingestor confirmation (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestors/connector.rs`, `src/runtime/ingestors/connector_acknowledgement.rs`, `src/runtime_ack.rs`) | `shuttle_a_drain_waits_for_the_transport_to_confirm_a_resolved_batch` lets a drain read the domain's ownership-handoff count at any point while the graph resolves the two confirmed roots of one batch in either order and the ingestor's transport takes a round trip to confirm the batch. Whenever the drain reads no outstanding work, every batch whose roots resolved has been confirmed, and the count returns to zero once it is. The check fails under a batch acknowledgement that releases the last root before the loop drops it, and under a root released as it resolves. |
@@ -4327,8 +4432,11 @@ Public connection leases are owned by the socket I/O wrapper and survive HTTP up
 expiry observes read and write progress; completed connection tasks are reaped during service.
 The HTTP/1 body collector and its plaintext I/O owner share only a bounded allocation-accounting
 ledger behind one selected blocking mutex. It stores one read range, an aggregate executor
-reservation and an optional typed refusal; no records, ACKs or graph state are shared there. The
-lock is never held over I/O, a wait, a copy or graph dispatch. Its input guard releases the charge
-on cancellation/refusal, or transfers it to the exclusively owned assembled body. Multi-frame
+reservation, an optional typed refusal and, while a read waits for room for an allocation its
+charge does not cover yet, that read's pending charge; no records, ACKs or graph state are shared
+there. The read polls its pending charge under the lock without blocking and returns pending until
+the class grants it, so the lock is never held over I/O, a wait, a copy or graph dispatch. Its input
+guard releases the charge, and drops a pending one with its place in the class's queue, on
+cancellation/refusal, or transfers it to the exclusively owned assembled body. Multi-frame
 assembly carries its reservation onto the executor worker through cancellation. The registered production-owner Shuttle check explores allocation observation racing input cancellation
 and verifies that the entire charge returns. This adds no concurrent map and changes no concurrent-map ledger entry.

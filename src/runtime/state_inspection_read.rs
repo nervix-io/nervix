@@ -297,7 +297,7 @@ impl Runtime {
         schema: &nervix_primitives::sync::StdArc<arrow_schema::Schema>,
     ) -> Result<PageSource, Report<StatePageReadError>> {
         let stored = self
-            .open_stored_materialized_snapshot(None, placement)
+            .open_stored_materialized_snapshot(executor, None, placement)
             .await
             .change_context(StatePageReadError::Stored)?;
         let count = match &stored {

@@ -1558,9 +1558,12 @@ mod tests {
             connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
                 ZeroMqPushEmitter {
                     mode: crate::ZeroMqPushPublishingMode::NoAck {
-                        retry_policy: RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("emitter"),
@@ -1932,9 +1935,12 @@ mod tests {
         client.connector = Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
             ZeroMqPushEmitter {
                 mode: crate::ZeroMqPushPublishingMode::NoAck {
-                    retry_policy: crate::RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "30s".to_string(),
+                    retry_policy: crate::EmitterRetryPolicy {
+                        pacing: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                        give_up_after: None,
                     },
                 },
                 client: named("emitter_two"),
@@ -1951,9 +1957,12 @@ mod tests {
         connector.connector = Box::new(EmitterEntity::Nats(NatsEmitter::Subject(
             NatsSubjectEmitter {
                 mode: crate::NatsSubjectPublishingMode::NoAck {
-                    retry_policy: crate::RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "30s".to_string(),
+                    retry_policy: crate::EmitterRetryPolicy {
+                        pacing: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                        give_up_after: None,
                     },
                 },
                 client: named("emitter"),
@@ -2042,9 +2051,12 @@ mod tests {
             panic!("expected ZeroMQ");
         };
         destination.mode = crate::ZeroMqPushPublishingMode::NoAck {
-            retry_policy: RetryPolicy {
-                backoff: "500ms".to_string(),
-                max_backoff: "45s".to_string(),
+            retry_policy: crate::EmitterRetryPolicy {
+                pacing: RetryPolicy {
+                    backoff: "500ms".to_string(),
+                    max_backoff: "45s".to_string(),
+                },
+                give_up_after: None,
             },
         };
         assert_single_aspect(

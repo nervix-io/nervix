@@ -195,14 +195,12 @@ async fn probe_peer(probe_response: wire::AppendEntriesResponseRecord) -> ProbeP
     };
     let leader_transport = bind(leader.clone()).await;
     let follower_transport = bind(follower.clone()).await;
-    leader_transport
-        .register_outbound_target(
-            follower.clone(),
-            format!("localhost:{}", follower_transport.local_addr().port())
-                .parse()
-                .assured("valid follower endpoint"),
-        )
-        .assured("test follower registers");
+    leader_transport.register_outbound_target(
+        follower.clone(),
+        format!("localhost:{}", follower_transport.local_addr().port())
+            .parse()
+            .assured("valid follower endpoint"),
+    );
     let live = BTreeSet::from([leader.clone(), follower.clone()]);
     leader_transport.replace_live_nodes(&live);
     follower_transport.replace_live_nodes(&live);

@@ -131,6 +131,8 @@ fn options_timeout<'local>(
         4 => options.backup_wait_timeout = duration,
         5 => options.keepalive_interval = duration,
         6 => options.keepalive_timeout = duration,
+        7 => options.reset_stream_duration = duration,
+        8 => options.connection_attempt_delay = duration,
         _ => {
             return Err(Error::argument(
                 "timeout",
@@ -152,13 +154,40 @@ fn options_window<'local>(
     kind: jint,
     bytes: jlong,
 ) -> Result<(), crate::error::Error> {
-    let window = host::Session::receive_window("bytes", bytes)?;
+    let window = host::Session::byte_bound("bytes", bytes)?;
     let options = mutable!(handle).options_mut()?;
     match kind {
         1 => options.stream_window_bytes = window,
         2 => options.connection_window_bytes = window,
         _ => {
             return Err(Error::argument("window", "does not name a receive window"));
+        }
+    }
+    Ok(())
+}
+
+native!(options_limit(handle: long, kind: int, value: long) -> ());
+
+/// Sets the call queue capacity (`1`), the header list bytes (`2`), the send buffer bytes (`3`),
+/// the error-reset streams (`4`) or the remembered reset streams (`5`). Zero and negatives, and a
+/// byte bound or stream count no `u32` holds, are refused here; a call queue beyond the native
+/// channel limit is refused at connect.
+fn options_limit<'local>(
+    _env: &mut jni::Env<'local>,
+    _class: jni::objects::JClass<'local>,
+    handle: jlong,
+    kind: jint,
+    value: jlong,
+) -> Result<(), crate::error::Error> {
+    let options = mutable!(handle).options_mut()?;
+    match kind {
+        1 => options.call_queue_capacity = host::Session::queue_capacity("value", value)?,
+        2 => options.header_list_bytes = host::Session::byte_bound("value", value)?,
+        3 => options.send_buffer_bytes = host::Session::byte_bound("value", value)?,
+        4 => options.max_error_reset_streams = host::Session::stream_count("value", value)?,
+        5 => options.remembered_reset_streams = host::Session::stream_count("value", value)?,
+        _ => {
+            return Err(Error::argument("limit", "does not name a connection limit"));
         }
     }
     Ok(())
@@ -452,6 +481,7 @@ pub(crate) const METHODS: &[jni::NativeMethod] = &[
     options_seeds::METHOD,
     options_timeout::METHOD,
     options_window::METHOD,
+    options_limit::METHOD,
     cancel_new::METHOD,
     cancel_deadline::METHOD,
     cancel_trigger::METHOD,

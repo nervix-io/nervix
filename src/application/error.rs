@@ -142,6 +142,8 @@ pub enum AppError {
     InvalidOperationalCapabilities,
     #[error("invalid trace export settings")]
     InvalidTraceExportSettings,
+    #[error("invalid web console pacing")]
+    InvalidWebConsoleSettings,
     #[error("invalid native runtime capacity")]
     InvalidRuntimeCapacity,
     #[error("invalid peer receive settings")]

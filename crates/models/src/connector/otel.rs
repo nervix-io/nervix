@@ -578,18 +578,18 @@ impl OtelMetricKind {
 
 super::publishing::emitter_modes! {
     pub enum OtelLogsPublishingMode {
-        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
+        Ack { retry_policy: crate::EmitterRetryPolicy } => RequestAck,
     }
 }
 
 super::publishing::emitter_modes! {
     pub enum OtelTracesPublishingMode {
-        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
+        Ack { retry_policy: crate::EmitterRetryPolicy } => RequestAck,
     }
 }
 
 super::publishing::emitter_modes! {
     pub enum OtelMetricsPublishingMode {
-        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
+        Ack { retry_policy: crate::EmitterRetryPolicy } => RequestAck,
     }
 }

@@ -1573,6 +1573,11 @@ impl SessionServiceImpl {
             }));
         }
         handoff.preparations.mark_publication_may_be_in_flight();
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_ownership_handoff_commit_if_armed(domain)
+            .await;
         Ok(Some(handoff))
     }
 
@@ -2170,14 +2175,18 @@ impl SessionServiceImpl {
         let schedule = self.inner.consensus.current_schedule().await;
         let revision_plan = PlannedClusterRevision::between(None, &schedule)
             .map_err(|error| OwnershipHandoffError::schedule(format!("{error:#}")))?;
-        let node_incarnations = self.available_node_incarnations().await;
-        let discarded = self.inner.runtime.reconcile_prepared_ownership_handoffs(
-            &request.coordination,
-            &revision_plan,
-            &node_incarnations,
-        )?;
-        Ok(u64::try_from(discarded)
-            .assured("a preparation map indexed in memory cannot exceed the u64 range"))
+        let discarded = self
+            .inner
+            .runtime
+            .reconcile_prepared_ownership_handoffs(&request.coordination, &revision_plan)?;
+        let discarded = u64::try_from(discarded)
+            .assured("a preparation map indexed in memory cannot exceed the u64 range");
+        #[cfg(feature = "testing")]
+        self.inner.runtime.record_ownership_handoff_reconciliation(
+            self.inner.consensus.local_node_id(),
+            discarded,
+        );
+        Ok(discarded)
     }
 
     pub(in crate::application) fn register_prepare_ownership_handoff_handler(
@@ -2480,7 +2489,7 @@ impl SessionServiceImpl {
             )?;
 
             let mut schedule_rx = self.inner.consensus.subscribe_schedule();
-            let target_schedule = loop {
+            loop {
                 nervix_primitives::task::consume_budget().await;
                 let schedule = self.inner.consensus.current_schedule().await;
                 let current = schedule.domain(&request.domain).ok_or_else(|| {
@@ -2511,7 +2520,7 @@ impl SessionServiceImpl {
                             request.destination
                         )));
                     }
-                    break current.clone();
+                    break;
                 }
                 if fingerprint != request.base_schedule_fingerprint {
                     return Err(OwnershipHandoffError::schedule(format!(
@@ -2523,16 +2532,11 @@ impl SessionServiceImpl {
                 schedule_rx.changed().await.assured(
                     "the consensus observer retains its schedule sender for the server lifetime",
                 );
-            };
+            }
 
             self.inner
                 .runtime
-                .activate_persisted_ownership_handoff(
-                    self.inner.consensus.local_node_id(),
-                    request,
-                    ExecutionRevision::from_schedule(&target_schedule)
-                        .map_err(|error| OwnershipHandoffError::schedule(format!("{error:#}")))?,
-                )
+                .wait_for_ownership_handoff_activation(request)
                 .await
         };
 

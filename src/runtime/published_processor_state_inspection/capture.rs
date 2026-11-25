@@ -200,7 +200,8 @@ impl Runtime {
             .now();
         let executor = self.inner.executor.clone();
         let memory = executor
-            .try_reserve(MemoryClass::Bulk, 1)
+            .reserve(MemoryClass::Bulk, 1)
+            .await
             .change_context(ProcessorStatePageError::Admission)?;
         let runtime = self.clone();
         let processor = processor.clone();
@@ -312,7 +313,6 @@ impl Runtime {
                         let mut decoded = decode_window_processor_layout(
                             payload,
                             &executor,
-                            nervix_execution::QueueAdmission::RefuseWhenFull,
                             WindowSnapshotSchemas { input, arguments },
                             admitted.layout,
                         )

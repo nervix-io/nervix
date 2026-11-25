@@ -108,7 +108,11 @@ fn decision_rules_refuse_protocol_service_binding_revision_timing_and_content() 
         DecisionRejection::Timing { .. }
     ));
     decision = original.clone();
-    decision.conditions.usage.quotas.remove(CLUSTER_NODES);
+    decision
+        .conditions
+        .operating
+        .durations
+        .remove(REFRESH_INTERVAL);
     assert!(matches!(
         validate(&fixture, &decision, &original.activation, None)
             .err()
@@ -135,6 +139,64 @@ fn envelope_rule_refuses_an_unauthorized_signer() {
             .current_context(),
         TrustError::UnknownSigningKey
     ));
+}
+
+/// A decision that does not verify is refused as a decision, whether its signature or its
+/// protected header fails, with the document's own refusal beneath it. A document refused as a
+/// trust document keeps that name.
+#[test]
+fn a_decision_that_does_not_verify_is_refused_as_a_decision() {
+    let fixture = Fixture::new();
+    let trust = fixture.trust();
+
+    let corrupted = flip_signature_bit(&fixture.sign(&fixture.decision()));
+    let signature_refusal = trust
+        .verify_decision(&corrupted, DecisionVerification::Apply, limits())
+        .err()
+        .assured("a decision with a changed signature bit does not verify");
+    assert!(matches!(
+        signature_refusal.current_context(),
+        TrustError::Decision
+    ));
+    assert_eq!(
+        format!("{signature_refusal:#}"),
+        "the decision has an invalid signature profile or payload: the document signature is \
+         invalid: JWS signature verification failed: InvalidSignature"
+    );
+
+    let authorization = fixture.roots[0]
+        .sign(&fixture.authorization(), limits())
+        .assured("current authorization");
+    let header_refusal = trust
+        .verify_decision(&authorization, DecisionVerification::Apply, limits())
+        .err()
+        .assured("a working-key authorization is no decision");
+    assert!(matches!(
+        header_refusal.current_context(),
+        TrustError::Decision
+    ));
+    assert_eq!(
+        format!("{header_refusal:#}"),
+        "the decision has an invalid signature profile or payload: the protected header must \
+         contain exactly ES256, the expected type and a key id"
+    );
+
+    let documents = TrustDocuments {
+        documents: vec![SignedTrustDocument::Compact(
+            fixture.sign(&fixture.decision()),
+        )],
+    };
+    let trust_refusal = TrustState::build(&fixture.embedded(), &documents, limits())
+        .err()
+        .assured("a decision is no trust document");
+    assert!(matches!(
+        trust_refusal.current_context(),
+        TrustError::Document
+    ));
+    assert_eq!(
+        format!("{trust_refusal:#}"),
+        "the trust document has an invalid signature profile or payload"
+    );
 }
 
 #[test]
@@ -342,8 +404,8 @@ fn unknown_condition_values_are_retained_and_never_reinterpret_known_names() {
         }
     );
     signed_round_trip(&fixture.working, &decision);
-    decision.conditions.usage.quotas.insert(
-        CLUSTER_NODES.to_owned(),
+    decision.conditions.operating.quotas.insert(
+        PERSISTENT_ACTIVATIONS.to_owned(),
         ConditionValue::Extension(extension),
     );
     assert!(validate(&fixture, &decision, &decision.activation, None).is_err());
@@ -528,9 +590,9 @@ fn conditions_revisions_issue_time_and_equal_revision_identity_are_monotone() {
     ));
     changed = original.clone();
     changed.decision_revision = 3;
-    changed.conditions.usage.quotas.insert(
-        CLUSTER_NODES.to_owned(),
-        ConditionValue::Known(Quota::Bounded { value: 3 }),
+    changed.conditions.usage.capabilities.insert(
+        LICENSING_DUMMY.to_owned(),
+        ConditionValue::Known(Capability::Enabled),
     );
     assert!(matches!(
         validate(&fixture, &changed, &original.activation, Some(&original))
@@ -567,37 +629,30 @@ fn bounded_timing_and_firm_ephemeral_status_are_validated() {
 }
 
 #[test]
-fn acknowledged_transitions_require_known_revisions_and_an_ordered_deadline() {
+fn an_acknowledged_transition_names_a_cluster_quota_the_catalog_declares() {
     let fixture = Fixture::new();
     let mut decision = fixture.decision();
-    let transition = Transition {
-        transition_id: id(90),
-        from_conditions_revision: 4,
-        to_conditions_revision: 5,
-        started_at: now(),
-        deadline: at(100),
-        trigger: TransitionTrigger::Tick {
-            decision_id: decision.decision_id,
-        },
-        reason: TransitionReason::PlanChanged,
-        affected: vec![AffectedQuota {
-            condition: CLUSTER_NODES.to_owned(),
-            previous: Quota::Unlimited,
-            target: Quota::Bounded { value: 2 },
-            usage: 3,
-        }],
-    };
-    decision.transitions.push(transition.clone());
-    assert!(validate(&fixture, &decision, &decision.activation, None).is_ok());
+    let mut transition = fixture_transition(TransitionTrigger::Tick {
+        decision_id: decision.decision_id,
+    });
     round_trip(&transition);
-    decision.transitions[0].from_conditions_revision = 999;
-    assert!(validate(&fixture, &decision, &decision.activation, None).is_err());
-    decision.transitions[0] = transition.clone();
-    decision.transitions[0].deadline = at(-1);
-    assert!(validate(&fixture, &decision, &decision.activation, None).is_err());
-    decision.transitions[0] = transition.clone();
-    decision.transitions.push(transition);
-    assert!(validate(&fixture, &decision, &decision.activation, None).is_err());
+    decision.transitions.push(transition.clone());
+    assert!(matches!(
+        validate(&fixture, &decision, &decision.activation, None)
+            .err()
+            .assured("the catalog declares no such cluster quota")
+            .current_context(),
+        DecisionRejection::Content
+    ));
+    PERSISTENT_ACTIVATIONS.clone_into(&mut transition.affected[0].condition);
+    decision.transitions = vec![transition];
+    assert!(matches!(
+        validate(&fixture, &decision, &decision.activation, None)
+            .err()
+            .assured("an activation quota is not a cluster quota")
+            .current_context(),
+        DecisionRejection::Content
+    ));
 }
 
 #[test]
@@ -633,7 +688,7 @@ fn embedded_epochs_protocol_and_signed_authorization_shape_are_checked() {
 }
 
 #[test]
-fn nonactive_statuses_carry_free_usage_and_preserve_operating_conditions() {
+fn every_nonactive_status_validates_with_the_free_usage() {
     let fixture = Fixture::new();
     for status in [
         DecisionStatus::Suspended,
@@ -649,11 +704,6 @@ fn nonactive_statuses_carry_free_usage_and_preserve_operating_conditions() {
             decision.timing.term_ends_at = now();
         }
         assert!(validate(&fixture, &decision, &decision.activation, None).is_ok());
-        decision.conditions.usage.quotas.insert(
-            CLUSTER_NODES.to_owned(),
-            ConditionValue::Known(Quota::Bounded { value: 0 }),
-        );
-        assert!(validate(&fixture, &decision, &decision.activation, None).is_err());
     }
 }
 

@@ -32,6 +32,7 @@ Feature: Durable signed licensing state
 
   Scenario Outline: A damaged stored decision loads degraded and refreshes on <cluster_size> nodes
     Given an HTTPS licensing test service is available
+    And the licensing service enables the capability "licensing.dummy"
     And a <cluster_size> node nervix cluster is started
     When these Plexus commands are executed on the leader node
       """
@@ -40,7 +41,7 @@ Feature: Durable signed licensing state
     Then the committed license decision is saved as placeholder "before_damage"
     And node "node-1" eventually describes this license without a selected domain
       """
-      quota cluster.nodes: <cluster_size> of 16
+      capability licensing.dummy: enabled
       """
     When the licensing service becomes unreachable
     And the cluster restarts with a damaged stored license decision
@@ -49,7 +50,8 @@ Feature: Durable signed licensing state
       mode: activated
       policy: degraded
       warning: decision_unverifiable
-      quota cluster.nodes: <cluster_size> of unlimited
+      rejection: licensing decision was rejected: the decision envelope or signing authorization is invalid
+      capability licensing.dummy: disabled
       """
     When the licensing service becomes reachable
     And these Plexus commands are executed on the leader node

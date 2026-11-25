@@ -406,7 +406,7 @@ async fn owner_body(executor: &Executor, rows: RecordBatch) -> (StatePageBody, C
     let rows = RuntimeRecordBatch::from_record_batch(rows.schema(), rows)
         .assured("the fixture rows are a runtime batch");
     let body = rows
-        .encode_arrow_snapshot_section(executor, nervix_execution::QueueAdmission::RefuseWhenFull)
+        .encode_arrow_snapshot_section(executor)
         .await
         .assured("a bounded section encodes");
     let job = executor
@@ -1296,13 +1296,6 @@ impl FullBulkClass {
     }
 }
 
-fn bulk_refusals(executor: &Executor) -> u64 {
-    executor
-        .snapshot()
-        .cpu_class(nervix_execution::CpuClass::Bulk)
-        .refused
-}
-
 /// A page is the owner's answer to a read it has already served, so an owner whose bulk class is
 /// full holds the encoding of the page's rows, their identity and the reply back instead of
 /// refusing the read, and frames the page once a place frees.
@@ -1310,7 +1303,6 @@ fn bulk_refusals(executor: &Executor) -> u64 {
 async fn an_owner_frames_a_page_once_its_full_bulk_class_frees_instead_of_refusing_it() {
     let executor = one_place_bulk_executor();
     let full = FullBulkClass::fill(&executor).await;
-    let refused = bulk_refusals(&executor);
     let mut framing = std::pin::pin!(stream_processor_page(
         &executor,
         Ok((
@@ -1333,11 +1325,6 @@ async fn an_owner_frames_a_page_once_its_full_bulk_class_frees_instead_of_refusi
         "the page is framed once a place frees: {:?}",
         framed.err()
     );
-    assert_eq!(
-        bulk_refusals(&executor),
-        refused,
-        "a full bulk class refuses no page"
-    );
 }
 
 /// A received page carries rows its owner already read, so a coordinator whose bulk class is full
@@ -1356,7 +1343,6 @@ async fn a_coordinator_presents_a_received_page_once_its_full_bulk_class_frees_i
     .await;
     let coordinator = one_place_bulk_executor();
     let full = FullBulkClass::fill(&coordinator).await;
-    let refused = bulk_refusals(&coordinator);
     let request = read(10);
     let expected = expected_sections();
     let mut decoding = std::pin::pin!(receive_sent(&coordinator, &stream, &request, &expected,));
@@ -1381,11 +1367,6 @@ async fn a_coordinator_presents_a_received_page_once_its_full_bulk_class_frees_i
         rows.column(1).as_primitive::<Int64Type>().values().to_vec(),
         vec![1, 2, 3],
         "the rows are the body's rows in the order the owner returned them"
-    );
-    assert_eq!(
-        bulk_refusals(&coordinator),
-        refused,
-        "a full bulk class refuses no received page"
     );
 }
 
@@ -1536,7 +1517,7 @@ async fn a_received_page_the_reader_could_never_hold_is_refused_at_once_as_too_l
     let mut need = 0_u64;
     for body in &bodies {
         let encoded = u64::try_from(body.len()).assured("a body length fits u64");
-        need += encoded + RuntimeRecordBatch::snapshot_section_decode_charge(&coordinator, encoded);
+        need += encoded + RuntimeRecordBatch::snapshot_section_scratch(&coordinator, encoded);
     }
     assert!(
         need > bulk,
@@ -1642,6 +1623,8 @@ struct SentMaterializedPage {
     stream: ChargedBytes,
     request: ReadMaterializedStatePage,
     layout: SealedContainerLayout,
+    /// The length of the container the page carries.
+    container: u64,
 }
 
 /// The page stream an owner sends for a first page returning every record of `generation`, with
@@ -1676,11 +1659,13 @@ async fn materialized_stream_declaring(
             groups,
         }),
     });
+    let container = u64::try_from(body.len()).assured("a fixture container's length fits u64");
     let stream = sent_reply(owner, reply, &[&body[..]]).await;
     SentMaterializedPage {
         stream,
         request: materialized_read(layout.records),
         layout,
+        container,
     }
 }
 
@@ -1846,11 +1831,13 @@ async fn a_received_materialized_page_the_reader_could_never_hold_is_refused_at_
     let generation = tenant_generation(&tenants, 16 * 1024);
     let schema = generation_schema(&generation);
     let sent = materialized_stream(&owner, &generation).await;
-    let container = u64::try_from(sent.stream.len()).assured("a fixture stream length fits u64");
+    let container = sent.container;
     let opening = sent
         .layout
-        .relay_opening_need(&coordinator)
-        .assured("every section the owner wrote fits the reader's bounds");
+        .relay_opening(&coordinator, container)
+        .assured("every section the owner wrote fits the reader's bounds")
+        .need()
+        .assured("the opening's parts add up within u64");
     assert!(
         container + opening > bulk,
         "the fixture page takes {} bytes, which the {bulk}-byte class could hold",

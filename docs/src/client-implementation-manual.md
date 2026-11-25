@@ -73,7 +73,7 @@ Unsolicited `ServerMessage` bodies carry no request identity:
 
 | Body | Meaning |
 | --- | --- |
-| `SessionOpened` | The five checked session limits, first on a WebSocket session |
+| `SessionOpened` | The five checked session limits and the node's session and web console pacing, first on a WebSocket session |
 | `LeadershipObserved` | Which node leads, first after the limits are announced and again on every change |
 | `DomainsObserved` | The domain list, after leadership and again on every change |
 | `DomainSnapshotObserved`, `ClusterObserved` | The selected domain's live graph and entities, and the cluster summary, after `SelectDomainRequest` |
@@ -152,7 +152,13 @@ archive; see [Restore Streams](#restore-streams).
   exactly one value for each `nervix-session-*` response metadata key and MUST install the announced frame
   bound before buffering response messages. A WebSocket client MUST first verify a
   `SessionOpened` `NXSM` frame under the fixed 1 KiB announcement bound, then install its
-  announced limits before sending requests or reading ordinary frames. The frame and transfer
+  announced limits before sending requests or reading ordinary frames. It MUST also validate the
+  opening's pacing as [Session Limits](client-session-protocol.md#session-limits) lists it: a
+  positive snapshot interval, a command retry validity that is absent or positive, web console
+  waits of whole milliseconds from 1ms through 24 hours with a longest backoff at least each first
+  wait, and a positive restore frame capacity; a missing or invalid value fails that opening. A
+  WebSocket client SHOULD pace its own waits by the announced values of the node it reached last,
+  as the browser console does. The frame and transfer
   bounds MUST lie within the documented ranges, the transfer MUST hold a frame, and the string
   bound MUST fit the transfer. A missing, duplicated, zero, unrepresentable or otherwise invalid
   bound MUST fail that opening. Every reconnect MUST adopt the contacted node's announcement;
@@ -780,7 +786,9 @@ remain the schema the ingestor declares; a payload field cannot replace the auth
   server retains that bounded result.
 - **E-5.** A retry or timeout can deliver the same stable identity and IPC bytes with a new
   reference, possibly to a different worker. The client MUST design its application side effects
-  for this duplicate window. There is no durable consumer cursor. An owner or session loss ends
+  for this duplicate window. Under the emitter's `GIVE UP AFTER`, the server offers a delivery no
+  more once the limit has passed since its first retry, timeout or lost attempt, and fails its rows
+  on the server without a frame to any client. There is no durable consumer cursor. An owner or session loss ends
   the attachment. A client retaining a desired consumer MAY reopen it on the current or a new
   exchange only after the `START` generation, endpoint contract, fields, window, timeouts, grant
   and batch limits

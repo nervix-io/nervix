@@ -44,7 +44,10 @@ use crate::{
         PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan, PlacementRulePlan,
         placement_members,
     },
-    runtime::{DecodeRejection, IngestorDescribe as RuntimeIngestorDescribe, TransportPosition},
+    runtime::{
+        DataflowNodeTransientState, DecodeRejection, IngestorDescribe as RuntimeIngestorDescribe,
+        TransportPosition,
+    },
 };
 
 /// The `source:` lines of an ingestor unit's rate-limit counters, in the families' own names.
@@ -250,23 +253,24 @@ fn decode_rejection_from_envelope(envelope: DecodeRejectionEnvelope) -> DecodeRe
 }
 
 pub(in crate::application) fn dataflow_node_status_to_envelope(
-    status: DataflowNodeStatus,
-    detail: Option<String>,
-    transient_error: Option<String>,
-    reconnect_backoff: Option<String>,
-    reconnect_wait_millis: Option<u64>,
+    health: DataflowNodeHealth,
+    transient: DataflowNodeTransientState,
 ) -> DataflowNodeStatusEnvelope {
-    let status = match status {
+    let status = match health.status {
         DataflowNodeStatus::Ok => "OK",
         DataflowNodeStatus::Waiting => "WAITING",
         DataflowNodeStatus::Error => "ERROR",
     };
     DataflowNodeStatusEnvelope {
         status: status.to_string(),
-        detail,
-        transient_error,
-        reconnect_backoff,
-        reconnect_wait_millis,
+        detail: health.detail,
+        transient_error: transient.error,
+        misconfigured: transient.misconfigured,
+        reconnect_backoff: transient.reconnect_backoff,
+        reconnect_wait_millis: health
+            .reconnect_wait_millis
+            .or(transient.reconnect_wait_millis),
+        give_up_wait_millis: transient.give_up_wait_millis,
     }
 }
 
@@ -1184,15 +1188,19 @@ pub(in crate::application) fn format_emitter_describe_output(
         }
     }
     if let Some(status) = status {
+        // A destination refusing writes as it is configured is retried like an outage, but an
+        // operator repairs it, so it reads as a misconfiguration rather than a transient error.
+        let (transient_error, misconfiguration) = if status.misconfigured {
+            (None, status.transient_error.as_deref())
+        } else {
+            (status.transient_error.as_deref(), None)
+        };
         lines.extend([
             format!("status: {}", status.status),
             // What the node is doing when it is neither working nor broken, such as waiting for a
             // connection from a shared client's pool.
             format!("detail: {}", status.detail.as_deref().unwrap_or("-")),
-            format!(
-                "transient error: {}",
-                status.transient_error.as_deref().unwrap_or("-")
-            ),
+            format!("transient error: {}", transient_error.unwrap_or("-")),
             format!(
                 "reconnect backoff: {}",
                 status.reconnect_backoff.as_deref().unwrap_or("-")
@@ -1200,6 +1208,15 @@ pub(in crate::application) fn format_emitter_describe_output(
             format!(
                 "reconnect wait: {}",
                 match status.reconnect_wait_millis {
+                    Some(millis) => format!("{millis}ms"),
+                    None => "-".to_string(),
+                }
+            ),
+            // A refusal of the configured writes and the give-up clock follow the retry delay.
+            format!("misconfigured: {}", misconfiguration.unwrap_or("-")),
+            format!(
+                "give up in: {}",
+                match status.give_up_wait_millis {
                     Some(millis) => format!("{millis}ms"),
                     None => "-".to_string(),
                 }

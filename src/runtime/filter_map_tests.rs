@@ -205,7 +205,6 @@ async fn accepted_work_route_keeps_every_row_while_the_data_class_is_full() {
             ))
         );
     }
-    assert_eq!(executor.snapshot().data_cpu.refused, 0);
 }
 
 #[test]
@@ -866,9 +865,12 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
         connector: Box::new(EmitterEntity::Kafka(KafkaEmitter::Topic(
             KafkaTopicEmitter {
                 mode: nervix_models::KafkaTopicPublishingMode::NoAck {
-                    retry_policy: RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "30s".to_string(),
+                    retry_policy: nervix_models::EmitterRetryPolicy {
+                        pacing: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                        give_up_after: None,
                     },
                 },
                 client: named("kafka_main"),
@@ -919,9 +921,12 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
     *unsupported_emitter.connector =
         EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
             mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: nervix_models::EmitterRetryPolicy {
+                    pacing: nervix_models::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: named("zeromq_main"),
@@ -1339,8 +1344,8 @@ async fn large_vm_batches_preserve_results_through_public_vm_api() {
     let input = vm_input_from_test_rows(&records, &program.program.input_schema)
         .expect("VM input batch should build");
 
-    let output = execute_accepted_program_with_selection_in_context(
-        Executor::default().accepted_work(),
+    let output = execute_program_with_selection_in_context(
+        &Executor::default(),
         &program.program,
         &input,
         &VmExecutionContext {

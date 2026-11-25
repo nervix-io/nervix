@@ -390,7 +390,10 @@ fn retry_policy() -> RetryPolicy {
 
 fn unconfirmed_publication() -> MqttTopicPublishingMode {
     MqttTopicPublishingMode::NoAck {
-        retry_policy: retry_policy(),
+        retry_policy: crate::EmitterRetryPolicy {
+            pacing: retry_policy(),
+            give_up_after: None,
+        },
     }
 }
 
@@ -399,14 +402,20 @@ fn confirmed_publications() -> [MqttTopicPublishingMode; 2] {
         MqttTopicPublishingMode::Ack {
             window: crate::AckWindow::Sequential,
             ack_timeout: "5s".to_owned(),
-            retry_policy: retry_policy(),
+            retry_policy: crate::EmitterRetryPolicy {
+                pacing: retry_policy(),
+                give_up_after: None,
+            },
         },
         MqttTopicPublishingMode::Ack {
             window: crate::AckWindow::Parallel {
                 max: NonZeroU64::MIN,
             },
             ack_timeout: "5s".to_owned(),
-            retry_policy: retry_policy(),
+            retry_policy: crate::EmitterRetryPolicy {
+                pacing: retry_policy(),
+                give_up_after: None,
+            },
         },
     ]
 }

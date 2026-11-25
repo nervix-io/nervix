@@ -1,6 +1,6 @@
 # WASM Processor Guests
 
-WASM processors are native WebAssembly modules loaded by Wasmtime. They do not use WASI. A guest module exports a small C ABI, owns one reusable linear-memory buffer, and exchanges Arrow IPC record batches with Nervix through that buffer. A module defines at most one linear memory, the one it exports as `memory`, and at most one table.
+WASM processors are native WebAssembly modules loaded by Wasmtime. They do not use WASI. A guest module exports a small C ABI, owns one reusable linear-memory buffer, and exchanges Arrow IPC record batches with Nervix through that buffer. A module defines at most one linear memory, the one it exports as `memory`, and at most one table, and uses only the [WebAssembly features](#webassembly-features) this chapter lists.
 
 Rust guests use the [Rust WASM Guest SDK](./wasm-guest-sdk.md) rather than implementing this ABI by hand. This chapter is the authoritative wire contract that the SDK implements and that guests in other languages implement directly.
 
@@ -49,8 +49,10 @@ wall-clock time or host-side work.
 
 `MAX MEMORY` is the Wasmtime linear-memory ceiling for each branch store. It applies to the
 initial size of the module's memory and every later `memory.grow`; choose a value large enough for
-the module's initial pages and reusable ABI buffer. It does not include shared compiled code,
-host-side Arrow or FlatBuffer data, or Wasmtime store bookkeeping.
+the module's initial pages and reusable ABI buffer. Each growth is checked against the size the
+guest's one memory would reach, so a growth that fails, whether Nervix or Wasmtime refuses it,
+takes none of the ceiling. It does not include shared compiled code, host-side Arrow or FlatBuffer
+data, or Wasmtime store bookkeeping.
 
 `MAX TABLE ELEMENTS` is the ceiling on the slots of the module's table in each branch store. It
 applies to the table's initial size and every later `table.grow`; each slot costs the node one
@@ -81,6 +83,46 @@ each receive the snapshot of their owning execution. Every call to
 context-free guest invocation and the module cannot choose or read host wall time. Wasmtime epoch
 yielding and fuel enforcement remain physical execution safeguards and do not change guest-visible
 domain time.
+
+## WebAssembly Features
+
+A guest module may use exactly the WebAssembly features below. Every node enables this set and
+nothing else, whatever its Wasmtime version would enable by default, so what a guest may use
+changes only together with this chapter. A module that needs anything else is refused when the node
+compiles it, before any branch instantiates, and the error names what it needs:
+
+```text
+wasm module uses the threads proposal, which a guest may not use
+```
+
+| Feature | What a guest may use |
+| --- | --- |
+| WebAssembly 2.0 | Bulk memory operations, reference types with `funcref`, sign-extension operators, non-trapping float-to-integer conversions, multiple results, fixed-width 128-bit SIMD and mutable globals |
+| Tail calls | `return_call`, `return_call_indirect` and `return_call_ref` |
+| Extended constant expressions | `add`, `sub` and `mul` of `i32` and `i64` in constant expressions |
+| Typed function references | Typed references to functions and `call_ref` |
+| The type system of the GC proposal | Recursive type groups and declared subtypes of function types |
+| Relaxed SIMD | The relaxed SIMD instructions, with the node's native results |
+| 64-bit memories | A linear memory indexed by `i64` |
+| Wide arithmetic | `i64.add128`, `i64.sub128`, `i64.mul_wide_s` and `i64.mul_wide_u` |
+
+The engine also enables the multiple memories proposal, but a guest still defines at most one
+memory, as [Execution Limits](#execution-limits) states.
+
+A relaxed SIMD instruction returns what the node's processor computes natively, and the proposal
+lets x86-64 and AArch64 processors compute different results for the same input. A guest whose
+output or saved state must not depend on the node that runs it, for example across a failover
+between nodes of different architectures, uses the fixed-width SIMD instructions instead.
+
+A guest may not use threads (shared memories and atomic instructions), shared-everything threads,
+exception handling in its current or its legacy form, garbage-collected references (`externref`,
+`anyref`, `eqref`, `i31ref`, structs and arrays), custom page sizes, stack switching, memory
+control, custom descriptors, compact imports or the component model. A node runs Wasmtime without
+its garbage collector and without threads, which exception handling, garbage-collected references
+and shared memories need; the others are not part of the contract.
+
+A Rust guest built for `wasm32-unknown-unknown` with the target's default features, as the
+[Rust WASM Guest SDK](./wasm-guest-sdk.md) builds it, stays within this set.
 
 ## Contract Summary
 
@@ -1034,6 +1076,13 @@ wasm processor 'sessionizer' application state restoration failed (branch 402383
 
 : The module is not valid `wasm32-unknown-unknown`, imports something outside
   the `env` functions listed above, or is not actually a WASM module.
+
+`wasm module uses ..., which a guest may not use`
+
+: The module needs a WebAssembly feature outside the guest contract, such as a
+  shared memory or atomic instructions from the threads proposal. Build it
+  without that feature; [WebAssembly Features](#webassembly-features) lists what
+  a guest may use.
 
 `missing required export`
 

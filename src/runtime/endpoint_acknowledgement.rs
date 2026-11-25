@@ -180,7 +180,8 @@ pub(crate) enum EndpointAdmissionRefusal {
     Suspended,
     /// Every slot of the ingestor's response window is taken.
     WindowFull,
-    /// The node's extension workers had no room to unfold the payload.
+    /// The node could not unfold the payload at all: it is stopping, or the unfolding needs a
+    /// charge larger than its whole memory class.
     UnfoldingRefused,
     /// The endpoint's pause buffer has no space for this request.
     PauseBufferFull,
@@ -191,8 +192,9 @@ pub(crate) enum EndpointAdmissionRefusal {
 }
 
 impl EndpointAdmissionRefusal {
-    /// The refusal the request's sender learns, in the client outcome vocabulary: the window and
-    /// the extension workers are both capacity the node lacks right now.
+    /// The refusal the request's sender learns, in the client outcome vocabulary: a full window or
+    /// pause buffer, and an unfolding the node could not do at all, are the node's reasons, not the
+    /// request's.
     fn submission(self) -> ClientSubmissionRefusal {
         match self {
             Self::Suspended | Self::PauseExpired | Self::IntakeEnded => {

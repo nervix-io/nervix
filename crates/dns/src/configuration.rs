@@ -406,17 +406,15 @@ mod tests {
         let resolver = file("nameserver 192.0.2.1\n");
         let hosts = file("");
         let configuration = configuration(&resolver, &hosts, NameServers::ResolverConfiguration);
-        let settings = crate::DnsSettings::resolve(
-            crate::DnsSettingValues {
-                cache_entries: Some(12),
-                positive_max_ttl: Some(Duration::from_secs(6)),
-                negative_max_ttl: Some(Duration::from_secs(2)),
-                hook_lookup_budget: Some(Duration::from_secs(7)),
-                address_family_policy: Some(crate::AddressFamilies::Ipv4),
-                trust_negative_answers: Some(false),
-            },
-            3,
-        )
+        let settings = crate::DnsSettings::resolve(crate::DnsSettingValues {
+            cache_entries: Some(12),
+            positive_max_ttl: Some(Duration::from_secs(6)),
+            negative_max_ttl: Some(Duration::from_secs(2)),
+            hook_lookup_budget: Some(Duration::from_secs(7)),
+            address_family_policy: Some(crate::AddressFamilies::Ipv4),
+            trust_negative_answers: Some(false),
+            concurrent_lookups: Some(3),
+        })
         .assured("a bounded local resolver policy");
         let loaded = configuration
             .read(settings)

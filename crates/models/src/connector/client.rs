@@ -363,6 +363,6 @@ connector_emitters! {
 
 super::publishing::emitter_modes! {
     pub enum ClientConsumerPublishingMode {
-        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => ClientAck,
+        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::EmitterRetryPolicy } => ClientAck,
     }
 }

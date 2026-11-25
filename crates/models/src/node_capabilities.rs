@@ -135,13 +135,8 @@ impl PeerReceiveBounds {
 )]
 pub struct InterconnectCapabilities {
     pub reconnect_jitter_permille: u16,
-    pub max_peers: NonZeroU64,
-    pub max_connections: NonZeroU64,
     pub concurrent_handshakes: NonZeroU64,
     pub incoming_queue_capacity: NonZeroU64,
-    pub request_quota: NonZeroU64,
-    pub completion_quota: NonZeroU64,
-    pub health_probes: NonZeroU64,
     pub stream_window_bytes: u32,
     pub connection_window_bytes: u32,
     pub connection_setup_timeout: Duration,
@@ -280,29 +275,6 @@ pub struct NodeCapabilityRecord {
     pub identity: ClusterNodeIdentity,
     pub capabilities: NodeCapabilities,
     pub operational: nervix_primitives::sync::StdArc<crate::NodeOperationalCapabilities>,
-}
-
-/// The peer-count input shared by transport capacity and DNS concurrency derivations.
-pub struct MaxPeers;
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("interconnect-max-peers ({0}) must be positive")]
-pub struct InvalidPeerCapacity(pub usize);
-impl crate::SettingDefinition for MaxPeers {
-    type Class = NodeCapabilities;
-    type Value = usize;
-    type Context = ();
-    type Error = InvalidPeerCapacity;
-    const NAME: &'static str = "interconnect-max-peers";
-    const DERIVATION: Option<&'static str> = None;
-    fn default_value(_: &()) -> usize {
-        64
-    }
-    fn validate(value: &usize, _: &()) -> Result<(), error_stack::Report<Self::Error>> {
-        if *value == 0 {
-            return Err(error_stack::Report::new(InvalidPeerCapacity(*value)));
-        }
-        Ok(())
-    }
 }
 
 /// The lifecycle budget one node run promises before terminal teardown.

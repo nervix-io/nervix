@@ -42,7 +42,7 @@ def test_inspection_metadata_and_verified_frames_survive_their_parents(
     assert isinstance(license_inspection, nx.Inspection)
     assert license_inspection.domain is None and license_inspection.entity_name is None
     assert license_inspection.entity_kind == "LICENSE" and license_inspection.rejection is None
-    assert license_inspection.counts is not None and license_inspection.counts.rows == 4
+    assert license_inspection.counts is not None and license_inspection.counts.rows == 2
     outcome = execute(reader, f"SHOW RELAY {relay} MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;")
     inspection = outcome.state_inspection
     assert isinstance(inspection, nx.Inspection)

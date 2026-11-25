@@ -140,10 +140,10 @@ async fn the_largest_gossip_exchange_fits_one_management_request_and_a_wider_one
         .local_prerequisites()
         .consensus_floors
         .largest_management_event_bytes;
-    assert_eq!(management_event_bytes, 64 << 10);
+    assert_eq!(management_event_bytes, 68 << 10);
 
     GossipExchange::check_fits(&interconnect, management_event_bytes)
-        .assured("a 60 KiB exchange and its typed request fields fit the 64 KiB bound");
+        .assured("Chitchat's largest message and its typed request fields fit the 68 KiB bound");
 
     let from = GossipExchange::largest().from;
     let exchange_of = |payload_bytes: usize| GossipExchange {
@@ -151,7 +151,7 @@ async fn the_largest_gossip_exchange_fits_one_management_request_and_a_wider_one
         payload: vec![0; payload_bytes],
     };
     let refused = interconnect
-        .check_request_fits(&exchange_of(64 << 10))
+        .check_request_fits(&exchange_of(68 << 10))
         .err()
         .assured("a payload of the whole bound leaves no room for its typed request fields");
     assert!(matches!(
@@ -163,7 +163,7 @@ async fn the_largest_gossip_exchange_fits_one_management_request_and_a_wider_one
     // Just below the whole bound the exchange's own archive fits, and only the request envelope
     // around it no longer does: the check counts the envelope too.
     let mut envelope_refusals = 0_u32;
-    for payload_bytes in (64 << 10) - 128..64 << 10 {
+    for payload_bytes in (68 << 10) - 128..68 << 10 {
         let Err(refused) = interconnect.check_request_fits(&exchange_of(payload_bytes)) else {
             continue;
         };
@@ -200,14 +200,266 @@ fn a_gossip_exchange_larger_than_one_message_is_refused() {
     assert_eq!(
         refusal,
         GossipExchangeRefusal::Oversized {
-            size: 61_441,
-            limit: 61_440,
+            size: 65_511,
+            limit: 65_510,
         }
     );
     assert_eq!(
         refusal.to_string(),
-        "a gossip message of 61441 bytes exceeds the 61440-byte bound"
+        "a gossip message of 65511 bytes exceeds the 65510-byte bound"
     );
+}
+
+/// Chitchat's budget counts a message from its one-byte type on, but not the header Chitchat writes
+/// before the type, so the largest message Chitchat builds is that header longer than its budget.
+#[test]
+fn the_gossip_bound_adds_the_header_chitchat_writes_outside_its_budget() {
+    // A BadCluster message carries nothing after its type: it is the header and the type alone.
+    let bad_cluster = chitchat::Serializable::serialize_to_vec(&ChitchatMessage::BadCluster);
+    assert_eq!(bad_cluster.len(), CHITCHAT_MESSAGE_HEADER_BYTES + 1);
+}
+
+/// A Syn of exactly `length` encoded bytes: Chitchat's header, the Syn type, an empty digest and a
+/// cluster identifier filling the rest. Chitchat budgets the messages that carry state, never a
+/// Syn, so a Syn can stand at whatever length a check of the gossip bound needs.
+fn syn_of_length(length: usize) -> ChitchatMessage {
+    const SYN_MESSAGE_TAG: u8 = 0;
+    // Every Chitchat message opens with the same header, its magic number and protocol version,
+    // before its one-byte type. A Syn then carries its digest, empty here, and the cluster
+    // identifier as one Chitchat string: a u16 length and its bytes.
+    let bad_cluster = chitchat::Serializable::serialize_to_vec(&ChitchatMessage::BadCluster);
+    let (_bad_cluster_type, header) = bad_cluster
+        .split_last()
+        .assured("a BadCluster message encodes its header and its type");
+    let mut encoded = header.to_vec();
+    encoded.push(SYN_MESSAGE_TAG);
+    chitchat::Serializable::serialize(&0_u16, &mut encoded);
+    let fixed_fields = encoded
+        .len()
+        .checked_add(chitchat::Serializable::serialized_len(&String::new()))
+        .assured("a Syn's fixed fields take a few bytes");
+    let identifier_length = length
+        .checked_sub(fixed_fields)
+        .assured("the fixture's lengths leave room for a Syn's fixed fields");
+    chitchat::Serializable::serialize(&"x".repeat(identifier_length), &mut encoded);
+    assert_eq!(encoded.len(), length);
+    let mut remaining = encoded.as_slice();
+    <ChitchatMessage as chitchat::Deserializable>::deserialize(&mut remaining)
+        .assured("the fixture encodes a Syn with an empty digest")
+}
+
+/// The gossip transport of the member `node_id`, gossiping at the address of its `interconnect`.
+fn gossip_transport_on(
+    interconnect: &InterconnectTransport,
+    node_id: ClusterNodeName,
+) -> InterconnectGossipTransport {
+    InterconnectGossipTransport::build(
+        interconnect.clone(),
+        interconnect.local_addr(),
+        BTreeMap::new(),
+        node_id,
+        crate::ConfiguredFaultInjection::default(),
+        MembershipSettings::default().gossip_receive_queue_capacity(),
+    )
+    .assured("the gossip handler is registered once")
+}
+
+/// A message of the whole gossip bound, the size of the largest SynAck or Ack Chitchat builds,
+/// crosses the real interconnect to the peer's socket intact as one gossip exchange. Chitchat
+/// discards the error of a reply it cannot send, so the sender itself refuses a message one byte
+/// larger, logs it and queues nothing for the peer.
+#[nervix_primitives::test]
+async fn the_whole_gossip_bound_reaches_the_peer_and_one_byte_more_stays_with_the_sender() {
+    let authority = crate::application::test_fixtures::TestCertificateAuthority::generate();
+    let sender = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
+    let receiver = ClusterNodeName::parse("node-2").assured("the fixture node name is valid");
+    let sender_interconnect = authority.interconnect("test", &sender).await;
+    let receiver_interconnect = authority.interconnect("test", &receiver).await;
+    let sender_address = sender_interconnect.local_addr();
+    let receiver_address = receiver_interconnect.local_addr();
+    let sender_transport = gossip_transport_on(&sender_interconnect, sender);
+    let receiver_transport = gossip_transport_on(&receiver_interconnect, receiver);
+    let mut sender_socket = GossipTransport::open(&sender_transport, sender_address)
+        .await
+        .assured("the transport opens its one socket");
+    let mut receiver_socket = GossipTransport::open(&receiver_transport, receiver_address)
+        .await
+        .assured("the transport opens its one socket");
+
+    let refused = sender_socket
+        .send(
+            receiver_address,
+            syn_of_length(MAX_GOSSIP_MESSAGE_BYTES + 1),
+        )
+        .await
+        .expect_err("a message above the gossip bound is refused at the sender");
+    assert_eq!(refused.to_string(), "gossip message exceeds 65510 bytes");
+    assert!(
+        sender_transport.inner.outgoing.is_empty(),
+        "nothing was queued for the peer"
+    );
+
+    let queued = sender_socket
+        .send(receiver_address, syn_of_length(MAX_GOSSIP_MESSAGE_BYTES))
+        .await;
+    assert!(
+        queued.is_ok(),
+        "a message of the whole bound is queued for the peer: {queued:?}"
+    );
+    let (from, received) =
+        nervix_primitives::time::timeout(Duration::from_secs(30), receiver_socket.recv())
+            .await
+            .assured("the peer receives the message of the whole bound within 30s")
+            .assured("the peer's socket decodes the message of the whole bound");
+    assert_eq!(from, sender_address);
+    assert_eq!(received, syn_of_length(MAX_GOSSIP_MESSAGE_BYTES));
+
+    sender_interconnect
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+        .await;
+    receiver_interconnect
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+        .await;
+}
+
+/// The settings of the member `node_id` of the cluster `test`, reached on `interconnect`. It joins
+/// through `bootstrap` when that names a member.
+fn loopback_member_settings(
+    node_id: &ClusterNodeName,
+    interconnect: &InterconnectTransport,
+    bootstrap: Option<SocketAddr>,
+) -> ClusterSettings {
+    let address = interconnect.local_addr();
+    ClusterSettings {
+        cluster_id: "test".to_string(),
+        node_id: node_id.clone(),
+        grpc_listen_addr: address,
+        client_advertise_url: crate::application::test_fixtures::test_service_url(address),
+        console_advertise_url: crate::application::test_fixtures::test_service_url(address),
+        interconnect_advertise_addr: address.into(),
+        bootstrap_host: bootstrap.map(|seed| seed.to_string()),
+        recovered_members: BTreeMap::new(),
+        interconnect: interconnect.clone(),
+        membership: MembershipSettings::default(),
+        session_notice_capacity: nervix_models::SessionCapabilities::default().notice_capacity(),
+        prerequisites: interconnect.local_prerequisites(),
+        fault_injection: crate::ConfiguredFaultInjection::default(),
+    }
+}
+
+/// Waits until `cluster` sees `peer` live, and fails the test once `bound` passes first.
+async fn wait_until_live(cluster: &ClusterHandle, peer: &ClusterNodeName, bound: Duration) {
+    let seen = nervix_primitives::time::timeout(bound, async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if cluster.live_node(peer).await.is_some() {
+                return;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(seen.is_ok(), "'{peer}' was not seen live within {bound:?}");
+}
+
+/// Chitchat fills every message it gossips up to its own message budget and splits larger state
+/// over later rounds, and the gossip transport must carry whatever it builds. A member whose state
+/// a peer lacks by more than one exchange carries must still reach that peer whole, in as many
+/// exchanges as it takes. Subscription interests are the state that grows with the work a node
+/// serves. Chitchat compresses a delta in blocks but counts the block it is still filling at its
+/// uncompressed size, so a full message ends up below its budget by what its last block compressed
+/// away. Long random relay names compress too little for that to keep a full message within a
+/// transport bound much smaller than the budget.
+#[nervix_primitives::test]
+async fn a_peer_learns_gossip_state_larger_than_one_exchange_carries() {
+    const DOMAIN: &str = "gossip";
+    const INTERESTS: usize = 400;
+    const RELAY_NAME_CHARACTERS: usize = 500;
+    const MEMBERSHIP_BOUND: Duration = Duration::from_secs(30);
+    const CONVERGENCE_BOUND: Duration = Duration::from_secs(30);
+
+    let first = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
+    let second = ClusterNodeName::parse("node-2").assured("the fixture node name is valid");
+    let authority = crate::application::test_fixtures::TestCertificateAuthority::generate();
+    let first_interconnect = authority.interconnect("test", &first).await;
+    let second_interconnect = authority.interconnect("test", &second).await;
+    let first_cluster = start_cluster(loopback_member_settings(&first, &first_interconnect, None))
+        .await
+        .assured("the first member starts on its loopback interconnect");
+    let second_cluster = start_cluster(loopback_member_settings(
+        &second,
+        &second_interconnect,
+        Some(first_interconnect.local_addr()),
+    ))
+    .await
+    .assured("the second member starts with the first as its bootstrap host");
+    wait_until_live(&second_cluster, &first, MEMBERSHIP_BOUND).await;
+    wait_until_live(&first_cluster, &second, MEMBERSHIP_BOUND).await;
+
+    let mut random = fastrand::Rng::with_seed(61_440);
+    let mut relays = Vec::with_capacity(INTERESTS);
+    for _ in 0..INTERESTS {
+        let mut relay = String::with_capacity(RELAY_NAME_CHARACTERS);
+        for _ in 0..RELAY_NAME_CHARACTERS {
+            relay.push(random.alphanumeric());
+        }
+        relays.push(relay);
+    }
+    for relay in &relays {
+        first_cluster
+            .reconcile_local_subscription_interest(DOMAIN, relay, || true)
+            .await;
+    }
+
+    // Chitchat sends a member's keys in the order of their versions, so the last interest
+    // arriving means every earlier one arrived too.
+    let first_identity = first_cluster.local_node_identity().await;
+    let last_relay = relays
+        .last()
+        .assured("the fixture advertises at least one interest");
+    let last_version = first_cluster
+        .local_subscription_interest_version(DOMAIN, last_relay)
+        .await
+        .assured("the first member advertises the interest it reconciled above");
+    let learned_last = nervix_primitives::time::timeout(
+        CONVERGENCE_BOUND,
+        second_cluster.wait_for_subscription_interest(
+            &first_identity,
+            DOMAIN,
+            last_relay,
+            last_version,
+        ),
+    )
+    .await;
+    let index = second_cluster.subscription_interest_index();
+    let mut missing = Vec::new();
+    for relay in &relays {
+        if !index.contains(&first_identity, DOMAIN, relay, 1) {
+            missing.push(relay.as_str());
+        }
+    }
+    assert!(
+        learned_last.is_ok() && missing.is_empty(),
+        "node-2 still lacks {} of the {} subscription interests node-1 advertised, \
+         {CONVERGENCE_BOUND:?} after node-1 advertised them",
+        missing.len(),
+        relays.len(),
+    );
+
+    second_cluster
+        .shutdown()
+        .await
+        .assured("the second member's gossip stops");
+    first_cluster
+        .shutdown()
+        .await
+        .assured("the first member's gossip stops");
+    second_interconnect
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+        .await;
+    first_interconnect
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+        .await;
 }
 
 fn health_identity(node: &str, incarnation: u64) -> ClusterNodeIdentity {

@@ -213,7 +213,7 @@ impl UnfoldingDomain {
         nervix_primitives::time::timeout(Duration::from_secs(10), async {
             loop {
                 let snapshot = self.executor.snapshot();
-                if snapshot.extension_cpu.refused > 0 || snapshot.relay_memory.reserved_bytes > 0 {
+                if snapshot.relay_memory.reserved_bytes > 0 {
                     return;
                 }
                 nervix_primitives::task::yield_now().await;
@@ -297,11 +297,6 @@ async fn a_poll_waits_for_the_extension_workers_when_the_node_cannot_unfold_it()
             .any(|line| line.starts_with("nervix_ingestor_read_bytes_total{")
                 && line.contains(" total=13 "))
     );
-    assert_eq!(
-        fixture.executor.snapshot().extension_cpu.refused,
-        0,
-        "the poll's unfolding waits for a place instead of being refused"
-    );
     assert!(
         errors.recv().now_or_never().is_none(),
         "a poll waiting for the extension workers is not reported as an ingestor error"
@@ -355,11 +350,6 @@ async fn an_unacknowledged_batch_waits_for_the_extension_workers() {
         (host, intake)
     });
     fixture.reach_unfolding().await;
-    assert_eq!(
-        fixture.executor.snapshot().extension_cpu.refused,
-        0,
-        "the batch's unfolding waits for a place instead of being refused"
-    );
     assert!(
         errors.recv().now_or_never().is_none(),
         "a batch waiting for the extension workers is not reported as an ingestor error"
@@ -494,7 +484,7 @@ pub(super) fn quiesce_control(
 
 /// The ingestor stopping ends a batch's wait for the extension workers at once, and the intake ends
 /// as stopped, so its loop leaves the batch's positions unconfirmed for a transport that keeps
-/// them to present again. Nothing of the batch stays behind, and nothing is counted as refused.
+/// them to present again. Nothing of the batch stays behind.
 #[nervix_primitives::test]
 async fn the_ingestor_stopping_ends_a_batch_waiting_for_the_extension_workers() {
     let mut fixture = UnfoldingDomain::start().await;
@@ -775,9 +765,8 @@ async fn take_in_acknowledged(
     .await
 }
 
-/// An acknowledged batch the extension workers cannot unfold now waits for them rather than being
-/// refused for its transport to present again, counting meanwhile as work its unit admitted, and
-/// is delivered and acknowledged once they have room. Nothing is counted as refused.
+/// An acknowledged batch the extension workers cannot unfold now waits for them, counting meanwhile
+/// as work its unit admitted, and is delivered and acknowledged once they have room.
 #[nervix_primitives::test]
 async fn an_acknowledged_batch_waits_for_the_extension_workers() {
     let mut fixture = UnfoldingDomain::start().await;
@@ -791,11 +780,6 @@ async fn an_acknowledged_batch_waits_for_the_extension_workers() {
         (host, intake)
     });
     fixture.reach_unfolding().await;
-    assert_eq!(
-        fixture.executor.snapshot().extension_cpu.refused,
-        0,
-        "the batch's unfolding waits for a place instead of being refused"
-    );
     assert_eq!(fixture.admitted_work(), 1);
 
     filled.release().await;

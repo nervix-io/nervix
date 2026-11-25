@@ -347,7 +347,7 @@ impl InferencerBranchFixture {
                 &domain,
                 None,
                 1,
-                &RetainedStateOpening::RefusedWhenFull,
+                &RetainedStateOpening::OnNodeExecutor,
             )
             .await
             .assured("the fixture inferencer branch instantiates")

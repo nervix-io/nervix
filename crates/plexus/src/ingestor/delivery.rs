@@ -29,9 +29,9 @@ use strum::IntoEnumIterator as _;
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        ParseError, ack_timeout, byte_size_lit, duration_lit, embedded_expression, kw, kw_phrase2,
-        kw_phrase3, nonzero_u64_value, parallel_ack_window, retry_policy, sequential_ack_window,
-        unknown_word,
+        ParseError, ack_timeout, byte_size_lit, duration_lit, embedded_expression,
+        ingestor_retry_policy, kw, kw_phrase2, kw_phrase3, nonzero_u64_value, parallel_ack_window,
+        sequential_ack_window, unknown_word,
     },
 };
 
@@ -55,7 +55,7 @@ pub(super) fn ack_sequential<'src>()
     kw(Identifier::Ack)
         .ignore_then(sequential_ack_window())
         .ignore_then(ack_timeout())
-        .then(retry_policy())
+        .then(ingestor_retry_policy())
         .map(|(timeout, retry_policy)| SequentialAck {
             timeout,
             retry_policy,
@@ -86,7 +86,7 @@ pub(super) fn ack_parallel_within<'src, W: 'src>(
         .ignore_then(window)
         .then(batch_timeout_parser())
         .then(ack_timeout())
-        .then(retry_policy())
+        .then(ingestor_retry_policy())
         .map(
             |(((max, batch_timeout), timeout), retry_policy)| ParallelAck {
                 max,

@@ -410,8 +410,8 @@ pub(super) async fn plan_filter_map_messages(
         .ack_timing
         .keep_alive_while_pending(
             acks.as_slice(),
-            execute_accepted_program_with_selection_in_context(
-                run.executor.accepted_work(),
+            execute_program_with_selection_in_context(
+                run.executor,
                 &program.compiled,
                 &vm_batch,
                 &VmExecutionContext {
@@ -843,8 +843,8 @@ pub(super) async fn execute_prepared_filter_map(
         .ack_timing
         .keep_alive_while_pending(
             acks.as_slice(),
-            execute_accepted_program_with_selection_in_context(
-                run.executor.accepted_work(),
+            execute_program_with_selection_in_context(
+                run.executor,
                 &program.compiled,
                 &vm_batch,
                 &VmExecutionContext {
@@ -1054,8 +1054,8 @@ pub(super) async fn evaluate_output_branch_program(
         None,
     )
     .change_context(PlannedGeneralError::PrepareInput { operation })?;
-    let result = execute_accepted_program_with_selection_in_context(
-        run.executor.accepted_work(),
+    let result = execute_program_with_selection_in_context(
+        run.executor,
         &program.program.compiled,
         &vm_input,
         &VmExecutionContext {

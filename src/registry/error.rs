@@ -23,6 +23,8 @@ use nervix_models::{
 use nervix_vm::program::WindowAggregateFunction;
 use thiserror::Error;
 
+use crate::registry::graph_loop::GraphLoop;
+
 /// The metadata fields an ingestor entity declares, as a refusal names them after the entity's
 /// phrase: "declare only metadata.status and metadata.polled_at", or "declare no metadata field".
 struct DeclaredIngestorMetadata(IngestorEntityKind);
@@ -733,6 +735,13 @@ pub(crate) enum RegistryError {
     },
     #[error("active configuration graph for domain '{domain}' contains a cycle")]
     ConfigurationCycle { domain: String },
+    /// Data would travel in a circle: along routes, error routes, correlation timeouts or reads of
+    /// a relay's materialized state, back to a relay it already passed.
+    #[error("the graph of domain '{domain}' would contain a loop: {graph_loop}")]
+    GraphLoop {
+        domain: DomainName,
+        graph_loop: GraphLoop,
+    },
     #[error(
         "placement rules {rules:?} in domain '{domain}' apply {policy} to {from:?} → {to:?}, a \
          {class} hop"

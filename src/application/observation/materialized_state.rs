@@ -130,58 +130,81 @@ impl SessionServiceImpl {
         let executor = self.inner.runtime.inspection_executor();
         let maximum =
             u64::try_from(plan.limits.transfer_bytes()).assured("session byte limits fit u64");
-        let mut inspection = super::processor_state::partition::PartitionInspection::new(
-            partitions, executor, maximum,
-        )?;
-        for unit in plan.node.units.keys() {
-            let owner = inspection_owner(&plan.node, *unit, self.inner.consensus.local_node_id())?;
-            let incarnation = incarnations
-                .get(&owner)
-                .copied()
-                .ok_or(StateInspectionRejection::OwnerUnavailable)?;
-            let request = nervix_interconnect::ReadMaterializedKeyCatalog {
-                read: ReadMaterializedStatePage {
-                    domain: plan.domain.clone(),
-                    relay: plan.relay.clone(),
-                    unit: *unit,
-                    control_revision: plan.control_revision,
-                    schema: plan.node.schema_fingerprint,
-                    selection: plan.selection,
-                    after: None,
-                    max_rows: 0,
-                    max_bytes: maximum,
-                    target: ClusterNodeIdentity::new(owner.clone(), incarnation),
-                },
-            };
-            let response = if &owner == self.inner.consensus.local_node_id() {
-                self.handle_materialized_key_catalog(request).await
-            } else {
-                self.inner
-                    .interconnect
-                    .request(&owner, request)
+        // A census that outgrows what its class has room for gives back everything it holds and
+        // starts again under the charge it needs, so it never waits while holding part of it.
+        let mut charge = 1;
+        'census: loop {
+            nervix_primitives::task::consume_budget().await;
+            let memory = executor
+                .reserve(nervix_execution::MemoryClass::Bulk, charge)
+                .await
+                .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
+            let mut inspection = super::processor_state::partition::PartitionInspection::new(
+                partitions, memory, maximum,
+            );
+            for unit in plan.node.units.keys() {
+                nervix_primitives::task::consume_budget().await;
+                let owner =
+                    inspection_owner(&plan.node, *unit, self.inner.consensus.local_node_id())?;
+                let incarnation = incarnations
+                    .get(&owner)
+                    .copied()
+                    .ok_or(StateInspectionRejection::OwnerUnavailable)?;
+                let request = nervix_interconnect::ReadMaterializedKeyCatalog {
+                    read: ReadMaterializedStatePage {
+                        domain: plan.domain.clone(),
+                        relay: plan.relay.clone(),
+                        unit: *unit,
+                        control_revision: plan.control_revision,
+                        schema: plan.node.schema_fingerprint,
+                        selection: plan.selection,
+                        after: None,
+                        max_rows: 0,
+                        max_bytes: maximum,
+                        target: ClusterNodeIdentity::new(owner.clone(), incarnation),
+                    },
+                };
+                let response = if &owner == self.inner.consensus.local_node_id() {
+                    self.handle_materialized_key_catalog(request).await
+                } else {
+                    self.inner
+                        .interconnect
+                        .request(&owner, request)
+                        .await
+                        .map_err(|error| {
+                            inspection_refusal(error, StateInspectionRejection::OwnerUnavailable)
+                        })?
+                };
+                let catalog = response.result?;
+                let unit = *unit;
+                let recorded = executor
+                    .run_cpu(
+                        nervix_execution::CpuClass::Bulk,
+                        executor.charge_nothing(nervix_execution::MemoryClass::Bulk),
+                        move |_charge, cancellation| {
+                            let growth = inspection.record(unit, catalog, cancellation)?;
+                            Ok::<_, StateInspectionRejection>(
+                                super::processor_state::partition::RecordedCensus {
+                                    inspection,
+                                    growth,
+                                },
+                            )
+                        },
+                    )
                     .await
                     .map_err(|error| {
-                        inspection_refusal(error, StateInspectionRejection::OwnerUnavailable)
-                    })?
-            };
-            let catalog = response.result?;
-            let admission = executor
-                .try_reserve(nervix_execution::MemoryClass::Bulk, 1)
-                .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
-            let unit = *unit;
-            inspection = executor
-                .run_cpu(
-                    nervix_execution::CpuClass::Bulk,
-                    admission,
-                    move |_charge, cancellation| {
-                        inspection.record(unit, catalog, cancellation)?;
-                        Ok::<_, StateInspectionRejection>(inspection)
-                    },
-                )
-                .await
-                .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))??;
+                        inspection_refusal(error, StateInspectionRejection::NotReady)
+                    })??;
+                inspection = recorded.inspection;
+                if let super::inspection_pages::InspectionGrowth::Short { needed } = recorded.growth
+                {
+                    drop(inspection);
+                    charge = needed;
+                    continue 'census;
+                }
+            }
+            return Ok(Some(inspection));
         }
-        Ok(Some(inspection))
     }
 
     pub(in crate::application) async fn show_stream_materialized_state(
@@ -433,11 +456,7 @@ impl SessionServiceImpl {
                 let limits = plan.limits;
                 let total = descriptor.counts.rows;
                 let executor = self.inner.runtime.inspection_executor();
-                let admission = executor
-                    .try_reserve(nervix_execution::MemoryClass::Bulk, 1)
-                    .map_err(|error| {
-                        inspection_refusal(error, StateInspectionRejection::NotReady)
-                    })?;
+                let admission = executor.charge_nothing(nervix_execution::MemoryClass::Bulk);
                 let encoded = executor
                     .run_cpu(
                         nervix_execution::CpuClass::Bulk,

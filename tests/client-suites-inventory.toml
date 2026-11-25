@@ -443,6 +443,11 @@ tier = "boundary"
 
 [[test]]
 host = "java"
+identity = "io.nervix.client.ArgumentTests#connectionLimitsOutsideTheirBoundsAreTypedArguments"
+tier = "boundary"
+
+[[test]]
+host = "java"
 identity = "io.nervix.client.ArgumentTests#fieldLevelsAndMalformedIpcAreRefusedAsTypedArguments"
 tier = "boundary"
 

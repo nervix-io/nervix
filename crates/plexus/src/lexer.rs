@@ -409,6 +409,8 @@ pub enum Identifier {
     Retry,
     Policy,
     Backoff,
+    Give,
+    Up,
     Max,
     Fuel,
     Memory,

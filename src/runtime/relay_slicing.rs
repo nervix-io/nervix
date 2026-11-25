@@ -25,11 +25,6 @@ use crate::runtime_schema::{RuntimeRecordBatch, batch_payload_bytes};
 impl RemoteDispatcher {
     /// The ordinary path sends the original shared body once. A refusal creates no receiver
     /// attempt, so its sequence can carry a smaller prefix; accepted prefixes keep their ACKs.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the encoded payload, borrowed rows, channel gate and ACK registrations retain \
-                  independent owners; the caller supplies its admission bound"
-    )]
     pub(super) async fn dispatch_sliced_relay_payload(
         &self,
         node: &ClusterNodeName,
@@ -117,10 +112,7 @@ impl RemoteDispatcher {
                     }
                     // A relay delivery answers no waiting caller, so a full queue holds the
                     // delivery back rather than failing it.
-                    let encoding = selected.encode_arrow_ipc(
-                        self.executor(),
-                        nervix_execution::QueueAdmission::WaitForPlace,
-                    );
+                    let encoding = selected.encode_arrow_ipc(self.executor());
                     let encoded = channel
                         .while_producer_lives(encoding)
                         .await

@@ -295,6 +295,28 @@ Feature: Local engine and client capabilities
     Then the CLI fails with "<refusal>"
 
     Examples:
-      | capabilities                                            | refusal                                                     |
-      | --restoration-backoff 31s --restoration-max-backoff 30s | restoration-backoff must not exceed restoration-max-backoff |
-      | --notice-bytes 0                                        | invalid value '0' for '--notice-bytes                       |
+      | capabilities                                            | refusal                                                                     |
+      | --restoration-backoff 31s --restoration-max-backoff 30s | restoration-backoff must not exceed restoration-max-backoff                 |
+      | --notice-bytes 0                                        | invalid value '0' for '--notice-bytes                                       |
+      | --call-queue-capacity 0                                 | invalid value '0' for '--call-queue-capacity                                |
+      | --header-list-bytes 0                                   | invalid value '0' for '--header-list-bytes                                  |
+      | --reset-stream-duration 0s                              | reset_stream_duration must be between one millisecond and one day           |
+      | --connection-attempt-delay 5ms                          | connection-attempt-delay 5ms must be between 10ms and 2s, RFC 8305's bounds |
+
+  # The node's answer to a session opening carries its status, content type and session-limit
+  # announcements, far more than 64 bytes of header list, and far less than the default 16 KiB.
+  Scenario Outline: The CLI refuses a session whose opening headers reach its header list bound on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the CLI executes "LIST DOMAINS;" on node "node-<cluster_size>" with connection capabilities "--header-list-bytes 64"
+    Then the CLI fails with "failed to start session exchange"
+    When the CLI executes "LIST DOMAINS;" on node "node-<cluster_size>" with connection capabilities "--header-list-bytes 16384"
+    Then the CLI output contains "{{domain}}"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

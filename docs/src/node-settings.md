@@ -153,8 +153,12 @@ admission.
 
 HTTP endpoint bodies use the independent `intake` executor memory class. It accounts the
 transport read buffers a request holds conservatively, and its body buffer exactly, including both
-allocations while a body moves to a larger buffer. Input contention refuses immediately with 503;
-it never holds relay decode capacity while waiting for relay work.
+allocations while a body moves to a larger buffer. Input contention holds a request back rather
+than refusing it: the request's read scratch, with the whole copy of a body whose length it
+declared, is charged up front, a read into an allocation the charge does not cover yet waits for
+room before it reads, and the growth of an undeclared body waits the same way, each within the
+body's deadline. A request that waits gives up its place when it ends. Waiting never holds relay
+decode capacity.
 
 A body that arrives in a single data frame keeps the shared byte buffer it was read into, with no
 copy. From the second data frame on, the endpoint copies each frame into one body buffer as it
@@ -173,12 +177,13 @@ The endpoint's public input outcomes are:
 | 413 | `http_body_capacity` | The declared length or accumulated chunked payload exceeds the cap |
 | 408 | `http_body_timeout` | The complete body did not arrive by its deadline |
 | 431 | HTTP header capacity | Hyper refuses an oversized request head and closes the connection |
-| 503 | `http_input_memory_capacity` | The intake pool cannot back retained input |
-| 503 | `http_input_worker_capacity` | Moving a body larger than one read buffer cannot be admitted on a data worker, expires or finishes cancelled |
+| 503 | `http_input_memory_capacity` | The intake pool cannot back retained input before the body's deadline passes while the request waits for room, the input could never fit in the whole pool beside what its request already holds, or the node stops |
+| 503 | `http_input_worker_capacity` | Moving a body larger than one read buffer waits for a data worker until the body's deadline passes, expires on it or finishes cancelled, or the node stops |
 | 400 | `http_body_invalid` | Malformed or interrupted HTTP body framing, including oversized chunked trailers |
 
 The HTTP input completion budget distinguishes phases: expiry while receiving bytes returns 408;
-expiry while the server waits for or performs a body move on a data worker returns 503. The move
+expiry while the server waits for input memory, or waits for or performs a body move on a data
+worker, returns 503. The move
 retains its reservation until the worker actually exits after cancellation.
 
 Input refusals admit no payload to the graph. Hyper completes the response and closes its write
@@ -264,10 +269,8 @@ without adding a prerequisite or changing graph acceptance.
 
 | Server option | Default | Meaning |
 | --- | --- | --- |
-| `--interconnect-max-peers` | 64 | Other node identities this transport can retain |
 | `--interconnect-concurrent-handshakes` | 32 | Concurrent transport handshakes |
 | `--interconnect-incoming-queue-capacity` | 1,024 | General request and relay admission capacity |
-| `--interconnect-request-quota` | Derived | Independent ordinary and append reserves: two requests per declared peer, bounded by the incoming queue |
 | `--interconnect-stream-receive-window` | 64 KiB | Advertised HTTP/2 receive credit per non-bulk stream |
 | `--interconnect-connection-receive-window` | 256 KiB | Advertised HTTP/2 receive credit per non-bulk connection, at least 65,535 bytes |
 | `--interconnect-connection-setup-timeout` | 5s | One DNS, TCP, TLS and binding budget |
@@ -280,6 +283,7 @@ without adding a prerequisite or changing graph acceptance.
 | `--dns-hook-lookup-budget` | 30s | Lookup budget for client libraries without an operation deadline |
 | `--dns-address-family-policy` | `dual-stack` | DNS queries: `dual-stack`, `ipv4` or `ipv6` |
 | `--dns-trust-negative-answers` | `true` | Trust a name server's negative response without asking the next server |
+| `--dns-concurrent-lookups` | 64 | DNS lookups in flight at once; a lookup waits for a slot within its caller's budget |
 | `--database-cache-bytes` | 32 MiB | Node database cache |
 | `--database-journal-bytes` | 512 MiB | Node database journal capacity, at least 64 MiB |
 | `--database-workers` | Derived | Available CPU count capped at four; one when unknown |
@@ -312,16 +316,23 @@ memtable cap, and Nervix does not limit the databases at runtime. Memtable memor
 outside the startup memory check; [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start)
 describes the headroom it needs.
 
-Connection capacity derives from both directions of every pool: twelve connections per declared
-peer, 768 by default. Health-probe fan-out and DNS lookup concurrency each equal
-`interconnect-max-peers`. Completion reserves are at least one and otherwise one per sixteen peers,
-bounded by the incoming queue.
+A node keeps every peer it is given. Every member must reach every other member for consensus,
+health and relay delivery, so a node keeps a dial target, its connections and a relay owner for
+every peer, however many there are; the operator decides the cluster's size, which licensing never
+limits. Connections follow the peers: each peer gets the fixed
+[pool layout](interconnect.md#listener-and-peer-topology) of six connections in each direction, the five
+preconnected connections and the on-demand bulk connection, and at most
+`interconnect-concurrent-handshakes` connections are in setup at once. One health round probes
+every peer together.
 
-With the default 64 peers, the ordinary and append request reserves are 128 each and health-probe
-fan-out is 64. An append stream retains its admission throughout its lifetime, so the derived
-reserve holds an append stream and its replacement for every declared peer. Each traffic reserve is
-independent; a full general queue cannot consume health or cancellation capacity. An explicit lower
-request quota is reported as configured, and a refusal is a typed capacity outcome.
+Requests follow the peers the same way. A request waits for a stream slot of its kind on its peer's
+connection until its own deadline, and its bytes are charged to its traffic class's memory as their
+size becomes known. The [stream slot layout](interconnect.md#traffic-and-resource-isolation) is
+fixed per connection, so a node's request capacity grows with every peer it has, without a
+derivation. An append stream keeps its slot for its whole lifetime, and the replication connection
+reserves a second slot for its replacement. Health checks, cancellations and terminal outcomes have
+slots of their own, so ordinary traffic cannot take their streams. Requests without a reserved kind
+also share `interconnect-incoming-queue-capacity`, and a refusal there is a typed capacity outcome.
 
 The transport has no request or progress timeout. A typed request, a stream and a relay delivery
 wait for their peer for as long as the liveness below keeps the peer and its connection, and end
@@ -396,9 +407,9 @@ whole-transfer deadlines and the explicit maintained OpenRaft configuration.
 
 ## Control-Plane And Session Capabilities
 
-Each incarnation's claim also records its resolved control-plane, session and client-link
-capabilities. `DESCRIBE CLUSTER` reports those values for live and departed nodes. Reconcile
-cadences are exported locally as `nervix_control_plane_cadence_seconds{operation="..."}`;
+Each incarnation's claim also records its resolved control-plane, session, client-link, trace export
+and web console capabilities. `DESCRIBE CLUSTER` reports those values for live and departed nodes.
+Reconcile cadences are exported locally as `nervix_control_plane_cadence_seconds{operation="..."}`;
 `membership` and `scheduling` identify their respective passes. A cadence changes when that node
 restarts. It changes neither the cluster's accepted Models nor an existing operation's deadline.
 
@@ -443,10 +454,11 @@ retain one such frame per subscription and four full subscriptions. A configured
 cannot be represented with the contacted peer's frame size refuses that opening before queue
 activation.
 
-An authenticated session announces its checked limits to the client. Reconnects adopt the node
-they reach, including after a capability roll. Producer and consumer links announce each
-sender's heartbeat at open; a receiver tolerates five of its peer's intervals. This permits
-different operational cadences within one cluster without a uniform-heartbeat assertion.
+An authenticated session announces its checked limits to the client, and a console WebSocket's
+opening also announces the node's snapshot interval and [web console pacing](#web-console-pacing).
+Reconnects adopt the node they reach, including after a capability roll. Producer and consumer links
+announce each sender's heartbeat at open; a receiver tolerates five of its peer's intervals. This
+permits different operational cadences within one cluster without a uniform-heartbeat assertion.
 [Client Session Protocol](client-session-protocol.md#session-limits) and
 [Cluster Interconnect](interconnect.md#client-producer-links) own the framing and failure rules.
 
@@ -515,6 +527,33 @@ OpenTelemetry specification's default limits: 128 attributes, events and links p
 attributes per event and per link. [Node Trace Export](name-resolution.md#node-trace-export)
 describes how the exporter reaches its collector, and
 [Metrics And Observability](metrics-and-observability.md#the-nodes-own-traces) what it exports.
+
+### Web Console Pacing
+
+The browser console has no command line of its own, so the node that serves it declares how it
+paces itself. These node capabilities form a group of the node's operational claim, beside the
+control-plane, session, client-link and trace export groups. `DESCRIBE CLUSTER` shows them on each
+node's capability line, and changing one requires restarting that node.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--web-console-request-timeout` | 2m | how long a backup download waits for its opening and for each next frame, and a restore for its connection to take a chunk and for its reply once the last chunk was sent |
+| `--web-console-connect-timeout` | 3s | how long the console waits for the answer to its credential check after a connection failed, before it keeps the credentials for the next attempt |
+| `--web-console-retry-backoff` | 250ms | the first wait before the console connects again, and before it repeats a command whose outcome is unknown; each further wait doubles |
+| `--web-console-retry-max-backoff` | 5s, at least each first wait | the longest wait those doubling backoffs and the subscription restoration backoff reach |
+| `--web-console-restoration-backoff` | 1s | the first wait before an interrupted subscription tab is restored again, which doubles; the period of the session's retry timer; and the pause before a download or a restore is streamed again |
+| `--web-console-restore-frame-capacity` | 4 frames | restore frames the browser keeps queued on its connection: 1 MiB at the default 4 MiB session frame |
+
+Every wait is a whole number of milliseconds from 1ms through 24 hours, because browser timers
+count whole milliseconds. The longest backoff must be at least the retry and restoration backoffs,
+and an omitted one follows a longer first wait. The restore queue holds at most 16,383 frames, the
+most whose 256 KiB chunks the browser can still count as queued bytes.
+
+The node announces the group when a console WebSocket opens, together with its
+`--session-snapshot-interval` and, once the node has applied the cluster's committed parameters,
+`COMMAND_RETRY_VALIDITY`. [Client Session Protocol](client-session-protocol.md#session-limits)
+describes the announcement and [Web Console](client-tools-web-console.md) how the console follows
+it.
 
 ## The Node Record
 
@@ -635,12 +674,11 @@ explains why a fresh cluster restored from an archive keeps its own UUID and key
 
 ## Cluster Licensing
 
-A cluster starts with the embedded free policy. Its current quotas, `cluster.nodes` and
-`cluster.domains`, are unlimited, and its one capability, `licensing.dummy`, is disabled. Node usage
-counts committed voters and learners; domain usage
-counts committed domain records, including stopped domains. Returning members and updates to an
-existing domain do not consume another slot. Free mode contacts no licensing service, including
-after restart.
+A cluster starts with the embedded free policy, which disables every capability; the catalog's one
+capability, `licensing.dummy`, is disabled. Licensing never limits base features: it refuses no
+node join, domain creation or restore, so a cluster has only the limits it has without a license.
+Free mode contacts no licensing service, including after restart. [Licensing](licensing.md)
+describes what a license adds and how to obtain one.
 
 ```plexus
 ACTIVATE LICENSE PERSISTENT WITH KEY 'NVXK-ABCDEFG2-your-secret';
@@ -720,11 +758,11 @@ that chain is refused without replacing the committed decision.
 Licensing time is committed and monotone. The leader proposes physical observations at deadline
 crossings independently of its refresh attempt. The derived refresh state is `licensed fresh`,
 `licensed due`, or `licensed overdue`; a bounded `valid_until` crossing becomes `lapsed freeze`.
-An outage moves no signed deadline, and restart resets none. Freeze keeps existing work running
-and refuses new domain and member usage. Existing domain lifecycle commands and backups remain
-available. A later verified decision can clear the lapse. A newcomer refused during the freeze
-stops, and the leader keeps refusing that run after the lapse clears, for as long as gossip still
-shows it; the node joins under the cleared policy when it starts again.
+An outage moves no signed deadline, and restart resets none. Freeze keeps existing work running and
+keeps each capability permitted only for its existing uses; it limits no base feature, so it
+refuses no domain or member. No current capability tracks its uses, so today a freeze refuses
+nothing. Existing domain lifecycle commands and backups remain available. A later verified decision
+can clear the lapse.
 
 The licensed leader holds one authenticated outbound event stream. Each connection obtains a
 fresh challenge and single-use signed stream ticket; credentials stay out of the URL. The initial
@@ -759,8 +797,8 @@ While the gate is closed:
 
 - `DESCRIBE LICENSE` reports `policy: stopped` and
   `processing: stopped by licensing: ephemeral activation expired at <instant>`.
-- Admission refuses all new usage with state `stopped`, `CREATE DOMAIN` and the domains a restore
-  would create included. The cluster never falls back to the free policy.
+- The cluster never falls back to the free policy. Licensing refuses no domain creation, restore or
+  node join; a domain created while the gate is closed stays stopped.
 - The leader stops every running domain through the ordinary graceful stop, which preserves its
   persisted runtime state: intake ends at once and the work in motion finishes. The licensing
   stop's request is forced a fixed 60 seconds after the expiry in committed licensing time
@@ -785,8 +823,7 @@ ephemeral activation expired, because the service released its capacity at that 
 stay stopped until an operator starts them.
 
 Every node answers `DESCRIBE LICENSE` without selecting a domain or redirecting to the leader.
-It reports the mode, policy, public identity, committed time, processing state, quotas and
-capabilities. An activation adds its binding, public credential identifier, decision and conditions
+It reports the mode, policy, public identity, committed time, processing state and capabilities. An activation adds its binding, public credential identifier, decision and conditions
 revisions, verification, signed deadlines, license facts and refresh state.
 
 A capability is a feature a license switches on. The typed `capabilities` section lists every
@@ -806,32 +843,26 @@ A degraded inspection also renders its typed decision-verification rejection.
 The command carries the same observation in a typed cluster-license state-inspection envelope
 with one unit and shared Row sections, so applications need not parse display text.
 
-A signed reduction below existing usage starts a committed grace period at receipt. The target
-quota governs new usage immediately. During grace, a replacement may restore usage up to the
+A signed reduction of a cluster quota below existing usage starts a committed grace period at
+receipt. The current catalog declares no cluster quota, so no grace period starts until a
+capability's own limit brings one; licensing never limits nodes or domains. The target quota governs
+new usage immediately. During grace, a replacement may restore usage up to the
 allowance held when the reduction arrived; it cannot expand that allowance. Refresh, restart and
 leader transfer preserve the transition's identity, start and deadline. The next refresh reports
 the committed transition, and a service-signed acknowledgement replaces its copy. Only that
 acknowledgement or a signed administrator extension can move a deadline later. Before acknowledgement,
 the signed offline deadline also bounds the temporary permission.
 The typed `transitions` section exposes each identity, condition, original and target values,
-usage at start, start time, signed deadline, effective deadline, acknowledgement and current quota
-state. `issued_at` and `received_at` are independent typed decision timestamps; `transitions_active`
-counts committed grants that remain active. A member replacement must have belonged to the
-membership when its grant started. A domain restore can recover slots up to the same original
-allowance. Creating another domain or introducing a new member follows the target quota.
+usage at start, start time, signed deadline, effective deadline and acknowledgement. `issued_at`
+and `received_at` are independent typed decision timestamps; `transitions_active` counts committed
+grants that remain active.
 
 An improvement applies immediately and ends grants it makes unnecessary. At a term-end tick or
 release, Nervix targets the embedded free policy and assesses any reduction using the signed grace
-in force. The current free policy has unlimited quotas, so returning to it does not create a quota
-reduction. Expired ephemeral activations retain their firm stop and receive no grace. When a grant
-ends with usage still above its target, inspection, metrics and a Warning notice report the excess;
-licensing itself drops no domain, removes no member and tears down no existing work.
-
-Admission evaluates a coherent committed observation. Domain planning captures its quota, and
-committed creation checks current usage and lapse before adding a domain. Membership admission
-checks before adding a learner or voter. A typed refusal never removes an existing domain or
-member. [Licensing Metrics](metrics-and-observability.md#licensing-metrics) owns the matching series
-and [notices](client-session-protocol.md#what-a-session-is-told) describe asynchronous warnings.
+in force. Expired ephemeral activations retain their firm stop and receive no grace. Licensing
+itself drops no domain, removes no member and tears down no existing work.
+[Licensing Metrics](metrics-and-observability.md#licensing-metrics) owns the licensing series and
+[notices](client-session-protocol.md#what-a-session-is-told) describe asynchronous warnings.
 
 ## The Prerequisite List Is Closed
 
@@ -846,7 +877,7 @@ them all, and each has one source:
 | Cluster identity | `--cluster-id`, which the node's certificate must also name | `default` | equal |
 | Trust root | Detected: a SHA-256 fingerprint over the SHA-256 digests of the trust anchors in `--interconnect-tls-ca`, sorted and without repeats, so the order of the file does not change it | none | equal |
 | Wire contract | Fixed by the build: the fingerprint of the one node-to-node contract it speaks | none | equal |
-| Largest command, largest management event | Detected: the executor's operation limits | 1 MiB, 64 KiB | equal |
+| Largest command, largest management event | Detected: the executor's operation limits | 1 MiB, 68 KiB | equal |
 | Durability promise | Fixed by the build: every Raft log append is synchronized, data and metadata, before the node acknowledges it, written `fsync every append` | none | equal |
 | Raft heartbeat | `--raft-heartbeat-interval` | `250ms` | within a factor of two |
 | Gossip interval | `--gossip-interval` | `500ms` | within a factor of two |
@@ -1025,7 +1056,7 @@ Each refusal names the setting or directory it judged, with the values involved:
 
 | Check | Refusal |
 | --- | --- |
-| Memory budgets | `the execution memory budgets of 229.25MiB exceed node memory 32MiB`, for the executor pools alone, or `memory-limit (500MiB) cannot hold the node's memory budgets of 507.16MiB`, for the complete total |
+| Memory budgets | `the execution memory budgets of 229.27MiB exceed node memory 32MiB`, for the executor pools alone, or `memory-limit (500MiB) cannot hold the node's memory budgets of 507.16MiB`, for the complete total |
 | Memory watermark | `memory-high-watermark (4GiB) exceeds memory-limit (3GiB)` |
 | Directories | `the database directory <path> cannot be created`, `the temporary directory <path> is not writable` |
 | Volumes | `the capacity of the volume holding the database directory <path> cannot be read` |
@@ -1093,7 +1124,7 @@ Each pool has `--execution-<pool>-memory-bytes`. With known memory, defaults are
 | Pool | Memory fraction | Minimum working set |
 | --- | --- | --- |
 | `intake` | 1/16 | 128 MiB |
-| `management` | 1/128 | 256 KiB, one consensus vote or metadata write |
+| `management` | 1/128 | 272 KiB, one consensus vote or metadata write |
 | `commands` | 1/32 | 24 MiB |
 | `relay` | 1/16 | Enough for its two admitted operations |
 | `state-read` | Resolved relay capacity | Enough for its two admitted operations |
@@ -1109,7 +1140,7 @@ silently reduced. With unknown memory, defaults are respectively 128, 8, 24, 192
 64 bytes and its creation policy remains the committed `PASSWORD_ITERATIONS` parameter.
 
 The management pool must hold its largest operation, one consensus vote or metadata write. The
-consensus store reserves four management events for each, 256 KiB with the fixed 64 KiB event (see
+consensus store reserves four management events for each, 272 KiB with the fixed 68 KiB event (see
 [Consensus Storage And Replication](consensus-storage-and-replication.md#storage-working-sets)).
 A smaller explicit `--execution-management-memory-bytes` refuses startup before any store opens,
 and the refusal names both values. A derived management pool never falls below this working set.
@@ -1321,8 +1352,8 @@ describes, defaults included.
 | `--raft-snapshot-entry-threshold`, `--raft-snapshot-byte-threshold`, `--raft-covered-log-entries-retained`, `--raft-covered-log-bytes-retained`, `--raft-retained-log-cap` | node capability | Raft retention |
 | `--raft-append-batch-entries` and the other [consensus capacities](#consensus-capacities) | node capability | consensus operations |
 | `--database-cache-bytes`, `--database-journal-bytes`, `--database-workers`, `--raft-database-cache-bytes`, `--raft-database-journal-bytes`, `--raft-database-workers` | node capability | node and consensus databases |
-| `--dns-cache-entries`, `--dns-positive-max-ttl`, `--dns-negative-max-ttl`, `--dns-hook-lookup-budget`, `--dns-address-family-policy`, `--dns-trust-negative-answers` | node capability | name resolution |
-| `--interconnect-max-peers` and the other [transport capacities](#transport-resolver-and-database-capacities) | node capability | interconnect transport |
+| `--dns-cache-entries`, `--dns-positive-max-ttl`, `--dns-negative-max-ttl`, `--dns-hook-lookup-budget`, `--dns-address-family-policy`, `--dns-trust-negative-answers`, `--dns-concurrent-lookups` | node capability | name resolution |
+| `--interconnect-concurrent-handshakes` and the other [transport capacities](#transport-resolver-and-database-capacities) | node capability | interconnect transport |
 | `--interconnect-relay-batch-bytes`, `--interconnect-relay-decoded-bytes`, `--interconnect-bulk-chunk-bytes`, `--interconnect-bulk-receive-window` | node capability | peer receive bounds |
 | `--listener-*`, `--http-body-bytes`, `--http-body-copy-bytes`, `--http-body-timeout`, `--http-refusal-drain-timeout`, `--websocket-message-bytes`, `--websocket-frame-bytes`, `--grpc-header-bytes`, `--grpc-concurrency`, `--grpc-request-timeout`, `--grpc-max-streams`, `--grpc-keepalive-interval`, `--grpc-keepalive-timeout` | node capability | [listener bounds](#listener-bounds) |
 | `--vm-*`, `--wasm-stack-bytes`, `--wasm-memory-reservation-bytes`, `--udf-watchdog`, `--connector-retry-multiplier`, `--connector-retry-jitter-percent`, `--kafka-domain-assignment-retry`, `--partition-topology-poll-interval`, `--syslog-intake-queue-capacity`, `--syslog-read-chunk-bytes`, `--mqtt-read-ahead-headroom` | node capability | [engine and connector host](#engine-and-connector-host-capabilities) |
@@ -1345,6 +1376,7 @@ describes, defaults included.
 | `--shutdown-timeout`, `--task-grace-period` | node capability | shutdown |
 | `--resource-max-archive-bytes`, `--resource-max-extracted-bytes`, `--resource-max-file-count` | cluster parameter | resources |
 | `--otel-trace-sample-ratio`, `--otel-trace-export-timeout`, `--otel-trace-export-interval`, `--otel-trace-queue-capacity`, `--otel-trace-export-batch-spans` | node capability | trace export |
+| `--web-console-request-timeout`, `--web-console-connect-timeout`, `--web-console-retry-backoff`, `--web-console-retry-max-backoff`, `--web-console-restoration-backoff`, `--web-console-restore-frame-capacity` | node capability | [web console pacing](#web-console-pacing) |
 | `--cpu-count`, `--memory-limit`, `--node-detection-timeout` | node capability | capacity |
 | `--execution-*`, `--runtime-worker-threads`, `--runtime-max-blocking-threads`, `--runtime-thread-stack-size` | node capability | execution |
 | `--client-producer-node-bytes`, `--client-consumer-node-bytes` | node capability | client admission |
@@ -1411,6 +1443,11 @@ has to move to grow takes its current size, the growth reserve and two guards. S
 reservation, guard and growth reserve do not replace a processor's declared `MAX FUEL`,
 `MAX MEMORY` or `MAX TABLE ELEMENTS`.
 
+The WebAssembly proposals a guest may use are a fixed part of the guest contract, never a setting:
+every node enables exactly the set [WASM Processor Guests](wasm-processor-guests.md#webassembly-features)
+lists, and keeps relaxed SIMD at the node's native results, whatever its Wasmtime version enables by
+default.
+
 `--udf-watchdog` is checked when a Roto UDF call returns: a call that took longer fails its whole
 batch, and each node judges the calls it runs by its own value. It cannot interrupt native code
 that never returns; [User-Defined Functions](udfs.md#nulls-errors-and-volatility) states what an
@@ -1438,7 +1475,7 @@ change takes effect when that node restarts.
 
 | Server option | Default | Owner and bound |
 | --- | --- | --- |
-| `--gossip-receive-queue-capacity` | 1,024 datagrams | positive, within the native channel permit bound; incoming gossip datagrams queued between the interconnect handler and Chitchat, each at most the 60 KiB gossip bound, so the queue retains up to its capacity times 60 KiB |
+| `--gossip-receive-queue-capacity` | 1,024 datagrams | positive, within the native channel permit bound; incoming gossip datagrams queued between the interconnect handler and Chitchat, each at most the 65,510-byte gossip bound, so the queue retains up to its capacity times 65,510 bytes |
 | `--gossip-tombstone-grace-period` | 60 s | positive, at most `u32::MAX` whole seconds, so Chitchat can add it to the instant a key was deleted; how long a deleted gossip key's tombstone stays before Chitchat collects it |
 
 Each has the environment twin `NERVIX_` followed by its uppercase name with underscores. Both are

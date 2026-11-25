@@ -10,18 +10,13 @@
     nervix::layer(control_plane, reason = "owns node licensing publication")
 )]
 
-mod admission_metrics;
 mod requests;
 pub(crate) use requests::{Connectivity, RequestEvent, RequestOutcome};
 pub(crate) mod metrics;
 pub mod policy;
 
-use admission_metrics::AdmissionMetrics;
-use meticulous::OptionExt as _;
-use nervix_consensus::{LicensingSnapshot, Observer};
-pub use nervix_licensing_vocabulary::{
-    CapabilityName, LicensingRefusal, Quota, QuotaConstraint, QuotaName,
-};
+use nervix_consensus::Observer;
+pub use nervix_licensing_vocabulary::CapabilityName;
 pub use nervix_models::LicensingStopReason;
 use nervix_primitives::{
     publication::{ArcSwap, Guard},
@@ -29,12 +24,8 @@ use nervix_primitives::{
 };
 pub use policy::{CapabilityVerdict, LicensingPolicy};
 
-use crate::{ConfiguredFaultInjection, metrics::RuntimeMetrics};
-
 struct PolicyPublication {
     policy: ArcSwap<LicensingPolicy>,
-    fault: ConfiguredFaultInjection,
-    admissions: AdmissionMetrics,
     requests: requests::RequestObservations,
 }
 
@@ -61,21 +52,6 @@ impl std::fmt::Debug for PolicyHandle {
     }
 }
 
-fn for_node(snapshot: LicensingSnapshot, fault: &ConfiguredFaultInjection) -> LicensingPolicy {
-    let mut policy = policy::evaluate_policy(snapshot);
-    for name in QuotaName::ALL {
-        let quota = fault.licensing_quota(name, policy.quota(name));
-        *policy
-            .conditions
-            .quotas
-            .get_mut(name.as_str())
-            .verified("the current free catalog contains this cluster quota") =
-            nervix_licensing_protocol::conditions::ConditionValue::Known(quota);
-    }
-    policy.refresh_grants();
-    policy
-}
-
 impl PolicyHandle {
     pub(crate) fn set_stream_connected(&self, connected: bool) {
         self.inner.requests.stream_connected.store(
@@ -90,17 +66,11 @@ impl PolicyHandle {
             .stream_connected
             .load(nervix_primitives::sync::atomic::Ordering::Relaxed)
     }
-    pub fn new(
-        observer: &Observer,
-        metrics: &RuntimeMetrics,
-        fault: ConfiguredFaultInjection,
-    ) -> Self {
-        let value = for_node(observer.licensing_snapshot(), &fault);
+    pub fn new(observer: &Observer) -> Self {
+        let value = policy::evaluate_policy(observer.licensing_snapshot());
         Self {
             inner: Arc::new(PolicyPublication {
                 policy: ArcSwap::from_pointee(value),
-                fault,
-                admissions: AdmissionMetrics::register(metrics),
                 requests: requests::RequestObservations::default(),
             }),
         }
@@ -136,64 +106,12 @@ impl PolicyHandle {
     pub fn capability(&self, name: CapabilityName) -> CapabilityVerdict {
         self.current().capability(name)
     }
-    pub fn quota(&self, name: QuotaName) -> Quota {
-        self.current().quota(name)
-    }
     pub fn processing_stop(&self) -> Option<LicensingStopReason> {
         self.current().processing_stop()
     }
 
-    pub(crate) fn admit_snapshot(
-        &self,
-        snapshot: LicensingSnapshot,
-        name: QuotaName,
-        usage: u64,
-        requested: u64,
-        replacement: bool,
-    ) -> error_stack::Result<QuotaConstraint, LicensingRefusal> {
-        for_node(snapshot, &self.inner.fault)
-            .admit(name, usage, requested, replacement)
-            .inspect_err(|report| self.record_refusal(report))
-    }
-
-    pub(crate) fn admit_node_snapshot(
-        &self,
-        snapshot: LicensingSnapshot,
-        node: &nervix_models::ClusterNodeName,
-        usage: u64,
-    ) -> error_stack::Result<QuotaConstraint, LicensingRefusal> {
-        let policy = for_node(snapshot, &self.inner.fault);
-        policy
-            .admit(
-                QuotaName::ClusterNodes,
-                usage,
-                1,
-                policy.is_node_replacement(node),
-            )
-            .inspect_err(|report| self.record_refusal(report))
-    }
-
-    pub fn admit(
-        &self,
-        name: QuotaName,
-        current_usage: u64,
-        requested: u64,
-        replacement: bool,
-    ) -> error_stack::Result<QuotaConstraint, LicensingRefusal> {
-        self.current()
-            .admit(name, current_usage, requested, replacement)
-            .inspect_err(|report| self.record_refusal(report))
-    }
-
-    pub fn record_refusal<C>(&self, report: &error_stack::Report<C>) {
-        if let Some(refusal) = report.downcast_ref::<LicensingRefusal>() {
-            self.inner.admissions.record(refusal);
-            tracing::warn!(error = %format_args!("{report:#}"), "licensing refused admission");
-        }
-    }
-
     pub(crate) fn refresh(&self, observer: &Observer) {
-        let value = for_node(observer.licensing_snapshot(), &self.inner.fault);
+        let value = policy::evaluate_policy(observer.licensing_snapshot());
         self.inner.policy.store(StdArc::new(value));
     }
 

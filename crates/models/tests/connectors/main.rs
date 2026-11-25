@@ -1034,9 +1034,12 @@ fn every_client_model_names_the_connector_it_configures_and_no_other_model_does(
 fn iceberg_emitter() -> IcebergTableEmitter {
     IcebergTableEmitter {
         mode: nervix_models::IcebergTablePublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
+            retry_policy: nervix_models::EmitterRetryPolicy {
+                pacing: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+                give_up_after: None,
             },
         },
         client: named("lake"),
@@ -1109,9 +1112,12 @@ fn an_otel_emitter_names_its_signal_by_its_entity() {
     };
     let logs = OtelEmitter::from(OtelLogsEmitter {
         mode: nervix_models::OtelLogsPublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
+            retry_policy: nervix_models::EmitterRetryPolicy {
+                pacing: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+                give_up_after: None,
             },
         },
         client: named("collector"),
@@ -1119,9 +1125,12 @@ fn an_otel_emitter_names_its_signal_by_its_entity() {
     });
     let traces = OtelEmitter::from(OtelTracesEmitter {
         mode: nervix_models::OtelTracesPublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
+            retry_policy: nervix_models::EmitterRetryPolicy {
+                pacing: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+                give_up_after: None,
             },
         },
         client: named("collector"),
@@ -1129,9 +1138,12 @@ fn an_otel_emitter_names_its_signal_by_its_entity() {
     });
     let metrics = OtelEmitter::from(OtelMetricsEmitter {
         mode: nervix_models::OtelMetricsPublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
+            retry_policy: nervix_models::EmitterRetryPolicy {
+                pacing: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+                give_up_after: None,
             },
         },
         client: named("collector"),
@@ -1165,9 +1177,12 @@ fn direct_value_mappings_cover_all_external_value_sections() {
     let emitters = [
         EmitterEntity::from(OtelLogsEmitter {
             mode: nervix_models::OtelLogsPublishingMode::Ack {
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: nervix_models::EmitterRetryPolicy {
+                    pacing: nervix_models::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: client.clone(),
@@ -1180,9 +1195,12 @@ fn direct_value_mappings_cover_all_external_value_sections() {
         }),
         EmitterEntity::ClickHouse(ClickHouseEmitter::Table(ClickHouseTableEmitter {
             mode: nervix_models::ClickHouseTablePublishingMode::Ack {
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: nervix_models::EmitterRetryPolicy {
+                    pacing: nervix_models::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: client.clone(),
@@ -1191,9 +1209,12 @@ fn direct_value_mappings_cover_all_external_value_sections() {
         })),
         EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
             mode: nervix_models::PostgresTablePublishingMode::Ack {
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: nervix_models::EmitterRetryPolicy {
+                    pacing: nervix_models::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: client.clone(),
@@ -1203,9 +1224,12 @@ fn direct_value_mappings_cover_all_external_value_sections() {
         })),
         EmitterEntity::MySql(MySqlEmitter::Table(MySqlTableEmitter {
             mode: nervix_models::MySqlTablePublishingMode::Ack {
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: nervix_models::EmitterRetryPolicy {
+                    pacing: nervix_models::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: client.clone(),
@@ -1215,9 +1239,12 @@ fn direct_value_mappings_cover_all_external_value_sections() {
         })),
         EmitterEntity::MongoDb(MongoDbEmitter::Collection(MongoDbCollectionEmitter {
             mode: nervix_models::MongoDbCollectionPublishingMode::Ack {
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: nervix_models::EmitterRetryPolicy {
+                    pacing: nervix_models::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: client.clone(),
@@ -1227,9 +1254,12 @@ fn direct_value_mappings_cover_all_external_value_sections() {
         })),
         EmitterEntity::Iceberg(IcebergEmitter::Table(IcebergTableEmitter {
             mode: nervix_models::IcebergTablePublishingMode::Ack {
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: nervix_models::EmitterRetryPolicy {
+                    pacing: nervix_models::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: client.clone(),
@@ -1262,7 +1292,10 @@ fn direct_value_mappings_cover_all_external_value_sections() {
         client,
         platform: None,
         mode: nervix_models::SentryEventPublishingMode::Ack {
-            retry_policy: retry_policy(),
+            retry_policy: nervix_models::EmitterRetryPolicy {
+                pacing: retry_policy(),
+                give_up_after: None,
+            },
         },
     }));
     assert_eq!(emitter_without_values.direct_value_mappings().count(), 0);
@@ -1273,9 +1306,12 @@ fn two_emitters_are_one_definition_when_only_their_client_differs() {
     let kafka = |client: &str, topic: &str| {
         EmitterEntity::from(KafkaTopicEmitter {
             mode: nervix_models::KafkaTopicPublishingMode::NoAck {
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: nervix_models::EmitterRetryPolicy {
+                    pacing: nervix_models::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: named(client),
@@ -1288,9 +1324,12 @@ fn two_emitters_are_one_definition_when_only_their_client_differs() {
 
     let pulsar = EmitterEntity::from(PulsarTopicEmitter {
         mode: nervix_models::PulsarTopicPublishingMode::NoAck {
-            retry_policy: nervix_models::RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
+            retry_policy: nervix_models::EmitterRetryPolicy {
+                pacing: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+                give_up_after: None,
             },
         },
         client: named("first"),
@@ -1303,9 +1342,12 @@ fn two_emitters_are_one_definition_when_only_their_client_differs() {
             mode: nervix_models::ClientConsumerPublishingMode::Ack {
                 window: nervix_models::AckWindow::Sequential,
                 ack_timeout: "30s".to_string(),
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: nervix_models::EmitterRetryPolicy {
+                    pacing: nervix_models::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             schema: named::<SchemaName>(schema),
@@ -1500,9 +1542,12 @@ fn an_entity_model_converts_into_every_enum_that_holds_it() {
 
     let connector = RedisPubSubEmitter {
         mode: nervix_models::RedisPubSubPublishingMode::NoAck {
-            retry_policy: nervix_models::RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
+            retry_policy: nervix_models::EmitterRetryPolicy {
+                pacing: nervix_models::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+                give_up_after: None,
             },
         },
         client: named("cache"),

@@ -1,8 +1,9 @@
 //! Declared transport capacity and deadline settings.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** One declaration, default and validation for each local transport policy input,
-//!   and peer-relative connection, request and health capacities.
+//! - **Owns.** One declaration, default and validation for each local transport policy input.
+//!   Connections and request reserves follow the peers the transport has, so no input counts
+//!   peers.
 //! - **Depends on.** Vocabulary setting classes, primitive admission and transport pool geometry.
 //! - **Must not know.** Command-line parsing, membership admission, graphs or placement.
 
@@ -13,22 +14,20 @@
 
 use std::time::Duration;
 
-use error_stack::{Report, ResultExt as _};
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
 use nervix_primitives::{sync::Semaphore, time::Instant};
 use thiserror::Error;
 use ubyte::ByteUnit;
 
-use crate::{PoolClass, TransportEntropy, TransportOptions};
+use crate::{TransportEntropy, TransportOptions};
 
 /// A local claim that the transport cannot enforce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum TransportSettingsError {
     #[error("interconnect-reconnect-jitter-permille ({0}) must be at most 1000")]
     Jitter(u16),
-    #[error("invalid peer capacity")]
-    PeerCapacity,
     #[error("{setting} ({value}) must be between 1 and {maximum}")]
     Capacity {
         setting: &'static str,
@@ -56,8 +55,6 @@ pub enum TransportSettingsError {
         maximum: Duration,
     },
 }
-
-pub use nervix_models::MaxPeers;
 
 /// The node's `interconnect-concurrent-handshakes` capacity.
 pub struct ConcurrentHandshakes;
@@ -208,51 +205,12 @@ impl SettingDefinition for ReconnectJitterPermille {
     }
 }
 
-/// The validated inputs of a peer-relative request capacity.
-#[derive(Debug, Clone, Copy)]
-pub struct RequestQuotaContext {
-    pub max_peers: usize,
-    pub incoming_capacity: usize,
-}
-
-/// Reserved requests of each ordinary class, independently in each direction.
-pub struct RequestQuota;
-impl SettingDefinition for RequestQuota {
-    type Class = NodeCapabilities;
-    type Value = Option<usize>;
-    type Context = RequestQuotaContext;
-    type Error = TransportSettingsError;
-    const NAME: &'static str = "interconnect-request-quota";
-    const DERIVATION: Option<&'static str> =
-        Some("two requests per peer, bounded by the incoming queue");
-    fn default_value(_: &RequestQuotaContext) -> Option<usize> {
-        None
-    }
-    fn validate(
-        value: &Option<usize>,
-        context: &RequestQuotaContext,
-    ) -> Result<(), Report<Self::Error>> {
-        if let Some(value) = value
-            && (*value == 0 || *value > context.incoming_capacity)
-        {
-            return Err(Report::new(TransportSettingsError::Capacity {
-                setting: Self::NAME,
-                value: *value,
-                maximum: context.incoming_capacity,
-            }));
-        }
-        Ok(())
-    }
-}
-
 /// Explicit local inputs; omitted derived values remain omitted at the edge.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TransportSettingValues {
     pub reconnect_jitter_permille: Option<u16>,
-    pub max_peers: Option<usize>,
     pub concurrent_handshakes: Option<usize>,
     pub incoming_queue_capacity: Option<usize>,
-    pub request_quota: Option<usize>,
     pub stream_receive_window: Option<ByteUnit>,
     pub connection_receive_window: Option<ByteUnit>,
     pub connection_setup_timeout: Option<Duration>,
@@ -264,10 +222,8 @@ pub struct TransportSettingValues {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransportSettings {
     reconnect_jitter_permille: Setting<ReconnectJitterPermille>,
-    max_peers: Setting<MaxPeers>,
     concurrent_handshakes: Setting<ConcurrentHandshakes>,
     incoming_queue_capacity: Setting<IncomingQueueCapacity>,
-    request_quota: Setting<RequestQuota>,
     stream_receive_window: Setting<StreamReceiveWindow>,
     connection_receive_window: Setting<ConnectionReceiveWindow>,
     connection_setup_timeout: Setting<ConnectionSetupTimeout>,
@@ -277,20 +233,10 @@ pub struct TransportSettings {
 
 impl TransportSettings {
     pub fn resolve(values: TransportSettingValues) -> Result<Self, Report<TransportSettingsError>> {
-        let max_peers = Setting::<MaxPeers>::resolve(values.max_peers, &())
-            .change_context(TransportSettingsError::PeerCapacity)?;
-        let incoming_queue_capacity =
-            Setting::<IncomingQueueCapacity>::resolve(values.incoming_queue_capacity, &())?;
-        let context = RequestQuotaContext {
-            max_peers: *max_peers.value(),
-            incoming_capacity: *incoming_queue_capacity.value(),
-        };
         let settings = Self {
             reconnect_jitter_permille: Setting::resolve(values.reconnect_jitter_permille, &())?,
-            max_peers,
             concurrent_handshakes: Setting::resolve(values.concurrent_handshakes, &())?,
-            incoming_queue_capacity,
-            request_quota: Setting::new(values.request_quota, &context)?,
+            incoming_queue_capacity: Setting::resolve(values.incoming_queue_capacity, &())?,
             stream_receive_window: Setting::resolve(values.stream_receive_window, &())?,
             connection_receive_window: Setting::resolve(values.connection_receive_window, &())?,
             connection_setup_timeout: Setting::resolve(values.connection_setup_timeout, &())?,
@@ -303,7 +249,6 @@ impl TransportSettings {
                 maximum: *settings.max_reconnect_backoff.value(),
             }));
         }
-        settings.validate_derived_capacities()?;
         Ok(settings)
     }
 
@@ -341,42 +286,6 @@ impl TransportSettings {
         }))
     }
 
-    fn connection_slots_per_peer() -> usize {
-        let mut slots = 0usize;
-        for class in PoolClass::ALL {
-            slots = slots
-                .checked_add(class.connections_per_peer())
-                .assured("the finite set of pool slots fits usize");
-        }
-        slots
-            .checked_mul(2)
-            .assured("the finite inbound and outbound pool geometry fits usize")
-    }
-
-    fn validate_derived_capacities(&self) -> Result<(), Report<TransportSettingsError>> {
-        let maximum = Semaphore::MAX_PERMITS / Self::connection_slots_per_peer();
-        if *self.max_peers.value() > maximum {
-            return Err(Report::new(TransportSettingsError::Capacity {
-                setting: MaxPeers::NAME,
-                value: *self.max_peers.value(),
-                maximum,
-            }));
-        }
-        if self
-            .incoming_queue_capacity
-            .value()
-            .checked_mul(8)
-            .is_none()
-        {
-            return Err(Report::new(TransportSettingsError::Capacity {
-                setting: IncomingQueueCapacity::NAME,
-                value: *self.incoming_queue_capacity.value(),
-                maximum: usize::MAX / 8,
-            }));
-        }
-        Ok(())
-    }
-
     pub(crate) fn validate_deadline(
         setting: &'static str,
         value: Duration,
@@ -395,59 +304,18 @@ impl TransportSettings {
         Ok(())
     }
 
-    /// Both directions of every pool, including the on-demand bulk pool.
-    pub fn max_connections(&self) -> usize {
-        self.max_peers
-            .value()
-            .checked_mul(Self::connection_slots_per_peer())
-            .verified("resolve validated capacity for every inbound and outbound pool")
-    }
-
-    pub fn health_probes(&self) -> usize {
-        *self.max_peers.value()
-    }
-
-    pub fn max_peers(&self) -> usize {
-        *self.max_peers.value()
-    }
-
-    pub fn request_quota(&self) -> usize {
-        match self.request_quota.value() {
-            Some(value) => *value,
-            None => self.derived_request_quota(),
-        }
-    }
-
-    /// Preserve omission of a peer-derived quota when command-line overrides change its inputs.
+    /// Every resolved value, as explicit inputs that resolve to these settings again.
     pub fn values(&self) -> TransportSettingValues {
         TransportSettingValues {
             reconnect_jitter_permille: Some(*self.reconnect_jitter_permille.value()),
-            max_peers: Some(*self.max_peers.value()),
             concurrent_handshakes: Some(*self.concurrent_handshakes.value()),
             incoming_queue_capacity: Some(*self.incoming_queue_capacity.value()),
-            request_quota: *self.request_quota.value(),
             stream_receive_window: Some(*self.stream_receive_window.value()),
             connection_receive_window: Some(*self.connection_receive_window.value()),
             connection_setup_timeout: Some(*self.connection_setup_timeout.value()),
             reconnect_backoff: Some(*self.reconnect_backoff.value()),
             max_reconnect_backoff: Some(*self.max_reconnect_backoff.value()),
         }
-    }
-
-    /// A normal append stream and its replacement for every peer, inside node admission.
-    fn derived_request_quota(&self) -> usize {
-        self.max_peers
-            .value()
-            .checked_mul(2)
-            .assured("validated peer capacity leaves room for stream replacement")
-            .min(*self.incoming_queue_capacity.value())
-    }
-
-    /// Completion capacity scales with the peers whose outstanding work it resolves.
-    pub fn completion_requests(&self) -> usize {
-        (*self.max_peers.value() / 16)
-            .max(1)
-            .min(*self.incoming_queue_capacity.value())
     }
 
     /// The same validated values used by construction, retained in this run's committed claim.
@@ -461,13 +329,8 @@ impl TransportSettings {
         };
         nervix_models::InterconnectCapabilities {
             reconnect_jitter_permille: *self.reconnect_jitter_permille.value(),
-            max_peers: positive(self.max_peers()),
-            max_connections: positive(self.max_connections()),
             concurrent_handshakes: positive(*self.concurrent_handshakes.value()),
             incoming_queue_capacity: positive(*self.incoming_queue_capacity.value()),
-            request_quota: positive(self.request_quota()),
-            completion_quota: positive(self.completion_requests()),
-            health_probes: positive(self.health_probes()),
             stream_window_bytes: u32::try_from(self.stream_receive_window.value().as_u64())
                 .verified("validated HTTP/2 window"),
             connection_window_bytes: u32::try_from(self.connection_receive_window.value().as_u64())
@@ -485,14 +348,8 @@ impl TransportSettings {
                 .assured("the declared accept-retry default is positive and clock-representable"),
             reconnect_jitter_permille: *self.reconnect_jitter_permille.value(),
             peer_receive,
-            max_peers: *self.max_peers.value(),
-            max_connections: self.max_connections(),
             max_concurrent_handshakes: *self.concurrent_handshakes.value(),
             incoming_queue_capacity: *self.incoming_queue_capacity.value(),
-            request_quota: self.request_quota(),
-            append_request_quota: self.request_quota(),
-            completion_request_quota: self.completion_requests(),
-            max_concurrent_health_probes: self.health_probes(),
             initial_stream_window_bytes: u32::try_from(self.stream_receive_window.value().as_u64())
                 .verified("the receive window fits HTTP/2"),
             initial_connection_window_bytes: u32::try_from(
@@ -547,42 +404,10 @@ mod tests {
     }
 
     #[test]
-    fn declared_peers_scale_independent_reserves_without_materializing_derived_inputs() {
-        let settings = TransportSettings::resolve(TransportSettingValues {
-            max_peers: Some(10),
-            ..Default::default()
-        })
-        .assured("ten peers fit every capacity");
-        let options = settings.options(None);
-        assert_eq!(options.max_connections, 120);
-        assert_eq!(options.request_quota, 20);
-        assert_eq!(options.append_request_quota, 20);
-        assert_eq!(options.max_concurrent_health_probes, 10);
-        assert_eq!(settings.values().request_quota, None);
-        let explicit = TransportSettings::resolve(TransportSettingValues {
-            max_peers: Some(16),
-            request_quota: Some(4),
-            ..Default::default()
-        })
-        .assured("a four-request reserve fits the incoming queue");
-        assert_eq!(explicit.options(None).append_request_quota, 4);
-        assert_eq!(explicit.values().request_quota, Some(4));
-    }
-
-    #[test]
     fn unrepresentable_and_inconsistent_inputs_are_refused_before_io() {
         for values in [
             TransportSettingValues {
-                max_peers: Some(0),
-                ..Default::default()
-            },
-            TransportSettingValues {
-                max_peers: Some(usize::MAX),
-                ..Default::default()
-            },
-            TransportSettingValues {
-                incoming_queue_capacity: Some(3),
-                request_quota: Some(4),
+                incoming_queue_capacity: Some(0),
                 ..Default::default()
             },
             TransportSettingValues {

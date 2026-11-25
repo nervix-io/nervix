@@ -51,10 +51,16 @@ impl ClientConnection {
                     ))
                 })?;
             request_url.set_path(path);
+            // Every body declares its length, which its receiver charges before reading it.
+            let length = match &body {
+                Some(body) => body.len(),
+                None => 0,
+            };
             let mut builder = Request::builder()
                 .method(Method::POST)
                 .version(Version::HTTP_2)
-                .uri(request_url.as_str());
+                .uri(request_url.as_str())
+                .header(http::header::CONTENT_LENGTH, length);
             for (name, value) in headers {
                 builder = builder.header(*name, *value);
             }
@@ -135,7 +141,7 @@ impl ClientConnection {
         &self,
         state: &TransportState,
         request: RawRequest<'_>,
-    ) -> Result<ChargedBytes, Report<TransportError>> {
+    ) -> Result<ReceivedBody, Report<TransportError>> {
         if self.closed.is_cancelled() {
             return Err(Report::new(TransportError::Closed(
                 self.key.endpoint.clone(),
@@ -166,10 +172,16 @@ impl ClientConnection {
                     ))
                 })?;
             request_url.set_path(path);
+            // Every body declares its length, which its receiver charges before reading it.
+            let length = match &body {
+                Some(body) => body.len(),
+                None => 0,
+            };
             let mut builder = Request::builder()
                 .method(Method::POST)
                 .version(Version::HTTP_2)
-                .uri(request_url.as_str());
+                .uri(request_url.as_str())
+                .header(http::header::CONTENT_LENGTH, length);
             for (name, value) in headers {
                 builder = builder.header(*name, *value);
             }
@@ -190,20 +202,29 @@ impl ClientConnection {
             }
             let response = response.await.map_err(TransportError::from)?;
             let status = response.status();
-            let response = read_body(
-                &state.executor,
-                response_class.memory_class(),
-                response_limit,
-                response.into_body(),
-            )
-            .await?;
+            let declared = declared_length(response.headers(), response_limit)?;
             if !status.is_success() {
+                let message = read_body(
+                    &state.executor,
+                    response_class.memory_class(),
+                    declared,
+                    response.into_body(),
+                )
+                .await?;
                 return Err(Report::new(TransportError::RemoteRejected {
                     status: status.as_u16(),
-                    message: String::from_utf8_lossy(response.as_ref()).into_owned(),
+                    message: String::from_utf8_lossy(message.as_ref()).into_owned(),
                 }));
             }
-            Ok(response)
+            // The answer and its decoding are charged together before any of it is read, so its
+            // decoding never waits for room behind the answer the caller holds.
+            read_body_to_decode(
+                &state.executor,
+                response_class.memory_class(),
+                declared,
+                response.into_body(),
+            )
+            .await
         };
         match crate::settings::within(deadline, operation).await {
             Ok(Ok(response)) => Ok(response),

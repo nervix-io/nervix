@@ -76,7 +76,7 @@ use nervix_client_wire::{
     SubscriptionRefusal, SubscriptionType, SuggestRequest, UnsubscribeDisposition,
     UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
 };
-use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
+use nervix_execution::{CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
     CreateSubscription, DeleteSubscription, DomainName, TransactionInspectionRequest, UserName,
 };
@@ -253,9 +253,7 @@ enum QueuedReply {
 enum ReplyEncodingFailure {
     /// The reply does not fit the session limits.
     Encoding(Report<WireEncodeError>),
-    /// The bulk memory a large reply is encoded under could not take the job.
-    Memory(Report<AdmissionError>),
-    /// The bulk workers could not take the job.
+    /// The bulk workers did not run the job: the node is stopping, or the job failed.
     Workers(Report<ExecutionError>),
 }
 
@@ -268,19 +266,11 @@ impl ReplyEncodingFailure {
                 field: None,
                 message: error.current_context().to_string(),
             },
-            Self::Memory(error) => RequestRejected {
-                rejection: RequestRejection::ServerBusy,
-                field: None,
-                message: format!(
-                    "the server had no memory left to prepare the reply: {}",
-                    error.current_context()
-                ),
-            },
             Self::Workers(error) => RequestRejected {
                 rejection: RequestRejection::ServerBusy,
                 field: None,
                 message: format!(
-                    "the server had no worker left to prepare the reply: {}",
+                    "the server's workers did not prepare the reply: {}",
                     error.current_context()
                 ),
             },
@@ -423,19 +413,11 @@ impl SessionShared {
                 .map_err(ReplyEncodingFailure::Encoding);
         }
         let executor = self.service.inner.runtime.executor();
-        // The charge admits the job onto the bulk workers. The reply it produces is bounded by the
-        // session transfer limit, which the encoder enforces as the reply grows.
-        let chunk_bytes = executor.limits().bulk_chunk_bytes.as_u64();
-        let reservation = if state_format.is_some() {
-            executor
-                .try_reserve(MemoryClass::Bulk, chunk_bytes)
-                .map_err(ReplyEncodingFailure::Memory)?
-        } else {
-            executor
-                .reserve(MemoryClass::Bulk, chunk_bytes)
-                .await
-                .map_err(ReplyEncodingFailure::Memory)?
-        };
+        // The job takes no charge of its own: the report it encodes holds its own, and the reply it
+        // produces is bounded by the session transfer limit, which the encoder enforces as the
+        // reply grows. A charge taken here would wait for room while the report holds part of the
+        // same class.
+        let reservation = executor.charge_nothing(MemoryClass::Bulk);
         let limits = *self.limits();
         let encoded = executor
             .run_cpu(

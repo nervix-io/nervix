@@ -1012,14 +1012,7 @@ impl RemoteDispatcher {
                 Some(bytes) => bytes,
                 // A subscription delivery answers no waiting caller, so a full queue holds the
                 // batch back rather than dropping it for its subscribers.
-                None => match batch
-                    .batch
-                    .encode_arrow_ipc(
-                        self.executor(),
-                        nervix_execution::QueueAdmission::WaitForPlace,
-                    )
-                    .await
-                {
+                None => match batch.batch.encode_arrow_ipc(self.executor()).await {
                     Ok(bytes) => {
                         let bytes = (bytes, batch_payload_bytes(batch.batch.batch()));
                         encoded_body = Some(bytes.clone());

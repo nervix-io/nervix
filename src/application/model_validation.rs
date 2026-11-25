@@ -22,7 +22,7 @@ use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{
-    Cancellation, Cancelled, CpuClass, ExecutionError, MemoryClass, QueueAdmission, Reservation,
+    Cancellation, Cancelled, CpuClass, ExecutionError, MemoryClass, Reservation,
 };
 use nervix_models::{
     CreateInferencer, CreateLookup, DomainName, DomainPace, InferencerName,
@@ -393,13 +393,11 @@ impl SessionServiceImpl {
         domain: &DomainName,
         pace: DomainPace,
         planned: &crate::registry::PlannedMutations,
-        client_admission: QueueAdmission,
     ) -> error_stack::Result<(), ModelBindingValidationError> {
         for model in planned.execution_changed_models() {
             nervix_primitives::task::consume_budget().await;
             if let Some(client) = model.configured_client() {
-                self.validate_client_configuration(domain, client, client_admission)
-                    .await?;
+                self.validate_client_configuration(domain, client).await?;
             }
             match model {
                 Model::Ingestor(ingestor) => {
@@ -764,7 +762,7 @@ impl SessionServiceImpl {
                             file: processor.file.clone(),
                         }
                     }
-                    ExecutionError::QueueFull { .. } | ExecutionError::PoolClosed { .. } => {
+                    ExecutionError::PoolClosed { .. } => {
                         InferencerBindingValidationError::InspectionTask {
                             node: processor.name.clone(),
                             file: processor.file.clone(),
@@ -1397,18 +1395,21 @@ mod tests {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
         }
-        let refusal = service
-            .validate_inferencer_model_metadata(&processor, &model)
-            .await
-            .expect_err("the full queue refuses an uninspected model");
-        assert!(matches!(
-            refusal.current_context(),
-            InferencerBindingValidationError::InspectionTask { .. }
-        ));
-        assert!(matches!(
-            refusal.downcast_ref::<ExecutionError>(),
-            Some(ExecutionError::QueueFull { .. })
-        ));
+        let held_processor = CreateInferencer {
+            name: named("held_matrix"),
+            ..processor.clone()
+        };
+        let mut held =
+            Box::pin(service.validate_inferencer_model_metadata(&held_processor, &model));
+        let first_poll = std::future::poll_fn(|context| {
+            std::task::Poll::Ready(std::future::Future::poll(held.as_mut(), context))
+        })
+        .await;
+        assert!(
+            first_poll.is_pending(),
+            "a full queue holds an uninspected model's preflight back instead of refusing it"
+        );
+        assert_eq!(executor.snapshot().bulk_cpu.pending, before.queue_capacity);
         drop(releases);
         let pending_limit = before
             .queue_capacity
@@ -1437,6 +1438,8 @@ mod tests {
             nervix_primitives::task::consume_budget().await;
             preflight.assured("the admitted production preflight did not panic");
         }
+        held.await
+            .assured("the held preflight inspects its model once a place frees");
         while let Some(empty) = empty_jobs.join_next().await {
             nervix_primitives::task::consume_budget().await;
             empty.assured("the queued empty job completed");
@@ -1448,14 +1451,13 @@ mod tests {
         let completed = before
             .workers
             .checked_add(before.queue_capacity)
-            .and_then(|jobs| jobs.checked_add(4))
+            .and_then(|jobs| jobs.checked_add(5))
             .assured("the bounded default workers, queue and preflights fit usize");
         let completed =
             u64::try_from(completed).assured("the bounded job count fits the execution counters");
         let after = executor.snapshot();
         assert_eq!(after.bulk_cpu.admitted - before.admitted, completed);
         assert_eq!(after.bulk_cpu.completed - before.completed, completed);
-        assert_eq!(after.bulk_cpu.refused - before.refused, 1);
         assert_eq!(after.bulk_cpu.running, 0);
         assert_eq!(after.bulk_cpu.pending, 0);
         assert_eq!(after.bulk_memory.reserved_bytes, 0);
@@ -1758,9 +1760,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&path);
     }
 
+    /// A model the bulk workers cannot take now waits for a place, within its inspection's own
+    /// timeout, and is inspected once a worker frees: a full class is no reason to refuse it.
     #[cfg(feature = "testing")]
     #[nervix_primitives::test]
-    async fn a_model_the_bulk_workers_cannot_take_now_is_refused_as_an_inspection_task() {
+    async fn a_model_the_bulk_workers_cannot_take_now_waits_and_is_inspected_once_they_free() {
         let executor = crate::runtime::single_worker_executor();
         let crate::application::test_fixtures::TestService {
             service,
@@ -1776,21 +1780,28 @@ mod tests {
             .join("tests/fixtures/onnx/matrix_identity.onnx");
         let filled = crate::runtime::FilledCpuClass::fill(&executor, CpuClass::Bulk).await;
 
-        let refused = service
-            .validate_inferencer_model_metadata(&processor, &model)
+        let mut validating =
+            std::pin::pin!(service.validate_inferencer_model_metadata(&processor, &model));
+        assert!(
+            nervix_primitives::time::timeout(Duration::from_millis(200), validating.as_mut())
+                .await
+                .is_err(),
+            "a full bulk class holds the inspection back instead of refusing it"
+        );
+        filled.release().await;
+        // The fixture binds none of the model's inputs, so only a model that was inspected can
+        // be found to miss one.
+        let inspected = validating
             .await
-            .expect_err("a full bulk class refuses the inspection");
-
+            .expect_err("the inspected model misses the fixture's input binding");
         assert!(
             matches!(
-                refused.current_context(),
-                InferencerBindingValidationError::InspectionTask { node, .. }
+                inspected.current_context(),
+                InferencerBindingValidationError::MissingBinding { node, .. }
                     if node == &processor.name
             ),
-            "{refused:?}"
+            "the inspection ran once a bulk worker freed: {inspected:?}"
         );
-        assert!(refused.contains::<ExecutionError>(), "{refused:?}");
-        filled.release().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 }

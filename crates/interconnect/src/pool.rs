@@ -74,13 +74,6 @@ impl PoolClass {
         Self::Relay,
     ];
 
-    pub(crate) const fn is_preconnected(self) -> bool {
-        matches!(
-            self,
-            Self::Management | Self::Commands | Self::Replication | Self::Relay
-        )
-    }
-
     /// Whether this pool's client connections grant each stream the bulk receive window, backed
     /// by a `bulk_window` reservation for as long as the stream is open. Only bulk streams carry
     /// responses large enough to be paced by the other pools' small windows: resource archives,
@@ -89,6 +82,9 @@ impl PoolClass {
         matches!(self, Self::Bulk)
     }
 
+    /// The connections one peer keeps open in one direction: what a test of the pool layout
+    /// expects a peer to bind before it is transport-ready.
+    #[cfg(test)]
     pub(crate) fn preconnected_connections_per_peer() -> usize {
         let mut connections = 0usize;
         for class in Self::PRECONNECTED {

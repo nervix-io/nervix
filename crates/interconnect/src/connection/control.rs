@@ -2,8 +2,8 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Encoding one control round trip and checking an optional authenticated process fence
-//!   before the request is sent.
+//! - **Owns.** Leasing a control request's stream, checking an optional authenticated process
+//!   fence on it, and encoding one control round trip on that lease.
 //! - **Depends on.** The parent connection's leases, bounded wire codecs and request admission.
 //! - **Must not know.** Domain clocks, graph readiness or the caller's retry policy.
 
@@ -16,11 +16,10 @@
 )]
 
 use error_stack::Report;
-use nervix_execution::QueueAdmission;
 use nervix_models::ClusterNodeName;
 
-use super::{CONTROL_PATH, RawRequest, TransportState};
-use crate::{ControlEnvelope, RequestSubquota, TransportError, wire};
+use super::{CONTROL_PATH, RawRequest, StreamLease, TransportState};
+use crate::{ControlEnvelope, PoolClass, RequestSubquota, TransportError, wire};
 
 /// The caller chooses whether this operation names a node or an exact authenticated process.
 /// The ordinary node operation retains no additional future state.
@@ -41,15 +40,24 @@ impl PeerProcessFence for u64 {
 }
 
 impl TransportState {
-    pub(crate) async fn round_trip_control<F: PeerProcessFence>(
+    /// Leases a stream of `class` and `subquota` toward `node_id`, waiting while liveness keeps the
+    /// peer and its connection and until `deadline` when the caller names one, and refuses a
+    /// replacement process when `fence` names the one the request is meant for.
+    ///
+    /// A request of a reserved kind leases its stream before it encodes its payload and keeps it
+    /// until its answer is decoded. The payload's copy goes uncharged while the envelope's encoding
+    /// waits for room, and so does the answer's payload while its typed decoding waits. No place of
+    /// the incoming queue bounds those copies for a reserved kind, so the streams the peer's
+    /// connection has bound them. A request holding such a place leases its stream only to
+    /// exchange.
+    pub(crate) async fn lease_control<F: PeerProcessFence>(
         &self,
         node_id: &ClusterNodeName,
-        control: ControlEnvelope,
+        class: PoolClass,
         subquota: RequestSubquota,
         deadline: Option<crate::ExchangeDeadline>,
         fence: F,
-    ) -> Result<wire::Decoded<ControlEnvelope>, Report<TransportError>> {
-        let class = control.pool_class();
+    ) -> Result<StreamLease, Report<TransportError>> {
         let lease = self.lease(node_id, class, subquota, deadline).await?;
         if let Some(expected) = fence.expected_epoch() {
             let actual = lease.connection.peer_epoch;
@@ -61,6 +69,18 @@ impl TransportState {
                 }));
             }
         }
+        Ok(lease)
+    }
+
+    /// Sends `control` on `lease` and reads its answer, for as long as the lease's connection
+    /// lives and until `deadline` when the caller names one.
+    pub(crate) async fn exchange_control(
+        &self,
+        lease: &StreamLease,
+        control: ControlEnvelope,
+        deadline: Option<crate::ExchangeDeadline>,
+    ) -> Result<wire::Decoded<ControlEnvelope>, Report<TransportError>> {
+        let class = control.pool_class();
         let bytes = wire::encode_rkyv(
             &self.executor,
             class.memory_class(),
@@ -82,14 +102,14 @@ impl TransportState {
                 },
             )
             .await?;
-        // The response carries work the peer already did, so a full queue holds it back rather than
-        // discarding it.
-        wire::decode_rkyv_with::<ControlEnvelope>(
+        // The response carries work the peer already did, so a full class holds it back rather
+        // than discarding it. It was read with the room its decoding takes, so the decoding waits
+        // for nothing behind it.
+        wire::decode_rkyv_within::<ControlEnvelope>(
             &self.executor,
-            class.memory_class(),
             class.cpu_class(),
-            QueueAdmission::WaitForPlace,
-            response,
+            response.bytes,
+            response.decoding,
         )
         .await
     }

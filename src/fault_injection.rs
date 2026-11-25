@@ -81,7 +81,9 @@ mod materialized_fetch_hold;
 mod materialized_reads;
 mod materialized_row_boundaries;
 mod model_publication;
+mod node_record_announcement;
 mod orphaned_domain_pause;
+mod ownership_handoff_commit;
 mod ownership_handoff_reads;
 mod pause;
 mod processor_branch_restore;
@@ -143,6 +145,7 @@ use live_view_gap::{LiveViewGap, LiveViewGapState};
 use materialized_reads::DelayedMaterializedReads;
 use model_publication::ModelPublicationRefusal;
 pub use model_publication::ModelPublicationRefusalKind;
+pub use ownership_handoff_commit::ObservedOwnershipHandoffReconciliations;
 use pause::TestPause;
 use relay_memory::RelayMemoryFill;
 use relocation_commit::RelocationCommitRefusal;
@@ -230,7 +233,6 @@ pub struct FaultInjection {
 
 #[derive(Debug)]
 struct FaultInjectionState {
-    licensing_quotas: watch::Sender<[Option<u64>; 2]>,
     licensing_clock_offset: watch::Sender<std::time::Duration>,
     orphaned_domain_pauses: orphaned_domain_pause::OrphanedDomainPauses,
     /// One bounded command-reply script per scenario domain, absent from ordinary builds.
@@ -422,6 +424,10 @@ struct FaultInjectionState {
     /// A destination pauses after making a handoff preparation durable but before returning its
     /// response, reproducing an ambiguous prepare RPC outcome.
     ownership_handoff_prepare_response_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    /// What each observed node's ownership-handoff preparation reconciliations did.
+    ownership_handoff_reconciliations: ownership_handoff_commit::ObservedReconciliationsByNode,
+    /// Nodes that hold back the announcement of their record.
+    held_node_record_announcements: node_record_announcement::HeldRecordAnnouncements,
     forced_recovery_pauses:
         DashMap<DomainName, Arc<forced_recovery::ForcedRecoveryPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -593,7 +599,6 @@ impl Default for FaultInjection {
         let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
         Self {
             inner: Arc::new(FaultInjectionState {
-                licensing_quotas: watch::channel([None; 2]).0,
                 licensing_clock_offset: watch::channel(std::time::Duration::ZERO).0,
                 orphaned_domain_pauses: orphaned_domain_pause::OrphanedDomainPauses::default(),
                 command_reply_scripts: DashMap::default(),
@@ -666,6 +671,8 @@ impl Default for FaultInjection {
                 ingestor_dispatch_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 ownership_handoff_prepare_response_pauses: DashMap::default(),
+                ownership_handoff_reconciliations: Default::default(),
+                held_node_record_announcements: Default::default(),
                 forced_recovery_pauses: DashMap::default(),
                 domain_clock_progress_pauses: DashMap::default(),
                 domain_clock_authority_proposal_rejections: DashMap::default(),
@@ -833,6 +840,9 @@ impl FaultInjection {
         self.inner.command_pauses.remove(&point);
     }
 
+    /// After how many entries the armed interruption stops the next stream of `entity`'s native
+    /// metadata section in a backup of `domain`. It stays armed until a stream spends it
+    /// ([`Self::native_metadata_capture_streamed`]).
     pub(crate) fn native_metadata_capture_interruption(
         &self,
         domain: &DomainName,
@@ -842,8 +852,19 @@ impl FaultInjection {
             domain: domain.clone(),
             entity: entity.clone(),
         };
-        let (_, entries) = self.inner.native_metadata_interruptions.remove(&owner)?;
-        Some(entries)
+        let entries = self.inner.native_metadata_interruptions.get(&owner)?;
+        Some(*entries.value())
+    }
+
+    /// A stream of `entity`'s native metadata section fired its armed interruption or wrote the
+    /// whole section, which spends the interruption. A stream whose capture attempt ended before
+    /// either, because the attempt ran short and runs again, leaves it armed for the next stream.
+    pub(crate) fn native_metadata_capture_streamed(&self, domain: &DomainName, entity: &ModelName) {
+        let owner = CapturedStateOwner {
+            domain: domain.clone(),
+            entity: entity.clone(),
+        };
+        self.inner.native_metadata_interruptions.remove(&owner);
     }
 
     pub(crate) fn guest_save_capture_interruption(

@@ -1656,10 +1656,6 @@ button {
   stroke-linecap: round;
 }
 
-.graph-edge[data-feedback="true"] {
-  stroke-dasharray: 10 4;
-}
-
 .graph-edge-shadow {
   fill: none;
   stroke: rgba(6, 182, 212, 0.08);

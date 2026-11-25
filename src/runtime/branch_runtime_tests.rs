@@ -33,7 +33,7 @@ async fn runtime_report_chain_branch_routing_logs() {
             &domain,
             None,
             1,
-            &RetainedStateOpening::RefusedWhenFull,
+            &RetainedStateOpening::OnNodeExecutor,
         )
         .await
         .assured("the fixture installs its junction branch")
@@ -85,7 +85,7 @@ async fn materialized_membership_is_reconciled_against_the_routing_its_epoch_fol
             &domain,
             None,
             1,
-            &RetainedStateOpening::RefusedWhenFull,
+            &RetainedStateOpening::OnNodeExecutor,
         )
         .await
         .assured("a junction branch instantiates on the test domain")
@@ -146,7 +146,7 @@ async fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
             &domain,
             None,
             1,
-            &RetainedStateOpening::RefusedWhenFull,
+            &RetainedStateOpening::OnNodeExecutor,
         )
         .await
         .expect("junction branch should instantiate")
@@ -316,7 +316,7 @@ async fn a_parked_message_that_still_waits_stays_parked_through_its_re_evaluatio
             &domain,
             None,
             1,
-            &RetainedStateOpening::RefusedWhenFull,
+            &RetainedStateOpening::OnNodeExecutor,
         )
         .await
         .assured("a junction branch instantiates on the test domain")

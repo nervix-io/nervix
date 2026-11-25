@@ -476,6 +476,38 @@ mod tests {
     }
 
     #[test]
+    fn an_ingestor_retry_policy_refuses_give_up_after() {
+        for mode in [
+            format!("{SEQUENTIAL} GIVE UP AFTER 10m"),
+            "ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX \
+             30s GIVE UP AFTER 0s"
+                .to_string(),
+        ] {
+            let statement = statement("orders", DOMAIN_OFFSETS, &mode);
+            assert!(
+                refused(&statement),
+                "an ingestor's retry policy paces redelivery and has no limit: {statement}"
+            );
+        }
+        let client = "CREATE CLIENT PRODUCER INGESTOR submit FROM SCHEMA event MODE ACK \
+                      SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s GIVE UP AFTER \
+                      1m ON QUIESCE SUSPEND TIMESTAMP NOW TO events INHERIT ALL UNBRANCHED FLUSH \
+                      IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+        assert!(
+            refused(client),
+            "a client producer's retry policy paces redelivery and has no limit"
+        );
+    }
+
+    #[test]
+    fn completion_never_offers_give_up_after_on_an_ingestor_retry_policy() {
+        assert_offers_exactly(
+            &format!("{HEAD} 'orders' OFFSET BY DOMAIN MODE {SEQUENTIAL} "),
+            &["RATE LIMIT", "ON QUIESCE"],
+        );
+    }
+
+    #[test]
     fn the_composed_grammar_requires_offset_ownership() {
         let statement = statement("orders", "", SEQUENTIAL);
 

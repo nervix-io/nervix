@@ -121,11 +121,12 @@ fn positive_bytes<D: SettingDefinition>(
 }
 
 impl OperationalArgs {
-    /// The operational capabilities these options declare, beside the trace export
-    /// capabilities their own group declares.
+    /// The operational capabilities these options declare, beside the trace export and web
+    /// console capabilities their own groups declare.
     pub(super) fn settings(
         &self,
         traces: TraceExportCapabilities,
+        web_console: WebConsoleCapabilities,
     ) -> Result<NodeOperationalCapabilities, Report<NodeOperationalError>> {
         Ok(NodeOperationalCapabilities {
             control_plane: ControlPlaneCapabilities::resolve(ControlPlaneCapabilityValues {
@@ -213,6 +214,7 @@ impl OperationalArgs {
                 consumer_writer_capacity: self.links_consumer_writer_capacity,
             })?,
             traces,
+            web_console,
         })
     }
 

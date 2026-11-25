@@ -75,10 +75,11 @@ impl NodeObservations {
     ) -> Result<CommandResult, Report<NodeInspectionError>> {
         let executor = service.inner.runtime.executor();
         let reservation = executor
-            .try_reserve(
+            .reserve(
                 MemoryClass::Bulk,
                 executor.limits().bulk_chunk_bytes.as_u64(),
             )
+            .await
             .change_context(NodeInspectionError::Admission)?;
         let consensus = service.inner.consensus.clone();
         let availability = service.inner.cluster.availability_state().await;

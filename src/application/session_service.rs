@@ -26,7 +26,8 @@ use nervix_interconnect::Transport;
 use nervix_models::{
     BuiltinFunctionScope, CodecDirection, CommandExecutionReference, DomainName, Model, ModelIndex,
     ModelName, PlacementPolicy, RelayQuestion, ReportedError, RequestedResourceVersion, ResourceId,
-    ResourceName, ResourceVersionStatus, SemanticReference, Statement, TransactionPosition,
+    ResourceName, ResourceVersionStatus, SemanticReference, Setting, Statement,
+    TransactionPosition,
 };
 use nervix_plexus::{
     Token, Word,
@@ -1245,6 +1246,27 @@ fn rebind_resource_before_for(input: &str, cursor: usize) -> Option<ResourceName
 impl SessionServiceImpl {
     pub(in crate::application) fn session_limits(&self) -> nervix_client_wire::SessionLimits {
         self.inner.session_limits
+    }
+
+    /// What a console WebSocket's opening announces: the session's limits, and how this node
+    /// paces the session and the web console it serves. The cluster's command retry validity is
+    /// announced once this node has applied the committed cluster parameters.
+    pub(in crate::application) fn session_opening(&self) -> nervix_client_wire::SessionOpened {
+        let operational = &self.inner.operational;
+        let snapshot_interval = Setting::new(operational.session.snapshot_interval(), &())
+            .assured("the node's resolved snapshot interval passed its definition's validation");
+        let command_retry_validity = self.inner.consensus.cluster_parameters().map(|applied| {
+            Setting::new(applied.values.command_retry_validity(), &())
+                .assured("committed parameters passed their definitions' validation")
+        });
+        nervix_client_wire::SessionOpened {
+            limits: self.session_limits(),
+            pacing: nervix_client_wire::SessionPacing::new(
+                snapshot_interval,
+                command_retry_validity,
+                operational.web_console,
+            ),
+        }
     }
 
     pub(in crate::application) async fn apply_current_cluster_state(

@@ -184,8 +184,7 @@ async fn a_runtime_stop_ends_an_envelope_sent_again_to_a_node_nothing_answers_fo
         .register_outbound_target(
             gone.clone(),
             nervix_models::NodeEndpoint::from(std::net::SocketAddr::from(([127, 0, 0, 1], 1))),
-        )
-        .expect("the fixture target fits the peer quota");
+        );
     let sending = {
         let dispatcher = dispatcher.clone();
         let gone = gone.clone();

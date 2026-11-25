@@ -252,7 +252,7 @@ async fn materialized_branch_eviction_withdraws_its_record_before_recreation() {
             &placed.domain,
             branch_key.clone(),
             1,
-            &RetainedStateOpening::RefusedWhenFull,
+            &RetainedStateOpening::OnNodeExecutor,
         )
         .await
         .assured("the branch installs")
@@ -355,7 +355,7 @@ async fn each_materialized_relay_installs_its_branch_owner_in_the_same_routing_e
             &placed.domain,
             key("acme"),
             1,
-            &RetainedStateOpening::RefusedWhenFull,
+            &RetainedStateOpening::OnNodeExecutor,
         )
         .await
         .assured("the branch installs")

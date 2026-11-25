@@ -298,25 +298,25 @@ async fn upgrade_console_websocket(
                 return;
             }
         };
-        let limits = service.session_limits();
-        let config = console_websocket_config(&limits, &settings);
+        let opening = service.session_opening();
+        let config = console_websocket_config(&opening.limits, &settings);
         let websocket =
             WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(config))
                 .await;
         match call {
             ConsoleCall::Session => {
                 service
-                    .serve_console_session(authenticated_user, limits, websocket)
+                    .serve_console_session(authenticated_user, opening, websocket)
                     .await;
             }
             ConsoleCall::BackupDownload => {
                 service
-                    .serve_console_download(authenticated_user, limits, websocket)
+                    .serve_console_download(authenticated_user, opening, websocket)
                     .await;
             }
             ConsoleCall::Restore => {
                 service
-                    .serve_console_restore(authenticated_user, limits, websocket)
+                    .serve_console_restore(authenticated_user, opening, websocket)
                     .await;
             }
         }

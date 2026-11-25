@@ -1170,9 +1170,12 @@ mod tests {
         emitter.connector = Box::new(EmitterEntity::Syslog(SyslogEmitter::Collector(
             SyslogCollectorEmitter {
                 mode: nervix_models::SyslogCollectorPublishingMode::NoAck {
-                    retry_policy: nervix_models::RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "30s".to_string(),
+                    retry_policy: nervix_models::EmitterRetryPolicy {
+                        pacing: nervix_models::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                        give_up_after: None,
                     },
                 },
                 client: named("syslog_out"),

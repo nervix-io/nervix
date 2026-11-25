@@ -79,7 +79,7 @@ carries a payload value.
 | Bulk progress | `nervix_interconnect_bulk_bytes_total` |
 | Snapshot pins | `nervix_consensus_snapshot_pinned_generations`, `nervix_consensus_snapshot_pinned_readers`, `nervix_consensus_snapshot_unreferenced_generations` |
 | Log retention | `nervix_consensus_log_last_index`, `nervix_consensus_log_snapshot_index`, `nervix_consensus_log_purged_index`, `nervix_consensus_log_retained_bytes` |
-| Quota failures | `nervix_interconnect_quota_failures_total`, `nervix_execution_memory_rejections_total`, `nervix_execution_job_rejections_total` |
+| Quota failures | `nervix_interconnect_quota_failures_total`, `nervix_execution_memory_rejections_total` |
 
 Evidence: `cluster/interconnect_observability.feature`. Its bounded-dimension step reads the whole
 exposition and fails on any interconnection sample carrying a label outside that closed set;

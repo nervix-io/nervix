@@ -390,11 +390,13 @@ impl Runtime {
         Ok(())
     }
 
-    /// Stops every local unit of the ingestor `entity`, retiring the previous input where the
-    /// replacement requires it. The swap starts no unit: an ingestor is a source, and the
-    /// revision's activation starts the units `revision` plans for this node once every node has
-    /// prepared it, so no unit runs on two nodes at once and a unit that moved here starts only
-    /// once this node holds what it reads from, such as its Kafka DOMAIN offsets.
+    /// Stops every local unit of the ingestor `entity` and prepares a replacement that requires
+    /// the previous input's retirement, without touching what the previous input keeps at its
+    /// broker: the swap retires that only once it can no longer be undone, so a failed swap
+    /// starts the previous ingestor again on it. The swap starts no unit: an ingestor is a source,
+    /// and the revision's activation starts the units `revision` plans for this node once every
+    /// node has prepared it, so no unit runs on two nodes at once and a unit that moved here
+    /// starts only once this node holds what it reads from, such as its Kafka DOMAIN offsets.
     pub(super) async fn swap_ingestor_entity(
         &self,
         context: EntitySwapContext<'_, '_>,
@@ -419,8 +421,8 @@ impl Runtime {
                 .change_context_lazy(build)?;
             journal.step(step).record_stopped(unit);
         }
-        if let Some(retirement) = retiring_ingestors.remove(&ingestor) {
-            Box::pin(self.retire_ingestor_input(retirement)).await?;
+        if let Some(retirement) = retiring_ingestors.get(&ingestor) {
+            Box::pin(self.prepare_ingestor_replacement(retirement)).await?;
         }
         #[cfg(feature = "testing")]
         self.hold_or_fail_entity_swap(domain, entity, context.local_node_id)

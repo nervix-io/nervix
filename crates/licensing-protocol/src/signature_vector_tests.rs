@@ -168,7 +168,7 @@ impl VectorKeys {
                         ConditionValue::Known(Capability::Enabled),
                     )]),
                     quotas: BTreeMap::from([(
-                        "cluster.nodes".to_owned(),
+                        "vectors.quota".to_owned(),
                         ConditionValue::Known(Quota::Bounded { value: 5 }),
                     )]),
                 },
@@ -212,7 +212,7 @@ impl VectorKeys {
                 },
                 reason: TransitionReason::PlanChanged,
                 affected: vec![AffectedQuota {
-                    condition: "cluster.nodes".to_owned(),
+                    condition: "vectors.quota".to_owned(),
                     previous: Quota::Unlimited,
                     target: Quota::Bounded { value: 5 },
                     usage: 7,
@@ -486,7 +486,7 @@ impl SignatureVectors {
             )
             .err()
             .assured("a decision with a changed signature byte does not verify");
-        assert!(matches!(error.current_context(), TrustError::Document));
+        assert!(matches!(error.current_context(), TrustError::Decision));
         assert_signature_refused(&error);
         let error = Request::verify(
             &tampered(&self.request),

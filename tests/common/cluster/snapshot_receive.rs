@@ -9,8 +9,8 @@
 )]
 
 use nervix_interconnect::{
-    FetchStateCheckpoint, RequestError, StateCheckpointRead, StatePlacementEnvelope,
-    StateSnapshotEnvelope, StateSyncRequest, TransportError,
+    FetchStateCheckpoint, StateCheckpointRead, StatePlacementEnvelope, StateSnapshotEnvelope,
+    StateSyncRequest,
 };
 use nervix_primitives::{sync::oneshot, task::JoinHandle};
 use nervix_recovery::Discarded as _;
@@ -99,13 +99,10 @@ impl Cluster {
             end,
             cleanup,
         };
-        probe
-            .transport
-            .register_outbound_target(
-                node_name(node),
-                PeerTarget::new(target.spec.interconnect_listen_addr(), "localhost").endpoint(),
-            )
-            .map_err(io::Error::other)?;
+        probe.transport.register_outbound_target(
+            node_name(node),
+            PeerTarget::new(target.spec.interconnect_listen_addr(), "localhost").endpoint(),
+        );
         Ok(probe)
     }
 
@@ -155,34 +152,34 @@ impl Cluster {
             let hold = PhaseDeadline::after(std::time::Duration::from_secs(60))
                 .poll_until(
                     std::time::Duration::from_millis(10),
-                    |_| async { try_hold_snapshot_receive_memory(&executor, 4096) },
+                    |_| async { try_hold_snapshot_receive_memory(&executor, 0) },
                     |_| true,
                 )
                 .await
                 .assured("the snapshot probe admits its bounded bulk hold");
-            let refused = probe
-                .transport
-                .request_stream(&node_name(node), request.clone())
-                .await;
-            match refused {
-                Err(error) => {
-                    assert!(
-                        matches!(
-                            error.downcast_ref::<TransportError>(),
-                            Some(TransportError::RemoteRejected { status: 503, .. })
-                        ),
-                        "snapshot receive admission must answer 503 before the request deadline: \
-                         {error:#}"
-                    );
-                    assert!(error.contains::<RequestError>());
-                }
-                Ok(_) => panic!("the receive allowance must refuse the overlapping decode"),
+            // A receive charges exactly what its body and decoding take, which a small checkpoint
+            // keeps to a few hundred bytes, so the probe holds the whole class: every charge the
+            // receive takes waits for room, and a full class holds it back without refusing it.
+            let mut held = Box::pin(probe.fetch(node, request, &snapshot));
+            if let Ok(ended) =
+                nervix_primitives::time::timeout(std::time::Duration::from_secs(2), held.as_mut())
+                    .await
+            {
+                panic!(
+                    "the receive waits while the bulk class is full, but it ended: {:?}",
+                    ended.map(|bytes| bytes.len())
+                );
             }
             drop(hold);
-            let recovered = probe.fetch(node, request, &snapshot).await?;
+            let recovered =
+                nervix_primitives::time::timeout(std::time::Duration::from_secs(60), held)
+                    .await
+                    .map_err(|_| {
+                        io::Error::other("the held receive did not end once the class freed room")
+                    })??;
             assert_eq!(
                 recovered, baseline,
-                "the exact complete checkpoint survives receive refusal"
+                "the exact complete checkpoint transfers once the class frees room"
             );
         }
         Ok(())
@@ -281,14 +278,10 @@ impl Cluster {
                     .nodes
                     .get(*replica)
                     .ok_or_else(|| io::Error::other("unknown replica"))?;
-                probe
-                    .transport
-                    .register_outbound_target(
-                        node_name(replica),
-                        PeerTarget::new(target.spec.interconnect_listen_addr(), "localhost")
-                            .endpoint(),
-                    )
-                    .map_err(io::Error::other)?;
+                probe.transport.register_outbound_target(
+                    node_name(replica),
+                    PeerTarget::new(target.spec.interconnect_listen_addr(), "localhost").endpoint(),
+                );
             }
             for (placement, revision) in placements {
                 nervix_primitives::task::consume_budget().await;
@@ -332,13 +325,10 @@ impl Cluster {
             .nodes
             .get(replica)
             .ok_or_else(|| io::Error::other("unknown replica"))?;
-        probe
-            .transport
-            .register_outbound_target(
-                node_name(replica),
-                PeerTarget::new(target.spec.interconnect_listen_addr(), "localhost").endpoint(),
-            )
-            .map_err(io::Error::other)?;
+        probe.transport.register_outbound_target(
+            node_name(replica),
+            PeerTarget::new(target.spec.interconnect_listen_addr(), "localhost").endpoint(),
+        );
         let result = nervix_primitives::time::timeout(Duration::from_secs(90), async {
             let page = probe
                 .transport

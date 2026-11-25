@@ -28,8 +28,11 @@ def build_environment() -> dict[str, str]:
     # Encoded flags take precedence over cargo-bolero's sanitizer RUSTFLAGS.
     if "CARGO_ENCODED_RUSTFLAGS" in os.environ:
         raise native.RunnerError("CARGO_ENCODED_RUSTFLAGS would override cargo-bolero's sanitizer flags")
+    # cargo-bolero appends the RUSTFLAGS it inherits to its sanitizer flags: the caller's, the
+    # sanitizer nightly's and the source instrumentation.
+    inherited = native.nightly_rustflags(os.environ.get("RUSTFLAGS", ""))
     return {
-        "RUSTFLAGS": (os.environ.get("RUSTFLAGS", "") + " -C instrument-coverage").strip(),
+        "RUSTFLAGS": f"{inherited} -C instrument-coverage",
         "LLVM_PROFILE_FILE": "/dev/null",
     }
 

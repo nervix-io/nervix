@@ -121,7 +121,7 @@ impl Runtime {
                         base_schedule_fingerprint: persisted.base_schedule_fingerprint,
                         target_schedule_fingerprint: persisted.target_schedule_fingerprint,
                         activation_authorization: super::state_replication::
-                            OwnershipHandoffActivationAuthorization::RecoveredAwaitingRequest,
+                            OwnershipHandoffActivationAuthorization::AuthorizedByCommittedTransition,
                         activation: watch::channel(
                             super::state_replication::OwnershipHandoffActivation::Prepared,
                         )
@@ -148,6 +148,7 @@ impl Runtime {
                 dns,
                 ingestors: Arc::new(DashMap::default()),
                 ingestor_quiescence: Arc::new(DashMap::default()),
+                mqtt_session_retirements: DashMap::default(),
                 memory_pressure: MemoryPressurePause::default(),
                 ingestor_statuses: DashMap::default(),
                 ingestor_readiness: DashMap::default(),
@@ -613,8 +614,9 @@ impl Runtime {
             .await;
     }
 
-    /// After how many entries a test interrupts the next branch lifecycle or Kafka offset section
-    /// of `entity` that a backup of `domain` streams, once. A product build never interrupts one.
+    /// After how many entries a test interrupts the next stream of a branch lifecycle or Kafka
+    /// offset section of `entity` that a backup of `domain` writes, once. A product build never
+    /// interrupts one.
     pub(crate) fn native_metadata_capture_interruption(
         &self,
         domain: &DomainName,
@@ -623,6 +625,14 @@ impl Runtime {
         self.inner
             .fault_injection
             .native_metadata_capture_interruption(domain, entity)
+    }
+
+    /// A stream of `entity`'s section fired its interruption or wrote the whole section, which
+    /// spends the interruption; see [`Self::native_metadata_capture_interruption`].
+    pub(crate) fn native_metadata_capture_streamed(&self, domain: &DomainName, entity: &ModelName) {
+        self.inner
+            .fault_injection
+            .native_metadata_capture_streamed(domain, entity);
     }
 
     /// After how many chunks a test interrupts the next guest save of `entity` in `domain`.
@@ -840,6 +850,25 @@ impl Runtime {
             .fault_injection
             .pause_ownership_handoff_prepare_response_if_armed(domain)
             .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_ownership_handoff_commit_if_armed(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .pause_ownership_handoff_commit_if_armed(domain)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn record_ownership_handoff_reconciliation(
+        &self,
+        node_id: &ClusterNodeName,
+        discarded: u64,
+    ) {
+        self.inner
+            .fault_injection
+            .record_ownership_handoff_reconciliation(node_id, discarded);
     }
 
     #[cfg(feature = "testing")]

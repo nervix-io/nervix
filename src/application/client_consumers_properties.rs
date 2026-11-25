@@ -142,14 +142,27 @@ fn answer(arbitrary: &mut Arbitrary<'_>) -> ClientEmitterAnswer {
 }
 
 fn description(arbitrary: &mut Arbitrary<'_>) -> ClientEmitterDescription {
+    let fields = arbitrary.schema_fields(0);
+    let maximum_payload_bytes = arbitrary.entropy().any_u64();
+    let maximum_payload_rows = any_u32(arbitrary);
+    let window = arbitrary.ack_window();
+    let ack_timeout = arbitrary.physical_duration();
+    let retry_backoff = arbitrary.physical_duration();
+    let retry_max_backoff = arbitrary.physical_duration();
+    let give_up_after = if arbitrary.entropy().flag() {
+        Some(arbitrary.physical_duration())
+    } else {
+        None
+    };
     ClientEmitterDescription {
-        fields: arbitrary.schema_fields(0),
-        maximum_payload_bytes: arbitrary.entropy().any_u64(),
-        maximum_payload_rows: any_u32(arbitrary),
-        window: arbitrary.ack_window(),
-        ack_timeout: arbitrary.physical_duration(),
-        retry_backoff: arbitrary.physical_duration(),
-        retry_max_backoff: arbitrary.physical_duration(),
+        fields,
+        maximum_payload_bytes,
+        maximum_payload_rows,
+        window,
+        ack_timeout,
+        retry_backoff,
+        retry_max_backoff,
+        give_up_after,
     }
 }
 
@@ -299,9 +312,9 @@ impl StreamFrame for ConsumerFrame {
 
     async fn encoded(self, codec: &DuplexCodec) -> Result<Vec<u8>, Report<TransportError>> {
         let encoded = match self {
-            Self::Opening(opening) => codec.encode_opening(opening).await,
-            Self::Item(item) => codec.encode_item(item).await,
-            Self::Event(event) => codec.encode_answer(event).await,
+            Self::Opening(opening) => codec.encode(opening).await,
+            Self::Item(item) => codec.encode(item).await,
+            Self::Event(event) => codec.encode(event).await,
         }?;
         Ok(encoded.bytes)
     }
@@ -313,15 +326,15 @@ impl StreamFrame for ConsumerFrame {
     ) -> Result<Self, Report<TransportError>> {
         match direction {
             ConsumerDirection::Opening => {
-                let decoded = codec.decode_opening::<OpenConsumerStream>(bytes).await?;
+                let decoded = codec.decode::<OpenConsumerStream>(bytes).await?;
                 Ok(Self::Opening(decoded.item))
             }
             ConsumerDirection::Serving => {
-                let decoded = codec.decode_item::<ConsumerItem>(bytes).await?;
+                let decoded = codec.decode::<ConsumerItem>(bytes).await?;
                 Ok(Self::Item(decoded.item))
             }
             ConsumerDirection::Owning => {
-                let decoded = codec.decode_answer::<ConsumerEvent>(bytes).await?;
+                let decoded = codec.decode::<ConsumerEvent>(bytes).await?;
                 Ok(Self::Event(decoded.item))
             }
         }
@@ -375,6 +388,7 @@ fn description_at(
         ack_timeout: duration,
         retry_backoff: duration,
         retry_max_backoff: duration,
+        give_up_after: Some(duration),
     }
 }
 

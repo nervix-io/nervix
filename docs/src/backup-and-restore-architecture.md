@@ -366,6 +366,17 @@ Capture then runs as one storage job:
    checkpoints only, materialized relays included.
 6. Each selected state becomes archive sections in node staging, one checkpoint at a time.
 
+The cut keeps what it captured while it stages it, and staging takes more of the same memory
+classes, so the cut and its staging are one attempt within an owner's shares of `restore_metadata`
+and then `bulk`, which the owner waits for while it holds nothing of either. The bulk share starts
+from the fresh materialized generations the cut would capture now, beside the staging working set;
+the restore metadata share starts at 1 MiB. Every charge of the attempt, the stored views it maps
+and the readers it opens included, is drawn from those shares, so the attempt never waits for room.
+An attempt that needs more gives everything back, the sections it staged included, and the owner
+cuts again within shares at least twice as large. A full class therefore holds a capture back and
+never refuses it. The lifecycle checkpoints a quiesced cut asks its entities for run before the
+owner takes its shares: they run on the entities' own tasks, which take charges of their own.
+
 | State | How it becomes sections |
 | --- | --- |
 | Inferencer tensors | Current inference routes provide immutable published generations. The cut freezes one generation per active lifecycle key, superseding its stored checkpoint. Quiesced and live captures request the scheduled primary's branch checkpoint, publishing its current session and lifecycle without running the model; live capture keeps intake running and retains crash-consistent semantics. Stopped cuts read the selected native checkpoint under bounded admission. Capture projects shapes and streams exact F32 bits into `state.bin`; its descriptor records the same publication revision and incarnation with the staged length/digest. The archive exposes no native snapshot frame. |
@@ -421,7 +432,7 @@ sending process:
 | --- | --- | --- | --- | --- |
 | Drain status | The coordinator to every live node and every node the schedule assigns the domain's work to, unary, polled every 50 ms; the coordinator answers itself in-process | Management, Liveness | What remains of the cut's budget, checked between polls; a request in flight waits for its node for as long as the node lives | The sender is the current leader. Without installing runtime state, which the pause already applied, the node starts a force-flush generation while it holds admitted work and none is running, starts a confirming force-flush generation, or only observes, and reports its admitted-work counters. |
 | Capture | The coordinator to every scheduled state owner, and for a live cut every other live node too, concurrently; the coordinator answers itself in-process | Management, Shared | What remains of the cut's budget | The sender is the current leader, the node has applied the cut revision, which it waits for with no bound of its own, its runtime plan is current and the sender is still the leader. |
-| Capture inventory | The coordinator to each node, unary | Management, Shared | What remains of the cut's budget | The sender is the current leader. The reply lists that capture's sections in path order within one management message of at most 64 KiB. |
+| Capture inventory | The coordinator to each node, unary | Management, Shared | What remains of the cut's budget | The sender is the current leader. The reply lists that capture's sections in path order within one management message of at most 68 KiB. |
 | Section fetch | The coordinator to the node that staged a section; a streamed response with its exact length | Bulk, Shared | None: the cut has ended, so the stream opens and is read for as long as the node and its connection live | The sender is the current leader and the capture's coordinator. The stage is removed as it is served, so a section is fetched once, in 1 MiB reads. |
 | Section release | The coordinator to each node whose inventory it read, unary, once its fetch of the domain's sections ends, whether or not the fetch completed; the coordinator releases its own stages in-process | Management, Shared | None: it waits for the node for as long as the node lives | The sender is the capture's coordinator. The node drops every section that coordination staged there for the domain; a failed release leaves them to the node's sweep. |
 
@@ -542,9 +553,11 @@ them:
   native header, identity and column pieces and concatenates them into one quota-owned file through
   a 64 KiB buffer, which the streamed publisher installs like a guest save, including a container
   larger than the 32 MiB bulk budget; the pieces and the container briefly occupy twice its disk
-  space. Typed branch uniqueness has an independent 8 MiB commands reservation and native row views an
-  independent 8 MiB state-read reservation. Decoded columns are charged cumulatively to `state_read`
-  through installation, and loading refuses further groups when that class is full. Row projection
+  space. Typed branch uniqueness has an independent 8 MiB commands reservation. Loading draws the
+  native row views and the decoded columns it keeps through installation from one `state_read`
+  share, which it waits for while it holds nothing of that class; a load that outgrows its share
+  gives everything back and loads again within the share it needed, rather than refusing further
+  groups. Row projection
   and Arrow encoding share one admission and one bounded bulk CPU job, so projected columns never
   wait for a second grant while retaining the first, and typed native identities convert only after
   their allocation is charged.
@@ -592,17 +605,22 @@ therefore grows with entry count, while strings and encoded checkpoint output st
 and received uploads retain their staged file and its disk quota through the storage job that reads
 them, including its cancellation.
 
-A conversion the node refuses only for room does not fail the restore. A bulk or `restore_metadata`
-class without room, a full worker queue and a full staging quota judged nothing of the archive, so
-the conversion releases what it holds and converts the refused unit again every 50 milliseconds for
-up to 30 seconds after the node first refused it. For a window the unit is one section, read and
-decoded again into a checkpoint exactly as it was before the refused attempt, whose staged pieces
-were dropped; a window refused while its sealed pieces are finished into one checkpoint is converted
-again from its first group; and a keyspace is converted again from its first group, because its
-admitted keys are what held its charge. A refusal that outlasts that wait ends the conversion and is
-reported as the node having had no room for it, since what the restore itself holds can be what
-fills the budget. A request larger than a whole budget, and content that does not fit the restored
-shapes, end it at once. Materialized conversion has no such wait: a refusal ends it.
+A full memory class or worker queue never fails a restore. Each conversion is one attempt within its
+own shares, which it waits for while it holds nothing of their classes: a keyspace within a
+`restore_metadata` share for its keys and a bulk share for its groups and encoding, taken in that
+order; a window, and a materialized relay's conversion or regrouping, within one bulk share. Every
+charge the attempt takes is drawn from its shares, so the attempt never waits, and each group gives
+its charges back to the share before the next. An attempt that needs more than a share gives
+everything back, its staged pieces and admitted keys included, and the conversion runs again from
+its first group within a share at least twice as large. The starting shares come from the largest
+archived group and the native encoding working set, so a conversion rarely runs twice. A full
+staging quota judged nothing of the archive either: the conversion releases what it holds and runs
+again every 50 milliseconds for up to 30 seconds after the quota first refused it. A refusal that
+outlasts that wait ends the conversion and is reported as the staging quota having had no room for
+it, since what the restore itself stages can be what fills the quota. A request larger than a whole
+memory class, and content that does not fit the restored shapes, end it at once. The restore's
+description charge, the archive's metadata and the fixed share of every archived key admitted once
+before planning, is the restore's own resident state while its conversions run.
 
 ## Planning
 
@@ -1149,7 +1167,7 @@ keyspaces' disk allocation; until the first sweep completes they read zero.
 | Complete-set publication and the gate | `backup.feature`, `backup_generation.feature`, `backup_materialized.feature`, `backup_branch_state.feature` and `backup_branch_state_large.feature`: interrupted installation through a checkpoint staging failure, durable-publication failure, each including one whose coordinator loses leadership before recording it and whose recovery under the same execution reference fails again, restart and delayed coordinators; the consensus Shuttle checks that publication and handle clearing precede resume and fence delayed publishers. |
 | Staging quota and maintenance | `backup_staging.feature`, the state store's storage regressions, the kept-measurement property, and the consensus Shuttle check that reclamation holds its revision through queued installation. |
 | Interconnect operations | The Turmoil scenarios for a fenced section fetch across a partition, window sections above the bulk budget, a bounded inventory under a held link, and a restart during transfer, with their committed seeds; [Deterministic Interconnect Simulation](./interconnect-simulation.md) lists them. |
-| Snapshot receive admission | `snapshot_receive_admission.feature` on one and three nodes uses archived identities of two interleaved branches to fetch actual native checkpoints over authenticated interconnect streams. Outer and nested receive overlap must return 503 while the probe holds all but 4096 bytes of the node's Bulk capacity, independent of earlier reservation releases; it then releases all input and transfers the complete original checkpoint after capacity returns. |
+| Snapshot receive admission | `snapshot_receive_admission.feature` on one and three nodes uses archived identities of two interleaved branches to fetch actual native checkpoints over authenticated interconnect streams. A receive that finds the probe holding the node's whole Bulk capacity waits for room instead of being refused, and answers nothing while the hold lasts; once the hold ends it transfers the complete original checkpoint. |
 | Tracked locks | The restore storage owner tests and the `@restore_installation` and `@backup_wait` scenarios in the Deloxide selections, with their `stress.` twins in the stress selections; [Data-Plane Concurrency](./data-plane-concurrency.md) records what the detector does and does not see. |
 | Real processes | The external chaos soak entries for backup under load, backup cycles, backup under owner crash, leader crash and partition, a rolling restart during a backup stream, and restore into a fresh cluster; and the [restore faults](./cluster-chaos.md#restore-faults) held in staging through a SIGKILL of the coordinating leader, an isolation of that leader from its peers and the client, a SIGKILL of a state owner, and a SIGKILL of a state owner while a restore whose coordinator and client were lost awaits its failure. Each restore completes under its execution reference or fails with `START` refused and a restore under another name completes; a completed restore equals its archive, a domain resumed after its coordinator's isolation consumes exactly from its archived offset, and staging returns to zero on every node through completed sweeps. The [staging volume](./cluster-chaos.md#restore-staging-volume) entry measures three concurrent restores of guest saves above the bulk budget. [External Cluster Chaos](./cluster-chaos.md) defines them. |
 
@@ -1328,15 +1346,15 @@ four selections; pointer publication, native tensors, async admission and transp
 outside its detector. The [stateful inference qualification](https://app.clickup.com/t/86bcyakvx)
 owns chaos qualification.
 
-Backup retry cadence and restore conversion's admission wait/retry are node capabilities, with
-50ms backup retries and a 30s conversion wait with 50ms retries by default. Each conversion unit
-keeps its first-refusal time and captured policy; a retry releases the failed attempt's charges
-and does not renew that wait. Capture and restored-state staging expire after the full command retry
-validity, `COMMAND_RETRY_VALIDITY`, fifteen minutes by default, or earlier once their coordinator's
-run ends. Their maintenance sweep uses the local restore-staging cadence. An owner's wait for the
-capture revision and a node's wait for a restore authority's generation have no bound of their
-own: a node that applies the leader's log slowly costs the step latency, and only the end of its
-applied-state authority ends either wait sooner.
+Backup retry cadence and restore conversion's staging wait/retry are node capabilities, with
+50ms backup retries and a 30s conversion staging wait with 50ms retries by default. Each conversion
+keeps its first staging refusal's time and captured policy; a retry releases the failed attempt's
+charges and does not renew that wait. Capture and restored-state staging expire after the full
+command retry validity, `COMMAND_RETRY_VALIDITY`, fifteen minutes by default, or earlier once their
+coordinator's run ends. Their maintenance sweep uses the local restore-staging cadence. An owner's
+wait for the capture revision and a node's wait for a restore authority's generation have no bound
+of their own: a node that applies the leader's log slowly costs the step latency, and only the end
+of its applied-state authority ends either wait sooner.
 
 Captured-section chunks use sixteen executor bulk chunks capped at half the immutable bulk
 pool, preserving the default 1 MiB transfer piece and room for two live read/transport buffers.

@@ -113,6 +113,13 @@ def test_a_seed_reaches_the_cluster_when_the_server_does_not(cluster: Cluster) -
         keepalive_timeout=10.0,
         stream_window_bytes=1024 * 1024,
         connection_window_bytes=4 * 1024 * 1024,
+        call_queue_capacity=512,
+        header_list_bytes=32 * 1024,
+        send_buffer_bytes=512 * 1024,
+        max_error_reset_streams=512,
+        remembered_reset_streams=100,
+        reset_stream_duration=2.0,
+        connection_attempt_delay=0.25,
         cancel=deadline(),
     ) as session:
         completed(session, "LIST DOMAINS;")

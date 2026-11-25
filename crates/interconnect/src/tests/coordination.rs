@@ -92,12 +92,10 @@ async fn coordination_identity_is_unique_and_bound_to_the_authenticated_process(
     .await
     .expect("replacement coordinator transport should bind");
     replacement_a.replace_live_nodes(&BTreeSet::from([node_a.clone(), node_b.clone()]));
-    replacement_a
-        .register_outbound_target(
-            node_b.clone(),
-            NodeEndpoint::new("localhost", transport_b.local_addr().port()),
-        )
-        .expect("replacement coordinator target should register");
+    replacement_a.register_outbound_target(
+        node_b.clone(),
+        NodeEndpoint::new("localhost", transport_b.local_addr().port()),
+    );
     let replacement = replacement_a
         .next_coordination_identity()
         .expect("the replacement process should allocate an identity");

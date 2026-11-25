@@ -394,6 +394,13 @@ class Session:
         keepalive_timeout: float | None = None,
         stream_window_bytes: int | None = None,
         connection_window_bytes: int | None = None,
+        call_queue_capacity: int | None = None,
+        header_list_bytes: int | None = None,
+        send_buffer_bytes: int | None = None,
+        max_error_reset_streams: int | None = None,
+        remembered_reset_streams: int | None = None,
+        reset_stream_duration: float | None = None,
+        connection_attempt_delay: float | None = None,
         cancel: Cancel | None = None,
     ) -> None: ...
     def __enter__(self) -> Self: ...

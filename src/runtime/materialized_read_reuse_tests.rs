@@ -114,8 +114,7 @@ impl RemoteGenerationFixture {
             .assured("the owner installs the shared fixture authority");
         dispatcher
             .interconnect
-            .register_outbound_target(owner_name.clone(), transport.local_addr().into())
-            .assured("the authenticated owner endpoint is valid");
+            .register_outbound_target(owner_name.clone(), transport.local_addr().into());
 
         let domain = domain("materialized_reads");
         let relay = named::<RelayName>("profiles");

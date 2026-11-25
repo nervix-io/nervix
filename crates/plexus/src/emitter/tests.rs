@@ -824,6 +824,149 @@ fn publishing_mode_completion_stays_within_the_selected_emitter() {
     assert!(!suggestions.contains(&"SINGLE".to_string()));
 }
 
+/// The `GIVE UP AFTER` an emitter statement's `MODE` clause declares.
+fn declared_give_up_after(source: &str) -> Option<String> {
+    let emitter = parse_create_emitter(source).assured("the fixture emitter parses");
+    emitter
+        .connector
+        .publishing()
+        .retry_policy()
+        .give_up_after
+        .clone()
+}
+
+#[rstest::rstest]
+#[case::no_ack(
+    "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF \
+     250ms MAX 30s GIVE UP AFTER 10m"
+)]
+#[case::broker_ack(
+    "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE ACK SEQUENTIAL ACK TIMEOUT \
+     30s RETRY POLICY BACKOFF 250ms MAX 30s GIVE UP AFTER 10m"
+)]
+#[case::request_ack(
+    "SENTRY EVENT EMITTER emit FROM p99 TO broker MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s \
+     GIVE UP AFTER 10m"
+)]
+fn give_up_after_follows_the_pacing_of_every_publishing_mode(#[case] connector: &str) {
+    let source = complete_codec_emitter(connector);
+
+    assert_eq!(declared_give_up_after(&source).as_deref(), Some("10m"));
+    assert_canonical_emitter_roundtrip(&source, connector);
+    let rendered = parse_create_emitter(&source)
+        .assured("the fixture emitter parses")
+        .to_canonical_plexus()
+        .assured("the fixture emitter renders");
+    assert!(
+        rendered.contains("RETRY POLICY BACKOFF 250ms MAX 30s GIVE UP AFTER 10m"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn a_direct_emitter_and_a_client_consumer_declare_give_up_after_in_their_mode() {
+    let direct = "CREATE POSTGRES TABLE EMITTER emit FROM p99 TO db TABLE 'events' MODE ACK RETRY \
+                  POLICY BACKOFF 250ms MAX 30s GIVE UP AFTER 0s VALUES { 'id' = input.id } BATCH \
+                  MAX MESSAGES 100 MAX SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
+                  ERROR LOG;";
+    assert_eq!(declared_give_up_after(direct).as_deref(), Some("0s"));
+    assert_canonical_emitter_roundtrip(direct, "POSTGRES TABLE");
+
+    let client = "CREATE CLIENT CONSUMER EMITTER app_output FROM orders TO SCHEMA outgoing MODE \
+                  ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s GIVE UP \
+                  AFTER 1h 30m INHERIT ALL BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE ON \
+                  MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+    assert_eq!(declared_give_up_after(client).as_deref(), Some("1h 30m"));
+    assert_canonical_emitter_roundtrip(client, "CLIENT CONSUMER");
+}
+
+#[test]
+fn an_emitter_without_give_up_after_retries_without_a_limit() {
+    let source = complete_codec_emitter(
+        "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK RETRY POLICY \
+         BACKOFF 250ms MAX 30s",
+    );
+
+    assert_eq!(declared_give_up_after(&source), None);
+    let rendered = parse_create_emitter(&source)
+        .assured("the fixture emitter parses")
+        .to_canonical_plexus()
+        .assured("the fixture emitter renders");
+    assert!(!rendered.contains("GIVE UP"), "{rendered}");
+}
+
+#[rstest::rstest]
+#[case::without_a_duration("GIVE UP AFTER")]
+#[case::without_after("GIVE UP 10m")]
+#[case::without_up("GIVE AFTER 10m")]
+#[case::twice("GIVE UP AFTER 10m GIVE UP AFTER 1m")]
+#[case::before_the_pacing("")]
+fn a_partial_or_repeated_give_up_after_is_refused(#[case] limit: &str) {
+    let source = if limit.is_empty() {
+        complete_codec_emitter(
+            "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK RETRY POLICY \
+             GIVE UP AFTER 10m BACKOFF 250ms MAX 30s",
+        )
+    } else {
+        complete_codec_emitter(&format!(
+            "KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO ACK RETRY POLICY \
+             BACKOFF 250ms MAX 30s {limit}"
+        ))
+    };
+
+    assert!(
+        parse_create_emitter(&source).is_err(),
+        "the emitter unexpectedly parsed: {source}"
+    );
+}
+
+#[test]
+fn completion_offers_give_up_after_once_the_pacing_is_complete() {
+    let after_pacing = "CREATE KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE NO \
+                        ACK RETRY POLICY BACKOFF 250ms MAX 30s ";
+    let suggestions = suggest_create_emitter(after_pacing, after_pacing.len());
+    assert!(
+        suggestions.contains(&"GIVE UP AFTER".to_string()),
+        "{suggestions:?}"
+    );
+    assert!(
+        suggestions.contains(&"ENCODE USING".to_string()),
+        "{suggestions:?}"
+    );
+
+    let before_pacing = "CREATE KAFKA TOPIC EMITTER emit FROM p99 TO broker TOPIC 'events' MODE \
+                         NO ACK RETRY POLICY ";
+    let suggestions = suggest_create_emitter(before_pacing, before_pacing.len());
+    assert_eq!(suggestions, vec!["BACKOFF".to_string()]);
+
+    let after_limit = format!("{after_pacing}GIVE UP AFTER 10m ");
+    let suggestions = suggest_create_emitter(&after_limit, after_limit.len());
+    assert!(
+        !suggestions.contains(&"GIVE UP AFTER".to_string()),
+        "{suggestions:?}"
+    );
+    assert!(
+        suggestions.contains(&"ENCODE USING".to_string()),
+        "{suggestions:?}"
+    );
+}
+
+#[test]
+fn an_altered_publishing_mode_keeps_its_give_up_after() {
+    let text = "ALTER KAFKA TOPIC EMITTER emit SET MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY \
+                POLICY BACKOFF 250ms MAX 30s GIVE UP AFTER 2m;";
+    let statement = crate::statement::parse_statement(text).assured("the alteration parses");
+    let rendered = statement
+        .to_canonical_plexus()
+        .assured("the alteration renders");
+
+    assert!(rendered.contains("GIVE UP AFTER 2m"), "{rendered}");
+    assert_eq!(
+        crate::statement::parse_statement(&rendered).assured("the alteration reparses"),
+        statement
+    );
+}
+
 #[test]
 fn nats_stream_completion_uses_the_ack_mode_phrase() {
     let input =

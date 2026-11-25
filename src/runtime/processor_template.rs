@@ -9,37 +9,25 @@ use error_stack::{Report, ResultExt as _};
 
 use super::{branch_runtime::BranchInstanceRuntime, *};
 
-/// How building a concrete branch opens the state its processors retain: on which executor, and
-/// what a full bulk wait queue does with a window's sealed sections.
+/// Which executor handle building a concrete branch opens the state its processors retain on.
 ///
-/// An inferencer's carried state waits for its storage place and its bulk room whichever opening
-/// builds it; the opening only chooses the executor handle those waits go through.
+/// Every opening waits for its places and its room; the opening only chooses whether anyone is told
+/// while it waits.
 #[derive(Clone, Debug)]
 pub(super) enum RetainedStateOpening {
-    /// On the node's executor, a window's sealed sections refused when the bulk wait queue is
-    /// full. A branch the record path, a partition move or a guest-state reset builds is built
-    /// this way, and its builder reports or retries the refusal.
-    RefusedWhenFull,
-    /// On `Executor`, a window's sealed sections waiting for a place rather than being refused: a
-    /// processor task's restore, whose executor handle tells the task while any opening waits, so
-    /// that the task answers its commands meanwhile.
-    WaitingForPlace(Executor),
+    /// On the node's executor, which tells no owner while an opening waits.
+    OnNodeExecutor,
+    /// On `Executor`, a handle that tells its owner while any opening waits for capacity: a
+    /// processor task's restore, so that the task answers its commands meanwhile.
+    ReportingWaits(Executor),
 }
 
 impl RetainedStateOpening {
     /// The executor every opening runs on.
     fn executor<'a>(&'a self, runtime: &'a Runtime) -> &'a Executor {
         match self {
-            Self::RefusedWhenFull => runtime.executor(),
-            Self::WaitingForPlace(executor) => executor,
-        }
-    }
-
-    /// What a full bulk wait queue does with a window's sealed sections.
-    fn queue_admission(&self) -> nervix_execution::QueueAdmission {
-        match self {
-            Self::RefusedWhenFull => nervix_execution::QueueAdmission::RefuseWhenFull,
-            Self::WaitingForPlace(_) => nervix_execution::QueueAdmission::WaitForPlace,
+            Self::OnNodeExecutor => runtime.executor(),
+            Self::ReportingWaits(executor) => executor,
         }
     }
 }
@@ -596,13 +584,7 @@ impl RelayProcessorTemplate {
                             branch: BranchScope::from(key),
                         })?;
                     let state = replicated_state
-                        .restore_state(
-                            plan,
-                            input_schema,
-                            incarnation,
-                            opening.executor(runtime),
-                            opening.queue_admission(),
-                        )
+                        .restore_state(plan, input_schema, incarnation, opening.executor(runtime))
                         .await
                         .change_context_lazy(|| ProcessorTemplateError::WindowRestore {
                             processor: self.processor.clone(),
@@ -1123,7 +1105,7 @@ mod tests {
                     incarnation: 1,
                 },
                 &revision,
-                &RetainedStateOpening::RefusedWhenFull,
+                &RetainedStateOpening::OnNodeExecutor,
             )
             .await
             .expect("deduplicator template must instantiate");
@@ -1234,7 +1216,7 @@ mod tests {
                     incarnation: 1,
                 },
                 &revision,
-                &RetainedStateOpening::RefusedWhenFull,
+                &RetainedStateOpening::OnNodeExecutor,
             )
             .await
             .assured("the test publishes the WASM processor state identity before instantiation");
@@ -1348,7 +1330,7 @@ mod tests {
                     incarnation: 1,
                 },
                 &revision,
-                &RetainedStateOpening::RefusedWhenFull,
+                &RetainedStateOpening::OnNodeExecutor,
             )
             .await
             .expect("deduplicator template must instantiate");

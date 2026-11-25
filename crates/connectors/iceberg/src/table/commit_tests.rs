@@ -11,7 +11,7 @@ use arrow_array::{Int64Array, StringArray};
 use arrow_schema::Field;
 use error_stack::{AttachmentKind, FrameKind};
 use futures_util::TryStreamExt as _;
-use nervix_execution::{AdmissionError, ExecutionConfig, Reservation};
+use nervix_execution::{ExecutionConfig, Reservation};
 use nervix_primitives::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
@@ -404,11 +404,18 @@ pub(super) fn description<C>(report: &Report<C>) -> Option<String> {
     })
 }
 
+/// A commit the bulk class has no room for waits for room, holding nothing of the class, and
+/// the emitter shows the wait as its transient status. Its staged rows and acknowledgements stay
+/// as they were while it waits; once room frees it commits, clears the status and returns its
+/// whole charge.
 #[nervix_primitives::test]
-async fn a_commit_the_bulk_class_has_no_room_for_keeps_its_staged_rows_and_acknowledgements() {
+async fn a_commit_the_bulk_class_has_no_room_for_waits_showing_its_wait_and_commits_once_room_frees()
+ {
     let catalog: StdArc<dyn Catalog> = StdArc::new(memory_catalog().await);
     let executor = Executor::default();
+    let host = nervix_connector_fake::FakeEmitterHost::on(executor.clone());
     let mut connector = fixture_emitter(StdArc::clone(&catalog), executor.clone()).await;
+    connector.host = host.host();
     let acknowledgements = StdArc::new(RecordedAcknowledgements::default());
     stage(&mut connector, &[1, 2], &acknowledgements).await;
     let staged = connector.staged_bytes;
@@ -417,56 +424,43 @@ async fn a_commit_the_bulk_class_has_no_room_for_keeps_its_staged_rows_and_ackno
         .assured("a staged batch holds at least its message header");
     let held = hold_bulk_memory_leaving(&executor, short_by_one);
 
-    let refused = connector
-        .commit()
-        .await
-        .err()
-        .assured("a class one byte short of the staged batch refuses the commit's charge");
-
-    assert_eq!(
-        refused.current_context(),
-        &EmitterWriteError::Commit { connector: ICEBERG }
-    );
-    assert_eq!(
-        refused.downcast_ref::<AdmissionError>(),
-        Some(&AdmissionError::BudgetExhausted {
-            class: "bulk",
-            requested: staged,
+    let report = {
+        let mut commit = std::pin::pin!(connector.commit());
+        let first = std::future::poll_fn(|context| {
+            std::task::Poll::Ready(std::future::Future::poll(commit.as_mut(), context))
         })
-    );
-    assert_eq!(
-        description(&refused),
-        Some(format!(
-            "Iceberg commit waits for room in the bulk memory class for {staged} staged bytes"
-        ))
-    );
-    assert_eq!(connector.staged_bytes, staged);
-    assert_eq!(connector.staged_rows, 2);
-    assert_eq!(
-        staging_files(&connector),
-        1,
-        "a refused commit keeps its staging file"
-    );
-    assert_eq!(acknowledgements.acknowledged(), 0);
-    assert_eq!(acknowledgements.rejected(), 0);
-    assert_eq!(
-        committed_user_ids(catalog.as_ref()).await,
-        Vec::<i64>::new()
-    );
-    assert_eq!(
-        executor.memory(MemoryClass::Bulk).reserved_bytes,
-        held.bytes(),
-        "a refused charge takes nothing"
-    );
-
-    // Exactly the staged bytes are free now, and the commit's charge takes every one of them.
-    drop(held);
-    let held = hold_bulk_memory_leaving(&executor, staged);
-    let report = connector
-        .commit()
-        .await
-        .assured("a class with room for exactly the staged bytes admits the commit")
-        .assured("the commit publishes the staged rows");
+        .await;
+        assert!(
+            first.is_pending(),
+            "a class one byte short of the staged batch holds the commit back instead of refusing \
+             it"
+        );
+        assert_eq!(
+            host.observations().transient_error,
+            Some(format!(
+                "Iceberg commit waits for room in the bulk memory class for {staged} staged bytes"
+            )),
+            "the emitter shows the wait while it lasts"
+        );
+        assert_eq!(acknowledgements.acknowledged(), 0);
+        assert_eq!(acknowledgements.rejected(), 0);
+        assert_eq!(
+            committed_user_ids(catalog.as_ref()).await,
+            Vec::<i64>::new()
+        );
+        // A queued charge is assigned the room the class frees as it waits, so the class counts
+        // that room toward it, but the commit's charge is not granted while it waits.
+        assert!(
+            executor.memory(MemoryClass::Bulk).reserved_bytes < held.bytes() + staged,
+            "a waiting commit holds no charge of its own"
+        );
+        drop(held);
+        nervix_primitives::time::timeout(Duration::from_secs(60), commit)
+            .await
+            .assured("the freed room reaches the waiting commit")
+            .assured("a class with room for the staged bytes admits the commit")
+            .assured("the commit publishes the staged rows")
+    };
 
     assert_eq!(report.messages, 2);
     assert_eq!(report.bytes, staged);
@@ -476,8 +470,13 @@ async fn a_commit_the_bulk_class_has_no_room_for_keeps_its_staged_rows_and_ackno
     assert!(connector.staged_batches.is_empty());
     assert_eq!(connector.staged_bytes, 0);
     assert_eq!(
+        host.observations().transient_error,
+        None,
+        "the emitter clears the wait once the commit has its charge"
+    );
+    assert_eq!(
         executor.memory(MemoryClass::Bulk).reserved_bytes,
-        held.bytes(),
+        0,
         "the commit returns its whole charge"
     );
 }
@@ -525,7 +524,8 @@ async fn a_staged_total_larger_than_the_bulk_class_commits_in_groups_within_one_
 }
 
 #[nervix_primitives::test]
-async fn a_staged_batch_larger_than_the_whole_bulk_class_commits_once_the_whole_class_is_free() {
+async fn a_staged_batch_larger_than_the_whole_bulk_class_waits_and_commits_once_the_whole_class_is_free()
+ {
     let catalog: StdArc<dyn Catalog> = StdArc::new(memory_catalog().await);
     let mut connector = fixture_emitter(StdArc::clone(&catalog), Executor::default()).await;
     let acknowledgements = StdArc::new(RecordedAcknowledgements::default());
@@ -541,56 +541,46 @@ async fn a_staged_batch_larger_than_the_whole_bulk_class_commits_once_the_whole_
         .checked_sub(1)
         .assured("the fixture's class holds more than one byte");
     let held = hold_bulk_memory_leaving(&executor, all_but_one);
+    let host = nervix_connector_fake::FakeEmitterHost::on(executor.clone());
+    connector.host = host.host();
 
-    let refused = connector
-        .commit()
-        .await
-        .err()
-        .assured("a staged batch larger than the class waits until the whole class is free");
-
-    assert_eq!(
-        refused.current_context(),
-        &EmitterWriteError::Commit { connector: ICEBERG }
-    );
-    assert_eq!(
-        refused.downcast_ref::<AdmissionError>(),
-        Some(&AdmissionError::BudgetExhausted {
-            class: "bulk",
-            requested: capacity,
+    let report = {
+        let mut commit = std::pin::pin!(connector.commit());
+        let first = std::future::poll_fn(|context| {
+            std::task::Poll::Ready(std::future::Future::poll(commit.as_mut(), context))
         })
-    );
-    assert_eq!(
-        description(&refused),
-        Some(format!(
-            "Iceberg commit waits for the whole bulk memory class of {capacity} bytes for a \
-             staged batch of {staged} bytes"
-        ))
-    );
-    assert_eq!(connector.staged_bytes, staged);
-    assert_eq!(
-        staging_files(&connector),
-        1,
-        "a refused commit keeps its staging file"
-    );
-    assert_eq!(acknowledgements.acknowledged(), 0);
-    assert_eq!(acknowledgements.rejected(), 0);
-    assert_eq!(
-        committed_user_ids(catalog.as_ref()).await,
-        Vec::<i64>::new()
-    );
-    assert_eq!(
-        executor.memory(MemoryClass::Bulk).reserved_bytes,
-        held.bytes(),
-        "a refused charge takes nothing"
-    );
-
-    // The whole class is free now, and the batch is read charged with all of it.
-    drop(held);
-    let report = connector
-        .commit()
-        .await
-        .assured("a free class admits a staged batch larger than itself")
-        .assured("the commit publishes the staged rows");
+        .await;
+        assert!(
+            first.is_pending(),
+            "a staged batch larger than the class waits until the whole class is free"
+        );
+        assert_eq!(
+            host.observations().transient_error,
+            Some(format!(
+                "Iceberg commit waits for the whole bulk memory class of {capacity} bytes for a \
+                 staged batch of {staged} bytes"
+            ))
+        );
+        assert_eq!(acknowledgements.acknowledged(), 0);
+        assert_eq!(acknowledgements.rejected(), 0);
+        assert_eq!(
+            committed_user_ids(catalog.as_ref()).await,
+            Vec::<i64>::new()
+        );
+        // A queued charge is assigned the room the class frees as it waits, so the class counts
+        // that room toward it, but the commit's charge is not granted while it waits.
+        assert!(
+            executor.memory(MemoryClass::Bulk).reserved_bytes < held.bytes() + capacity,
+            "a waiting commit holds no charge of its own"
+        );
+        // The whole class is free now, and the batch is read charged with all of it.
+        drop(held);
+        nervix_primitives::time::timeout(Duration::from_secs(60), commit)
+            .await
+            .assured("the freed class reaches the waiting commit")
+            .assured("a free class admits a staged batch larger than itself")
+            .assured("the commit publishes the staged rows")
+    };
 
     assert_eq!(report.messages, 8);
     assert_eq!(report.bytes, staged);
@@ -855,5 +845,58 @@ fn a_load_group_reads_one_span_from_each_staging_file_it_takes_batches_from() {
             bytes: 200..300,
             batches: 1,
         }]
+    );
+}
+
+/// Giving up a staged commit drops every staged batch with its staging file and hands back the
+/// acknowledgements the batches retained, unresolved, for the host to report. The emitter then
+/// stages nothing, and a commit after it publishes nothing it dropped.
+#[nervix_primitives::test]
+async fn giving_up_the_staged_rows_drops_their_staging_file_and_returns_their_acknowledgements() {
+    let catalog: StdArc<dyn Catalog> = StdArc::new(memory_catalog().await);
+    let executor = Executor::default();
+    let mut connector = fixture_emitter(StdArc::clone(&catalog), executor.clone()).await;
+    let acknowledgements = StdArc::new(RecordedAcknowledgements::default());
+    stage_carriers(&mut connector, &[&[1, 2], &[3]], &acknowledgements).await;
+    assert_eq!(staging_files(&connector), 1);
+
+    let abandoned = connector
+        .abandon_staged()
+        .await
+        .assured("staged rows hand their acknowledgements back when they are given up");
+
+    assert!(connector.staged_batches.is_empty());
+    assert_eq!(connector.staged_rows, 0);
+    assert_eq!(connector.staged_bytes, 0);
+    assert_eq!(connector.staged_messages(), 0);
+    assert_eq!(
+        staging_files(&connector),
+        0,
+        "giving the staged rows up removes the staging file that held them"
+    );
+    assert_eq!(acknowledgements.acknowledged(), 0);
+    assert_eq!(
+        acknowledgements.rejected(),
+        0,
+        "the connector leaves resolving the handed-back acknowledgements to the host"
+    );
+    abandoned.reject("gave up after 0s of retries".to_string());
+    assert_eq!(
+        acknowledgements.rejected(),
+        2,
+        "the host resolves every carrier's acknowledgement it was handed back"
+    );
+    assert!(
+        connector.abandon_staged().await.is_none(),
+        "an emitter that stages nothing gives nothing up"
+    );
+    let report = connector
+        .commit()
+        .await
+        .assured("a commit with nothing staged has nothing to fail on");
+    assert!(report.is_none());
+    assert_eq!(
+        committed_user_ids(catalog.as_ref()).await,
+        Vec::<i64>::new()
     );
 }

@@ -15,8 +15,7 @@ use error_stack::{Report, ResultExt as _};
 use futures_util::{StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{
-    AdmissionError, BudgetedBuffer, ChargedBytes, Executor, MemoryClass, QueueAdmission,
-    Reservation,
+    AdmissionError, BudgetedBuffer, ChargedBytes, Executor, MemoryClass, Reservation,
 };
 use nervix_interconnect::{
     MaterializedStatePageBody, MaterializedStatePageDescriptor, MaterializedStatePageGroup,
@@ -68,9 +67,8 @@ async fn identified_body(
     job: Reservation,
 ) -> Result<IdentifiedBody, Report<StreamHandlerError>> {
     executor
-        .run_cpu_with(
+        .run_cpu(
             nervix_execution::CpuClass::Bulk,
-            QueueAdmission::WaitForPlace,
             job,
             move |job, cancellation| {
                 cancellation.check()?;
@@ -252,7 +250,6 @@ pub(crate) async fn stream_materialized_page(
             executor.clone(),
             PoolClass::Bulk,
             PoolClass::Bulk.payload_limit(executor),
-            QueueAdmission::WaitForPlace,
             descriptor_charge,
         )
         .await
@@ -323,7 +320,6 @@ pub(crate) async fn stream_processor_page(
             executor.clone(),
             PoolClass::Bulk,
             limit,
-            QueueAdmission::WaitForPlace,
             charge,
         )
         .await
@@ -355,7 +351,6 @@ async fn stream_refusal<R: RkyvMessage>(
             executor.clone(),
             PoolClass::Bulk,
             limit,
-            QueueAdmission::WaitForPlace,
             charge,
         )
         .await
@@ -511,16 +506,16 @@ impl BodyCharges {
         // The part holds rows the owner already read, so a full bulk queue holds its encoding
         // back; the caller's reset of the page stream ends the wait.
         let encoded = part
-            .encode_arrow_snapshot_section_within(executor, QueueAdmission::WaitForPlace, charge)
+            .encode_arrow_snapshot_section_within(executor, charge)
             .await;
         match encoded {
             Ok(body) => Ok(PartBody::Encoded(body)),
-            Err(error) => {
-                if let ArrowBodyError::EncodedPastLimit { .. } = error.current_context() {
-                    return Ok(PartBody::PastLimit);
-                }
-                Err(StreamHandlerError::with_cause(error))
-            }
+            Err(error) => match error.current_context() {
+                ArrowBodyError::EncodedPastLimit { .. } => Ok(PartBody::PastLimit),
+                // The body outgrew its charge while the pool had no room for the rest at once.
+                ArrowBodyError::Admission => Ok(PartBody::Declined),
+                _ => Err(StreamHandlerError::with_cause(error)),
+            },
         }
     }
 }
@@ -636,9 +631,8 @@ async fn verified_body_within(
     charge: Reservation,
 ) -> Result<(ChargedBytes, Reservation), Report<StatePageExchangeError>> {
     executor
-        .run_cpu_with(
+        .run_cpu(
             nervix_execution::CpuClass::Bulk,
-            QueueAdmission::WaitForPlace,
             charge,
             move |charge, cancellation| {
                 cancellation
@@ -900,10 +894,9 @@ async fn read_descriptor<R: RkyvMessage>(
     // The reply is the owner's answer to a read it already served, so a full bulk queue holds its
     // decoding back rather than discarding that answer; the caller's own read deadline bounds the
     // wait.
-    let (reply, decoded_charge) = R::decode_rkyv_within(
+    let (reply, decoded_charge) = R::decode_rkyv_charged_within(
         executor.clone(),
         PoolClass::Bulk,
-        QueueAdmission::WaitForPlace,
         header,
         decoded_charge,
     )
@@ -979,7 +972,10 @@ pub(crate) async fn receive_materialized_page(
     if length > request.max_bytes || length != bodies || count == 0 || layout.records != count {
         return Err(framing());
     }
-    let opening = match layout.relay_opening_need(executor) {
+    let opening = match layout
+        .relay_opening(executor, length)
+        .and_then(|opening| opening.need())
+    {
         Ok(opening) => opening,
         Err(error) => {
             if let MaterializedSnapshotError::MetadataTooLarge = error.current_context() {
@@ -1005,7 +1001,7 @@ pub(crate) async fn receive_materialized_page(
         executor,
         schema,
         received,
-        layout,
+        &layout,
         opening_charge,
     )
     .await
@@ -1195,7 +1191,7 @@ fn page_body_need(
         }
         for identity in &transfer.bodies {
             let decoding =
-                RuntimeRecordBatch::snapshot_section_decode_charge(executor, identity.bytes);
+                RuntimeRecordBatch::snapshot_section_scratch(executor, identity.bytes);
             need.bytes = need.bytes.checked_add(identity.bytes).ok_or_else(framing)?;
             need.total = need.total.checked_add(identity.bytes).ok_or_else(framing)?;
             need.total = need.total.checked_add(decoding).ok_or_else(framing)?;
@@ -1243,7 +1239,6 @@ impl ReceivedBodies<'_> {
             // back; the caller's own read deadline bounds the wait.
             let (decoded, charge) = RuntimeRecordBatch::decode_arrow_snapshot_section_within(
                 executor,
-                QueueAdmission::WaitForPlace,
                 StdArc::clone(&schema),
                 body,
                 charge,
@@ -1271,7 +1266,7 @@ impl ReceivedBodies<'_> {
         executor: &Executor,
         encoded: u64,
     ) -> Result<Reservation, Report<StatePageExchangeError>> {
-        let wanted = RuntimeRecordBatch::snapshot_section_decode_charge(executor, encoded);
+        let wanted = RuntimeRecordBatch::snapshot_section_scratch(executor, encoded);
         let left = self
             .decoding
             .take()

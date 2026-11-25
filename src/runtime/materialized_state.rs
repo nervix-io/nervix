@@ -429,6 +429,16 @@ impl MaterializedRelayStateRead {
         })
     }
 
+    /// What [`Self::capture_for_backup`] would charge now: the row-view and grouping arrays of
+    /// the current entries, or `None` when they are beyond counting.
+    pub(super) fn backup_capture_bytes(&self) -> Option<u64> {
+        let bytes = self.state.entries.load().len().checked_mul(
+            std::mem::size_of::<MaterializedGenerationRecord>()
+                + std::mem::size_of::<std::ops::Range<usize>>(),
+        )?;
+        u64::try_from(bytes).ok()
+    }
+
     /// Admit the row-view and grouping arrays before capturing a backup cut. Carrier columns and
     /// branch identities remain shared; the charge follows the immutable generation until its
     /// archive sections have been staged. One capture cannot monopolize the bulk worker budget.

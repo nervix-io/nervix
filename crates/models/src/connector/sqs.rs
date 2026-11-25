@@ -707,7 +707,7 @@ connector_emitters! {
 
 super::publishing::emitter_modes! {
     pub enum SqsQueuePublishingMode {
-        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
+        Ack { retry_policy: crate::EmitterRetryPolicy } => RequestAck,
     }
 }
 

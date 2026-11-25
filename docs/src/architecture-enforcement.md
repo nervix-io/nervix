@@ -180,26 +180,63 @@ throughout, and missing analysis never reads as zero findings.
 ## Pinned Toolchain
 
 Product code and the `nervix-ratchet` orchestration binary build with the stable toolchain
-`rust-toolchain.toml` declares. The analysis driver links rustc's internal crates and builds on one
-pinned nightly, `nightly-2026-11-21`, which the isolated tooling workspace declares with `rustc-dev`,
-`rust-src`, `rustfmt` and `llvm-tools`. `just toolchains-install` installs both toolchains. The
-driver refuses any other analysis compiler: it locates the pinned compiler through rustup and checks
-the commit that `rustc -vV` reports. Bolero's sanitizer campaigns use the same nightly, which the
-`[tool]` table of `tests/bolero-targets.toml` declares. Native coverage of the typed-ratchet
-qualification builds both the runner and driver with that toolchain's own LLVM tools, so profiles
-and exporters match the compiler that produced them. `scripts/native_coverage.py exec` records the
-runner's and driver's profiles within the existing producer; ordinary builds retain the stable
-runner and pinned analysis compiler.
+`rust-toolchain.toml` declares. Everything that needs a nightly uses one pinned nightly,
+`nightly-2026-11-21`:
+
+- the analysis driver, which links rustc's internal crates, and the isolated tooling workspace,
+  which declares the toolchain with `rustc-dev`, `rust-src`, `rustfmt` and `llvm-tools`;
+- the formatter, because `rustfmt.toml` enables unstable options that only a nightly rustfmt reads;
+- Miri;
+- Bolero's sanitizer campaigns, whose toolchain the `[tool]` table of `tests/bolero-targets.toml`
+  declares.
+
+The justfile names the nightly once, as `nightly_toolchain`, and nothing names the floating
+`nightly` channel: no recipe (`+nightly`, `rustup run nightly`, `RUSTUP_TOOLCHAIN=nightly`),
+manifest, script or workflow step. `just toolchains-install` installs both toolchains, the nightly
+with every component a recipe uses, and CI installs no other nightly. The driver refuses any other
+analysis compiler: it locates the pinned compiler through rustup and checks the commit that
+`rustc -vV` reports. Native coverage of the typed-ratchet qualification builds both the runner and
+driver with that toolchain's own LLVM tools, so profiles and exporters match the compiler that
+produced them. `scripts/native_coverage.py exec` records the runner's and driver's profiles within
+the existing producer; ordinary builds retain the stable runner and pinned analysis compiler.
+
+Compilation on the nightly solves trait goals the way the product compiler does. A nightly build of
+rustc uses the next-generation trait solver for every goal by default, because rustc's bootstrap
+sets that default for the nightly and dev channels only, while a stable build uses it for coherence
+alone. Under the nightly default, the server library's analysis needs about four times the memory.
+Each owner of a nightly compilation therefore passes `-Znext-solver=coherence` to rustc and rustdoc,
+after the caller's own flags:
+
+- The justfile declares it as `nightly_flags`, which `nightly_rustflags` and `nightly_rustdocflags`
+  carry into every recipe that compiles on the nightly: Miri, and the tooling workspace's builds,
+  tests, documentation tests and Clippy lane.
+- The analysis runner adds its `configuration::TOOLCHAIN_RUSTFLAGS` to the `RUSTFLAGS`, or the
+  `CARGO_ENCODED_RUSTFLAGS` a caller set, of every Cargo command it starts. The dependencies compile
+  with these, because the workspace wrapper hands only workspace crates to the driver.
+- The driver passes it for every crate it analyzes, the contract fixtures the runner compiles
+  without Cargo included, so the analysis checks the code with the product compiler's solver.
+- `scripts/native_coverage.py` declares it as `NIGHTLY_RUSTFLAGS` and starts the instrumented build
+  of a producer that selects the nightly from it, so the Cargo commands that recipe runs without
+  naming a toolchain take it too.
+- `scripts/bolero.py` puts the same flags in the `RUSTFLAGS` that cargo-bolero inherits and appends
+  to its sanitizer flags.
+
+Formatting compiles nothing and takes no flag. Cargo gives `RUSTFLAGS` to the target's crates alone
+when a command names `--target`, as the browser configuration, cargo-bolero and Miri do, so the
+build scripts and procedural macros of those builds still compile with the nightly default. No
+stable compiler receives the flag, which it refuses. A stable toolchain upgrade that changes the
+product compiler's solver changes these four declarations in the same change.
 
 Upgrading the pinned nightly is one change that moves every declaration together: the tooling
-`rust-toolchain.toml`, the driver's compiler check, the runner's `configuration::TOOLCHAIN`, the justfile recipes
-that name the toolchain, `scripts/native_coverage.py`, the Bolero inventory and the sanitizer
-workflow's toolchain step, and the chapters and `AGENTS.md` that name it. It adapts the driver to
-rustc's changed internal APIs while every compiler fixture keeps its allowed and rejected result; a
-recognition the new compiler changes is a rule change and ships its fixtures. It qualifies with
-`just test-typed-ratchet`, `just qualify-typed-ratchet-cache`, the complete `just ratchet` gate and
-a `fuzz`-labeled run of the sanitizer campaigns. The new compiler identity re-establishes every
-report, so no evidence from the previous compiler is reused.
+`rust-toolchain.toml`, the driver's compiler check, the runner's `configuration::TOOLCHAIN`, the
+justfile's `nightly_toolchain`, `NIGHTLY_TOOLCHAIN` in `scripts/native_coverage.py`, the Bolero
+inventory and the sanitizer workflow's toolchain step, and the chapters and `AGENTS.md` that name
+it. It adapts the driver to rustc's changed internal APIs while every compiler fixture keeps its
+allowed and rejected result; a recognition the new compiler changes is a rule change and ships its
+fixtures. It commits whatever `just fmt` changes under the new formatter, and qualifies with
+`just test-typed-ratchet`, `just qualify-typed-ratchet-cache`, the complete `just ratchet` gate, the
+Miri recipes and a `fuzz`-labeled run of the sanitizer campaigns. The new compiler identity
+re-establishes every report, so no evidence from the previous compiler is reused.
 
 Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The source
 counts retain their product-debt scope: directory components named `tests`, `benches` or
@@ -280,17 +317,19 @@ classification a site takes: a setting of its class, a derivation, or a fixed va
 ## Host Memory Admission
 
 An analysis compilation needs about the memory of rustc's own check of its target, and the server
-library's dwarfs every other. Its diagnostic analysis has peaked just over 25 GiB in CI, while other
-crates stay below the 4 GiB threshold. Its 26 GiB reservation accounts for that peak when the host
-admits compilations. Every configuration builds in a directory of its own, and up to four
+library's dwarfs every other. Its analysis peaks at 3.9 GiB in CI in every configuration, the
+diagnostic ones included, while other crates stay below the 4 GiB threshold. Its 5 GiB reservation,
+the smallest whole reservation above the threshold, accounts for that peak when the host admits
+compilations. Every configuration builds in a directory of its own, and up to four
 configurations analyze at once, a
 bound `--jobs` or `NERVIX_TYPED_RATCHET_JOBS` sets otherwise; the evidence keeps the declared order
 whatever order they end in, and once one analysis fails no configuration starts another.
 Configurations at once, and validations in several worktrees of one host, would hold several server
 analyses at a time, and nothing else admits them against the host's memory: kache, the compiler
 wrapper the host configures, runs a chain with a workspace wrapper directly, outside its own
-memory-weighted scheduler. Five server analyses at once exceed a 62 GiB host, and the kernel's
-out-of-memory killer ends one of them.
+memory-weighted scheduler. Each worktree analyzes up to four configurations at once, so the
+validations of several worktrees together can fill a host's memory, and the kernel's out-of-memory
+killer then ends one of them.
 
 `tools/nervix-lint/configurations.toml` declares the admission: a threshold, a wait limit and a
 reservation for every compilation, by crate and target kind, that peaks above the threshold. The
