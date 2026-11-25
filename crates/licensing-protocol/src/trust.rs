@@ -56,6 +56,8 @@ pub enum TrustError {
     EpochConflict { epoch: u64 },
     #[error("the trust document has an invalid signature profile or payload")]
     Document,
+    #[error("the decision has an invalid signature profile or payload")]
+    Decision,
     #[error("the signature set has {verified} verified roots, below its threshold of {required}")]
     Threshold { verified: usize, required: usize },
     #[error("the document names a different root epoch from its verified signers")]
@@ -651,7 +653,7 @@ impl TrustState {
         limits: DocumentLimits,
     ) -> Result<VerifiedDecision, Report<TrustError>> {
         let parsed = UnverifiedDocument::parse(compact, DocumentType::Decision, limits)
-            .change_context(TrustError::Document)?;
+            .change_context(TrustError::Decision)?;
         let Some(authorizations) = self.authorizations.get(parsed.key_id()) else {
             return Err(Report::new(TrustError::UnknownSigningKey));
         };
@@ -660,7 +662,7 @@ impl TrustState {
             .assured("authorization map entries are installed with a document");
         let decision: Decision = parsed
             .verify(&first.public_jwk)
-            .change_context(TrustError::Document)?;
+            .change_context(TrustError::Decision)?;
         let mut authorized = false;
         for authorization in authorizations {
             if authorization.authorizes(decision.issued_at) {
