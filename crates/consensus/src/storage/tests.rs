@@ -1,6 +1,7 @@
 //! Recovery and publication checks through the Raft storage traits.
 
 mod cluster_identity_tests;
+mod keyspace_name_tests;
 mod licensing_tests;
 mod log_read_charge_tests;
 mod management_working_set_tests;
