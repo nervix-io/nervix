@@ -79,8 +79,9 @@ existing `state_store_shuttle_tests.rs` checks of the state assignment authority
 
 ## Practical durability limits
 
-- A checkpoint has ninety seconds from the guest's save to its last replica's confirmation. One branch
-  holds the acknowledgements of one callback at a time.
+- A checkpoint has no deadline of its own: its acknowledgements wait for its last replica's
+  confirmation for as long as that replica lives and stays assigned. One branch holds the
+  acknowledgements of one callback at a time.
 - Without replicas, only the owner's storage holds a branch's checkpoints: losing that node resets
   the branch. With replicas, a promoted replica holds every checkpoint whose acknowledgements were
   released.

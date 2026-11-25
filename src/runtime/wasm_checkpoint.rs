@@ -25,7 +25,7 @@ use super::*;
 /// Each hold is one more share of an input's acknowledgement: the input resolves once every
 /// delivery the callback made for it resolves and its hold is released. A negative decision
 /// resolves the input at once, whatever holds it. Holds live in memory only, for one callback and
-/// the checkpoint after it, which the checkpoint deadline bounds.
+/// the checkpoint after it, until that checkpoint commits or fails or its branch task ends.
 #[derive(Debug, Default)]
 pub(super) struct WasmCheckpointHolds {
     held: Vec<AckSet>,

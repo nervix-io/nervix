@@ -2078,8 +2078,9 @@ lost in transit is replaced by the next announcement instead of stranding the ow
 stable storage acknowledges nothing. The owner of a WASM processor branch releases the ingestor
 acknowledgements a guest checkpoint covers only once every replica the committed schedule assigns
 has acknowledged that checkpoint's revision; a replica that is unreachable, lagging, or failing to
-install stops those acknowledgements from being released rather than letting them through, and the
-checkpoint fails after its ninety-second deadline. The owner announces a WASM processor's new branch to
+install stops those acknowledgements from being released rather than letting them through, until it
+acknowledges or the committed schedule replaces it. The checkpoint has no deadline of its own. The
+owner announces a WASM processor's new branch to
 its replicas as soon as the branch appears. Every catch-up round of a replica synchronizes the
 owner's branch lifecycle before it installs any branch checkpoint, and the replica refuses a
 checkpoint of a branch that lifecycle does not name, as for a branch the owner has evicted.

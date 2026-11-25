@@ -380,8 +380,10 @@ branch. A node without stable storage acknowledges nothing.
 While the checkpoint waits, it wakes on each replica report and, at least every tenth of the local replication cadence (100 milliseconds by default),
 rereads the unit assignment publication the branch retains, which schedule installation replaces. A
 replica the schedule replaces is replaced in the wait. The wait fails when the
-schedule assigns fewer replicas than the checkpoint was captured for, when this node no longer
-executes the processor, and when the deadline passes with a replica still missing.
+schedule assigns fewer replicas than the checkpoint was captured for, and when this node no longer
+executes the processor. A live replica that cannot install the checkpoint logs each refused
+installation and tries again in its next round, and the callback's acknowledgements wait for it
+until it confirms or the schedule replaces it.
 
 ### Acknowledgement Holds
 
@@ -405,8 +407,8 @@ acknowledgement waits for its checkpoints, although its guest state is checkpoin
 | --- | --- |
 | `state authority check` | The placement is no longer current on this node, or the schedule no longer has this node execute the processor. |
 | `state snapshot` | `nervix_dump_state` returned a negative code, trapped, exhausted a limit, or exceeded the host's 64 MiB guest buffer. |
-| `local state persistence` | The write or its synchronization failed, or did not finish before the deadline. |
-| `state replication` | A replica did not confirm before the deadline, or the schedule assigns fewer replicas than the checkpoint was captured for. |
+| `local state persistence` | The write or its synchronization failed. |
+| `state replication` | The schedule assigns fewer replicas than the checkpoint was captured for. |
 
 Whatever the processor's `ON GLOBAL ERROR` policy, the failure is reported as a runtime error at its
 stage. Every input the callback decided, and every input the guest still buffers, is negatively

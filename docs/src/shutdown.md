@@ -580,8 +580,9 @@ timeout, every task ends, and every placement writes its final checkpoint.
 A WASM processor branch keeps the acknowledgements of its latest guest callback open until that
 callback's checkpoint reaches stable storage and every assigned replica, and its callback holds the
 work it took until then, so the save waits for that checkpoint as work in motion. The checkpoint has
-a ninety-second completion deadline. A checkpoint that cannot complete fails and negatively
-acknowledges what it held.
+no deadline of its own: replicas that are slow while they live cost the save time. A checkpoint that
+cannot complete, because the schedule assigns fewer replicas than it was captured for or the node no
+longer executes the processor, fails and negatively acknowledges what it held.
 
 Runtime teardown gives each processor task a stop grace, and the processor task gives each of its
 branch tasks one of its own. A processor task still stopping its branches when its grace ends is
