@@ -538,6 +538,27 @@ impl EmitterPublishBatch {
         self.batch.merged_acks()
     }
 
+    /// Releases every row the emitter has not resolved as done, as the drop that destroys the
+    /// emitter does, and answers how many they were. Staged rows belong to the connector, which
+    /// releases them itself.
+    fn release_unresolved_as_done(&self) -> u64 {
+        let mut released = 0_u64;
+        for (row, state) in self.rows.iter().enumerate() {
+            if state.is_resolved() {
+                continue;
+            }
+            self.batch
+                .acks
+                .get(row)
+                .verified("a buffered row retains the ACK validated with its source batch")
+                .ack_success();
+            released = released
+                .checked_add(1)
+                .assured("the rows of one buffered batch are fewer than u64::MAX");
+        }
+        released
+    }
+
     /// Staged rows already belong to the connector; retirement abandons only host-owned rows.
     fn retire_unresolved(&self) {
         for (row, state) in self.rows.iter().enumerate() {
@@ -962,6 +983,18 @@ impl EmitterBatchBuffer {
 
     pub(super) fn pending_acks(&self) -> AckSet {
         AckSet::merged(self.pending.iter().map(EmitterPublishBatch::merged_acks))
+    }
+
+    /// Releases every row the buffer holds unresolved as done, as the drop that destroys the
+    /// emitter does, and answers how many they were. The buffer holds nothing afterwards.
+    pub(super) fn release_as_done(&mut self) -> u64 {
+        let mut released = 0_u64;
+        for batch in self.drain_pending() {
+            released = released
+                .checked_add(batch.release_unresolved_as_done())
+                .assured("the rows one emitter buffers are fewer than u64::MAX");
+        }
+        released
     }
 
     /// Takes every batch back, together with the rows the retained payloads and requests carry,

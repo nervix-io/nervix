@@ -74,6 +74,14 @@ Every input and output relay must match it exactly. State, scheduling, buffers, 
 views are instantiated independently for every concrete branch. Only ingestors and reingestors
 construct branch keys.
 
+`DROP <kind> <processor>` removes a processor at once and waits for nothing it holds. Every node
+that runs it first takes it out of the relays it reads, then destroys each branch with what it
+holds, without a final flush: collected input and output waiting in a route's buffer, `REQUIRED
+WAIT` messages, rows a reorderer or a window holds, records a correlator holds for a partner and
+messages a WASM guest holds. The processor's share of each is counted as done, the answer reports
+them by kind, and the processor's stored state, a deduplicator's keys or a window's rows included,
+is removed on every node, so a processor created later under the same name starts empty.
+
 ### Partitioned processing
 
 A processor or generator whose parametrizer declares `PARTITIONS n` runs as one independently

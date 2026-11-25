@@ -58,6 +58,8 @@ mod relay;
 
 #[path = "capabilities.rs"]
 mod capabilities;
+#[path = "entity_drop.rs"]
+mod entity_drop;
 #[path = "materialized.rs"]
 mod materialized;
 #[path = "parameters.rs"]

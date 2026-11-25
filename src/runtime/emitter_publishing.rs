@@ -543,6 +543,15 @@ impl EmitterConnectorState {
         }
     }
 
+    /// Releases as done every message the open connector staged and has not committed, as the
+    /// drop that destroys the emitter does, and answers how many they were.
+    pub(super) fn release_staged_as_done(&mut self) -> u64 {
+        match self {
+            Self::Open(open) => open.connector.lifecycle_mut().release_staged_as_done(),
+            Self::Unavailable { .. } => 0,
+        }
+    }
+
     pub(super) fn unavailable_reason(&self) -> Option<&str> {
         match self {
             Self::Open(open) => open.resume_error.as_deref(),
@@ -1458,6 +1467,7 @@ mod tests {
             commands,
             stop_signal,
             task,
+            discard: super::emitter_supervision::emitter_discard_channel().0,
         };
         retry_started.notified().await;
 

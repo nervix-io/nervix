@@ -3,7 +3,8 @@
 //! Layer: decisions.
 //!
 //! - **Owns.** Pure classification of schedule changes into unchanged, dynamic, entity-swap and
-//!   domain-rebuild activation decisions.
+//!   domain-rebuild activation decisions. A node a change drops decides none of them: every node
+//!   destroys its runtime in place apart from that decision.
 //! - **Depends on.** Scheduled vocabulary and model-change classification.
 //! - **Must not know.** Runtime tasks, control-plane coordination, persistence or presentation.
 
@@ -272,12 +273,8 @@ impl ScheduleDelta {
                 QuiesceLevel::DomainPause => return Self::Rebuild,
             }
         }
-        if existing.nodes.iter().any(|(identity, existing_node)| {
-            !desired.nodes.contains_key(identity)
-                && is_schedulable_model(existing_node.config.as_ref())
-        }) {
-            return Self::Rebuild;
-        }
+        // A schedulable node `desired` no longer holds is dropped, which pauses and drains nothing:
+        // every node destroys its runtime in place before it applies this delta.
 
         if entities.is_empty() && reassignments.is_empty() {
             // The schedules still differ somewhere the runtime does not execute, such as a
@@ -710,6 +707,38 @@ mod tests {
     fn relay_capacity_is_a_dynamic_delta() {
         let existing = schedule(nonzero!(1usize));
         let desired = schedule(nonzero!(5usize));
+        assert_eq!(
+            ScheduleDelta::classify(&existing, &desired),
+            ScheduleDelta::Dynamic(vec![DynamicModelUpdate::RelayCapacity {
+                relay: named("events"),
+                capacity: nonzero!(5usize),
+            }])
+        );
+    }
+
+    /// The relay schedule with the endpoint ingestor of [`ingestor_schedule`] beside it.
+    fn relay_and_ingestor_schedule(capacity: NonZeroUsize) -> DomainSchedule {
+        let mut schedule = schedule(capacity);
+        push_scheduled(&mut schedule, first_scheduled(ingestor_schedule("intake")));
+        schedule
+    }
+
+    #[test]
+    fn a_dropped_node_is_removed_in_place_without_rebuilding_the_domain() {
+        let existing = relay_and_ingestor_schedule(nonzero!(1usize));
+        let desired = schedule(nonzero!(1usize));
+
+        let delta = ScheduleDelta::classify(&existing, &desired);
+
+        assert_eq!(delta, ScheduleDelta::Dynamic(Vec::new()));
+        assert_eq!(delta.quiesce_level(), QuiesceLevel::Dynamic);
+    }
+
+    #[test]
+    fn a_drop_keeps_the_delta_of_the_changes_beside_it() {
+        let existing = relay_and_ingestor_schedule(nonzero!(1usize));
+        let desired = schedule(nonzero!(5usize));
+
         assert_eq!(
             ScheduleDelta::classify(&existing, &desired),
             ScheduleDelta::Dynamic(vec![DynamicModelUpdate::RelayCapacity {

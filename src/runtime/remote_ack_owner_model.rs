@@ -55,6 +55,11 @@ impl RecordExpectation {
     fn finish(&mut self, outcome: Option<AckOutcome>) {
         assert!(self.outcome.is_none(), "a record has one terminal outcome");
         match outcome {
+            Some(AckOutcome::Ack) => {
+                // Acknowledging makes a parked share active before it resolves.
+                self.park(false);
+                self.outcome = Some(AckOutcome::Ack);
+            }
             Some(outcome) => self.outcome = Some(outcome),
             None => {
                 // Clearing drops the park guard before the last ACK handle disappears.

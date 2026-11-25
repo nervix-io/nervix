@@ -418,6 +418,46 @@ fn a_registration_kind_and_ordered_progress_are_validated_by_the_exact_owner() {
     assert_eq!(completion.wait().now_or_never(), Some(AckOutcome::Ack));
 }
 
+/// A receiver that releases a parked share and acknowledges it at once reports the outcome without
+/// first reporting that the share left its wait. The registrar resolves its share of the root as
+/// an active one, while the root's other record, still parked, keeps it pending and out of an
+/// ownership handoff's wait.
+#[test]
+fn an_outcome_that_overtakes_the_unparked_report_resolves_an_active_share() {
+    let owners = RemoteDispatchRegistry::with_capacity(1);
+    let tracker = Arc::new(crate::runtime_ack::AckRootTracker::default());
+    let (root, completion) = AckSet::tracked_root(tracker.clone());
+    let mut records = Vec::new();
+    root.split_into(2, &mut records);
+    let ids = owners
+        .register_acks(receiver(), records)
+        .assured("the fixture delivery fits");
+    let first = ids[0].assured("the first row carries a record acknowledgement");
+    let second = ids[1].assured("the second row carries a record acknowledgement");
+    owners.admit_ack(first);
+    owners.admit_ack(second);
+    assert!(owners.progress_ack(first, 1, true));
+    assert!(owners.progress_ack(second, 1, true));
+    assert_eq!(
+        tracker.outstanding_for_ownership_handoff(),
+        0,
+        "an ownership handoff waits for no parked share"
+    );
+    let mut outcome = std::pin::pin!(completion.wait());
+
+    assert!(owners.resolve_ack(first, AckOutcome::Ack));
+    assert_eq!(
+        tracker.outstanding_for_ownership_handoff(),
+        0,
+        "the record still parked keeps the root out of a handoff's wait"
+    );
+    assert_eq!(outcome.as_mut().now_or_never(), None);
+
+    assert!(owners.resolve_ack(second, AckOutcome::Ack));
+    assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+    assert_eq!(outcome.as_mut().now_or_never(), Some(AckOutcome::Ack));
+}
+
 #[test]
 fn record_outcomes_are_independent_and_the_delivery_releases_its_memory_last() {
     let owners = RemoteDispatchRegistry::with_capacity(1);

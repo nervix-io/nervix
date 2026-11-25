@@ -476,7 +476,11 @@ instance or attachment changes, ingestor,
 emitter source-predicate, and relay materialized-state changes gate and drain only affected
 entities. Changing emitter `FROM` membership pauses the domain because it changes topology.
 Deduplicator key and reorderer ordering changes also use entity pause; their `MAX TIME` changes are
-dynamic. Write an ingestor's `ALTER` under the stored ingestor's own head, such as
+dynamic. `DROP <kind> <name>` names the kind phrase of the entity's `CREATE` head without its
+connector (`WINDOW PROCESSOR`, `WASM PROCESSOR`, `HASH MAP`, `SIGNALING PROTOCOL`, `EMITTER`, …).
+A drop is immediate and dynamic: it waits for nothing the entity holds, discards it, counts the
+entity's share of each held message as done and reports what was discarded; warn that it is not a
+graceful stop. Write an ingestor's `ALTER` under the stored ingestor's own head, such as
 `ALTER KAFKA TOPIC INGESTOR`; an alteration never changes its connector or entity, so reading
 another one takes `DROP INGESTOR` and a new `CREATE`. Use that head's complete body after
 `SET FROM`, or change one part in place: `SET CLIENT`, `SET <locator>`, `SET|DROP <option>`,

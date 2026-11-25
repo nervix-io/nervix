@@ -707,6 +707,7 @@ async fn a_flush_change_names_the_emitter_whose_task_did_not_take_it() {
                 commands,
                 stop_signal,
                 task: spawn(async {}),
+                discard: super::emitter_supervision::emitter_discard_channel().0,
             },
         );
 
@@ -859,6 +860,7 @@ async fn an_emitter_swap_keeps_the_task_that_did_not_stop() {
                 commands,
                 stop_signal,
                 task: spawn(async {}),
+                discard: super::emitter_supervision::emitter_discard_channel().0,
             },
         );
 

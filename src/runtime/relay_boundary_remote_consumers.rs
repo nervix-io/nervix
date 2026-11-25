@@ -262,6 +262,81 @@ impl RelayBoundaryServices {
         self.remote_runtime_consumers.store(StdArc::new(consumers));
     }
 
+    /// Stops routing new batches to the remote consumers a drop destroyed, by installing
+    /// `remaining`, this relay's remote consumers without them. It is installed only when it
+    /// withdraws destinations and changes nothing else: every destination it keeps for a unit was
+    /// routed that unit before, with the same mode or detached where it was attached. Any other
+    /// change waits for the schedule application that installs it behind its dispatch fence.
+    ///
+    /// No routing generation is replaced, so no channel of a destination that stays is
+    /// interrupted, and a fan-out that already holds a withdrawn destination's channel delivers
+    /// there, where the share of a consumer the drop destroyed counts as done. A withdrawn
+    /// destination's idle channels end with their branch or with the unit's next routing
+    /// generation.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a drop withdraws the relay's routes to the consumers it destroyed"
+        )
+    )]
+    pub(in crate::runtime) fn withdraw_dropped_remote_runtime_consumers(
+        &self,
+        remaining: Vec<RemoteRuntimeConsumer>,
+    ) {
+        let current = self.remote_runtime_consumers.load_full();
+        if *current == remaining {
+            return;
+        }
+        if !self.only_withdraws(&current, &remaining) {
+            return;
+        }
+        self.remote_runtime_consumers.store(StdArc::new(remaining));
+    }
+
+    /// Whether `next` routes each unit to a subset of the destinations `current` routes it to,
+    /// each with the mode it had there or detached where it was attached.
+    fn only_withdraws(
+        &self,
+        current: &[RemoteRuntimeConsumer],
+        next: &[RemoteRuntimeConsumer],
+    ) -> bool {
+        #[derive(PartialEq, Eq, PartialOrd, Ord)]
+        struct Destination<'a> {
+            node_id: &'a ClusterNodeName,
+            relay: &'a RelayName,
+        }
+        let mut routed = BTreeMap::new();
+        for consumer in current {
+            let destination = Destination {
+                node_id: &consumer.node_id,
+                relay: &consumer.relay,
+            };
+            routed.insert(destination, consumer);
+        }
+        let units = self.partitioning.units();
+        for consumer in next {
+            let destination = Destination {
+                node_id: &consumer.node_id,
+                relay: &consumer.relay,
+            };
+            let Some(before) = routed.get(&destination) else {
+                return false;
+            };
+            for unit in &units {
+                let Some(after) = consumer.mode_for(*unit) else {
+                    continue;
+                };
+                match (before.mode_for(*unit), after) {
+                    (Some(AckMode::Attached), _) | (Some(AckMode::Detached), AckMode::Detached) => {
+                    }
+                    (Some(AckMode::Detached), AckMode::Attached) | (None, _) => return false,
+                }
+            }
+        }
+        true
+    }
+
     pub(super) fn changed_consumer_units(&self, next: &[RemoteRuntimeConsumer]) -> Vec<Unit> {
         let current = self.remote_runtime_consumers.load();
         self.partitioning

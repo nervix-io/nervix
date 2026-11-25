@@ -1317,6 +1317,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/interconnect/src/entity_drop/__fuzz__/entity_drop__wire_properties__bolero_entity_drop_report_round_trip/corpus"
+domain_version = 1
+features = []
+id = "entity-drop-report-wire"
+invariant = "A drop report's requests with zero, full-width and generated revisions and every report answer, pending, unknown, empty and with discarded work of every kind for entities of several kinds at generated and full-width counts, including every refusal, retain complete values through the declared class's production wire codec."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/entity_drop/wire_properties.rs"
+test = "entity_drop::wire_properties::bolero_entity_drop_report_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/interconnect/src/backup/__fuzz__/backup__capture_properties__bolero_backup_capture_messages_round_trip/corpus"
 domain_version = 4
 features = []

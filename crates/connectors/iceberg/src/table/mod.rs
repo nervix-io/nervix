@@ -1214,6 +1214,19 @@ impl EmitterLifecycle for IcebergTableEmitter {
         self.staged_rows
     }
 
+    fn release_staged_as_done(&mut self) -> u64 {
+        let released = self.staged_rows;
+        for batch in std::mem::take(&mut self.staged_batches) {
+            if let Some(acknowledgements) = batch.acknowledgements {
+                acknowledgements.acknowledge();
+            }
+        }
+        self.staged_rows = 0;
+        self.staged_bytes = 0;
+        // The staging files stay in the emitter's staging directory, which its end removes.
+        released
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "external Iceberg SDK commit and error formatting own their \

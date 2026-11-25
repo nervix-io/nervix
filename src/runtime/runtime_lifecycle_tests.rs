@@ -105,6 +105,7 @@ fn deadline_reporting_emitter(
         commands,
         stop_signal,
         task,
+        discard: super::emitter_supervision::emitter_discard_channel().0,
     }
 }
 

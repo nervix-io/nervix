@@ -637,6 +637,22 @@ fn finished_transaction_attachment(
     })
 }
 
+/// The entities that run on nodes which `statements` drop, in written order: a committed run's
+/// answer reports what the nodes discarded for each of them.
+pub(in crate::application) fn dropped_running_entities<'a>(
+    statements: impl IntoIterator<Item = &'a Statement>,
+) -> Vec<nervix_models::NodeRef> {
+    let mut dropped = Vec::new();
+    for statement in statements {
+        if let Statement::Drop(drop) = statement
+            && drop.kind.is_schedulable()
+        {
+            dropped.push(nervix_models::NodeRef::new(drop.kind, drop.name.clone()));
+        }
+    }
+    dropped
+}
+
 pub(in crate::application) fn is_queueable_transaction_statement(statement: &Statement) -> bool {
     statement.is_model_mutation()
         || matches!(statement, Statement::MutateEntityLabels(edit)
@@ -1685,6 +1701,16 @@ impl SessionServiceImpl {
                 return transaction_commit_result(&current);
             }
         };
+        // Every node records what it discarded for the entities the transaction drops under the
+        // runtime revision that dropped them, which comes after this one. A finished transaction
+        // keeps no statements, so the dropped entities are read before the commit.
+        let revision_before_commit = self.inner.consensus.current_runtime_revision().await;
+        let dropped = dropped_running_entities(
+            started
+                .statements
+                .iter()
+                .map(|statement| &statement.request.statement),
+        );
         let finished = if matches!(started.state, TransactionState::Finished(_)) {
             Ok(started)
         } else {
@@ -1723,7 +1749,17 @@ impl SessionServiceImpl {
                 .await;
         }
         match finished {
-            Ok(transaction) => transaction_commit_result(&transaction),
+            Ok(transaction) => {
+                let mut result = transaction_commit_result(&transaction);
+                Box::pin(self.report_transaction_drops(
+                    &transaction,
+                    &dropped,
+                    revision_before_commit,
+                    &mut result,
+                ))
+                .await;
+                result
+            }
             Err(error) => {
                 let proposal_error = error.downcast_ref::<ConsensusError>();
                 let mut result =
@@ -1753,6 +1789,33 @@ impl SessionServiceImpl {
                 }
                 result
             }
+        }
+    }
+
+    /// Adds to a committed transaction's answer what the nodes discarded for every running entity
+    /// in `dropped`, which its `DROP` statements removed and the nodes recorded under a runtime
+    /// revision after `revision_before_commit`.
+    async fn report_transaction_drops(
+        &self,
+        transaction: &ReplicatedTransaction,
+        dropped: &[nervix_models::NodeRef],
+        revision_before_commit: u64,
+        result: &mut CommandResult,
+    ) {
+        if dropped.is_empty()
+            || !matches!(
+                transaction.finished_outcome(),
+                Some(TransactionOutcome::Committed)
+            )
+        {
+            return;
+        }
+        let first_revision = revision_before_commit
+            .checked_add(1)
+            .assured("a committed runtime revision stays below u64::MAX");
+        let report = Box::pin(self.collect_drop_report(&transaction.domain, first_revision)).await;
+        for entity in dropped {
+            append_command_output(&mut result.message, &report.entity_text(entity));
         }
     }
 

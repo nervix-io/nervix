@@ -31,7 +31,8 @@ use nervix_primitives::{
 use shuttle::rand::{Rng as _, thread_rng};
 
 use super::{
-    RelayBroadcast, RelayDispatchGate, RelayDispatchGateLease, RelayReceiver, RelayTryRecv,
+    RelayBroadcast, RelayDepartures, RelayDispatchGate, RelayDispatchGateLease, RelayFanoutClosed,
+    RelayReceiver, RelayTryRecv,
 };
 
 const RANDOM_ITERATIONS: usize = 1_000;
@@ -965,7 +966,7 @@ fn losing_every_consumer_delivers_or_returns_the_waiting_batch() {
             .await
             .assured("a check task that panics fails the execution before its join returns");
         match delivery {
-            Ok(()) => assert_eq!(
+            Ok(_) => assert_eq!(
                 late.try_recv(),
                 RelayTryRecv::Batch(1),
                 "a batch reported delivered reached the only consumer left to take it"
@@ -994,4 +995,93 @@ fn losing_every_consumer_delivers_or_returns_the_waiting_batch() {
 #[test]
 fn shuttle_losing_every_consumer_delivers_or_returns_the_waiting_batch() {
     explore(losing_every_consumer_delivers_or_returns_the_waiting_batch);
+}
+
+/// A consumer a drop destroys leaves the fan-out while a publisher delivers to it. Each share a
+/// publication reserved for it is accounted exactly once: the departing consumer takes back every
+/// batch delivered before its queue closed, and the publisher reports every one it could not
+/// deliver, whether its push found the queue closed or its wait for room ended with the departure.
+/// A publication that begins after the consumer left selects only the consumer that stays and
+/// reserves nothing for the one that left. The consumer that stays receives the batch either way.
+fn a_released_departure_racing_a_delivery_accounts_each_share_once() {
+    shuttle::future::block_on(async {
+        let channel = Arc::new(RelayBroadcast::with_capacity(capacity(1)));
+        let mut departing = channel.new_receiver();
+        let mut staying = channel.new_receiver();
+        // Both consumers hold the first batch; only the staying one takes it, so the departing
+        // one is at capacity and a publisher waits for its room until it leaves.
+        channel
+            .broadcast(0)
+            .await
+            .assured("both consumers have room for one batch");
+        assert_eq!(staying.try_recv(), RelayTryRecv::Batch(0));
+
+        let publisher = nervix_primitives::task::spawn({
+            let channel = channel.clone();
+            async move {
+                let publication = channel.publication();
+                let selected = publication.receivers();
+                let departures = publication.broadcast(1).await;
+                PublicationOutcome {
+                    selected,
+                    departures,
+                }
+            }
+        });
+        let departure = nervix_primitives::task::spawn(async move {
+            let taken = departing.depart_releasing();
+            DepartureOutcome {
+                taken,
+                _receiver: departing,
+            }
+        });
+        let published = publisher
+            .await
+            .assured("a check task that panics fails the execution before its join returns");
+        let delivered = published
+            .departures
+            .assured("the staying consumer takes every batch");
+        let departed = departure
+            .await
+            .assured("a check task that panics fails the execution before its join returns");
+
+        let first_taken_back = departed.taken.iter().filter(|batch| **batch == 0).count();
+        let second_taken_back = departed.taken.iter().filter(|batch| **batch == 1).count();
+        assert_eq!(
+            first_taken_back, 1,
+            "the batch delivered before the departure is taken back by the departing consumer"
+        );
+        let reserved_for_departing = published
+            .selected
+            .checked_sub(1)
+            .assured("the consumer that stays is selected by every publication");
+        assert_eq!(
+            second_taken_back + delivered.released,
+            reserved_for_departing,
+            "the share a publication reserved for the departing consumer is accounted once, by \
+             the consumer or by the publisher, and none is accounted when it reserved none"
+        );
+        assert_eq!(
+            staying.try_recv(),
+            RelayTryRecv::Batch(1),
+            "the consumer that stays keeps its pace through the departure"
+        );
+    });
+}
+
+/// How many consumers a publication selected as it began, and what its delivery answered.
+struct PublicationOutcome {
+    selected: usize,
+    departures: Result<RelayDepartures, RelayFanoutClosed<u64>>,
+}
+
+/// What the departing consumer took back, and its receiver, kept until the check ends.
+struct DepartureOutcome {
+    taken: Vec<u64>,
+    _receiver: RelayReceiver<u64>,
+}
+
+#[test]
+fn shuttle_a_released_departure_racing_a_delivery_accounts_each_share_once() {
+    explore(a_released_departure_racing_a_delivery_accounts_each_share_once);
 }

@@ -260,6 +260,7 @@ class InventoryTests(unittest.TestCase):
             "runtime-error-event-wire",
             "backup-capture-wire",
             "domain-stop-wire",
+            "entity-drop-report-wire",
             "backup-capture-wire-malformed",
             "backup-section-mapping",
             "stopping-node-drain-wire",
