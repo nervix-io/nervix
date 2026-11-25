@@ -1425,6 +1425,15 @@ impl HubHost {
     async fn hold_stalled_link(&mut self) {
         turmoil::hold(HUB, STALLED);
         self.trace.record(HUB, "link to the stalled peer held");
+        // Beside the shared streams the stalled peer's operations hold, a progress report the hub
+        // sent that peer while it held the peer's relay can still wait for its answer: a report
+        // waits for as long as its peer lives, and the stalled peer never drains what it receives.
+        // Whatever else the hub holds, the expired probe gives back exactly its own stream.
+        let held = self.observe().leased(PoolClass::Management);
+        assert!(
+            held >= MANAGEMENT_SHARED_STREAMS,
+            "the stalled peer's operations hold every shared management stream: {held}"
+        );
         assert_liveness_timeout(&self.transport, &self.stalled.node).await;
         let expired = self.observe();
         assert_eq!(
@@ -1433,7 +1442,8 @@ impl HubHost {
         );
         assert_eq!(
             expired.leased(PoolClass::Management),
-            MANAGEMENT_SHARED_STREAMS
+            held,
+            "the expired probe gave back its stream: {expired:?}"
         );
         self.exchange_with_healthy().await;
         self.trace.record(
