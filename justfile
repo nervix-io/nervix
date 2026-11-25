@@ -9,6 +9,20 @@ export CARGO_INCREMENTAL := if env("CI", []) != [] { "0" } else { env("CARGO_INC
 
 rust_toolchain_version := shell("python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path(\"rust-toolchain.toml\").read_text())[\"toolchain\"][\"channel\"])'")
 rustflags := env('RUSTFLAGS', '')
+# The one nightly the repository uses, for formatting, Miri, the analysis driver with its tooling
+# workspace and Bolero's sanitizer campaigns. Product builds stay on the stable toolchain, and no
+# recipe names the floating `nightly` channel.
+nightly_toolchain := "nightly-2026-11-21"
+# A nightly rustc solves every trait goal with the next-generation solver by default, which a
+# stable rustc uses for coherence alone; under that default the server library's analysis needs
+# about four times the memory. Every recipe that compiles on the nightly passes these flags to
+# rustc and rustdoc, which then compile with the stable compiler's solver.
+nightly_flags := "-Znext-solver=coherence"
+# The RUSTFLAGS of a Cargo build on the nightly: the caller's flags, then the nightly's.
+nightly_rustflags := trim(rustflags + " " + nightly_flags)
+# The RUSTDOCFLAGS of documentation tests on the nightly: rustdoc passes its own `-Z` flags on to
+# the compiler of each doctest.
+nightly_rustdocflags := trim(env('RUSTDOCFLAGS', '') + " " + nightly_flags)
 build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }
 cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
@@ -1691,7 +1705,7 @@ test-rate-limit-diagnostic selection: build-deadlock-report
 
 # Format the NATS driver package in its checkout.
 fmt-nats-driver checkout:
-    cargo +nightly fmt --manifest-path {{ quote(checkout + "/Cargo.toml") }} --package async-nats
+    cargo +{{ nightly_toolchain }} fmt --manifest-path {{ quote(checkout + "/Cargo.toml") }} --package async-nats
 
 # Qualify the pinned NATS driver's flush, ordered headers and borrowed delivery metadata parser.
 test-nats-driver checkout *args:
@@ -1699,7 +1713,7 @@ test-nats-driver checkout *args:
 
 # Format the maintained NKey codec package in its checkout.
 fmt-nkeys-codec checkout:
-    cargo +nightly fmt --manifest-path {{ quote(checkout + "/Cargo.toml") }}
+    cargo +{{ nightly_toolchain }} fmt --manifest-path {{ quote(checkout + "/Cargo.toml") }}
 
 # Qualify the maintained NKey format boundary without enabling its signing backend.
 test-nkeys-codec checkout *args:
@@ -2832,7 +2846,8 @@ test-relay-channel-loom phase="run":
 
 test-relay-channel-miri *args:
     MIRIFLAGS="-Zmiri-disable-isolation" BOLERO_RANDOM_ITERATIONS=4 BOLERO_RANDOM_MAX_LEN=512 \
-        cargo +nightly miri test --package nervix-relay-channel --lib -- {{ args }}
+        RUSTFLAGS={{ quote(nightly_rustflags) }} \
+        cargo +{{ nightly_toolchain }} miri test --package nervix-relay-channel --lib -- {{ args }}
 
 # Exercise deliberate changes to admission, cancellation, delivery and standstill invariants.
 # Each selector must continue to identify a mutation when the product code changes.
@@ -2890,7 +2905,8 @@ bench-relay-channel *args:
 # Miri run lifts isolation and bounds the property's random cases beside that corpus.
 test-expiry-map-miri *args:
     MIRIFLAGS="-Zmiri-disable-isolation" BOLERO_RANDOM_ITERATIONS=4 BOLERO_RANDOM_MAX_LEN=512 \
-        cargo +nightly miri test --package nervix-expiry-map -- {{ args }}
+        RUSTFLAGS={{ quote(nightly_rustflags) }} RUSTDOCFLAGS={{ quote(nightly_rustdocflags) }} \
+        cargo +{{ nightly_toolchain }} miri test --package nervix-expiry-map -- {{ args }}
 
 test-expiry-map-mutants:
     cargo mutants --package nervix-expiry-map --timeout 120
@@ -4274,22 +4290,23 @@ benchmark-ci nervix_image artifacts_root *args: benchmark-flink-image
 
 # Format explicit modules during a focused edit without traversing sibling module trees.
 cargo-fmt-files +files:
-    rustup run nightly rustfmt --edition 2024 --config skip_children=true {{ files }}
+    rustup run {{ nightly_toolchain }} rustfmt --edition 2024 --config skip_children=true {{ files }}
 
+# rustfmt.toml enables unstable options, which only a nightly rustfmt reads.
 cargo-fmt:
-    cargo +nightly fmt
+    cargo +{{ nightly_toolchain }} fmt
 
 # Format selected Rust files without revisiting their child modules.
 fmt-rust-files +files:
-    rustup run nightly rustfmt --config skip_children=true {{ quote(files) }}
+    rustup run {{ nightly_toolchain }} rustfmt --config skip_children=true {{ quote(files) }}
 
 # Format one package during a focused implementation cycle.
 cargo-fmt-package package:
-    cargo +nightly fmt --package {{ package }}
+    cargo +{{ nightly_toolchain }} fmt --package {{ package }}
 
 # Format one Rust module and its children during a focused edit.
 rustfmt-file file:
-    rustfmt +nightly {{ quote(file) }}
+    rustfmt +{{ nightly_toolchain }} {{ quote(file) }}
 
 # Ripgrep honors the repository ignore rules, so generated target trees are not formatted.
 taplo-format:
@@ -4299,11 +4316,11 @@ taplo-format:
 fmt: cargo-fmt fmt-typed-ratchet taplo-format dockerfmt gherkin-fmt plexus-fmt autoinherit
 
 cargo-fmt-check:
-    cargo +nightly fmt --check
+    cargo +{{ nightly_toolchain }} fmt --check
 
 # Check one Rust file with the workspace's formatter and edition.
 rustfmt-check path:
-    rustfmt +nightly --edition 2024 --check {{ quote(path) }}
+    rustfmt +{{ nightly_toolchain }} --edition 2024 --check {{ quote(path) }}
 
 taplo-format-check:
     git ls-files -z --cached --others --exclude-standard '*.toml' | xargs -0 -r taplo format --check
@@ -4578,11 +4595,14 @@ clippy-lane-deloxide selection: \
     (clippy-target selection "nervix-server" ["--lib", "--bins", "--features", selection]) \
     (clippy-target selection "nervix-server" ["--all-targets", "--package", "nervix-scenarios", "--features", selection + " testing"])
 
+# A lane on the nightly, the compiler tooling's, lints with the nightly's compiler flags too.
+clippy_rustflags(toolchain) := "-Dwarnings " + if toolchain == nightly_toolchain { nightly_rustflags } else { rustflags }
+
 # The shared Clippy command lints one package and its Cargo arguments in its lane's build
 # directory. Keep kache configured.
 [private]
 clippy-target lane package args toolchain="":
-    CARGO_TARGET_DIR={{ quote(clippy_build_directory(lane)) }} RUSTFLAGS={{ quote("-Dwarnings " + rustflags) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }} -q
+    CARGO_TARGET_DIR={{ quote(clippy_build_directory(lane)) }} RUSTFLAGS={{ quote(clippy_rustflags(toolchain)) }} cargo {{ if toolchain == "" { "" } else { quote("+" + toolchain) } }} clippy --package {{ quote(package) }} {{ quote(args) }} -q
 
 # Lint one package and all of its targets; extra arguments retain their boundaries. Focused checks
 # share one directory of their own, so a package checked again, or one beside it, reuses its build.
@@ -4641,12 +4661,13 @@ typed-ratchet-source-build:
     set -euo pipefail
     source_toolchain="1.100"
     if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
-        source_toolchain="nightly-2026-11-21"
+        source_toolchain={{ quote(nightly_toolchain) }}
+        export RUSTFLAGS={{ quote(nightly_rustflags) }}
     fi
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/source cargo +"$source_toolchain" build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --package nervix-ratchet
 
 typed-ratchet-build: build-ratchet-runner
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-11-21 build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver RUSTFLAGS={{ quote(nightly_rustflags) }} cargo +{{ nightly_toolchain }} build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
 
 typed-ratchet *args: typed-ratchet-build
     #!/usr/bin/env bash
@@ -4732,12 +4753,12 @@ test-typed-ratchet-modeled:
 test-typed-ratchet-docs:
     #!/usr/bin/env bash
     set -euo pipefail
-    doctest_flags="${RUSTDOCFLAGS:-} -Z unstable-options --persist-doctests {{ cargo_target_dir }}/typed-ratchet/doctests"
+    doctest_flags={{ quote(nightly_rustdocflags) }}" -Z unstable-options --persist-doctests {{ cargo_target_dir }}/typed-ratchet/doctests"
     if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
         doctest_flags+=" -C instrument-coverage"
     fi
-    RUSTDOCFLAGS="$doctest_flags" CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/docs \
-        cargo +nightly-2026-11-21 test --manifest-path tools/nervix-lint/fixtures/Cargo.toml --doc
+    RUSTFLAGS={{ quote(nightly_rustflags) }} RUSTDOCFLAGS="$doctest_flags" CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/docs \
+        cargo +{{ nightly_toolchain }} test --manifest-path tools/nervix-lint/fixtures/Cargo.toml --doc
 
 # Current API examples compile alongside their compile_fail counterparts on the product toolchain.
 test-typed-ratchet-product-docs:
@@ -4758,11 +4779,11 @@ qualify-typed-ratchet-cache: typed-ratchet-build
     exec "${qualification_command[@]}"
 
 test-typed-ratchet-reports:
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-11-21 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver RUSTFLAGS={{ quote(nightly_rustflags) }} cargo +{{ nightly_toolchain }} test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib
 
 # Run one deterministic source-contract regression through its existing report-test build.
 test-typed-source-contract filter:
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-11-21 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib -- {{ quote(filter) }} --exact --nocapture
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver RUSTFLAGS={{ quote(nightly_rustflags) }} cargo +{{ nightly_toolchain }} test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib -- {{ quote(filter) }} --exact --nocapture
 
 # Focused deterministic tests of the analysis runner and host memory admission.
 test-ratchet-runner *args:
@@ -4787,7 +4808,8 @@ ratchet-tests selection *args:
     set -euo pipefail
     runner_toolchain="1.100"
     if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
-        runner_toolchain="nightly-2026-11-21"
+        runner_toolchain={{ quote(nightly_toolchain) }}
+        export RUSTFLAGS={{ quote(nightly_rustflags) }}
     fi
     if [[ {{ quote(selection) }} == lib ]]; then
         targets=(--lib)
@@ -4812,19 +4834,20 @@ build-ratchet-runner:
     set -euo pipefail
     runner_toolchain="1.100"
     if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
-        runner_toolchain="nightly-2026-11-21"
+        runner_toolchain={{ quote(nightly_toolchain) }}
+        export RUSTFLAGS={{ quote(nightly_rustflags) }}
     fi
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/source cargo +"$runner_toolchain" build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet
 
 fmt-typed-ratchet:
-    cargo +nightly-2026-11-21 fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report --package nervix-ratchet
-    cargo +nightly-2026-11-21 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --package nervix-lint-fixtures
-    cargo +nightly-2026-11-21 fmt --manifest-path tools/nervix-lint/fixture-macros/Cargo.toml
+    cargo +{{ nightly_toolchain }} fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report --package nervix-ratchet
+    cargo +{{ nightly_toolchain }} fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --package nervix-lint-fixtures
+    cargo +{{ nightly_toolchain }} fmt --manifest-path tools/nervix-lint/fixture-macros/Cargo.toml
 
 fmt-check-typed-ratchet:
-    cargo +nightly-2026-11-21 fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report --package nervix-ratchet --check
-    cargo +nightly-2026-11-21 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --package nervix-lint-fixtures --check
-    cargo +nightly-2026-11-21 fmt --manifest-path tools/nervix-lint/fixture-macros/Cargo.toml --check
+    cargo +{{ nightly_toolchain }} fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report --package nervix-ratchet --check
+    cargo +{{ nightly_toolchain }} fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --package nervix-lint-fixtures --check
+    cargo +{{ nightly_toolchain }} fmt --manifest-path tools/nervix-lint/fixture-macros/Cargo.toml --check
 
 # Tooling packages use the same bounded scheduler and command, with their pinned compiler.
 lint-typed-ratchet jobs=default_jobs: (run-with-jobs "typed-ratchet-clippy-targets" jobs)
@@ -4834,7 +4857,7 @@ typed-ratchet-clippy-targets: typed-ratchet-clippy-packages
 
 # The compiler tooling is a workspace of its own on the analysis nightly, so it is a lane of its own.
 [private]
-typed-ratchet-clippy-packages: *(clippy-target "typed-ratchet" *["nervix-lint-driver", "nervix-lint-report", "nervix-ratchet"] ["--manifest-path", "tools/nervix-lint/Cargo.toml", "--all-targets"] "nightly-2026-11-21")
+typed-ratchet-clippy-packages: *(clippy-target "typed-ratchet" *["nervix-lint-driver", "nervix-lint-report", "nervix-ratchet"] ["--manifest-path", "tools/nervix-lint/Cargo.toml", "--all-targets"] nightly_toolchain)
 
 coverage-typed-ratchet-python: typed-ratchet-source-build install-cargo-crap test-typed-ratchet-compiler test-typed-ratchet-modeled
     #!/usr/bin/env bash
@@ -5137,9 +5160,11 @@ validate-clock-boundaries:
 validate-typed-errors:
     python3 -m scripts.check_typed_errors
 
+# Install the product toolchain rust-toolchain.toml declares and the nightly with every component a
+# recipe uses: the analysis driver's compiler crates, the formatter, Clippy, Miri and the LLVM tools.
 toolchains-install:
     rustup toolchain install
-    rustup toolchain install nightly-2026-11-21 --profile minimal --component rustc-dev --component rust-src --component rustfmt --component clippy --component llvm-tools --target wasm32-unknown-unknown
+    rustup toolchain install {{ nightly_toolchain }} --profile minimal --component rustc-dev --component rust-src --component rustfmt --component clippy --component miri --component llvm-tools --target wasm32-unknown-unknown
 
 # Run every test target of the Plexus language and its formatter: unit, integration, completion-walk
 # unit and documentation tests. The walk itself is a separate gate, `plexus-completion-walk`.

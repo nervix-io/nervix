@@ -180,34 +180,63 @@ throughout, and missing analysis never reads as zero findings.
 ## Pinned Toolchain
 
 Product code and the `nervix-ratchet` orchestration binary build with the stable toolchain
-`rust-toolchain.toml` declares. The analysis driver links rustc's internal crates and builds on one
-pinned nightly, `nightly-2026-11-21`, which the isolated tooling workspace declares with `rustc-dev`,
-`rust-src`, `rustfmt` and `llvm-tools`. `just toolchains-install` installs both toolchains. The
-driver refuses any other analysis compiler: it locates the pinned compiler through rustup and checks
-the commit that `rustc -vV` reports. Bolero's sanitizer campaigns use the same nightly, which the
-`[tool]` table of `tests/bolero-targets.toml` declares. Native coverage of the typed-ratchet
-qualification builds both the runner and driver with that toolchain's own LLVM tools, so profiles
-and exporters match the compiler that produced them. `scripts/native_coverage.py exec` records the
-runner's and driver's profiles within the existing producer; ordinary builds retain the stable
-runner and pinned analysis compiler.
+`rust-toolchain.toml` declares. Everything that needs a nightly uses one pinned nightly,
+`nightly-2026-11-21`:
 
-The analysis solves trait goals the way the product compiler does. A nightly build of rustc uses the
-next-generation trait solver for every goal by default, because rustc's bootstrap sets that default
-for the nightly and dev channels only, while a stable build uses it for coherence alone. The driver
-passes `-Znext-solver=coherence`, so the analysis checks the code with the product compiler's
-solver. Under the nightly default, the server library's analysis needs about four times the memory.
-A stable toolchain upgrade that changes the product compiler's solver changes the driver's flag in
-the same change.
+- the analysis driver, which links rustc's internal crates, and the isolated tooling workspace,
+  which declares the toolchain with `rustc-dev`, `rust-src`, `rustfmt` and `llvm-tools`;
+- the formatter, because `rustfmt.toml` enables unstable options that only a nightly rustfmt reads;
+- Miri;
+- Bolero's sanitizer campaigns, whose toolchain the `[tool]` table of `tests/bolero-targets.toml`
+  declares.
+
+The justfile names the nightly once, as `nightly_toolchain`, and nothing names the floating
+`nightly` channel: no recipe (`+nightly`, `rustup run nightly`, `RUSTUP_TOOLCHAIN=nightly`),
+manifest, script or workflow step. `just toolchains-install` installs both toolchains, the nightly
+with every component a recipe uses, and CI installs no other nightly. The driver refuses any other
+analysis compiler: it locates the pinned compiler through rustup and checks the commit that
+`rustc -vV` reports. Native coverage of the typed-ratchet qualification builds both the runner and
+driver with that toolchain's own LLVM tools, so profiles and exporters match the compiler that
+produced them. `scripts/native_coverage.py exec` records the runner's and driver's profiles within
+the existing producer; ordinary builds retain the stable runner and pinned analysis compiler.
+
+Compilation on the nightly solves trait goals the way the product compiler does. A nightly build of
+rustc uses the next-generation trait solver for every goal by default, because rustc's bootstrap
+sets that default for the nightly and dev channels only, while a stable build uses it for coherence
+alone. Under the nightly default, the server library's analysis needs about four times the memory.
+Each owner of a nightly compilation therefore passes `-Znext-solver=coherence` to rustc and rustdoc,
+after the caller's own flags:
+
+- The justfile declares it as `nightly_flags`, which `nightly_rustflags` and `nightly_rustdocflags`
+  carry into every recipe that compiles on the nightly: Miri, and the tooling workspace's builds,
+  tests, documentation tests and Clippy lane.
+- The analysis runner adds its `configuration::TOOLCHAIN_RUSTFLAGS` to the `RUSTFLAGS`, or the
+  `CARGO_ENCODED_RUSTFLAGS` a caller set, of every Cargo command it starts. The dependencies compile
+  with these, because the workspace wrapper hands only workspace crates to the driver.
+- The driver passes it for every crate it analyzes, the contract fixtures the runner compiles
+  without Cargo included, so the analysis checks the code with the product compiler's solver.
+- `scripts/native_coverage.py` declares it as `NIGHTLY_RUSTFLAGS` and starts the instrumented build
+  of a producer that selects the nightly from it, so the Cargo commands that recipe runs without
+  naming a toolchain take it too.
+- `scripts/bolero.py` puts the same flags in the `RUSTFLAGS` that cargo-bolero inherits and appends
+  to its sanitizer flags.
+
+Formatting compiles nothing and takes no flag. Cargo gives `RUSTFLAGS` to the target's crates alone
+when a command names `--target`, as the browser configuration, cargo-bolero and Miri do, so the
+build scripts and procedural macros of those builds still compile with the nightly default. No
+stable compiler receives the flag, which it refuses. A stable toolchain upgrade that changes the
+product compiler's solver changes these four declarations in the same change.
 
 Upgrading the pinned nightly is one change that moves every declaration together: the tooling
-`rust-toolchain.toml`, the driver's compiler check, the runner's `configuration::TOOLCHAIN`, the justfile recipes
-that name the toolchain, `scripts/native_coverage.py`, the Bolero inventory and the sanitizer
-workflow's toolchain step, and the chapters and `AGENTS.md` that name it. It adapts the driver to
-rustc's changed internal APIs while every compiler fixture keeps its allowed and rejected result; a
-recognition the new compiler changes is a rule change and ships its fixtures. It qualifies with
-`just test-typed-ratchet`, `just qualify-typed-ratchet-cache`, the complete `just ratchet` gate and
-a `fuzz`-labeled run of the sanitizer campaigns. The new compiler identity re-establishes every
-report, so no evidence from the previous compiler is reused.
+`rust-toolchain.toml`, the driver's compiler check, the runner's `configuration::TOOLCHAIN`, the
+justfile's `nightly_toolchain`, `NIGHTLY_TOOLCHAIN` in `scripts/native_coverage.py`, the Bolero
+inventory and the sanitizer workflow's toolchain step, and the chapters and `AGENTS.md` that name
+it. It adapts the driver to rustc's changed internal APIs while every compiler fixture keeps its
+allowed and rejected result; a recognition the new compiler changes is a rule change and ships its
+fixtures. It commits whatever `just fmt` changes under the new formatter, and qualifies with
+`just test-typed-ratchet`, `just qualify-typed-ratchet-cache`, the complete `just ratchet` gate, the
+Miri recipes and a `fuzz`-labeled run of the sanitizer campaigns. The new compiler identity
+re-establishes every report, so no evidence from the previous compiler is reused.
 
 Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The source
 counts retain their product-debt scope: directory components named `tests`, `benches` or
