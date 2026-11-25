@@ -148,6 +148,13 @@ Every ingestor body declares its delivery mode with `MODE`, polled and listener 
   `REJECT RETRY AFTER <duration>` or hold them with `BUFFER MAX SIZE <bytes> RESPOND AFTER RESUME`.
   The sender owns retry.
 
+An ingestor's `RETRY POLICY` only paces its next attempt after a transient failure: reading again
+after a failed or timed-out acknowledgement, recovering from a transport failure, or, for a
+`CLIENT PRODUCER`, the producer sending again a batch that was refused only temporarily. Its source
+keeps what the ingestor has not acknowledged, so an ingestor has nothing to give up: `GIVE UP AFTER`
+belongs only to an [emitter's retry policy](emitters.md#giving-up), and writing it on an
+ingestor's is a parse error that completion never offers.
+
 For `ACK SEQUENTIAL` and `ACK PARALLEL`, `ACK TIMEOUT` bounds how long a payload may make no
 acknowledgement progress, not how long its processing takes. Work under way on its records reports
 them alive on the physical clock: a node that received a record from another node does for as long
@@ -594,17 +601,17 @@ The node counts the payloads its ingestor consumed this way in
 `last decode rejection:`, the latest rejection on the node that runs the ingestor, or `-` before
 the first.
 
-A payload the node's extension workers have no room to unfold has not been judged by its codec, so
-it is not a decode rejection; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
+A payload that waits for the node's extension workers to unfold it has not been judged by its
+codec, so it is not a decode rejection; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
 An endpoint ingestor in `MODE NO ACK` accepts a body its codec refuses and reports it the same way, including a body
 its quiesce buffer retained.
 
 ## When The Extension Workers Are Full
 
 A codec with an `ON INGESTION` transformation [unfolds](schemas-and-codecs.md#unfolding-payloads)
-every payload on the node's extension workers. When every worker is busy and the class's wait queue
-is full, a payload a source handed over waits for a place and is never refused: a busy node delivers
-late, and it never drops what it was handed.
+every payload on the node's extension workers. When every worker is busy, a payload a source handed
+over waits for one and is never refused: a busy node delivers late, and it never drops what it was
+handed.
 
 - An ingestor's payload, acknowledged or not, waits in its host before it is decoded. The ingestor
   takes nothing further from its source while it waits, so the wait reaches the transport as
@@ -614,11 +621,13 @@ late, and it never drops what it was handed.
   [Quiesce Modes](#quiesce-modes).
 - A paced ingestor's poll waits the same way. Waiting delays the next poll, and the domain cadence
   coalesces the occurrences it missed into one poll at the newest due instant.
-- An [endpoint ingestor](#http-endpoint-and-websockets-endpoint) answers an HTTP body 503 without
-  `Retry-After`, counts the refused request payload in `nervix_ingestor_unfolding_refused_total`, and
-  lets the sender send it again: an HTTP sender still holds its body and waits for the answer. A
-  WebSocket frame in `MODE NO ACK` has no answer its sender waits for, so it waits for a place like
-  an ingestor's payload, and its connection reads nothing further meanwhile. The frame counts as
+- An [endpoint ingestor](#http-endpoint-and-websockets-endpoint)'s HTTP body waits for a place too,
+  for as long as its request lasts: its sender still holds the body and waits for the answer, and a
+  sender that gives up the request gives up the place. Only a node that is stopping, or a body
+  whose unfolding needs a charge larger than its whole memory class, is answered 503 without
+  `Retry-After`, counted in `nervix_ingestor_unfolding_refused_total` and left for the sender to
+  send again. A WebSocket frame in `MODE NO ACK` has no answer its sender waits for, so it waits for
+  a place like an ingestor's payload, and its connection reads nothing further meanwhile. The frame counts as
   work its ingestor admitted, so a drain, an ownership handoff and a graceful stop wait for it, and
   it ends unprocessed only when its ingestor's intake ends.
 
@@ -1573,7 +1582,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
-| Buffers | an inherited consumer group's unadmitted native partition position: at most 1 position per inherited group reader; when full, holds back what fills it<br>a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, holds back what fills it |
+| Buffers | an inherited consumer group's unadmitted native partition position: at most 1 position per inherited group reader; when full, holds back what fills it<br>a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs waiting for or holding a connector worker: at most 2 jobs per Kafka client; when full, holds back what fills it |
 | Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group offset commit: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign, pause, resume fetches and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |
 | Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>An inherited consumer-group reader disables automatic offset storage and stores only positions in its committed external partition set. It pauses and rewinds an unadmitted partition through connector control execution, retaining its position until that work finishes. The broker confirms that exact unread starting offset before the reader can retire, so even a subsequent START AT LATEST join cannot skip it; replacing the reader after a topology commit admits the partition.<br>Connector control execution has two workers per node by default. librdkafka sends a commit again by itself while the group has no reachable coordinator, and a commit still unanswered after its caller's 30 s deadline retains its worker and the ingestor's one in-flight commit until the native call ends. Native subscribe, assign, pause, resume and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>While the host holds the loop, during a long read allowance hold or while a payload waits for the node's extension workers, a consumer-group ingestor pauses fetching and services its group through the same control turn. Each job polls once. The driver can discard its own prefetched copies; the next admitted read resumes from its unread position. No record buffer is added.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
@@ -3543,7 +3552,7 @@ CREATE HTTP ENDPOINT INGESTOR acknowledged
 | --- | --- | --- | --- |
 | 200 | `completed` | `none` | The payload's graph acknowledgement root completed under the declared error policies. |
 | 400 | `processing_failed` | `rejected` | The codec or local route construction refused the input. |
-| 503 | `not_admitted` | `busy` | The response window, pause buffer or execution capacity is full. |
+| 503 | `not_admitted` | `busy` | The response window or pause buffer is full, or the node could not unfold the payload at all: it is stopping, or the unfolding needs a charge larger than its whole memory class. A full extension class holds the payload back instead. |
 | 503 | `not_admitted` | `suspended` | Intake is quiesced, or the deadline or intake ended while the payload was still waiting to enter the graph. |
 | 503 | `processing_failed` | `rejected` | Downstream negatively acknowledged admitted work. |
 | 503 | `processing_failed` | `ack_timeout` | The absolute response deadline expired after admission. |
@@ -3570,9 +3579,10 @@ A codec refusal becomes a decode rejection consumed by `ON GENERAL ERROR`; it al
 WebSocket data frames receive no per-frame graph-completion reply in this mode; signaling replies
 still follow their protocol. Under `RESPOND AFTER RESUME`, an unacknowledged HTTP request waits
 until resume, it disconnects, or the intake ends. A request still waiting when the domain stops
-receives HTTP 503 and its body is discarded. If extension workers cannot unfold a fresh HTTP body,
-HTTP answers 503; a fresh WebSocket frame waits for a place, its connection reading nothing further
-meanwhile, and buffered payloads retain their place until workers can take them. See
+receives HTTP 503 and its body is discarded. A fresh HTTP body the extension workers cannot unfold
+yet waits for a place for as long as its request lasts, a fresh WebSocket frame waits for a place,
+its connection reading nothing further meanwhile, and buffered payloads retain their place until
+workers can take them. See
 [When The Extension Workers Are Full](#when-the-extension-workers-are-full) and
 [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
 

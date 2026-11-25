@@ -705,8 +705,8 @@ impl RelayProcessorNode {
                         .remote_ack_timing
                         .keep_alive_while_pending(
                             &batch,
-                            execute_accepted_program_with_selection_in_context(
-                                branch.runtime.executor().accepted_work(),
+                            execute_program_with_selection_in_context(
+                                branch.runtime.executor(),
                                 &key_program.program,
                                 &vm_batch,
                                 &VmExecutionContext {
@@ -1069,8 +1069,8 @@ impl RelayProcessorNode {
                             &batch,
                             self.remote_ack_timing.keep_alive_while_pending(
                                 output_buffers.as_slice(),
-                                execute_accepted_program_with_selection_in_context(
-                                    branch.runtime.executor().accepted_work(),
+                                execute_program_with_selection_in_context(
+                                    branch.runtime.executor(),
                                     &program.program,
                                     &vm_batch,
                                     &VmExecutionContext {
@@ -2309,7 +2309,7 @@ mod tests {
                     &domain,
                     None,
                     1,
-                    &RetainedStateOpening::RefusedWhenFull,
+                    &RetainedStateOpening::OnNodeExecutor,
                 )
                 .await
                 .assured("the branch instantiates on the test domain")
@@ -2441,7 +2441,6 @@ mod tests {
                 Duration::from_secs(60)
             )
         );
-        assert_eq!(executor.snapshot().data_cpu.refused, 0);
     }
 
     fn text_batch(acks: AckSet) -> RelayRecordBatch {

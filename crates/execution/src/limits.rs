@@ -196,7 +196,8 @@ impl From<StorageClass> for WorkerClassName {
     }
 }
 
-/// How many jobs each class may have running at once, and how many may wait for a slot.
+/// How many jobs each class may have running at once. A job that finds every worker of its class
+/// busy waits for one, and nothing bounds how many jobs wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerCounts {
     pub control_cpu: NonZeroUsize,
@@ -207,9 +208,6 @@ pub struct WorkerCounts {
     pub consensus_storage: NonZeroUsize,
     pub filesystem_storage: NonZeroUsize,
     pub connector_storage: Setting<ConnectorStorageWorkers>,
-    /// The number of jobs one class may hold waiting for a worker. Beyond it, admission is refused
-    /// with typed backpressure rather than growing an unbounded queue in front of the pool.
-    pub pending_jobs: crate::PendingJobCounts,
 }
 
 impl Default for WorkerCounts {
@@ -569,8 +567,27 @@ impl ExecutionConfig {
                 ExecutionConfigError::UnaddressableCommandStorage,
             ));
         };
-        let (commands_operation, commands_required) = if storage_required >= replication_required {
-            ("normalized command state storage", storage_required)
+        // A follower keeps its resident window charged while the durable append of those entries
+        // waits for one command state storage working set from this same class. The budget holds
+        // both at once, so that append never waits for room only its own window can release; it
+        // waits only for room other work frees.
+        let Some(resident_window) =
+            resident_batches.checked_mul(self.limits.replication_batch_bytes.as_u64())
+        else {
+            return Err(Report::new(
+                ExecutionConfigError::UnaddressableReplicationBatch,
+            ));
+        };
+        let Some(follower_required) = resident_window.checked_add(storage_required) else {
+            return Err(Report::new(
+                ExecutionConfigError::UnaddressableCommandStorage,
+            ));
+        };
+        let (commands_operation, commands_required) = if follower_required >= replication_required {
+            (
+                "resident replication batches beside one command state storage working set",
+                follower_required,
+            )
         } else {
             (
                 "resident replication batches beside one being encoded",

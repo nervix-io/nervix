@@ -252,7 +252,10 @@ one file per process and module. Build scripts and procedural macros execute onl
 compiled rather than served from the cache, so their ordinary build-time counters are discarded.
 The compiler fixture is itself an executed check: its loaded procedural macro objects are retained
 by build ID, including those in nested Cargo output directories. The producer uses its pinned
-compiler's LLVM tools. The report is exported with the toolchain's own
+compiler's LLVM tools, and its instrumented build starts from the
+[pinned nightly's compiler flags](./architecture-enforcement.md#pinned-toolchain), which
+`cargo llvm-cov show-env` keeps ahead of the instrumentation, so the record's instrumentation flags
+name them. The report is exported with the toolchain's own
 `llvm-profdata` and `llvm-cov` from exactly the executables that ran and the children they started.
 It keeps the files inside the repository and leaves out dependencies, harness code below a `tests`,
 `examples` or `benches` directory, and code generated below a Cargo target directory.

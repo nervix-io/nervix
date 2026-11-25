@@ -1612,7 +1612,6 @@ mod tests {
         }
         assert_eq!(completed.wait().await, AckOutcome::Ack);
         assert_no_runtime_events(&mut events).await;
-        assert_eq!(executor.snapshot().data_cpu.refused, 0);
     }
 
     #[nervix_primitives::test]

@@ -406,7 +406,7 @@ async fn owner_body(executor: &Executor, rows: RecordBatch) -> (StatePageBody, C
     let rows = RuntimeRecordBatch::from_record_batch(rows.schema(), rows)
         .assured("the fixture rows are a runtime batch");
     let body = rows
-        .encode_arrow_snapshot_section(executor, nervix_execution::QueueAdmission::RefuseWhenFull)
+        .encode_arrow_snapshot_section(executor)
         .await
         .assured("a bounded section encodes");
     identified_body(executor, body)
@@ -487,6 +487,34 @@ fn refusal(
     }
 }
 
+/// The room a page stream's descriptor decodes within, taken beside the stream as the coordinator
+/// takes it when the page arrives.
+/// The rooms a received page's decoders draw from, as the receive charges them with the page.
+fn page_rooms(executor: &Executor, stream: &ChargedBytes) -> PageRooms {
+    let length = u64::try_from(stream.len()).assured("a bounded fixture stream's length fits u64");
+    PageRooms {
+        descriptor: descriptor_room(executor, stream),
+        body: executor
+            .try_reserve(
+                MemoryClass::Bulk,
+                RestoredMaterializedSnapshot::decode_scratch_bound(executor, length),
+            )
+            .assured("the fixture class has room for a body's decoding"),
+    }
+}
+
+fn descriptor_room(executor: &Executor, stream: &ChargedBytes) -> Reservation {
+    let length = u64::try_from(stream.len()).assured("a bounded fixture stream's length fits u64");
+    executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            length
+                .checked_mul(2)
+                .assured("a bounded fixture stream's decoding fits u64"),
+        )
+        .assured("the fixture class has room for a descriptor's decoding")
+}
+
 #[nervix_primitives::test]
 async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_their_rows() {
     let executor = Executor::default();
@@ -497,10 +525,15 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
         &[&body[..]],
     )
     .await;
-    let received =
-        ReceivedProcessorPage::decode(&executor, &stream, &read(10), &expected_sections())
-            .await
-            .assured("the page agrees with its descriptor and the read");
+    let received = ReceivedProcessorPage::decode(
+        &executor,
+        &stream,
+        page_rooms(&executor, &stream),
+        &read(10),
+        &expected_sections(),
+    )
+    .await
+    .assured("the page agrees with its descriptor and the read");
     let Ok(page) = received else {
         panic!("an owner that returned rows did not refuse the read");
     };
@@ -530,9 +563,15 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
         &[],
     )
     .await;
-    let received = ReceivedProcessorPage::decode(&executor, &counted, &read(0), &[])
-        .await
-        .assured("a page that returns no row agrees with a count-only read");
+    let received = ReceivedProcessorPage::decode(
+        &executor,
+        &counted,
+        page_rooms(&executor, &counted),
+        &read(0),
+        &[],
+    )
+    .await
+    .assured("a page that returns no row agrees with a count-only read");
     let Ok(page) = received else {
         panic!("an owner that counted its rows did not refuse the read");
     };
@@ -547,10 +586,15 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
 
     // An owner's typed refusal arrives as that refusal, and carries no body.
     let refused = sent_page(&executor, Err(StateInspectionRejection::NotReady), &[]).await;
-    let received =
-        ReceivedProcessorPage::decode(&executor, &refused, &read(10), &expected_sections())
-            .await
-            .assured("a refusal is a complete reply");
+    let received = ReceivedProcessorPage::decode(
+        &executor,
+        &refused,
+        page_rooms(&executor, &refused),
+        &read(10),
+        &expected_sections(),
+    )
+    .await
+    .assured("a refusal is a complete reply");
     assert!(
         matches!(received, Err(StateInspectionRejection::NotReady)),
         "the coordinator reports the owner's refusal as the owner typed it"
@@ -562,7 +606,14 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
     )
     .await;
     let error = refusal(
-        ReceivedProcessorPage::decode(&executor, &trailing, &read(10), &expected_sections()).await,
+        ReceivedProcessorPage::decode(
+            &executor,
+            &trailing,
+            page_rooms(&executor, &trailing),
+            &read(10),
+            &expected_sections(),
+        )
+        .await,
     );
     assert!(matches!(
         error.current_context(),
@@ -589,8 +640,14 @@ async fn a_body_whose_columns_or_types_disagree_with_its_declared_fields_is_refu
         )
         .await;
         let error = refusal(
-            ReceivedProcessorPage::decode(&executor, &stream, &read(10), &expected_sections())
-                .await,
+            ReceivedProcessorPage::decode(
+                &executor,
+                &stream,
+                page_rooms(&executor, &stream),
+                &read(10),
+                &expected_sections(),
+            )
+            .await,
         );
         assert!(
             matches!(error.current_context(), StatePageExchangeError::Columns),
@@ -739,8 +796,16 @@ async fn a_body_whose_rows_identity_or_bounds_disagree_with_the_descriptor_or_th
     ));
 
     for (case, stream, request) in cases {
-        let error =
-            refusal(ReceivedProcessorPage::decode(&executor, &stream, &request, &expected).await);
+        let error = refusal(
+            ReceivedProcessorPage::decode(
+                &executor,
+                &stream,
+                page_rooms(&executor, &stream),
+                &request,
+                &expected,
+            )
+            .await,
+        );
         assert!(
             matches!(error.current_context(), StatePageExchangeError::Framing),
             "{case} is a framing violation, found {error:?}"
@@ -748,7 +813,7 @@ async fn a_body_whose_rows_identity_or_bounds_disagree_with_the_descriptor_or_th
     }
 }
 
-/// An executor whose bulk class has one worker and one place in its wait queue.
+/// An executor whose bulk class has one worker.
 fn one_place_bulk_executor() -> Executor {
     use std::num::NonZeroUsize;
 
@@ -758,20 +823,16 @@ fn one_place_bulk_executor() -> Executor {
     Executor::new(ExecutionConfig {
         workers: WorkerCounts {
             bulk_cpu: NonZeroUsize::MIN,
-            pending_jobs: nervix_execution::PendingJobCounts {
-                bulk_cpu: NonZeroUsize::MIN,
-                ..workers.pending_jobs
-            },
             ..workers
         },
         ..ExecutionConfig::default()
     })
-    .assured("the test changes only the bulk class's worker and queue counts")
+    .assured("the test changes only the bulk class's worker count")
 }
 
-/// The bulk class of a [`one_place_bulk_executor`] held full: its worker runs a job that waits for
-/// the test, and its one place is taken by a job waiting behind it, so a job that refuses on a full
-/// class is refused and one that waits for a place waits until the hold is released.
+/// The bulk class of a [`one_place_bulk_executor`] held busy: its worker runs a job that waits for
+/// the test, and another job waits behind it, so the next job waits for the worker until the hold
+/// is released.
 struct FullBulkClass {
     release: nervix_primitives::sync::oneshot::Sender<()>,
     occupying: nervix_primitives::task::JoinHandle<()>,
@@ -818,12 +879,12 @@ impl FullBulkClass {
                     |_charge, _cancellation| (),
                 )
                 .await
-                .assured("the queued job runs once the worker frees");
+                .assured("the waiting job runs once the worker frees");
         });
         while executor
             .snapshot()
             .cpu_class(nervix_execution::CpuClass::Bulk)
-            .pending
+            .waiting
             == 0
         {
             nervix_primitives::task::yield_now().await;
@@ -846,13 +907,6 @@ impl FullBulkClass {
     }
 }
 
-fn bulk_refusals(executor: &Executor) -> u64 {
-    executor
-        .snapshot()
-        .cpu_class(nervix_execution::CpuClass::Bulk)
-        .refused
-}
-
 /// A page is the owner's answer to a read it has already served, so an owner whose bulk class is
 /// full holds the encoding of the page's rows, their identity and the reply back instead of
 /// refusing the read, and frames the page once a place frees.
@@ -860,7 +914,6 @@ fn bulk_refusals(executor: &Executor) -> u64 {
 async fn an_owner_frames_a_page_once_its_full_bulk_class_frees_instead_of_refusing_it() {
     let executor = one_place_bulk_executor();
     let full = FullBulkClass::fill(&executor).await;
-    let refused = bulk_refusals(&executor);
     let mut framing = std::pin::pin!(stream_processor_page(
         &executor,
         Ok((
@@ -882,11 +935,6 @@ async fn an_owner_frames_a_page_once_its_full_bulk_class_frees_instead_of_refusi
         "the page is framed once a place frees: {:?}",
         framed.err()
     );
-    assert_eq!(
-        bulk_refusals(&executor),
-        refused,
-        "a full bulk class refuses no page"
-    );
 }
 
 /// A received page carries rows its owner already read, so a coordinator whose bulk class is full
@@ -905,12 +953,12 @@ async fn a_coordinator_presents_a_received_page_once_its_full_bulk_class_frees_i
     .await;
     let coordinator = one_place_bulk_executor();
     let full = FullBulkClass::fill(&coordinator).await;
-    let refused = bulk_refusals(&coordinator);
     let request = read(10);
     let expected = expected_sections();
     let mut decoding = std::pin::pin!(ReceivedProcessorPage::decode(
         &coordinator,
         &stream,
+        page_rooms(&coordinator, &stream),
         &request,
         &expected,
     ));
@@ -936,10 +984,5 @@ async fn a_coordinator_presents_a_received_page_once_its_full_bulk_class_frees_i
         rows.column(1).as_primitive::<Int64Type>().values().to_vec(),
         vec![1, 2, 3],
         "the rows are the body's rows in the order the owner returned them"
-    );
-    assert_eq!(
-        bulk_refusals(&coordinator),
-        refused,
-        "a full bulk class refuses no received page"
     );
 }

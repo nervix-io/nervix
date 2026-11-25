@@ -906,8 +906,8 @@ async fn evaluate_route_arguments(
     .change_context(WindowProcessorError::ProjectAggregateInput)?;
     #[cfg(test)]
     WINDOW_ARGUMENT_VM_EXECUTIONS.with(|executions| executions.set(executions.get() + 1));
-    let result = execute_accepted_program_with_selection_in_context(
-        executor.accepted_work(),
+    let result = execute_program_with_selection_in_context(
+        executor,
         argument_program,
         &input,
         &VmExecutionContext {
@@ -1169,7 +1169,7 @@ pub(super) async fn evaluate_window_aggregate(
         // Qualify the complete emitted row before any route can publish it. The maintained IPC
         // writer owns the encoded limit; its typed error stays a window emission failure.
         let encoded = batch
-            .encode_arrow_ipc(executor, nervix_execution::QueueAdmission::WaitForPlace)
+            .encode_arrow_ipc(executor)
             .await
             .change_context(WindowProcessorError::CollectionOutput)?;
         drop(encoded);
@@ -1199,8 +1199,8 @@ fn evaluate_window_value<'a>(
                         .collect(),
                 )
                 .change_context(WindowProcessorError::AggregateExprInput)?;
-                let result = execute_accepted_program_with_selection_in_context(
-                    executor.accepted_work(),
+                let result = execute_program_with_selection_in_context(
+                    executor,
                     program,
                     &input,
                     &VmExecutionContext {
@@ -2423,7 +2423,6 @@ mod tests {
         let restored = super::super::window_state::decode_window_processor_snapshot(
             &sealed,
             &executor,
-            nervix_execution::QueueAdmission::RefuseWhenFull,
             super::super::window_state::WindowSnapshotSchemas {
                 input: &window.input_schema.arrow_schema(),
                 arguments: &arguments,
@@ -2593,7 +2592,6 @@ mod tests {
         );
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
         filled.release().await;
-        assert_eq!(executor.snapshot().data_cpu.refused, 0);
     }
 
     #[nervix_primitives::test]

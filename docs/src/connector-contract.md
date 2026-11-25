@@ -881,8 +881,8 @@ when a swap or `ALTER` replaces it, or when composing its emitter fails after th
 a flush keeps running on the runtime's blocking pool after its finish's caller stops waiting for it,
 until librdkafka's flush returns. Whichever of them lets the last handle go hands the client to its
 retirement and carries on at once, on an async worker, a connector worker or a blocking-pool thread
-alike. The retirement destroys the client in one connector storage job. A full queue holds that job
-until a place frees instead of refusing it, because nothing could present the client again, and the
+alike. The retirement destroys the client in one connector storage job. Busy workers hold that job
+until one frees instead of refusing it, because nothing could present the client again, and the
 job runs under a commands charge the client took before it was created, so retiring a client asks
 the node for nothing it could refuse. A client that cannot take that charge is not created: the
 ingestor's open or the inspector's start fails with the transient
@@ -904,7 +904,7 @@ A joined consumer whose coordinator does not answer holds a connector worker for
 seconds, and a producer holds one for its polling thread's last poll and up to half a second of
 flushing. A broker that stops answering while its clients retire therefore delays the node's other
 Kafka control calls queued behind them, never its async workers. The `connector_storage` class's
-`nervix_execution_jobs_running` and `nervix_execution_jobs_pending` count retirements with the other
+`nervix_execution_jobs_running` and `nervix_execution_jobs_waiting` count retirements with the other
 Kafka jobs. Node shutdown does not wait for a retirement: the process's runtime finishes or
 performs it as it stops after terminal teardown, as
 [Terminal Teardown](./shutdown.md#terminal-teardown) describes.
@@ -1110,10 +1110,10 @@ not disable verification or silently fall back when unavailable.
 The server composition root extends the existing changed-model binding boundary before standalone
 mutation or transaction commit. It renders mount templates using the resource resolver and checks
 the rendered schema and Nervix-owned file paths on an admitted filesystem worker, charged to command memory.
-Request preflight refuses inspection when command memory or the filesystem wait queue is full.
-Applying a model step under an accepted transaction or restore instead waits for those existing
-capacities with `QueueAdmission::WaitForPlace`; lack of room has not judged the configuration.
-The service task's existing shutdown cancellation ends the wait. A charge larger than the whole
+A full command memory class or busy filesystem workers hold the inspection back, during request
+preflight exactly as when a model step applies under an accepted transaction or restore; lack of
+room has not judged the configuration. The service task's existing shutdown cancellation ends the
+wait. A charge larger than the whole
 class or a closed executor still fails inspection, and no uncharged config copy is made while waiting.
 Rendered values also pass the WebSockets configuration owner, which holds a schema-valid
 WebSockets client to an endpoint without a fragment or user information, counts within their ranges
@@ -2749,6 +2749,15 @@ represent, so the backoff alone decides that wait. Every emitter retains its ins
 transient failures; lifecycle recovery never discards staged work, a persistent session or the
 transient failure its pending work is still waiting out.
 
+Every `EmitterWriteError` is retried on the emitter's declared retry policy, `Misconfigured`
+included: a destination that refuses the write as the emitter is configured says nothing about the
+records, so the host keeps them, shows the refusal as the emitter's misconfiguration and counts the
+attempt as `misconfigured`. Only the emitter's declared `GIVE UP AFTER` ends a retry, and the host
+alone applies it: it starts each buffered unit's clock at the unit's first failed attempt, decides
+between attempts, and fails the rows a unit still holds once its limit passed, with every unit that
+shares one of its retained payloads. A connector never measures the limit and never fails a record
+for it; the [give-up contract](./emitters.md#giving-up) states what the user observes.
+
 ### Finishing an emitter
 
 The host calls `close` only after it has received the terminal finish outcome, or after an ending
@@ -3359,7 +3368,13 @@ includes the deadline in the emitter wake and commits once it is reached or the 
 size boundary. A retry and a drain force the commit without reading the domain clock, which a
 stopped domain no longer has. The host keeps retained ACKs alive during commit and retry, and
 reports sent metrics only after the commit reports publication. A failed commit retries on the
-emitter's declared backoff until it succeeds or the stop deadline ends the attempt. See
+emitter's declared backoff until it succeeds, the stop deadline ends the attempt, or the emitter's
+`GIVE UP AFTER`, counted from the first failed commit attempt, passes. Then the host calls
+`EmitterLifecycle::abandon_staged`, which drops what the emitter staged, with its staging state, and
+returns the staged rows' acknowledgements; the host reports them through the emitter's general error
+policy with the class `unavailable`. Giving up undoes nothing the destination applied, such as a
+commit it applied without its answer reaching the emitter. A connector that stages nothing keeps the
+default, which returns nothing. See
 [ACK Semantics And Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery) for the
 user-visible delivery consequences.
 
@@ -3915,8 +3930,10 @@ Broker read results and scheduled polls are observed once through the host's typ
 `IngestorReadOutcome`. The host counts returned raw payloads and bytes before decoding and only
 times paced polls; internal buffer replay is not another transport read. Neither observation
 changes delivery, cancellation, acknowledgement, error reporting or retry policy. An
-extension-worker unfolding refusal is counted only for an endpoint request whose sender is answered
-that the node is busy; an ingestor's payload waits for admission instead, which is not a refusal. The request path records each endpoint request or frame
+extension-worker unfolding refusal is counted only for an endpoint request the node could not
+unfold at all, because it is stopping or the unfolding needs a charge larger than its whole memory
+class; every other payload, endpoint bodies included, waits for a place, which is not a refusal.
+The request path records each endpoint request or frame
 once for every ingestor bound to its route, through retained children of that ingestor's unit,
 from the typed outcome that ingestor reached. A route that refuses a request before reading it
 records each ingestor's refusal there, and a request it admits is recorded at dispatch alone.
@@ -4045,8 +4062,9 @@ the address's failure and the parser's error, both at the ingestor's start and i
 emitter's configuration diagnostic.
 
 The endpoint ingestor also reports the full ingest-group dispatch or flush chain in its runtime event
-and log. A refusal to admit unfolding remains retryable and its diagnostic retains the executor
-cause without treating the payload as decoded or rejected.
+and log. A refusal to admit unfolding, which only a stopping node or an unfolding larger than its
+whole memory class leaves, keeps the executor cause in its diagnostic without treating the payload
+as decoded or rejected.
 
 Paced ingestor resume and poll status, ingestor suspend and close events, and cadence failures render
 the full report supplied by their owner. Kafka partition-watch failures similarly name the ingestor

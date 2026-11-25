@@ -374,6 +374,7 @@ fn exchange_emission_declares_its_locator_routing_key_and_the_queue_emitters_con
         vec![
             RuntimeCapability::Publishing(EmitterPublishingModeKind::NoAck),
             RuntimeCapability::Publishing(EmitterPublishingModeKind::BrokerAck),
+            RuntimeCapability::GiveUp,
             RuntimeCapability::Option {
                 keywords: "ROUTING KEY"
             },
@@ -408,9 +409,12 @@ fn only_an_exchange_emitter_computes_a_routing_key() {
     let routing_key = crate::Expression::Literal(crate::Literal::String("orders".to_string()));
     let exchange = crate::EmitterEntity::from(RabbitMqExchangeEmitter {
         mode: RabbitMqExchangePublishingMode::NoAck {
-            retry_policy: RetryPolicy {
-                backoff: "1s".to_string(),
-                max_backoff: "30s".to_string(),
+            retry_policy: crate::EmitterRetryPolicy {
+                pacing: RetryPolicy {
+                    backoff: "1s".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+                give_up_after: None,
             },
         },
         client: ClientName::parse("broker").assured("broker is a client name"),
@@ -425,9 +429,12 @@ fn only_an_exchange_emitter_computes_a_routing_key() {
 
     let queue = crate::EmitterEntity::from(RabbitMqQueueEmitter {
         mode: RabbitMqQueuePublishingMode::NoAck {
-            retry_policy: RetryPolicy {
-                backoff: "1s".to_string(),
-                max_backoff: "30s".to_string(),
+            retry_policy: crate::EmitterRetryPolicy {
+                pacing: RetryPolicy {
+                    backoff: "1s".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+                give_up_after: None,
             },
         },
         client: ClientName::parse("broker").assured("broker is a client name"),

@@ -5,7 +5,11 @@
 //! - **Depends on.** The host session runtime, typed outcomes and magnus keyword conversion.
 //! - **Must not know.** Server state, routing, request correlation or recovery decisions.
 
-use std::{cell::RefCell, num::NonZeroU32, time::Duration};
+use std::{
+    cell::RefCell,
+    num::{NonZeroU32, NonZeroUsize},
+    time::Duration,
+};
 
 use magnus::{
     DataTypeFunctions, Error, RArray, RHash, RModule, RString, Ruby, TypedData, Value, function,
@@ -38,9 +42,19 @@ pub(crate) fn seconds(argument: &'static str, value: f64) -> Result<Duration, Er
     })
 }
 
-/// A receive window a host passed in bytes.
-fn window(argument: &'static str, bytes: i64) -> Result<NonZeroU32, Error> {
-    host::Session::receive_window(argument, bytes).map_err(errors::raise)
+/// A byte bound a host passed: a receive window, header list or send buffer.
+fn byte_bound(argument: &'static str, bytes: i64) -> Result<NonZeroU32, Error> {
+    host::Session::byte_bound(argument, bytes).map_err(errors::raise)
+}
+
+/// A count of HTTP/2 streams a host passed.
+fn stream_count(argument: &'static str, streams: i64) -> Result<NonZeroU32, Error> {
+    host::Session::stream_count(argument, streams).map_err(errors::raise)
+}
+
+/// A queue capacity a host passed.
+fn queue_capacity(argument: &'static str, capacity: i64) -> Result<NonZeroUsize, Error> {
+    host::Session::queue_capacity(argument, capacity).map_err(errors::raise)
 }
 
 #[derive(DataTypeFunctions, TypedData)]
@@ -182,10 +196,50 @@ impl ConnectLimits {
             options.keepalive_timeout = seconds("keepalive_timeout", timeout)?;
         }
         if let Some(bytes) = self.stream_window_bytes {
-            options.stream_window_bytes = window("stream_window_bytes", bytes)?;
+            options.stream_window_bytes = byte_bound("stream_window_bytes", bytes)?;
         }
         if let Some(bytes) = self.connection_window_bytes {
-            options.connection_window_bytes = window("connection_window_bytes", bytes)?;
+            options.connection_window_bytes = byte_bound("connection_window_bytes", bytes)?;
+        }
+        Ok(options)
+    }
+}
+
+/// The keywords naming the connection's HTTP/2 and connector limits: the call queue, the header
+/// list and send buffer in bytes, the reset-stream counts and duration and the connection attempt
+/// delay in seconds.
+struct ConnectTransport {
+    call_queue_capacity: Option<i64>,
+    header_list_bytes: Option<i64>,
+    send_buffer_bytes: Option<i64>,
+    max_error_reset_streams: Option<i64>,
+    remembered_reset_streams: Option<i64>,
+    reset_stream_duration: Option<f64>,
+    connection_attempt_delay: Option<f64>,
+}
+
+impl ConnectTransport {
+    fn apply(self, mut options: ConnectOptions) -> Result<ConnectOptions, Error> {
+        if let Some(capacity) = self.call_queue_capacity {
+            options.call_queue_capacity = queue_capacity("call_queue_capacity", capacity)?;
+        }
+        if let Some(bytes) = self.header_list_bytes {
+            options.header_list_bytes = byte_bound("header_list_bytes", bytes)?;
+        }
+        if let Some(bytes) = self.send_buffer_bytes {
+            options.send_buffer_bytes = byte_bound("send_buffer_bytes", bytes)?;
+        }
+        if let Some(streams) = self.max_error_reset_streams {
+            options.max_error_reset_streams = stream_count("max_error_reset_streams", streams)?;
+        }
+        if let Some(streams) = self.remembered_reset_streams {
+            options.remembered_reset_streams = stream_count("remembered_reset_streams", streams)?;
+        }
+        if let Some(duration) = self.reset_stream_duration {
+            options.reset_stream_duration = seconds("reset_stream_duration", duration)?;
+        }
+        if let Some(delay) = self.connection_attempt_delay {
+            options.connection_attempt_delay = seconds("connection_attempt_delay", delay)?;
         }
         Ok(options)
     }
@@ -249,7 +303,7 @@ impl Connection {
                 Option<Option<i64>>,
                 Option<Option<i64>>,
             ),
-            (),
+            RHash,
         >(
             kwargs.splat,
             &[],
@@ -270,6 +324,41 @@ impl Connection {
             stream_window_bytes,
             connection_window_bytes,
         ) = more.optional;
+        let transport = get_kwargs::<
+            _,
+            (),
+            (
+                Option<Option<i64>>,
+                Option<Option<i64>>,
+                Option<Option<i64>>,
+                Option<Option<i64>>,
+                Option<Option<i64>>,
+                Option<Option<f64>>,
+                Option<Option<f64>>,
+            ),
+            (),
+        >(
+            more.splat,
+            &[],
+            &[
+                "call_queue_capacity",
+                "header_list_bytes",
+                "send_buffer_bytes",
+                "max_error_reset_streams",
+                "remembered_reset_streams",
+                "reset_stream_duration",
+                "connection_attempt_delay",
+            ],
+        )?;
+        let (
+            call_queue_capacity,
+            header_list_bytes,
+            send_buffer_bytes,
+            max_error_reset_streams,
+            remembered_reset_streams,
+            reset_stream_duration,
+            connection_attempt_delay,
+        ) = transport.optional;
         let access = ConnectAccess {
             username: username.flatten(),
             password: password.flatten(),
@@ -287,8 +376,18 @@ impl Connection {
             stream_window_bytes: stream_window_bytes.flatten(),
             connection_window_bytes: connection_window_bytes.flatten(),
         };
+        let transport = ConnectTransport {
+            call_queue_capacity: call_queue_capacity.flatten(),
+            header_list_bytes: header_list_bytes.flatten(),
+            send_buffer_bytes: send_buffer_bytes.flatten(),
+            max_error_reset_streams: max_error_reset_streams.flatten(),
+            remembered_reset_streams: remembered_reset_streams.flatten(),
+            reset_stream_duration: reset_stream_duration.flatten(),
+            connection_attempt_delay: connection_attempt_delay.flatten(),
+        };
         let options = access.apply(ConnectOptions::default())?;
         let options = limits.apply(options)?;
+        let options = transport.apply(options)?;
         Ok(Self {
             server,
             domain: domain.flatten(),

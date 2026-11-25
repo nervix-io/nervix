@@ -354,6 +354,8 @@ pub(crate) struct ConnectedTransports {
     pub(crate) transport_b: Transport,
     node_a: ClusterNodeName,
     pub(crate) node_b: ClusterNodeName,
+    /// The requester's budgets, so a test can fill a class its requests charge.
+    executor_a: Executor,
     /// The responder's budgets, so a test can observe what its handlers are holding charged.
     executor_b: Executor,
     _incoming_a: mpsc::Receiver<ReceivedEnvelope>,
@@ -373,13 +375,10 @@ async fn connected_transports() -> ConnectedTransports {
 
 async fn connected_transports_with_options(options: TransportOptions) -> ConnectedTransports {
     let transports = bound_transports_with_options(options).await;
-    transports
-        .transport_a
-        .register_outbound_target(
-            transports.node_b.clone(),
-            NodeEndpoint::new("localhost", transports.transport_b.local_addr().port()),
-        )
-        .expect("authenticated test target should register");
+    transports.transport_a.register_outbound_target(
+        transports.node_b.clone(),
+        NodeEndpoint::new("localhost", transports.transport_b.local_addr().port()),
+    );
     transports
 }
 
@@ -389,12 +388,13 @@ pub(crate) async fn bound_transports_with_options(
     let authority = TestCertificateAuthority::new();
     let node_a = ClusterNodeName::parse("node-a").expect("test node name should be valid");
     let node_b = ClusterNodeName::parse("node-b").expect("test node name should be valid");
+    let executor_a = Executor::default();
     let (transport_a, incoming_a) = Transport::bind(
         "127.0.0.1:0".parse().expect("test address should be valid"),
         localhost_identity("test-cluster", node_a.clone()),
         authority.issue("test-cluster", &node_a),
         options.clone(),
-        Executor::default(),
+        executor_a.clone(),
         test_resolver().await,
     )
     .await
@@ -419,6 +419,7 @@ pub(crate) async fn bound_transports_with_options(
         transport_b,
         node_a,
         node_b,
+        executor_a,
         executor_b,
         _incoming_a: incoming_a,
         incoming_b,
@@ -441,12 +442,10 @@ async fn send_waits_for_a_target_registered_after_the_operation_starts() {
         send.as_mut().now_or_never().is_none(),
         "send should await the transport's target notification"
     );
-    transport_a
-        .register_outbound_target(
-            node_b.clone(),
-            NodeEndpoint::new("localhost", transport_b.local_addr().port()),
-        )
-        .expect("authenticated test target should register");
+    transport_a.register_outbound_target(
+        node_b.clone(),
+        NodeEndpoint::new("localhost", transport_b.local_addr().port()),
+    );
 
     send.await.expect("control delivery should succeed");
     let received = incoming_b
@@ -464,30 +463,12 @@ async fn send_waits_for_a_target_registered_after_the_operation_starts() {
 }
 
 #[test]
-fn connection_limit_reserves_both_preconnected_directions() {
-    let mut options = TransportOptions {
-        max_peers: 2,
-        max_connections: 20,
-        ..TransportOptions::default()
-    };
-    assert!(matches!(
-        options.validate(),
-        Err(error) if matches!(error.current_context(), TransportError::InvalidOptions { .. })
-    ));
-
-    options.max_connections = 21;
-    options
-        .validate()
-        .expect("one on-demand connection should fit after both preconnected directions");
-}
-
-#[test]
 fn invalid_transport_options_report_the_failed_contract() {
     let cases = [
         (
-            "max_peers",
+            "incoming_queue_capacity",
             TransportOptions {
-                max_peers: 0,
+                incoming_queue_capacity: 0,
                 ..TransportOptions::default()
             },
         ),
@@ -522,87 +503,6 @@ fn invalid_transport_options_report_the_failed_contract() {
         };
         assert!(reason.contains(contract), "{reason}");
     }
-}
-
-#[nervix_primitives::test]
-async fn peer_quota_refuses_a_new_target_but_retains_the_registered_peer() {
-    let options = TransportOptions {
-        max_peers: 1,
-        ..TransportOptions::default()
-    };
-    let ConnectedTransports {
-        transport_a,
-        transport_b,
-        node_b,
-        ..
-    } = bound_transports_with_options(options).await;
-    let endpoint = NodeEndpoint::new("localhost", transport_b.local_addr().port());
-    transport_a
-        .register_outbound_target(node_b.clone(), endpoint.clone())
-        .expect("the first peer should fit the quota");
-    let node_c = ClusterNodeName::parse("node-c").expect("test node name should be valid");
-    let error = transport_a
-        .register_outbound_target(node_c, endpoint.clone())
-        .expect_err("another peer must exceed the quota");
-    assert!(matches!(
-        error.current_context(),
-        TransportError::PoolExhausted
-    ));
-    transport_a
-        .register_outbound_target(node_b, endpoint)
-        .expect("re-registering the current peer must remain possible");
-
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
-}
-
-#[nervix_primitives::test]
-async fn bootstrap_respects_the_peer_quota_before_registering_a_new_identity() {
-    let options = TransportOptions {
-        max_peers: 1,
-        ..TransportOptions::default()
-    };
-    let ConnectedTransports {
-        _authority: authority,
-        transport_a,
-        transport_b,
-        node_b,
-        ..
-    } = bound_transports_with_options(options).await;
-    transport_a
-        .register_outbound_target(
-            node_b.clone(),
-            NodeEndpoint::new("localhost", transport_b.local_addr().port()),
-        )
-        .expect("the first peer should fit the quota");
-
-    let node_c = ClusterNodeName::parse("node-c").expect("test node name should be valid");
-    let (transport_c, _incoming_c) = Transport::bind(
-        "127.0.0.1:0".parse().expect("test address should be valid"),
-        localhost_identity("test-cluster", node_c.clone()),
-        authority.issue("test-cluster", &node_c),
-        TransportOptions::default(),
-        Executor::default(),
-        test_resolver().await,
-    )
-    .await
-    .expect("third test transport should bind");
-    let error = transport_a
-        .bootstrap_target(
-            PeerTarget::new(transport_c.local_addr(), "localhost"),
-            BootstrapExpectation::AnyMember,
-        )
-        .await
-        .expect_err("bootstrap must respect the existing peer quota");
-    assert!(matches!(
-        error.current_context(),
-        TransportError::PoolExhausted
-    ));
-    assert!(!transport_a.is_connected_to(&node_c));
-
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
-    transport_c.shutdown().await;
 }
 
 #[nervix_primitives::test]
@@ -710,6 +610,7 @@ async fn rejected_tls_replacement_keeps_the_previous_identity_usable() {
 }
 
 mod coordination;
+mod one_way_control;
 mod relay_grant_capacity;
 mod relay_owners;
 mod relay_send_progress;
@@ -720,6 +621,7 @@ use resolver::{localhost_identity, test_resolver};
 
 mod lease;
 mod receive_window;
+mod request_streams;
 
 #[nervix_primitives::test]
 async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {
@@ -1378,53 +1280,106 @@ async fn slow_management_work_cannot_consume_cancellation_streams() {
     transport_b.shutdown().await;
 }
 
+/// Twice as many cancellations to one peer as its connection has cancellation streams are all
+/// admitted: those beyond the streams wait for one until their deadline and succeed once the first
+/// ones resolve, instead of being refused as busy by a count of their own.
+#[nervix_primitives::test]
+async fn cancellations_beyond_a_connections_streams_wait_for_one_instead_of_being_refused() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        ..
+    } = connected_transports().await;
+    let started = StdArc::new(AtomicUsize::new(0));
+    let (release, release_rx) = watch::channel(false);
+    transport_b
+        .register_handler::<CancellationRequest, _, _>({
+            let started = StdArc::clone(&started);
+            move |_context, _request| {
+                let started = StdArc::clone(&started);
+                let mut release_rx = release_rx.clone();
+                async move {
+                    started.fetch_add(1, Ordering::AcqRel);
+                    release_rx
+                        .wait_for(|released| *released)
+                        .await
+                        .expect("test release sender should remain open");
+                    CancellationResponse
+                }
+            }
+        })
+        .expect("cancellation handler should register");
+
+    let streams = connection::stream_slots::MANAGEMENT_CANCELLATION_STREAMS;
+    let mut cancellations = Vec::new();
+    for _ in 0..streams.checked_mul(2).expect("the stream count doubles") {
+        let requester = transport_a.clone();
+        let target = node_b.clone();
+        cancellations.push(nervix_primitives::task::spawn(async move {
+            requester.request(&target, CancellationRequest).await
+        }));
+    }
+    timeout(Duration::from_secs(2), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if started.load(Ordering::Acquire) == streams {
+                break;
+            }
+            nervix_primitives::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("every cancellation stream of the connection should become occupied");
+
+    release.send_replace(true);
+    for cancellation in cancellations {
+        assert_eq!(
+            cancellation
+                .await
+                .expect("cancellation request task should join")
+                .expect("every cancellation should succeed, the ones that waited included"),
+            CancellationResponse
+        );
+    }
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
 mod duplex;
 
 mod progress;
 mod tls_policy;
 
+/// Discovery beyond the discovery streams of a connection waits for one of them instead of being
+/// refused, even with the incoming queue at a single place, and never takes the management streams
+/// other requests use meanwhile.
 #[nervix_primitives::test]
-async fn discovery_subquota_cannot_crowd_out_management_requests() {
+async fn discovery_beyond_its_streams_waits_and_never_crowds_out_management_requests() {
     let options = TransportOptions {
         incoming_queue_capacity: 1,
         ..TransportOptions::default()
     };
     let ConnectedTransports {
-        _authority: authority,
         transport_a,
         transport_b,
         node_b,
         ..
-    } = connected_transports_with_options(options.clone()).await;
-    let node_c = ClusterNodeName::parse("node-c").expect("test node name should be valid");
-    let (transport_c, _incoming_c) = Transport::bind(
-        "127.0.0.1:0".parse().expect("test address should be valid"),
-        localhost_identity("test-cluster", node_c.clone()),
-        authority.issue("test-cluster", &node_c),
-        options,
-        Executor::default(),
-        test_resolver().await,
-    )
-    .await
-    .expect("third test transport should bind");
-    transport_c
-        .register_outbound_target(
-            node_b.clone(),
-            NodeEndpoint::new("localhost", transport_b.local_addr().port()),
-        )
-        .expect("third test transport should register its authenticated target");
-    let started = StdArc::new(Notify::new());
-    let release = StdArc::new(Notify::new());
+    } = connected_transports_with_options(options).await;
+    let started = StdArc::new(AtomicUsize::new(0));
+    let (release, release_rx) = watch::channel(false);
     transport_b
         .register_handler::<BlockingDiscoveryRequest, _, _>({
             let started = StdArc::clone(&started);
-            let release = StdArc::clone(&release);
             move |_context, _request| {
                 let started = StdArc::clone(&started);
-                let release = StdArc::clone(&release);
+                let mut release_rx = release_rx.clone();
                 async move {
-                    started.notify_one();
-                    release.notified().await;
+                    started.fetch_add(1, Ordering::AcqRel);
+                    release_rx
+                        .wait_for(|released| *released)
+                        .await
+                        .expect("test release sender should remain open");
                     BlockingDiscoveryResponse
                 }
             }
@@ -1436,65 +1391,48 @@ async fn discovery_subquota_cannot_crowd_out_management_requests() {
         })
         .expect("management handler should register");
 
-    let requester = transport_a.clone();
-    let target = node_b.clone();
-    let discovery = nervix_primitives::task::spawn(async move {
-        requester.request(&target, BlockingDiscoveryRequest).await
-    });
-    timeout(Duration::from_secs(2), started.notified())
-        .await
-        .expect("the first discovery handler should start");
-
-    let error = transport_a
-        .request_with_timeout(
-            &node_b,
-            BlockingDiscoveryRequest,
-            Duration::from_millis(250),
-        )
-        .await
-        .expect_err("the discovery subquota should reject excess work");
-    assert!(matches!(
-        error.current_context(),
-        RequestError::AdmissionFull {
-            request,
-            subquota: RequestSubquota::Discovery,
-        } if request == &BlockingDiscoveryRequest::NAME
-    ));
-
-    let error = transport_c
-        .request_with_timeout(
-            &node_b,
-            BlockingDiscoveryRequest,
-            Duration::from_millis(250),
-        )
-        .await
-        .expect_err("the receiver should reject discovery beyond its subquota");
-    assert!(matches!(
-        error.current_context(),
-        RequestError::RemoteRejected {
-            failure: RemoteRequestFailure::AdmissionFull {
-                subquota: RequestSubquota::Discovery,
-            },
-            ..
+    let mut discoveries = Vec::new();
+    for _ in 0..=connection::stream_slots::MANAGEMENT_DISCOVERY_STREAMS {
+        let requester = transport_a.clone();
+        let target = node_b.clone();
+        discoveries.push(nervix_primitives::task::spawn(async move {
+            requester.request(&target, BlockingDiscoveryRequest).await
+        }));
+    }
+    timeout(Duration::from_secs(2), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if started.load(Ordering::Acquire)
+                == connection::stream_slots::MANAGEMENT_DISCOVERY_STREAMS
+            {
+                break;
+            }
+            nervix_primitives::task::yield_now().await;
         }
-    ));
+    })
+    .await
+    .expect("every discovery stream of the connection should become occupied");
 
-    let management = transport_c
-        .request(&node_b, ManagementRequest)
-        .await
-        .expect("reserved management capacity should remain available");
+    let management = timeout(
+        Duration::from_secs(2),
+        transport_a.request(&node_b, ManagementRequest),
+    )
+    .await
+    .expect("busy discovery streams must leave the management streams to other requests")
+    .expect("the management request should succeed");
     assert_eq!(management, ManagementResponse);
 
-    release.notify_waiters();
-    assert_eq!(
-        discovery
-            .await
-            .expect("discovery request task should join")
-            .expect("the admitted discovery request should succeed"),
-        BlockingDiscoveryResponse
-    );
+    release.send_replace(true);
+    for discovery in discoveries {
+        assert_eq!(
+            discovery
+                .await
+                .expect("discovery request task should join")
+                .expect("every discovery request should succeed, the one that waited included"),
+            BlockingDiscoveryResponse
+        );
+    }
     transport_a.shutdown().await;
-    transport_c.shutdown().await;
     transport_b.shutdown().await;
 }
 
@@ -1513,12 +1451,10 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
         mut incoming_b,
         ..
     } = connected_transports_with_options(options).await;
-    transport_b
-        .register_outbound_target(
-            node_a.clone(),
-            NodeEndpoint::new("localhost", transport_a.local_addr().port()),
-        )
-        .expect("the response target should register");
+    transport_b.register_outbound_target(
+        node_a.clone(),
+        NodeEndpoint::new("localhost", transport_a.local_addr().port()),
+    );
     let payload = |ack_id, sequence, registrar| RelayPayload {
         ack_timing: nervix_models::RemoteAckTiming::default(),
         decoded_bytes: 0,
@@ -1651,12 +1587,10 @@ async fn the_next_relay_on_a_channel_is_granted_before_the_outcome_of_the_one_be
         mut incoming_b,
         ..
     } = connected_transports_with_options(options).await;
-    transport_b
-        .register_outbound_target(
-            node_a.clone(),
-            NodeEndpoint::new("localhost", transport_a.local_addr().port()),
-        )
-        .expect("the outcome target should register");
+    transport_b.register_outbound_target(
+        node_a.clone(),
+        NodeEndpoint::new("localhost", transport_a.local_addr().port()),
+    );
     let payload = |ack_id, sequence| RelayPayload {
         ack_timing: nervix_models::RemoteAckTiming::default(),
         decoded_bytes: 0,
@@ -1824,10 +1758,11 @@ async fn a_relay_grant_that_skips_its_channels_next_position_is_refused_out_of_o
     transport_b.shutdown().await;
 }
 
-/// A grant the receiver's relay budget has no room for is answered with a typed capacity refusal
-/// both ends count, and the same delivery is granted and received once the room returns.
+/// A grant the receiver's relay budget has no room for waits for that room instead of being refused
+/// for capacity, and the delivery is granted and received once the room returns. Neither end
+/// counts a capacity refusal.
 #[nervix_primitives::test]
-async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
+async fn a_grant_the_relay_budget_has_no_room_for_waits_and_is_granted_once_room_returns() {
     let ConnectedTransports {
         transport_a,
         transport_b,
@@ -1872,29 +1807,21 @@ async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
         snapshot.counters.relay_grant_refusals[direction.index()][RelayGrantRefusal::Memory.index()]
     };
 
-    let error = transport_a
-        .send(&node_b, Envelope::RelayPayload(payload.clone()))
-        .await
-        .expect_err("a receiver without room for the grant refuses it");
-    assert!(matches!(
-        error.current_context(),
-        TransportError::RelayGrantRefused(RelayGrantRefusal::Memory)
-    ));
-    assert!(RelayGrantRefusal::Memory.is_capacity());
-    assert_eq!(
-        refused(transport_b.snapshot(), ConnectionDirection::Inbound),
-        1
-    );
-    assert_eq!(
-        refused(transport_a.snapshot(), ConnectionDirection::Outbound),
-        1
+    let sender = transport_a.clone();
+    let sending = nervix_primitives::task::spawn(async move {
+        sender.send(&node_b, Envelope::RelayPayload(payload)).await
+    });
+    nervix_primitives::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !sending.is_finished(),
+        "a receiver without room for the grant holds it back instead of refusing it"
     );
 
     drop(occupied);
-    transport_a
-        .send(&node_b, Envelope::RelayPayload(payload))
+    sending
         .await
-        .expect("the same delivery is granted once the receiver has room");
+        .expect("the sending task is joined")
+        .expect("the delivery is granted once the receiver has room");
     let received = timeout(Duration::from_secs(2), incoming_b.recv())
         .await
         .expect("the granted relay should enter the application queue")
@@ -1902,7 +1829,13 @@ async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
     assert!(matches!(received.envelope, Envelope::RelayPayload(_)));
     assert_eq!(
         refused(transport_b.snapshot(), ConnectionDirection::Inbound),
-        1
+        0,
+        "the receiver refused no grant for capacity"
+    );
+    assert_eq!(
+        refused(transport_a.snapshot(), ConnectionDirection::Outbound),
+        0,
+        "the sender was refused no grant for capacity"
     );
     transport_a.shutdown().await;
     transport_b.shutdown().await;
@@ -1966,12 +1899,10 @@ async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
         mut incoming_b,
         ..
     } = connected_transports_with_options(options).await;
-    transport_b
-        .register_outbound_target(
-            node_a.clone(),
-            NodeEndpoint::new("localhost", transport_a.local_addr().port()),
-        )
-        .expect("the response target should register");
+    transport_b.register_outbound_target(
+        node_a.clone(),
+        NodeEndpoint::new("localhost", transport_a.local_addr().port()),
+    );
     transport_b
         .send(&node_a, Envelope::Control(ControlEnvelope::Terminate))
         .await
@@ -2388,12 +2319,10 @@ async fn an_outcome_addressed_to_an_earlier_registrar_run_leaves_the_current_adm
         mut incoming_b,
         ..
     } = connected_transports().await;
-    transport_b
-        .register_outbound_target(
-            node_a.clone(),
-            NodeEndpoint::new("localhost", transport_a.local_addr().port()),
-        )
-        .expect("the response target should register");
+    transport_b.register_outbound_target(
+        node_a.clone(),
+        NodeEndpoint::new("localhost", transport_a.local_addr().port()),
+    );
     let delivery = RelayDelivery {
         channel_incarnation: [12; 16],
         sequence: 0,
@@ -2487,6 +2416,7 @@ async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
         transport_b,
         node_a,
         node_b,
+        executor_a: _,
         executor_b: _,
         _incoming_a: _,
         mut incoming_b,
@@ -2535,12 +2465,10 @@ async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
     .await
     .expect("the replacement receiver process should bind");
     replacement_b.replace_live_nodes(&BTreeSet::from([node_a, node_b.clone()]));
-    transport_a
-        .register_outbound_target(
-            node_b.clone(),
-            NodeEndpoint::new("localhost", replacement_b.local_addr().port()),
-        )
-        .expect("the replacement receiver target should register");
+    transport_a.register_outbound_target(
+        node_b.clone(),
+        NodeEndpoint::new("localhost", replacement_b.local_addr().port()),
+    );
 
     assert_eq!(
         timeout(
@@ -2572,12 +2500,10 @@ async fn reserved_relay_work_reports_progress_before_runtime_admission() {
         mut incoming_b,
         ..
     } = connected_transports().await;
-    transport_b
-        .register_outbound_target(
-            node_a.clone(),
-            NodeEndpoint::new("localhost", transport_a.local_addr().port()),
-        )
-        .expect("the progress response target should register");
+    transport_b.register_outbound_target(
+        node_a.clone(),
+        NodeEndpoint::new("localhost", transport_a.local_addr().port()),
+    );
     transport_a
         .send(
             &node_b,
@@ -2879,14 +2805,13 @@ async fn invalid_rkyv_is_rejected_before_dispatch() {
     let bytes = executor
         .try_charge_owned(MemoryClass::Commands, vec![0xff; 32])
         .expect("test payload should fit the command budget");
+    let decoding = executor
+        .try_reserve(MemoryClass::Commands, 32)
+        .expect("the decoding room should fit the command budget");
 
-    let result = wire::decode_rkyv::<ControlEnvelope>(
-        &executor,
-        MemoryClass::Commands,
-        CpuClass::Control,
-        bytes,
-    )
-    .await;
+    let result =
+        wire::decode_rkyv_within::<ControlEnvelope>(&executor, CpuClass::Control, bytes, decoding)
+            .await;
 
     let Err(error) = result else {
         panic!("invalid rkyv must be rejected before dispatch");

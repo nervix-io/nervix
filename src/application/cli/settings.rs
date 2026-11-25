@@ -308,7 +308,7 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             .change_context(AppError::InvalidTransportSettings)?;
         let dns = args
             .dns
-            .settings(interconnect.max_peers())
+            .settings()
             .change_context(AppError::InvalidDnsSettings)?;
         let mut runtime = args
             .runtime

@@ -1,11 +1,13 @@
-//! The schedule a START moves misplaced units with.
+//! The schedule a START moves misplaced units with, and how long a START waits for an admitted
+//! node.
 //!
 //! Layer: test harness.
 //!
 //! - **Owns.** Focused tests for which units a START move places as the planner wants and which
-//!   keep their committed assignment.
-//! - **Depends on.** The START placement decisions and the shared application test fixtures.
-//! - **Must not know.** Consensus, the ownership handoff or the runtime that applies the move.
+//!   keep their committed assignment, and for a waiting START that only its own task ends.
+//! - **Depends on.** The START placement decisions and the shared application test fixtures,
+//!   including the single-node test service a waiting START runs on.
+//! - **Must not know.** The ownership handoff or the runtime that applies the move.
 
 #![cfg_attr(
     nervix_lint,
@@ -14,11 +16,17 @@
 
 use std::collections::BTreeSet;
 
+use meticulous::OptionExt as _;
 use nervix_models::{DomainName, DomainSchedule, ModelKind, NodeRef, NodeUnitRef, Unit};
+use nervix_recovery::Discarded as _;
 
 use super::{
-    super::test_fixtures::{
-        node_named, placement_group, placement_member, scheduled_node, scheduled_node_on,
+    super::{
+        subscription::SessionSubscriptions,
+        test_fixtures::{
+            TestService, build_test_service, named, node_named, placement_group, placement_member,
+            scheduled_node, scheduled_node_on, test_command_request,
+        },
     },
     start_placement_schedule,
 };
@@ -128,4 +136,71 @@ fn a_start_move_keeps_the_committed_assignment_of_a_unit_the_planner_does_not_pl
         Some("node-1"),
         "a unit the planner does not schedule keeps where it is"
     );
+}
+
+/// The stopped `default` domain of a single-node test service, whose deduplicator only a node
+/// tagged `zone=mars` may run. The service's one node carries no tags, so a START of this domain
+/// waits for an admitted node.
+const UNADMITTED_DEDUPLICATOR: [&str; 5] = [
+    "CREATE SCHEMA transaction ( tenant STRING, transaction_id STRING );",
+    "CREATE RELAY inbound SCHEMA transaction UNBRANCHED;",
+    "CREATE RELAY deduped SCHEMA transaction UNBRANCHED;",
+    "CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id MAX TIME 10m \
+     UNBRANCHED TO deduped INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+    "CREATE PLACEMENT mars_dedup FOR dedup_txns REQUIRE NODES WHERE tag('zone') = 'mars';",
+];
+
+/// A START that waits for an admitted node is a command like any other: when its node stops, it
+/// ends with the node's service work and the leader that follows resumes it. Neither the node's
+/// stop request nor the end of the services its save and moves rely on ends the wait with an
+/// answer of its own, so no refusal is ever recorded for a START because its node stopped.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_waiting_start_keeps_waiting_through_its_nodes_stop_signals() {
+    let TestService {
+        service,
+        registry,
+        path,
+    } = build_test_service(true).await;
+    let mut subscriptions = SessionSubscriptions::new();
+    for command in UNADMITTED_DEDUPLICATOR {
+        let result = service
+            .test_command(test_command_request(command, "default"), &mut subscriptions)
+            .await;
+        assert!(
+            result.succeeded(),
+            "test graph command must succeed: {command}: {}",
+            result.message
+        );
+    }
+    let domain: DomainName = named("default");
+    let looks = service
+        .inner
+        .operational
+        .control_plane
+        .scheduling_interval()
+        .checked_mul(5)
+        .assured("five scheduling intervals fit a Duration");
+    {
+        let placing = service.place_units_for_start(&domain);
+        tokio::pin!(placing);
+
+        let before_stop = nervix_primitives::time::timeout(looks, &mut placing).await;
+        assert!(
+            before_stop.is_err(),
+            "START must wait while no node satisfies its node rule: {before_stop:?}"
+        );
+
+        service.inner.admission_shutdown.cancel();
+        service.inner.drain_support_shutdown.cancel();
+        let after_stop = nervix_primitives::time::timeout(looks, &mut placing).await;
+        assert!(
+            after_stop.is_err(),
+            "a waiting START must keep waiting when its node stops, not end with: {after_stop:?}"
+        );
+    }
+
+    subscriptions.stop_all().await;
+    drop(service);
+    drop(registry);
+    std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
 }

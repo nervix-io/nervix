@@ -21,15 +21,22 @@ use error_stack::ResultExt as _;
 use nervix_connector::{
     EmitterFinish, EmitterFinishResult, EmitterLifecycle, EmitterRecordPosition,
     EmitterStagedCommit, EmitterWriteError, PerRecordOutcome, RejectedEmitterMember,
+    physical_time::PhysicalDeadline,
 };
 
-use super::{emitter_supervision::EmitterConfirmationWaitGuard, *};
+use super::{
+    emitter_buffer::GiveUpClock, emitter_retry::EmitterGiveUp,
+    emitter_supervision::EmitterConfirmationWaitGuard, *,
+};
 
 pub(super) struct EmitterPublishControl<'a> {
     pub(super) fault_injection: &'a ConfiguredFaultInjection,
     pub(super) shutdown_rx: &'a mut watch::Receiver<bool>,
     pub(super) stop_rx: &'a mut watch::Receiver<Option<Instant>>,
     pub(super) backoff: &'a mut RuntimeReconnectBackoff,
+    /// The emitter's `GIVE UP AFTER`, which every retry inside a publish call honours and which
+    /// keeps the work it gives up for the task to deliver once the call returns.
+    pub(super) give_up: &'a mut EmitterGiveUp,
 }
 
 /// The existing retry decision accompanies the publish it selects, including drain retries.
@@ -336,6 +343,9 @@ pub(super) struct OpenEmitterConnector {
     /// The `COMMIT EACH` deadline of the staged rows, armed by the first cadence check that finds
     /// them staged and cleared once the connector holds nothing.
     commit_cadence: BranchBufferTimer,
+    /// When the emitter gives up committing what the connector staged: its `GIVE UP AFTER` from the
+    /// first failed commit attempt since the last one that published everything staged.
+    staged_give_up: GiveUpClock,
 }
 
 /// The owning emitter's stop-drain answer, kept distinct from a missing host-bound answer.
@@ -421,6 +431,27 @@ impl EmitterConnectorState {
         }
     }
 
+    /// Gives up what the open connector staged once the emitter has retried committing it for as
+    /// long as its `GIVE UP AFTER` allows. Answers whether it gave the staged rows up.
+    pub(super) async fn give_up_staged_if_due(
+        &mut self,
+        give_up: &mut EmitterGiveUp,
+        buffer: &mut EmitterBatchBuffer,
+    ) -> bool {
+        match self {
+            Self::Open(open) => open.give_up_staged_if_due(give_up, buffer).await,
+            Self::Unavailable { .. } => false,
+        }
+    }
+
+    /// When the emitter gives up committing what the open connector staged.
+    pub(super) fn staged_give_up(&self) -> GiveUpClock {
+        match self {
+            Self::Open(open) => open.staged_give_up,
+            Self::Unavailable { .. } => GiveUpClock::NotStarted,
+        }
+    }
+
     /// The state of an emitter whose connector just opened and has staged nothing yet.
     pub(super) fn opened(connector: Box<dyn EmitterConnector>) -> Self {
         Self::Open(OpenEmitterConnector {
@@ -429,6 +460,7 @@ impl EmitterConnectorState {
             resume_error: None,
             resume_retry_after: Duration::ZERO,
             commit_cadence: BranchBufferTimer::default(),
+            staged_give_up: GiveUpClock::NotStarted,
         })
     }
 
@@ -810,27 +842,47 @@ impl EmitterConnectorState {
                         return Err(error);
                     }
                     self.reconnect_after(&error, context);
+                    control.give_up.record_failure(buffer, &error);
+                    control.give_up.collect(buffer).await;
+                    if buffer.is_empty() {
+                        // The emitter gave up everything it held, so nothing is left to drain.
+                        flushed = None;
+                        break;
+                    }
                     let reason = emitter_error_message(&error);
                     let wait = emitter_retry_delay(control.backoff, &error);
-                    context.record_retry(reason.clone(), wait, EmitterRetryKind::Infrastructure);
+                    let give_up_at = control.give_up.next_deadline(buffer);
+                    context.record_retry(
+                        reason.clone(),
+                        wait,
+                        EmitterRetryKind::publish(&error),
+                        give_up_at,
+                    );
                     context.report_flush_error(label, &reason);
                     let cause = error.current_context().retry_cause();
                     let acks = buffer.pending_acks();
                     let retry_wait = async {
                         context.interactions.record_retry(cause, wait);
-                        RuntimeReconnectBackoff::wait_duration_with_ack_alive(
-                            wait,
-                            &context.remote_ack_timing,
-                            control.shutdown_rx,
-                            &acks,
-                        )
-                        .await
+                        nervix_primitives::select! {
+                            waited = RuntimeReconnectBackoff::wait_duration_with_ack_alive(
+                                wait,
+                                &context.remote_ack_timing,
+                                control.shutdown_rx,
+                                &acks,
+                            ) => waited,
+                            () = EmitterGiveUp::until_run_out(give_up_at) => true,
+                        }
                     };
                     let waited = await_until_emitter_stop_deadline(control.stop_rx, retry_wait)
                         .await
                         .map_err(|()| emitter_stop_deadline_elapsed())?;
                     if !waited {
                         return Err(Report::new(EmitterRuntimeError::ShutdownWhileStalled));
+                    }
+                    control.give_up.collect(buffer).await;
+                    if buffer.is_empty() {
+                        flushed = None;
+                        break;
                     }
                     kind = EmitterPublishAttemptKind::Retry;
                 }
@@ -902,8 +954,16 @@ impl EmitterConnectorState {
                 }
                 Err(error) if error.current_context().is_retryable_publish_failure() => {
                     self.reconnect_after(&error, context);
+                    if self.give_up_staged_if_due(control.give_up, buffer).await {
+                        return Ok(None);
+                    }
                     let acks = self.pending_acks(buffer);
-                    if !Self::wait_for_commit_retry(label, context, control, &acks, &error).await? {
+                    let give_up_at = self.staged_give_up().deadline();
+                    if !Self::wait_for_commit_retry(
+                        label, context, control, &acks, &error, give_up_at,
+                    )
+                    .await?
+                    {
                         return match reason {
                             EmitterCommitReason::Drain => {
                                 Err(Report::new(EmitterRuntimeError::ShutdownWhileStalled)
@@ -914,6 +974,9 @@ impl EmitterConnectorState {
                             }
                             EmitterCommitReason::Cadence | EmitterCommitReason::Retry => Ok(None),
                         };
+                    }
+                    if self.give_up_staged_if_due(control.give_up, buffer).await {
+                        return Ok(None);
                     }
                     // An attempt the cadence started keeps retrying whatever is staged, exactly as
                     // the failure it is recovering from was already committing it.
@@ -1084,25 +1147,38 @@ impl EmitterConnectorState {
         Ok(())
     }
 
+    /// Waits out the backoff before the next commit attempt, or until the emitter gives the staged
+    /// rows up at `give_up_at`, whichever comes first, keeping `acks` alive meanwhile. Answers
+    /// whether the wait ended without a shutdown.
     async fn wait_for_commit_retry(
         connector: &str,
         context: &EmitterConnectorContext,
         control: &mut EmitterPublishControl<'_>,
         acks: &EmitterAcknowledgements,
         error: &Report<EmitterRuntimeError>,
+        give_up_at: Option<PhysicalDeadline>,
     ) -> EmitterRuntimeResult<bool> {
         let reason = emitter_error_message(error);
         let wait = control.backoff.next_delay();
-        context.record_retry(reason.clone(), wait, EmitterRetryKind::Commit);
+        context.record_retry(
+            reason.clone(),
+            wait,
+            EmitterRetryKind::commit(error),
+            give_up_at,
+        );
         context.report_flush_error(connector, &reason);
         let retry_wait = async {
             context
                 .interactions
                 .record_retry(EmitterRetryCause::Commit, wait);
-            control
-                .backoff
-                .wait_with_ack_alive(&context.remote_ack_timing, control.shutdown_rx, acks)
-                .await
+            nervix_primitives::select! {
+                waited = control.backoff.wait_with_ack_alive(
+                    &context.remote_ack_timing,
+                    control.shutdown_rx,
+                    acks,
+                ) => waited,
+                () = EmitterGiveUp::until_run_out(give_up_at) => true,
+            }
         };
         await_until_emitter_stop_deadline(control.stop_rx, retry_wait)
             .await
@@ -1162,14 +1238,47 @@ impl OpenEmitterConnector {
             Err(error) => error.current_context().attempt_outcome(),
         };
         attempt.finish(outcome);
+        // A commit the destination failed starts the staged rows' give-up clock; one the node's own
+        // bounded execution refused judged nothing about the destination.
+        if let Err(error) = &committed
+            && error.current_context().is_retryable_publish_failure()
+            && error.current_context().fails_the_destination()
+        {
+            control.give_up.record_commit_failure(error);
+            if self.staged_give_up == GiveUpClock::NotStarted
+                && let Some(clock) = control.give_up.started_clock()
+            {
+                self.staged_give_up = clock;
+            }
+        }
         let committed = committed?;
-        // The commit published everything staged, so the next rows staged start a cadence of
-        // their own.
+        // The commit published everything staged, so the next rows staged start a cadence and a
+        // give-up clock of their own.
         self.commit_cadence.clear();
+        self.staged_give_up = GiveUpClock::NotStarted;
         let report = committed.map(|report| {
             PublishReport::flushed(report.messages, report.bytes, report.domain_timestamp)
         });
         Ok(report)
+    }
+
+    /// Drops what the connector staged once the emitter has retried committing it for as long as
+    /// its `GIVE UP AFTER` allows, and hands the acknowledgements the connector retained to `give_up`.
+    /// Answers whether it gave the staged rows up.
+    async fn give_up_staged_if_due(
+        &mut self,
+        give_up: &mut EmitterGiveUp,
+        buffer: &mut EmitterBatchBuffer,
+    ) -> bool {
+        if !EmitterGiveUp::has_run_out(self.staged_give_up) {
+            return false;
+        }
+        let acks = self.connector.lifecycle_mut().abandon_staged().await;
+        buffer.report_staged_messages(self.connector.lifecycle().staged_messages());
+        give_up.collect_staged(acks);
+        self.commit_cadence.clear();
+        self.staged_give_up = GiveUpClock::NotStarted;
+        true
     }
 
     /// Whether the commit of what the connector staged is due: at once when it reached its size
@@ -1307,14 +1416,15 @@ fn stalled_after_resolving<Id: Copy + Ord>(
     stalled
 }
 
-/// A connector's publish failure as this emitter's own, keeping a misconfigured emitter out of the
-/// retry loop it would never leave.
+/// A connector's publish failure as this emitter's own. A destination that refuses the write as
+/// it is configured is retried like an outage, on the same policy, and shown as misconfigured while
+/// it lasts: nothing is wrong with the rows, so none of them fails before `GIVE UP AFTER` passes.
 pub(super) fn emitter_publish_failure(
     error: Report<EmitterWriteError>,
 ) -> Report<EmitterRuntimeError> {
     match error.current_context() {
         EmitterWriteError::Misconfigured { .. } => {
-            error.change_context(EmitterRuntimeError::InvalidConnectorConfig)
+            error.change_context(EmitterRuntimeError::DestinationMisconfigured)
         }
         EmitterWriteError::NotInitialized { .. }
         | EmitterWriteError::Publish { .. }
@@ -1327,7 +1437,7 @@ pub(super) fn emitter_publish_failure(
 impl EmitterRuntimeError {
     /// The host's existing decision projected into the bounded observation label.
     fn attempt_outcome(&self) -> EmitterAttemptOutcome {
-        if let Self::InvalidConnectorConfig = self {
+        if let Self::InvalidConnectorConfig | Self::DestinationMisconfigured = self {
             return EmitterAttemptOutcome::Misconfigured;
         }
         if self.is_retryable_publish_failure()
@@ -1586,11 +1696,13 @@ mod tests {
         let mut backoff = RuntimeReconnectBackoff::default();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (_stop_tx, mut stop_rx) = watch::channel(None);
+        let mut give_up = EmitterGiveUp::new(None);
         let mut control = EmitterPublishControl {
             fault_injection: &fault_injection,
             shutdown_rx: &mut shutdown_rx,
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
+            give_up: &mut give_up,
         };
         let context = emitter_context();
         let cadence = Duration::from_millis(20);
@@ -1661,11 +1773,13 @@ mod tests {
         let mut backoff = RuntimeReconnectBackoff::default();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (_stop_tx, mut stop_rx) = watch::channel(None);
+        let mut give_up = EmitterGiveUp::new(None);
         let mut control = EmitterPublishControl {
             fault_injection: &fault_injection,
             shutdown_rx: &mut shutdown_rx,
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
+            give_up: &mut give_up,
         };
         let context = emitter_context();
         let mut connector = EmitterConnectorState::opened(Box::new(staging_emitter(
@@ -1698,11 +1812,13 @@ mod tests {
         let mut backoff = RuntimeReconnectBackoff::default();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (_stop_tx, mut stop_rx) = watch::channel(None);
+        let mut give_up = EmitterGiveUp::new(None);
         let mut control = EmitterPublishControl {
             fault_injection: &fault_injection,
             shutdown_rx: &mut shutdown_rx,
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
+            give_up: &mut give_up,
         };
         let mut context = emitter_context();
         let domain = unpaced_domain_state(context.domain.as_str());
@@ -1802,11 +1918,13 @@ mod tests {
         let mut backoff = RuntimeReconnectBackoff::default();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (_stop_tx, mut stop_rx) = watch::channel(None);
+        let mut give_up = EmitterGiveUp::new(None);
         let mut control = EmitterPublishControl {
             fault_injection: &fault_injection,
             shutdown_rx: &mut shutdown_rx,
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
+            give_up: &mut give_up,
         };
         let context = emitter_context();
         let mut connector = EmitterConnectorState::opened(Box::new(unencodable_emitter()));
@@ -1867,11 +1985,13 @@ mod tests {
         let mut backoff = RuntimeReconnectBackoff::default();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (_stop_tx, mut stop_rx) = watch::channel(None);
+        let mut give_up = EmitterGiveUp::new(None);
         let mut control = EmitterPublishControl {
             fault_injection: &fault_injection,
             shutdown_rx: &mut shutdown_rx,
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
+            give_up: &mut give_up,
         };
         let context = emitter_context();
         let mut connector = EmitterConnectorState::opened(Box::new(unencodable_emitter()));
@@ -1991,11 +2111,13 @@ mod tests {
         let mut backoff = RuntimeReconnectBackoff::default();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (_stop_tx, mut stop_rx) = watch::channel(None);
+        let mut give_up = EmitterGiveUp::new(None);
         let mut control = EmitterPublishControl {
             fault_injection: &fault_injection,
             shutdown_rx: &mut shutdown_rx,
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
+            give_up: &mut give_up,
         };
         let context = emitter_context();
         let mut connector = EmitterConnectorState::Unavailable {

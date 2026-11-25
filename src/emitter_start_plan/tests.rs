@@ -116,9 +116,12 @@ fn emitter(connector: EmitterEntity) -> CreateEmitter {
 fn iceberg_emitter() -> EmitterEntity {
     EmitterEntity::Iceberg(IcebergEmitter::Table(IcebergTableEmitter {
         mode: nervix_models::IcebergTablePublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
-                backoff: "100ms".to_string(),
-                max_backoff: "1s".to_string(),
+            retry_policy: nervix_models::EmitterRetryPolicy {
+                pacing: nervix_models::RetryPolicy {
+                    backoff: "100ms".to_string(),
+                    max_backoff: "1s".to_string(),
+                },
+                give_up_after: None,
             },
         },
         client: named("upstream"),
@@ -226,9 +229,12 @@ impl EmitterKind {
             Self::Http => EmitterCase {
                 connector: EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
                     mode: nervix_models::HttpRequestPublishingMode::Ack {
-                        retry_policy: nervix_models::RetryPolicy {
-                            backoff: "100ms".to_string(),
-                            max_backoff: "1s".to_string(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: client(),
@@ -246,9 +252,12 @@ impl EmitterKind {
             Self::Kafka => EmitterCase {
                 connector: EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter {
                     mode: nervix_models::KafkaTopicPublishingMode::NoAck {
-                        retry_policy: nervix_models::RetryPolicy {
-                            backoff: "100ms".to_string(),
-                            max_backoff: "1s".to_string(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: client(),
@@ -265,9 +274,12 @@ impl EmitterKind {
             Self::Pulsar => EmitterCase {
                 connector: EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
                     mode: nervix_models::PulsarTopicPublishingMode::NoAck {
-                        retry_policy: nervix_models::RetryPolicy {
-                            backoff: "100ms".to_string(),
-                            max_backoff: "1s".to_string(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: client(),
@@ -284,9 +296,12 @@ impl EmitterKind {
             Self::RabbitMq => EmitterCase {
                 connector: EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(RabbitMqQueueEmitter {
                     mode: nervix_models::RabbitMqQueuePublishingMode::NoAck {
-                        retry_policy: nervix_models::RetryPolicy {
-                            backoff: "100ms".to_string(),
-                            max_backoff: "1s".to_string(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: client(),
@@ -303,9 +318,12 @@ impl EmitterKind {
             Self::Redis => EmitterCase {
                 connector: EmitterEntity::Redis(RedisEmitter::PubSub(RedisPubSubEmitter {
                     mode: nervix_models::RedisPubSubPublishingMode::NoAck {
-                        retry_policy: nervix_models::RetryPolicy {
-                            backoff: "100ms".to_string(),
-                            max_backoff: "1s".to_string(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: client(),
@@ -323,9 +341,12 @@ impl EmitterKind {
             Self::Mqtt => EmitterCase {
                 connector: EmitterEntity::Mqtt(MqttEmitter::Topic(MqttTopicEmitter {
                     mode: MqttTopicPublishingMode::NoAck {
-                        retry_policy: nervix_models::RetryPolicy {
-                            backoff: "100ms".to_string(),
-                            max_backoff: "1s".to_string(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: client(),
@@ -343,9 +364,12 @@ impl EmitterKind {
             Self::Nats => EmitterCase {
                 connector: EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
                     mode: nervix_models::NatsSubjectPublishingMode::NoAck {
-                        retry_policy: nervix_models::RetryPolicy {
-                            backoff: "100ms".to_string(),
-                            max_backoff: "1s".to_string(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: client(),
@@ -362,9 +386,12 @@ impl EmitterKind {
             Self::ZeroMq => EmitterCase {
                 connector: EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
                     mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
-                        retry_policy: nervix_models::RetryPolicy {
-                            backoff: "100ms".to_string(),
-                            max_backoff: "1s".to_string(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: client(),
@@ -381,9 +408,12 @@ impl EmitterKind {
                 connector: EmitterEntity::Syslog(SyslogEmitter::Collector(
                     SyslogCollectorEmitter {
                         mode: nervix_models::SyslogCollectorPublishingMode::NoAck {
-                            retry_policy: nervix_models::RetryPolicy {
-                                backoff: "100ms".to_string(),
-                                max_backoff: "1s".to_string(),
+                            retry_policy: nervix_models::EmitterRetryPolicy {
+                                pacing: nervix_models::RetryPolicy {
+                                    backoff: "100ms".to_string(),
+                                    max_backoff: "1s".to_string(),
+                                },
+                                give_up_after: None,
                             },
                         },
                         client: client(),
@@ -400,9 +430,12 @@ impl EmitterKind {
             Self::Sqs => EmitterCase {
                 connector: EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
                     mode: nervix_models::SqsQueuePublishingMode::Ack {
-                        retry_policy: nervix_models::RetryPolicy {
-                            backoff: "100ms".to_string(),
-                            max_backoff: "1s".to_string(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: client(),
@@ -421,9 +454,12 @@ impl EmitterKind {
             Self::Sentry => EmitterCase {
                 connector: EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
                     mode: nervix_models::SentryEventPublishingMode::Ack {
-                        retry_policy: nervix_models::RetryPolicy {
-                            backoff: "100ms".to_string(),
-                            max_backoff: "1s".to_string(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: client(),
@@ -440,9 +476,12 @@ impl EmitterKind {
             Self::Otel => EmitterCase {
                 connector: EmitterEntity::from(OtelLogsEmitter {
                     mode: nervix_models::OtelLogsPublishingMode::Ack {
-                        retry_policy: nervix_models::RetryPolicy {
-                            backoff: "100ms".to_string(),
-                            max_backoff: "1s".to_string(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: client(),
@@ -465,9 +504,12 @@ impl EmitterKind {
                 connector: EmitterEntity::ClickHouse(ClickHouseEmitter::Table(
                     ClickHouseTableEmitter {
                         mode: nervix_models::ClickHouseTablePublishingMode::Ack {
-                            retry_policy: nervix_models::RetryPolicy {
-                                backoff: "100ms".to_string(),
-                                max_backoff: "1s".to_string(),
+                            retry_policy: nervix_models::EmitterRetryPolicy {
+                                pacing: nervix_models::RetryPolicy {
+                                    backoff: "100ms".to_string(),
+                                    max_backoff: "1s".to_string(),
+                                },
+                                give_up_after: None,
                             },
                         },
                         client: client(),
@@ -486,9 +528,12 @@ impl EmitterKind {
             Self::Postgres => EmitterCase {
                 connector: EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
                     mode: nervix_models::PostgresTablePublishingMode::Ack {
-                        retry_policy: nervix_models::RetryPolicy {
-                            backoff: "100ms".to_string(),
-                            max_backoff: "1s".to_string(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: client(),
@@ -508,9 +553,12 @@ impl EmitterKind {
             Self::MySql => EmitterCase {
                 connector: EmitterEntity::MySql(MySqlEmitter::Table(MySqlTableEmitter {
                     mode: nervix_models::MySqlTablePublishingMode::Ack {
-                        retry_policy: nervix_models::RetryPolicy {
-                            backoff: "100ms".to_string(),
-                            max_backoff: "1s".to_string(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: client(),
@@ -531,9 +579,12 @@ impl EmitterKind {
                 connector: EmitterEntity::MongoDb(MongoDbEmitter::Collection(
                     MongoDbCollectionEmitter {
                         mode: nervix_models::MongoDbCollectionPublishingMode::Ack {
-                            retry_policy: nervix_models::RetryPolicy {
-                                backoff: "100ms".to_string(),
-                                max_backoff: "1s".to_string(),
+                            retry_policy: nervix_models::EmitterRetryPolicy {
+                                pacing: nervix_models::RetryPolicy {
+                                    backoff: "100ms".to_string(),
+                                    max_backoff: "1s".to_string(),
+                                },
+                                give_up_after: None,
                             },
                         },
                         client: client(),
@@ -969,7 +1020,10 @@ fn decides_a_broker_confirmation_window_timeout_and_retry_policy() {
             max: nonzero!(17u64),
         },
         ack_timeout: "3s".to_string(),
-        retry_policy: retry_policy("25ms", "2s"),
+        retry_policy: nervix_models::EmitterRetryPolicy {
+            pacing: retry_policy("25ms", "2s"),
+            give_up_after: None,
+        },
     };
 
     let plan = case
@@ -1005,7 +1059,10 @@ fn decides_transport_specific_mqtt_nats_and_sqs_modes() {
     destination.mode = MqttTopicPublishingMode::Ack {
         window: AckWindow::Sequential,
         ack_timeout: "7s".to_string(),
-        retry_policy: retry_policy("10ms", "1s"),
+        retry_policy: nervix_models::EmitterRetryPolicy {
+            pacing: retry_policy("10ms", "1s"),
+            give_up_after: None,
+        },
     };
     let EmitterConnectorPlan::Mqtt(MqttEmitterPlan::Topic(mqtt)) =
         mqtt.decide().expect("valid MQTT mode").connector
@@ -1033,7 +1090,10 @@ fn decides_transport_specific_mqtt_nats_and_sqs_modes() {
                 max: nonzero!(23u64),
             },
             ack_timeout: "11s".to_string(),
-            retry_policy: retry_policy("10ms", "1s"),
+            retry_policy: nervix_models::EmitterRetryPolicy {
+                pacing: retry_policy("10ms", "1s"),
+                give_up_after: None,
+            },
         },
     }));
     let EmitterConnectorPlan::Nats(NatsEmitterPlan::Stream(stream)) =
@@ -1098,7 +1158,10 @@ fn rejects_an_unusable_retry_policy(
         panic!("expected Kafka destination");
     };
     destination.mode = nervix_models::KafkaTopicPublishingMode::NoAck {
-        retry_policy: policy,
+        retry_policy: nervix_models::EmitterRetryPolicy {
+            pacing: policy,
+            give_up_after: None,
+        },
     };
 
     let error = case
@@ -1125,13 +1188,19 @@ fn mqtt_acknowledged() -> MqttTopicPublishingMode {
             max: nonzero!(4u64),
         },
         ack_timeout: "2s".to_string(),
-        retry_policy: retry_policy("10ms", "1s"),
+        retry_policy: nervix_models::EmitterRetryPolicy {
+            pacing: retry_policy("10ms", "1s"),
+            give_up_after: None,
+        },
     }
 }
 
 fn mqtt_unacknowledged() -> MqttTopicPublishingMode {
     MqttTopicPublishingMode::NoAck {
-        retry_policy: retry_policy("10ms", "1s"),
+        retry_policy: nervix_models::EmitterRetryPolicy {
+            pacing: retry_policy("10ms", "1s"),
+            give_up_after: None,
+        },
     }
 }
 
@@ -1222,7 +1291,10 @@ fn rejects_an_unusable_ack_timeout(
     destination.mode = nervix_models::RabbitMqQueuePublishingMode::Ack {
         window: AckWindow::Sequential,
         ack_timeout: ack_timeout.to_string(),
-        retry_policy: retry_policy("25ms", "2s"),
+        retry_policy: nervix_models::EmitterRetryPolicy {
+            pacing: retry_policy("25ms", "2s"),
+            give_up_after: None,
+        },
     };
 
     let error = case

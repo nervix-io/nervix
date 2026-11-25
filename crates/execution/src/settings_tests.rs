@@ -57,11 +57,10 @@ fn cpu_classes_share_the_cpu_claim_and_keep_independent_minimum_service() {
 }
 
 #[test]
-fn explicit_cpu_and_queue_capacities_are_used_and_remaining_shares_are_derived() {
+fn explicit_cpu_capacities_are_used_and_remaining_shares_are_derived() {
     let config = resolve(
         ExecutionOverrides {
             data_cpu_workers: NonZeroUsize::new(3),
-            data_cpu_pending_jobs: NonZeroUsize::new(7),
             ..Default::default()
         },
         8,
@@ -77,9 +76,8 @@ fn explicit_cpu_and_queue_capacities_are_used_and_remaining_shares_are_derived()
         .into_iter()
         .find(|(class, _)| *class == crate::WorkerClassName::Cpu(crate::CpuClass::Data))
         .expect("the data worker class is reported");
-    assert_eq!((data.workers, data.queue_capacity), (3, 7));
-    assert_eq!(executor.snapshot().data_cpu.queue_capacity, 7);
-    assert_eq!(executor.snapshot().extension_cpu.queue_capacity, 128);
+    assert_eq!((data.workers, data.running, data.waiting), (3, 0, 0));
+    assert_eq!(executor.snapshot().extension_cpu.workers, 2);
 }
 
 #[test]
@@ -231,7 +229,6 @@ fn every_memory_fraction_and_operation_default_is_resolved_before_construction()
         largest.budgets.restore_metadata.as_u64(),
         u64::from(u32::MAX)
     );
-    assert_eq!(largest.workers.pending_jobs.data_cpu.get(), 1024);
 }
 
 #[test]
@@ -326,10 +323,10 @@ fn scalar_refusals_precede_capacity_detection() {
         ),
         (
             ExecutionOverrides {
-                bulk_cpu_pending_jobs: NonZeroUsize::new(usize::MAX),
+                bulk_cpu_workers: NonZeroUsize::new(usize::MAX),
                 ..Default::default()
             },
-            "execution-bulk-cpu-pending-jobs",
+            "execution-bulk-cpu-workers",
         ),
     ] {
         let error = overrides

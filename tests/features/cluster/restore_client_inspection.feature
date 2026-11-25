@@ -19,7 +19,7 @@ Feature: Accepted restores wait for client inspection capacity
     When restore "DOMAIN {{domain}} AS {{domain}}_copy" of backup archive "client.nvxb" is streamed to node "{{leader}}" under execution reference "{{test_id}}-inspection" in the background
     Then the restoring model batch pauses on node "{{leader}}"
     Given client inspection storage admission for domain "{{domain}}_copy" is observed
-    When filesystem workers and their queue on node "{{leader}}" are held full
+    When every filesystem worker on node "{{leader}}" is held
     And the command admission pause on node "{{leader}}" is released
     Then client inspection of domain "{{domain}}_copy" has polled its storage admission
     When the scenario releases its client inspection capacity

@@ -1,7 +1,7 @@
 Feature: Materialized capture under bulk memory contention
 
   @restore_installation @deloxide_stress_restore
-  Scenario Outline: A stopped materialized capture refuses overlapping bulk memory and succeeds after release on <cluster_size> nodes
+  Scenario Outline: A stopped materialized capture waits for bulk memory other work holds and succeeds once it frees on <cluster_size> nodes
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
@@ -51,14 +51,14 @@ Feature: Materialized capture under bulk memory contention
       STOP;
       """
     Then the current leader node is saved as placeholder "leader"
+    # The capture's bulk share is larger than the free room, so the owner waits for it while it
+    # holds nothing of the class, and the cut stays pending instead of being refused.
     When bulk memory on every node keeps only "3145728" bytes free
-    And the CLI backs up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "refused.nvxb" reporting JSON
-    Then the CLI backup failed with JSON error code "BACKUP_REFUSED"
-    And the CLI backup failure mentions "materialized snapshot memory admission was refused"
-    And within "60s" every node reserves only the bulk memory the scenario holds
+    And the CLI begins backing up "domain {{domain}} --timeout 60s" from node "{{leader}}" into "accepted.nvxb" in the background
+    Then the background CLI backup remains pending for "3s"
     When bulk memory on every node is released
-    And the CLI backs up "domain {{domain}} --timeout 60s" from node "{{leader}}" into "accepted.nvxb" reporting JSON
-    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Then the background CLI backup finishes
+    And the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     Given the restore coordinator uses remote placement in a multi-node cluster
     When the CLI restores "domain {{domain}} --as {{domain}}_copy --resume" from "accepted.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore succeeded, restoring domain "{{domain}}_copy" with 0 resource versions and 11 models

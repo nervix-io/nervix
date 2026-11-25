@@ -96,9 +96,8 @@ impl ClusterSigner {
         // refusing it.
         self.inner
             .executor
-            .run_cpu_with(
+            .run_cpu(
                 CpuClass::Control,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_reservation, cancellation| -> Result<String, Report<ClusterIdentityError>> {
                     cancellation
@@ -164,17 +163,17 @@ impl Proposer {
         };
         let executor = self.inner.store.inner.executor.clone();
         let reservation = executor
-            .try_reserve(
+            .reserve(
                 MemoryClass::Management,
                 executor.limits().management_event_bytes.as_u64(),
             )
+            .await
             .change_context(ClusterIdentityError::Admission)
             .change_context(ConsensusError::ClusterIdentity)?;
         let signer_executor = executor.clone();
         let signer = executor
-            .run_cpu_with(
+            .run_cpu(
                 CpuClass::Control,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_reservation,
                       cancellation|

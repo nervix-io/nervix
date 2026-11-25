@@ -21,6 +21,7 @@
 )]
 
 use error_stack::ResultExt as _;
+use nervix_connector::physical_time::PhysicalDeadline;
 
 use super::*;
 
@@ -38,18 +39,43 @@ pub(super) enum EmitterReconfigureError {
     ResponseDropped,
 }
 
-/// What an emitter is retrying: the publish path itself, or the commit that publishes what its
-/// emitter staged.
+/// What an emitter is retrying: the publish path itself, the commit that publishes what its
+/// emitter staged, or writes its destination refuses as it is configured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EmitterRetryKind {
     Infrastructure,
     Commit,
+    /// The destination refuses the writes as it is configured; an operator's repair ends it.
+    Misconfigured,
+}
+
+impl EmitterRetryKind {
+    /// The kind of retry a failed publish attempt waits on.
+    pub(super) fn publish(error: &Report<EmitterRuntimeError>) -> Self {
+        if error.current_context().is_misconfiguration() {
+            Self::Misconfigured
+        } else {
+            Self::Infrastructure
+        }
+    }
+
+    /// The kind of retry a failed commit of staged rows waits on.
+    pub(super) fn commit(error: &Report<EmitterRuntimeError>) -> Self {
+        if error.current_context().is_misconfiguration() {
+            Self::Misconfigured
+        } else {
+            Self::Commit
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct EmitterRetryStatus {
     pub(super) kind: EmitterRetryKind,
     pub(super) reconnect: RuntimeReconnectStatus,
+    /// When the emitter gives up the oldest unit it is retrying, absent while no unit's
+    /// `GIVE UP AFTER` clock runs.
+    pub(super) give_up_at: Option<PhysicalDeadline>,
 }
 
 pub(super) struct EmitterConfirmationWaitGuard {
@@ -485,6 +511,7 @@ impl Runtime {
                     backoff,
                     retry_at: Instant::now() + backoff,
                 },
+                give_up_at: None,
             }),
         );
     }
@@ -676,9 +703,12 @@ mod tests {
             connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
                 ZeroMqPushEmitter {
                     mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
-                        retry_policy: RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("emitter"),

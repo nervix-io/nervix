@@ -2772,12 +2772,32 @@ impl SignalingProtocolOnConnect {
     }
 }
 
+/// The `BACKOFF <duration> MAX <duration>` pacing of a `RETRY POLICY`: the first wait between
+/// attempts and the longest one it grows to. An ingestor's policy is this pacing alone; an emitter's
+/// adds how long it keeps retrying, as [`EmitterRetryPolicy`].
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct RetryPolicy {
     pub backoff: String,
     pub max_backoff: String,
+}
+
+/// An emitter's `RETRY POLICY`: how it paces the retries of work its destination did not take, and
+/// whether it ever stops retrying one unit of that work.
+///
+/// Without `GIVE UP AFTER` the emitter retries a unit until its destination takes it. With it, the
+/// emitter stops retrying a unit once that much time has passed since the unit's first failed
+/// attempt, and the rows the unit still holds fail with an `unavailable` error. `GIVE UP AFTER 0s`
+/// never retries.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct EmitterRetryPolicy {
+    /// The `BACKOFF … MAX …` pacing every retry policy shares.
+    pub pacing: RetryPolicy,
+    /// The `GIVE UP AFTER` duration, absent when the emitter retries without a limit.
+    pub give_up_after: Option<String>,
 }
 
 /// How many acknowledgements an acknowledging mode keeps outstanding at once: one for

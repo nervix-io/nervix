@@ -46,10 +46,10 @@ use nervix_models::{
     AckWindow, Assignment, AssignmentTarget, ClickHouseEmitter, ClickHouseTableEmitter,
     ClickHouseValueMapping, ClientConfigEntry, ClientConsumerEmitter, ClientEmitter, ClientName,
     ClientPoolBounds, ClientResourceMount, CreateEmitter, EmitterBatchPolicy,
-    EmitterDeclaration as _, EmitterEntity, Expression, FieldName, HttpEmitter, HttpOrigin,
-    HttpRequestEmitter, IcebergCatalog, IcebergEmitter, IcebergStorageBackend, IcebergTableEmitter,
-    KafkaEmitter, KafkaTopicEmitter, Literal, Model, MongoDbCollectionEmitter, MongoDbEmitter,
-    MqttEmitter, MqttQos, MqttTopicEmitter, MqttTopicPublishingMode, MySqlEmitter,
+    EmitterDeclaration as _, EmitterEntity, EmitterRetryPolicy, Expression, FieldName, HttpEmitter,
+    HttpOrigin, HttpRequestEmitter, IcebergCatalog, IcebergEmitter, IcebergStorageBackend,
+    IcebergTableEmitter, KafkaEmitter, KafkaTopicEmitter, Literal, Model, MongoDbCollectionEmitter,
+    MongoDbEmitter, MqttEmitter, MqttQos, MqttTopicEmitter, MqttTopicPublishingMode, MySqlEmitter,
     MySqlTableEmitter, NatsEmitter, NatsStreamEmitter, NatsSubjectEmitter, OtelEmitter,
     OtelMappings, OtelMetricsEmitter, PostgresEmitter, PostgresTableEmitter, PulsarEmitter,
     PulsarTopicEmitter, RabbitMqEmitter, RabbitMqExchangeEmitter, RabbitMqQueueEmitter,
@@ -70,6 +70,8 @@ pub(super) enum EmitterDurationSetting {
     RetryBackoff,
     #[strum(serialize = "retry max backoff")]
     RetryMaxBackoff,
+    #[strum(serialize = "give up after")]
+    GiveUpAfter,
     #[strum(serialize = "ack timeout")]
     AckTimeout,
 }
@@ -842,6 +844,9 @@ pub(super) struct EmitterStartPlan<Config = ResolvedClientConfig> {
     pub(super) label: String,
     /// The backoff the emitter waits between publish retries and emitter reconnects.
     pub(super) retry_policy: ParsedRetryPolicy,
+    /// How long after a unit's first failed attempt the emitter gives up on it, absent when its
+    /// `RETRY POLICY` declares no `GIVE UP AFTER` and the emitter retries without a limit.
+    pub(super) give_up_after: Option<Duration>,
     pub(super) connector: EmitterConnectorPlan<Config>,
 }
 
@@ -862,7 +867,8 @@ impl EmitterStartPlan<DeclaredClientConfig> {
     ) -> Result<Self, Report<EmitterStartPlanError>> {
         let connector = emitter.connector.as_ref();
         let policy = connector.publishing();
-        let retry_policy = Self::decide_retry_policy(policy.retry_policy())?;
+        let retry_policy = Self::decide_retry_policy(&policy.retry_policy().pacing)?;
+        let give_up_after = Self::decide_give_up_after(policy.retry_policy())?;
         if let EmitterEntity::Client(ClientEmitter::Consumer(ClientConsumerEmitter {
             schema,
             mode,
@@ -887,6 +893,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     .keyword()
                     .to_ascii_lowercase(),
                 retry_policy,
+                give_up_after,
                 connector: EmitterConnectorPlan::Client(ClientEmitterPlan::Consumer(
                     ClientConsumerEmitterPlan {
                         schema: schema.clone(),
@@ -1350,6 +1357,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 .keyword()
                 .to_ascii_lowercase(),
             retry_policy,
+            give_up_after,
             connector: emitter_plan,
         })
     }
@@ -1370,6 +1378,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
         Ok(EmitterStartPlan {
             label: self.label,
             retry_policy: self.retry_policy,
+            give_up_after: self.give_up_after,
             connector,
         })
     }
@@ -1392,6 +1401,18 @@ impl EmitterStartPlan<DeclaredClientConfig> {
             backoff,
             max_backoff,
         })
+    }
+
+    /// How long after a unit's first failed attempt an emitter's `GIVE UP AFTER` gives up on it.
+    /// `0s` is a limit too: the emitter never retries.
+    fn decide_give_up_after(
+        policy: &EmitterRetryPolicy,
+    ) -> Result<Option<Duration>, Report<EmitterStartPlanError>> {
+        let Some(give_up_after) = &policy.give_up_after else {
+            return Ok(None);
+        };
+        let limit = EmitterDurationSetting::GiveUpAfter.parse(give_up_after)?;
+        Ok(Some(limit))
     }
 
     /// The origin an HTTP emitter's client sends every request to: its `endpoint`, which the

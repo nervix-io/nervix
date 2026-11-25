@@ -298,27 +298,15 @@ async fn surviving_authority_reconciles_a_dead_coordinators_preparation() {
     let schedule = ClusterSchedule::from_iter([fixture.base_schedule.clone()]);
     let revision_plan = PlannedClusterRevision::between(None, &schedule)
         .assured("the handoff fixture has a complete cluster revision");
-    let incarnations = BTreeMap::from([
-        (fixture.source.clone(), source_incarnation),
-        (fixture.destination.clone(), destination_incarnation),
-    ]);
     assert_eq!(
         runtime
-            .reconcile_prepared_ownership_handoffs(
-                &surviving_authority,
-                &revision_plan,
-                &incarnations,
-            )
+            .reconcile_prepared_ownership_handoffs(&surviving_authority, &revision_plan)
             .expect("the surviving authority should reconcile the abandoned operation"),
         1
     );
     assert_eq!(
         runtime
-            .reconcile_prepared_ownership_handoffs(
-                &surviving_authority,
-                &revision_plan,
-                &incarnations,
-            )
+            .reconcile_prepared_ownership_handoffs(&surviving_authority, &revision_plan)
             .expect("duplicate reconciliation should be idempotent"),
         0
     );
@@ -387,24 +375,17 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
         .expect("restarted runtime should restore persisted state");
     let restarted_destination_incarnation =
         attach_loopback_cluster(&runtime, &fixture.destination).await;
+    assert_ne!(
+        restarted_destination_incarnation,
+        prepared_destination_incarnation
+    );
     let committed_schedule = ClusterSchedule::from_iter([fixture.target_schedule.clone()]);
     let committed_revision = PlannedClusterRevision::between(None, &committed_schedule)
         .assured("the committed handoff fixture has a complete cluster revision");
-    let incarnations = BTreeMap::from([
-        (fixture.source.clone(), source_incarnation),
-        (
-            fixture.destination.clone(),
-            restarted_destination_incarnation,
-        ),
-    ]);
     let surviving_authority = CoordinationIdentity::new(named("coordinator-b"), 12, 1);
     assert_eq!(
         runtime
-            .reconcile_prepared_ownership_handoffs(
-                &surviving_authority,
-                &committed_revision,
-                &incarnations,
-            )
+            .reconcile_prepared_ownership_handoffs(&surviving_authority, &committed_revision)
             .expect("committed preparation should survive reconciliation"),
         0
     );
@@ -446,11 +427,7 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
         .expect("duplicate activation should be idempotent");
     assert_eq!(
         runtime
-            .reconcile_prepared_ownership_handoffs(
-                &surviving_authority,
-                &committed_revision,
-                &incarnations,
-            )
+            .reconcile_prepared_ownership_handoffs(&surviving_authority, &committed_revision)
             .expect("reconciliation reordered after activation should be idempotent"),
         0
     );
@@ -483,6 +460,9 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
 
 #[path = "handoff_activation_tests.rs"]
 mod handoff_activation_tests;
+
+#[path = "handoff_reconciliation_tests.rs"]
+mod handoff_reconciliation_tests;
 
 #[nervix_primitives::test]
 async fn stopped_wasm_ownership_recovery_preserves_the_complete_checkpoint_inventory() {
@@ -1699,26 +1679,14 @@ async fn a_recreated_window_branch_refuses_the_previous_lifetime_checkpoint() {
         .expect("the first lifetime should publish");
 
     let resumed = state
-        .restore_state(
-            &plan,
-            &input_schema,
-            7,
-            &Executor::default(),
-            nervix_execution::QueueAdmission::RefuseWhenFull,
-        )
+        .restore_state(&plan, &input_schema, 7, &Executor::default())
         .await
         .expect("the matching lifetime should restore");
     assert_eq!(resumed.incarnation, 7);
     assert!(!state.generations.is_live_dirty());
 
     let recreated = state
-        .restore_state(
-            &plan,
-            &input_schema,
-            8,
-            &Executor::default(),
-            nervix_execution::QueueAdmission::RefuseWhenFull,
-        )
+        .restore_state(&plan, &input_schema, 8, &Executor::default())
         .await
         .expect("a new lifetime should start empty");
     assert_eq!(recreated.incarnation, 8);

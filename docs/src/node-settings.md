@@ -153,8 +153,12 @@ admission.
 
 HTTP endpoint bodies use the independent `intake` executor memory class. It accounts the
 transport read buffers a request holds conservatively, and its body buffer exactly, including both
-allocations while a body moves to a larger buffer. Input contention refuses immediately with 503;
-it never holds relay decode capacity while waiting for relay work.
+allocations while a body moves to a larger buffer. Input contention holds a request back rather
+than refusing it: the request's read scratch, with the whole copy of a body whose length it
+declared, is charged up front, a read into an allocation the charge does not cover yet waits for
+room before it reads, and the growth of an undeclared body waits the same way, each within the
+body's deadline. A request that waits gives up its place when it ends. Waiting never holds relay
+decode capacity.
 
 A body that arrives in a single data frame keeps the shared byte buffer it was read into, with no
 copy. From the second data frame on, the endpoint copies each frame into one body buffer as it
@@ -173,12 +177,13 @@ The endpoint's public input outcomes are:
 | 413 | `http_body_capacity` | The declared length or accumulated chunked payload exceeds the cap |
 | 408 | `http_body_timeout` | The complete body did not arrive by its deadline |
 | 431 | HTTP header capacity | Hyper refuses an oversized request head and closes the connection |
-| 503 | `http_input_memory_capacity` | The intake pool cannot back retained input |
-| 503 | `http_input_worker_capacity` | Moving a body larger than one read buffer cannot be admitted on a data worker, expires or finishes cancelled |
+| 503 | `http_input_memory_capacity` | The intake pool cannot back retained input before the body's deadline passes while the request waits for room, the input could never fit in the whole pool beside what its request already holds, or the node stops |
+| 503 | `http_input_worker_capacity` | Moving a body larger than one read buffer waits for a data worker until the body's deadline passes, expires on it or finishes cancelled, or the node stops |
 | 400 | `http_body_invalid` | Malformed or interrupted HTTP body framing, including oversized chunked trailers |
 
 The HTTP input completion budget distinguishes phases: expiry while receiving bytes returns 408;
-expiry while the server waits for or performs a body move on a data worker returns 503. The move
+expiry while the server waits for input memory, or waits for or performs a body move on a data
+worker, returns 503. The move
 retains its reservation until the worker actually exits after cancellation.
 
 Input refusals admit no payload to the graph. Hyper completes the response and closes its write
@@ -264,10 +269,8 @@ without adding a prerequisite or changing graph acceptance.
 
 | Server option | Default | Meaning |
 | --- | --- | --- |
-| `--interconnect-max-peers` | 64 | Other node identities this transport can retain |
 | `--interconnect-concurrent-handshakes` | 32 | Concurrent transport handshakes |
 | `--interconnect-incoming-queue-capacity` | 1,024 | General request and relay admission capacity |
-| `--interconnect-request-quota` | Derived | Independent ordinary and append reserves: two requests per declared peer, bounded by the incoming queue |
 | `--interconnect-stream-receive-window` | 64 KiB | Advertised HTTP/2 receive credit per non-bulk stream |
 | `--interconnect-connection-receive-window` | 256 KiB | Advertised HTTP/2 receive credit per non-bulk connection, at least 65,535 bytes |
 | `--interconnect-connection-setup-timeout` | 5s | One DNS, TCP, TLS and binding budget |
@@ -282,6 +285,7 @@ without adding a prerequisite or changing graph acceptance.
 | `--dns-hook-lookup-budget` | 30s | Lookup budget for client libraries without an operation deadline |
 | `--dns-address-family-policy` | `dual-stack` | DNS queries: `dual-stack`, `ipv4` or `ipv6` |
 | `--dns-trust-negative-answers` | `true` | Trust a name server's negative response without asking the next server |
+| `--dns-concurrent-lookups` | 64 | DNS lookups in flight at once; a lookup waits for a slot within its caller's budget |
 | `--database-cache-bytes` | 32 MiB | Node database cache |
 | `--database-journal-bytes` | 512 MiB | Node database journal capacity, at least 64 MiB |
 | `--database-workers` | Derived | Available CPU count capped at four; one when unknown |
@@ -314,16 +318,23 @@ memtable cap, and Nervix does not limit the databases at runtime. Memtable memor
 outside the startup memory check; [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start)
 describes the headroom it needs.
 
-Connection capacity derives from both directions of every pool: twelve connections per declared
-peer, 768 by default. Health-probe fan-out and DNS lookup concurrency each equal
-`interconnect-max-peers`. Completion reserves are at least one and otherwise one per sixteen peers,
-bounded by the incoming queue.
+A node keeps every peer it is given. Every member must reach every other member for consensus,
+health and relay delivery, so a node keeps a dial target, its connections and a relay owner for
+every peer, however many there are; the operator decides the cluster's size, which licensing never
+limits. Connections follow the peers: each peer gets the fixed
+[pool layout](interconnect.md#listener-and-peer-topology) of six connections in each direction, the five
+preconnected connections and the on-demand bulk connection, and at most
+`interconnect-concurrent-handshakes` connections are in setup at once. One health round probes
+every peer together.
 
-With the default 64 peers, the ordinary and append request reserves are 128 each and health-probe
-fan-out is 64. An append stream retains its admission throughout its lifetime, so the derived
-reserve holds an append stream and its replacement for every declared peer. Each traffic reserve is
-independent; a full general queue cannot consume health or cancellation capacity. An explicit lower
-request quota is reported as configured, and a refusal is a typed capacity outcome.
+Requests follow the peers the same way. A request waits for a stream slot of its kind on its peer's
+connection until its own deadline, and its bytes are charged to its traffic class's memory as their
+size becomes known. The [stream slot layout](interconnect.md#traffic-and-resource-isolation) is
+fixed per connection, so a node's request capacity grows with every peer it has, without a
+derivation. An append stream keeps its slot for its whole lifetime, and the replication connection
+reserves a second slot for its replacement. Health checks, cancellations and terminal outcomes have
+slots of their own, so ordinary traffic cannot take their streams. Requests without a reserved kind
+also share `interconnect-incoming-queue-capacity`, and a refusal there is a typed capacity outcome.
 
 Typed RPCs derive their deadlines from the request budget: control one tenth, coordination one
 fifth, setup one half, ordinary requests one, snapshot operations three, checkpoint transfers six,
@@ -1102,11 +1113,12 @@ CPU admission total is at most the larger of CPU count and five. These are admis
 they do not promise an idle physical core. A stuck extension cannot take a data or control place.
 Consensus storage defaults to one worker; filesystem and connector storage each default to two.
 
-For each class, `--execution-<class>-workers` and `--execution-<class>-pending-jobs` override its
-workers and queue. Class names are `control-cpu`, `credentials-cpu`, `data-cpu`, `extension-cpu`,
-`bulk-cpu`, `consensus-storage`, `filesystem-storage`, and `connector-storage`. A queue defaults
-to 64 pending jobs per worker, capped at 1,024 per class. Counts must be positive and representable
-by the admission primitive; explicit CPU over-allocation is refused.
+For each class, `--execution-<class>-workers` overrides its workers. Class names are
+`control-cpu`, `credentials-cpu`, `data-cpu`, `extension-cpu`, `bulk-cpu`, `consensus-storage`,
+`filesystem-storage`, and `connector-storage`. A class's workers are all its admission: a job that
+finds every worker busy waits for one in the order it asked, and no setting bounds how many jobs
+wait. Counts must be positive and representable by the admission primitive; explicit CPU
+over-allocation is refused.
 
 Each pool has `--execution-<pool>-memory-bytes`. With known memory, defaults are:
 
@@ -1341,8 +1353,8 @@ describes, defaults included.
 | `--raft-snapshot-entry-threshold`, `--raft-snapshot-byte-threshold`, `--raft-covered-log-entries-retained`, `--raft-covered-log-bytes-retained`, `--raft-retained-log-cap` | node capability | Raft retention |
 | `--raft-append-batch-entries` and the other [consensus capacities](#consensus-capacities) | node capability | consensus operations |
 | `--database-cache-bytes`, `--database-journal-bytes`, `--database-workers`, `--raft-database-cache-bytes`, `--raft-database-journal-bytes`, `--raft-database-workers` | node capability | node and consensus databases |
-| `--dns-cache-entries`, `--dns-positive-max-ttl`, `--dns-negative-max-ttl`, `--dns-hook-lookup-budget`, `--dns-address-family-policy`, `--dns-trust-negative-answers` | node capability | name resolution |
-| `--interconnect-max-peers` and the other [transport capacities](#transport-resolver-and-database-capacities) | node capability | interconnect transport |
+| `--dns-cache-entries`, `--dns-positive-max-ttl`, `--dns-negative-max-ttl`, `--dns-hook-lookup-budget`, `--dns-address-family-policy`, `--dns-trust-negative-answers`, `--dns-concurrent-lookups` | node capability | name resolution |
+| `--interconnect-concurrent-handshakes` and the other [transport capacities](#transport-resolver-and-database-capacities) | node capability | interconnect transport |
 | `--interconnect-relay-batch-bytes`, `--interconnect-relay-decoded-bytes`, `--interconnect-bulk-chunk-bytes`, `--interconnect-bulk-receive-window` | node capability | peer receive bounds |
 | `--listener-*`, `--http-body-bytes`, `--http-body-copy-bytes`, `--http-body-timeout`, `--http-refusal-drain-timeout`, `--websocket-message-bytes`, `--websocket-frame-bytes`, `--grpc-header-bytes`, `--grpc-concurrency`, `--grpc-request-timeout`, `--grpc-max-streams`, `--grpc-keepalive-interval`, `--grpc-keepalive-timeout` | node capability | [listener bounds](#listener-bounds) |
 | `--vm-*`, `--wasm-stack-bytes`, `--wasm-memory-reservation-bytes`, `--udf-watchdog`, `--connector-retry-multiplier`, `--connector-retry-jitter-percent`, `--kafka-domain-assignment-retry`, `--partition-topology-poll-interval`, `--syslog-intake-queue-capacity`, `--syslog-read-chunk-bytes`, `--mqtt-read-ahead-headroom` | node capability | [engine and connector host](#engine-and-connector-host-capabilities) |
@@ -1431,6 +1443,11 @@ after it: a memory that fits in the reservation takes the reservation and two gu
 has to move to grow takes its current size, the growth reserve and two guards. Stack, address
 reservation, guard and growth reserve do not replace a processor's declared `MAX FUEL`,
 `MAX MEMORY` or `MAX TABLE ELEMENTS`.
+
+The WebAssembly proposals a guest may use are a fixed part of the guest contract, never a setting:
+every node enables exactly the set [WASM Processor Guests](wasm-processor-guests.md#webassembly-features)
+lists, and keeps relaxed SIMD at the node's native results, whatever its Wasmtime version enables by
+default.
 
 `--udf-watchdog` is checked when a Roto UDF call returns: a call that took longer fails its whole
 batch, and each node judges the calls it runs by its own value. It cannot interrupt native code

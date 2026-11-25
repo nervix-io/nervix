@@ -1,6 +1,7 @@
 //! Recovery and publication checks through the Raft storage traits.
 
 mod cluster_identity_tests;
+mod keyspace_name_tests;
 mod licensing_tests;
 mod log_read_charge_tests;
 mod management_working_set_tests;
@@ -1052,7 +1053,7 @@ async fn a_queued_vote_runs_after_a_ready_append_batch() -> TestResult {
         log.save_vote(&VoteOf::new(4, Harness::node())).await
     });
     nervix_primitives::time::timeout(Duration::from_secs(10), async {
-        while harness.executor.snapshot().consensus_storage.pending == 0 {
+        while harness.executor.snapshot().consensus_storage.waiting == 0 {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
         }
@@ -1174,8 +1175,9 @@ async fn exhausted_log_chunks_leave_room_for_another_reader_and_source_control()
 #[test]
 fn the_store_has_as_many_commands_turns_as_leave_room_beside_its_working_sets()
 -> Result<(), Box<dyn std::error::Error>> {
-    // Command state working sets are 16 MiB with the default operation limits.
-    for (commands, turns) in [(16, 1), (24, 1), (32, 1), (48, 2)] {
+    // Command state working sets are 16 MiB with the default operation limits, and the smallest
+    // budget a node starts with holds one beside a follower's 8 MiB resident window.
+    for (commands, turns) in [(24, 1), (32, 1), (48, 2)] {
         let executor = Executor::new(ExecutionConfig {
             budgets: MemoryBudgets {
                 commands: ByteUnit::Mebibyte(commands),
@@ -1193,15 +1195,15 @@ fn the_store_has_as_many_commands_turns_as_leave_room_beside_its_working_sets()
     Ok(())
 }
 
-/// The consensus storage worker and every place in its wait queue held by jobs that have not run
-/// yet. Releasing the fill lets the holding job end, so the queue drains in order.
+/// The consensus storage worker held by a job, with another job waiting behind it. Releasing the
+/// fill lets the holding job end, so the waiting jobs run in the order they asked.
 struct FilledConsensusStorage {
     release: nervix_primitives::sync::blocking::mpsc::Sender<()>,
 }
 
 impl FilledConsensusStorage {
-    /// Fills an executor whose consensus class has one worker and one waiting place: one job holds
-    /// the worker until the fill is released, and a second waits behind it.
+    /// Fills an executor whose consensus class has one worker: one job holds the worker until the
+    /// fill is released, and a second waits behind it.
     async fn fill(executor: &Executor) -> Self {
         let (release, held) = nervix_primitives::sync::blocking::mpsc::channel::<()>();
         let (started, is_started) = nervix_primitives::sync::oneshot::channel();
@@ -1237,13 +1239,13 @@ impl FilledConsensusStorage {
             assert!(run.as_mut().now_or_never().is_none());
             queued
                 .send(())
-                .assured("the fixture waits for its occupied queue place");
+                .assured("the fixture waits for its job behind the occupied worker");
             run.await
                 .assured("the waiting job runs once the holder leaves");
         });
         is_queued
             .await
-            .assured("the fixture's only waiting place is occupied");
+            .assured("a fixture job waits behind the occupied worker");
         Self { release }
     }
 
@@ -1252,18 +1254,13 @@ impl FilledConsensusStorage {
     }
 }
 
-/// A full consensus storage queue is a temporary condition: a log append waits for a place rather
-/// than being refused, so it never marks the store failed, and the store appends again once the
-/// worker frees.
+/// A busy consensus storage worker is a temporary condition: a log append waits for it rather than
+/// being refused, so it never marks the store failed, and the store appends again once the worker
+/// frees.
 #[nervix_primitives::test]
-async fn a_full_consensus_storage_queue_holds_an_append_back_instead_of_failing_the_store()
+async fn a_busy_consensus_storage_worker_holds_an_append_back_instead_of_failing_the_store()
 -> TestResult {
-    let mut workers = ExecutionConfig::default().workers;
-    workers.pending_jobs.consensus_storage = std::num::NonZeroUsize::MIN;
-    let executor = Executor::new(ExecutionConfig {
-        workers,
-        ..ExecutionConfig::default()
-    })?;
+    let executor = Executor::new(ExecutionConfig::default())?;
     let mut harness = Harness::with_executor(executor.clone()).await?;
     let filled = FilledConsensusStorage::fill(&executor).await;
 
@@ -1271,7 +1268,7 @@ async fn a_full_consensus_storage_queue_holds_an_append_back_instead_of_failing_
         let mut append = std::pin::pin!(harness.append(1));
         assert!(
             append.as_mut().now_or_never().is_none(),
-            "the append waits for a place in the full consensus queue"
+            "the append waits for the busy consensus worker"
         );
         filled.release();
         nervix_primitives::time::timeout(Duration::from_secs(10), append)
@@ -1541,7 +1538,7 @@ async fn idle_wait_joins_a_blocking_job_abandoned_by_its_async_caller() -> TestR
     let store = harness.store.clone();
     let idle = nervix_primitives::task::spawn(async move { store.wait_for_idle().await });
     nervix_primitives::time::timeout(Duration::from_secs(10), async {
-        while harness.executor.snapshot().consensus_storage.pending == 0 {
+        while harness.executor.snapshot().consensus_storage.waiting == 0 {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
         }
@@ -1924,7 +1921,7 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
             .await
     });
     nervix_primitives::time::timeout(Duration::from_secs(10), async {
-        while executor.snapshot().consensus_storage.pending < 1 {
+        while executor.snapshot().consensus_storage.waiting < 1 {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
         }
@@ -1952,7 +1949,7 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
             .await
     });
     nervix_primitives::time::timeout(Duration::from_secs(10), async {
-        while executor.snapshot().consensus_storage.pending < 1 {
+        while executor.snapshot().consensus_storage.waiting < 1 {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
         }

@@ -100,6 +100,47 @@ fn cargo_build_profiles_are_separate_from_collected_runtime_profiles() {
 }
 
 #[test]
+fn every_cargo_command_selects_the_stable_trait_solver_after_the_callers_flags() {
+    let mut fixture = Harness::new();
+    prepare(&mut fixture);
+    let unset = capture(&fixture);
+    assert_eq!(unset.environment["RUSTFLAGS"], "-Znext-solver=coherence");
+    fixture.set("RUSTFLAGS", "--cfg tokio_unstable");
+    let inherited = capture(&fixture);
+    assert_eq!(
+        inherited.environment["RUSTFLAGS"],
+        "--cfg tokio_unstable -Znext-solver=coherence"
+    );
+    assert_ne!(inherited.identity, unset.identity);
+    // Cargo reads the encoded flags alone when they are set, so the selection joins them there.
+    fixture.set("CARGO_ENCODED_RUSTFLAGS", "-C\u{1f}debuginfo=1");
+    let encoded = capture(&fixture);
+    assert_eq!(
+        encoded.environment["CARGO_ENCODED_RUSTFLAGS"],
+        "-C\u{1f}debuginfo=1\u{1f}-Znext-solver=coherence"
+    );
+    assert_eq!(encoded.environment["RUSTFLAGS"], "--cfg tokio_unstable");
+    fixture.set("CARGO_ENCODED_RUSTFLAGS", "");
+    assert_eq!(
+        capture(&fixture).environment["CARGO_ENCODED_RUSTFLAGS"],
+        "-Znext-solver=coherence"
+    );
+    // The analysis hands them to Cargo, which compiles the dependencies no driver reaches.
+    fixture.runner.environment = inherited.environment;
+    fixture.runner.inputs = inherited.inputs;
+    fixture
+        .runner
+        .analyze_one(&fixture.configuration, false)
+        .assured("the process fixture completes its analysis");
+    let environment: serde_json::Value = io::read(&fixture.path("ordinary.environment.json"))
+        .assured("the Cargo child captured its environment");
+    assert_eq!(
+        environment["RUSTFLAGS"],
+        "--cfg tokio_unstable -Znext-solver=coherence"
+    );
+}
+
+#[test]
 fn every_authored_input_extension_driver_compiler_and_binary_digest_invalidates() {
     let mut fixture = Harness::new();
     prepare(&mut fixture);

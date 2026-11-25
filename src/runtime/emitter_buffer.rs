@@ -17,7 +17,7 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector::RecordEnvelope;
+use nervix_connector::{RecordEnvelope, physical_time::PhysicalDeadline};
 
 use super::{emitter_task::branch_retention::EmitterBranchRetirements, *};
 use crate::metrics::{EmitterWork, EmitterWorkKind};
@@ -92,6 +92,36 @@ pub(super) struct EmitterPublishBatch {
     http_requests: Option<AdmittedHttpRequests>,
     /// Where every row stands in its publication.
     rows: Vec<BufferedRow>,
+    /// When the emitter's `GIVE UP AFTER` stops retrying this batch.
+    give_up: GiveUpClock,
+}
+
+/// When an emitter stops retrying a buffered batch: its `GIVE UP AFTER` measured from the first
+/// failed attempt that held the batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GiveUpClock {
+    /// No attempt that held the batch has failed since the emitter received it, or the emitter
+    /// declares no `GIVE UP AFTER`.
+    NotStarted,
+    /// The emitter gives up on the batch once this physical deadline is reached.
+    Until(PhysicalDeadline),
+    /// The limit ends beyond every instant the monotonic clock can report, so the emitter retries
+    /// the batch until its destination takes it, as it would without a limit.
+    Unreachable,
+    /// The destination's own delivery owner, which retries a payload by itself, measured the
+    /// limit from the payload's first failed attempt and gave the payload up, so the emitter gives
+    /// up every batch the payload carries.
+    RanOut,
+}
+
+impl GiveUpClock {
+    /// The deadline this clock gives up at, while it has one.
+    pub(super) fn deadline(self) -> Option<PhysicalDeadline> {
+        match self {
+            Self::Until(deadline) => Some(deadline),
+            Self::NotStarted | Self::Unreachable | Self::RanOut => None,
+        }
+    }
 }
 
 /// Where one buffered row stands between the emitter receiving it and the emitter owning nothing
@@ -151,6 +181,7 @@ impl EmitterPublishBatch {
             envelopes: None,
             http_requests: None,
             rows: vec![BufferedRow::Pending; row_count],
+            give_up: GiveUpClock::NotStarted,
         }
     }
 
@@ -178,6 +209,7 @@ impl EmitterPublishBatch {
             envelopes: None,
             http_requests: None,
             rows: vec![BufferedRow::Pending; row_count],
+            give_up: GiveUpClock::NotStarted,
         })
     }
 
@@ -532,6 +564,31 @@ impl EmitterPublishBatch {
 
     fn domain_timestamp(&self) -> Option<Timestamp> {
         self.batch.domain_timestamp()
+    }
+
+    /// Starts this batch's give-up clock as `clock`, unless an earlier failed attempt already
+    /// started it: the emitter gives up measuring from the first failed attempt that held the
+    /// batch.
+    fn start_give_up_clock(&mut self, clock: GiveUpClock) {
+        if self.give_up == GiveUpClock::NotStarted {
+            self.give_up = clock;
+        }
+    }
+
+    /// Whether the emitter has retried this batch for as long as its `GIVE UP AFTER` allows, at the
+    /// instant `now` marks.
+    fn has_given_up(&self, now: PhysicalDeadline) -> bool {
+        match self.give_up {
+            GiveUpClock::Until(deadline) => deadline <= now,
+            GiveUpClock::RanOut => true,
+            GiveUpClock::NotStarted | GiveUpClock::Unreachable => false,
+        }
+    }
+
+    /// Gives this batch up at once, because the destination's own delivery owner gave up a payload
+    /// that carries one of its rows after measuring the limit itself.
+    pub(super) fn give_up_now(&mut self) {
+        self.give_up = GiveUpClock::RanOut;
     }
 
     pub(super) fn merged_acks(&self) -> AckSet {
@@ -1104,6 +1161,111 @@ impl EmitterBatchBuffer {
         if let Some(work) = observations {
             work.set(EmitterWorkKind::Buffered, *pending_messages);
         }
+    }
+
+    /// Starts the give-up clock of every held batch whose clock has not started yet as `clock`,
+    /// because an attempt that held them just failed. The clock of a batch an earlier failed
+    /// attempt already held keeps counting from that first failure.
+    pub(super) fn start_give_up_clocks(&mut self, clock: GiveUpClock) {
+        for batch in &mut self.pending {
+            batch.start_give_up_clock(clock);
+        }
+    }
+
+    /// The earliest physical deadline at which this buffer gives a held batch up, absent while no
+    /// held batch has a give-up clock running.
+    pub(super) fn next_give_up(&self) -> Option<PhysicalDeadline> {
+        let mut next: Option<PhysicalDeadline> = None;
+        for batch in &self.pending {
+            let Some(deadline) = batch.give_up.deadline() else {
+                continue;
+            };
+            next = match next {
+                Some(earlier) => Some(earlier.min(deadline)),
+                None => Some(deadline),
+            };
+        }
+        next
+    }
+
+    /// Takes out every held batch the emitter has retried for as long as its `GIVE UP AFTER`
+    /// allows by the instant `now` marks, so that their unresolved rows can fail.
+    ///
+    /// A batch payload, HTTP request or prepared row request carries its rows as one unit: it is
+    /// written again with exactly the bytes and members it was first written with, so none of its
+    /// members can be retried while another one is given up. A batch whose rows share a retained
+    /// payload with a given-up batch is therefore given up with it. The batches that stay keep their
+    /// order, and every prepared store is remapped onto them.
+    pub(super) async fn take_given_up(
+        &mut self,
+        now: PhysicalDeadline,
+    ) -> Vec<EmitterPublishBatch> {
+        let mut taken = Vec::with_capacity(self.pending.len());
+        for batch in &self.pending {
+            taken.push(batch.has_given_up(now));
+        }
+        if !taken.contains(&true) {
+            return Vec::new();
+        }
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let mut spread = self.payloads.spread_over_members(&mut taken);
+            spread |= self.client_payloads.spread_over_members(&mut taken);
+            spread |= self.requests.spread_over_members(&mut taken);
+            spread |= self.row_requests.spread_over_members(&mut taken);
+            if !spread {
+                break;
+            }
+        }
+        let Self {
+            flush_policy: _,
+            pending,
+            payloads,
+            client_payloads,
+            requests,
+            row_requests,
+            pending_messages,
+            pending_bytes,
+            cadence,
+            buffered_messages,
+            observations,
+        } = self;
+        let mut positions = Vec::with_capacity(pending.len());
+        let mut kept = Vec::with_capacity(pending.len());
+        let mut given_up = Vec::new();
+        let mut next = 0_usize;
+        for (batch, taken) in std::mem::take(pending).into_iter().zip(taken) {
+            nervix_primitives::task::consume_budget().await;
+            if taken {
+                *pending_messages = pending_messages
+                    .checked_sub(batch.message_count())
+                    .assured("given-up messages were counted when their batch entered this buffer");
+                *pending_bytes = pending_bytes
+                    .checked_sub(batch.estimated_bytes())
+                    .assured("given-up bytes were counted when their batch entered this buffer");
+                positions.push(None);
+                given_up.push(batch);
+            } else {
+                positions.push(Some(next));
+                kept.push(batch);
+                next = next
+                    .checked_add(1)
+                    .assured("kept carriers fit in the buffer already allocated");
+            }
+        }
+        *pending = kept;
+        payloads.remap_batches(&positions).await;
+        client_payloads.remap_batches(&positions).await;
+        requests.remap_batches(&positions).await;
+        row_requests.remap_batches(&positions).await;
+        if pending.is_empty() {
+            cadence.clear();
+        }
+        buffered_messages.set_buffered((*pending_messages).arch_into());
+        if let Some(work) = observations {
+            work.set(EmitterWorkKind::Buffered, *pending_messages);
+        }
+        given_up
     }
 
     /// What a flush that just completed published: every row its emitter delivered while this buffer

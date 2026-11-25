@@ -29,13 +29,13 @@ use nervix_connector::{
     EmitterBoundedExecution, EmitterEventReporter, EmitterFinish, EmitterFinishError,
     EmitterGeneralErrorHandler, EmitterHost, EmitterRecordAcknowledgementServices,
     EmitterRecordAcknowledgements, EmitterStagingDirectory, EmitterTransientErrorStatus,
-    physical_time::actual_utc_now,
+    physical_time::{PhysicalDeadline, actual_utc_now},
 };
-use nervix_models::DiscardedWorkKind;
+use nervix_models::{DiscardedWorkKind, ExternalErrorCode};
 
 use super::{
     emitter_publishing::{EmitterPublishAttemptKind, EmitterStopDrainOutcome},
-    emitter_retry::EmitterBufferedKeepalive,
+    emitter_retry::{EmitterBufferedKeepalive, EmitterGiveUp, GivenUpWork},
     *,
 };
 
@@ -166,6 +166,8 @@ pub(in crate::runtime) type EmitterRuntimeResult<T> = Result<T, Report<EmitterRu
 pub(in crate::runtime) enum EmitterRuntimeError {
     #[error("invalid emitter connector configuration")]
     InvalidConnectorConfig,
+    #[error("the emitter's destination cannot accept the write as it is configured")]
+    DestinationMisconfigured,
     #[error("failed to initialize emitter connector")]
     InitializeConnector,
     #[error("failed to resume emitter connector")]
@@ -224,6 +226,8 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     FaultInjected,
     #[error("emitter shutdown while stalled")]
     ShutdownWhileStalled,
+    #[error("the emitter gave up committing the rows its connector staged")]
+    CommitGivenUp,
     #[error("the emitter could not resolve its flush cadence against the domain clock")]
     FlushTiming,
     #[error("the emitter retry deadline is outside the monotonic clock range")]
@@ -270,6 +274,7 @@ impl EmitterRuntimeError {
             | Self::PublishBatch
             | Self::PublishStalled
             | Self::EncodingRefused
+            | Self::DestinationMisconfigured
             | Self::UnansweredEmitterRecords { .. } => true,
             Self::FlushPolicyNotInitialized
             | Self::HeaderCountMismatch { .. }
@@ -291,6 +296,7 @@ impl EmitterRuntimeError {
             | Self::CloseConnector
             | Self::FaultInjected
             | Self::ShutdownWhileStalled
+            | Self::CommitGivenUp
             | Self::StopDeadlineElapsed
             | Self::FinalFlush
             | Self::FinishTransport
@@ -301,6 +307,19 @@ impl EmitterRuntimeError {
             | Self::SplitFailedBatch { .. }
             | Self::SourceFilter { .. } => false,
         }
+    }
+
+    /// Whether a retry of this failure waits for the destination, so that the emitter's
+    /// `GIVE UP AFTER` counts the wait. An encoding the node's bounded execution could not take yet
+    /// judged nothing about the destination: the node holds the work back and the wait is its own.
+    pub(super) fn fails_the_destination(&self) -> bool {
+        !matches!(self, Self::EncodingRefused)
+    }
+
+    /// Whether a retry of this failure waits for the operator to repair the destination's setup,
+    /// which status and inspection show as a misconfiguration rather than a transient error.
+    pub(super) fn is_misconfiguration(&self) -> bool {
+        matches!(self, Self::DestinationMisconfigured)
     }
 
     /// The class the rows of a batch this failure ended carry: the destination or its connector
@@ -316,6 +335,7 @@ impl EmitterRuntimeError {
             | Self::PublishBatch
             | Self::PublishStalled
             | Self::InvalidConnectorConfig
+            | Self::DestinationMisconfigured
             | Self::InitializeConnector
             | Self::CloseConnector
             | Self::FaultInjected
@@ -324,6 +344,7 @@ impl EmitterRuntimeError {
             Self::ShutdownWhileStalled | Self::StopDeadlineElapsed => {
                 MessageErrorClass::INTERRUPTED
             }
+            Self::CommitGivenUp => MessageErrorClass::UNAVAILABLE,
             Self::EncodeBatch => MessageErrorClass::CODEC,
             Self::SourceFilter { .. } => MessageErrorClass::EVALUATION,
             Self::EncodingRefused
@@ -401,6 +422,7 @@ impl EmitterConnectorContext {
         error: impl Into<String>,
         backoff: Duration,
         kind: EmitterRetryKind,
+        give_up_at: Option<PhysicalDeadline>,
     ) {
         self.status.fail(
             error.into(),
@@ -410,6 +432,7 @@ impl EmitterConnectorContext {
                     backoff,
                     retry_at: Instant::now() + backoff,
                 },
+                give_up_at,
             }),
         );
     }
@@ -590,6 +613,7 @@ impl EmitterTransientErrorStatus for EmitterConnectorContext {
                     backoff: retry_after,
                     retry_at: Instant::now() + retry_after,
                 },
+                give_up_at: None,
             }),
         );
     }
@@ -754,6 +778,12 @@ impl EmitterBatchFailure {
         operation: MessageErrorOperation::Publish,
     };
 
+    /// A batch the emitter stopped retrying once its `GIVE UP AFTER` passed.
+    const GIVEN_UP: Self = Self {
+        class: MessageErrorClass::UNAVAILABLE,
+        operation: MessageErrorOperation::Publish,
+    };
+
     fn of(error: &Report<EmitterRuntimeError>, codec_route: bool) -> Self {
         let context = error.current_context();
         let operation = match (context, codec_route) {
@@ -780,6 +810,7 @@ struct EmitterTaskState {
     keepalive: EmitterBufferedKeepalive,
     backoff: RuntimeReconnectBackoff,
     reconnect_on_wake: bool,
+    give_up: EmitterGiveUp,
 }
 
 #[derive(Clone, Copy)]
@@ -829,6 +860,7 @@ impl EmitterTaskState {
         connector: EmitterConnectorState,
         buffer: EmitterBatchBuffer,
         mut backoff: RuntimeReconnectBackoff,
+        give_up: EmitterGiveUp,
         context: &EmitterConnectorContext,
     ) -> Self {
         let reconnect_on_wake = connector.unavailable_reason().is_some();
@@ -842,6 +874,8 @@ impl EmitterTaskState {
                     acks: EmitterAcknowledgements::default(),
                     waiting_for_stall_clear: false,
                     reason: Some(reason),
+                    kind: EmitterRetryKind::Infrastructure,
+                    give_up_at: None,
                 },
             );
         } else {
@@ -854,12 +888,73 @@ impl EmitterTaskState {
             keepalive: EmitterBufferedKeepalive::new(context.remote_ack_timing.clone()),
             backoff,
             reconnect_on_wake,
+            give_up,
         }
     }
 
     fn wake(&self, context: &EmitterConnectorContext) -> RuntimeWake {
-        self.retry
-            .wake(self.connector.cadence_wake(&context.clock, &self.buffer))
+        let wake = self
+            .retry
+            .wake(self.connector.cadence_wake(&context.clock, &self.buffer));
+        match self.next_give_up() {
+            Some(deadline) => wake.with_physical(deadline),
+            None => wake,
+        }
+    }
+
+    /// When the emitter next gives work up: the earliest of its buffered batches' give-up clocks
+    /// and the clock of what its connector staged.
+    fn next_give_up(&self) -> Option<PhysicalDeadline> {
+        let buffered = self.give_up.next_deadline(&self.buffer);
+        let staged = self.connector.staged_give_up().deadline();
+        match (buffered, staged) {
+            (Some(buffered), Some(staged)) => Some(buffered.min(staged)),
+            (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+            (None, None) => None,
+        }
+    }
+
+    /// Whether the emitter holds no work at all: nothing buffered and nothing staged.
+    fn holds_nothing(&self) -> bool {
+        self.buffer.is_empty() && self.connector.staged_messages() == 0
+    }
+
+    /// Gives up every buffered batch and the staged rows whose `GIVE UP AFTER` has passed, and
+    /// delivers the failures of everything given up, including what a publish call gave up.
+    /// Answers whether anything was given up.
+    async fn give_up_due_work(
+        &mut self,
+        context: &EmitterConnectorContext,
+        batch_context: &EmitterBatchContext<'_>,
+    ) -> bool {
+        self.give_up.collect(&mut self.buffer).await;
+        self.connector
+            .give_up_staged_if_due(&mut self.give_up, &mut self.buffer)
+            .await;
+        self.deliver_given_up(context, batch_context).await
+    }
+
+    /// Delivers the failures of everything the emitter gave up since it last delivered, and
+    /// answers whether there was any.
+    ///
+    /// When the emitter then holds nothing while its connector is open, no retry is left to run:
+    /// the next input is published at once. The status keeps saying why the work was given up,
+    /// without a wait, until an attempt succeeds or fails again.
+    async fn deliver_given_up(
+        &mut self,
+        context: &EmitterConnectorContext,
+        batch_context: &EmitterBatchContext<'_>,
+    ) -> bool {
+        let Some(given_up) = self.give_up.take_given_up() else {
+            return false;
+        };
+        let message = given_up.message.clone();
+        batch_context.fail_given_up(given_up).await;
+        if self.holds_nothing() && self.connector.unavailable_reason().is_none() {
+            self.retry.clear();
+            context.status.fail(message, None);
+        }
+        true
     }
 
     fn keep_buffered_work_alive(&mut self) {
@@ -936,25 +1031,44 @@ impl EmitterTaskState {
                         batch_context
                             .handle_publish_error_batch(batch, reason, failure)
                             .await;
+                        self.deliver_given_up(context, batch_context).await;
                         return;
                     }
                 } else {
                     pending_batch.take();
                 }
+                // The attempt held every buffered batch, so their clocks start with it. What has
+                // already been retried for as long as `GIVE UP AFTER` allows is not retried again:
+                // with `GIVE UP AFTER 0s` that is everything the attempt held.
+                self.give_up.record_failure(&mut self.buffer, &error);
+                self.give_up.collect(&mut self.buffer).await;
+                self.connector
+                    .give_up_staged_if_due(&mut self.give_up, &mut self.buffer)
+                    .await;
                 let reason = emitter_error_message(&error);
-                self.retry.defer(
-                    context,
-                    EmitterRetryDeferral {
-                        cause,
-                        wait,
-                        acks: self.connector.pending_acks(&self.buffer),
-                        waiting_for_stall_clear: error.current_context()
-                            == &EmitterRuntimeError::PublishStalled,
-                        reason: Some(&reason),
-                    },
-                );
                 self.reconnect_on_wake = self.connector.reconnect_after(&error, context);
                 outcome_context.report_error(context, &reason);
+                if !self.holds_nothing() || self.connector.unavailable_reason().is_some() {
+                    let kind = match cause {
+                        EmitterRetryCause::Commit => EmitterRetryKind::commit(&error),
+                        EmitterRetryCause::Publish | EmitterRetryCause::Connect => {
+                            EmitterRetryKind::publish(&error)
+                        }
+                    };
+                    self.retry.defer(
+                        context,
+                        EmitterRetryDeferral {
+                            cause,
+                            wait,
+                            acks: self.connector.pending_acks(&self.buffer),
+                            waiting_for_stall_clear: error.current_context()
+                                == &EmitterRuntimeError::PublishStalled,
+                            reason: Some(&reason),
+                            kind,
+                            give_up_at: self.next_give_up(),
+                        },
+                    );
+                }
             }
             Err(failure) => {
                 self.retry.clear();
@@ -969,6 +1083,7 @@ impl EmitterTaskState {
                     .await;
             }
         }
+        self.deliver_given_up(context, batch_context).await;
     }
 }
 
@@ -1286,7 +1401,13 @@ impl EmitterTask {
             )
             .await;
             let connector_label = connector.connector_label(&plan.label);
-            let state = EmitterTaskState::new(connector, buffer, backoff, &context);
+            let state = EmitterTaskState::new(
+                connector,
+                buffer,
+                backoff,
+                EmitterGiveUp::new(plan.give_up_after),
+                &context,
+            );
             let task_emitter_node = ModelName::from(&task_emitter);
             let batch_context = EmitterBatchContext {
                 error_routing: &context.routing,
@@ -1512,6 +1633,7 @@ impl EmitterTaskLoop<'_> {
                         connector,
                         buffer,
                         backoff,
+                        give_up,
                         ..
                     } = &mut self.state;
                     let mut control = EmitterPublishControl {
@@ -1519,6 +1641,7 @@ impl EmitterTaskLoop<'_> {
                         shutdown_rx: &mut *self.shutdown_rx,
                         stop_rx: &mut *self.stop_rx,
                         backoff,
+                        give_up,
                     };
                     let drained = connector
                         .drain_for_stop(
@@ -1529,6 +1652,9 @@ impl EmitterTaskLoop<'_> {
                             deadline,
                             kind,
                         )
+                        .await;
+                    self.state
+                        .deliver_given_up(self.context, &self.batch_context)
                         .await;
                     let result = match drained {
                         EmitterStopDrainOutcome::Finished { report, finished } => {
@@ -1586,11 +1712,19 @@ impl EmitterTaskLoop<'_> {
                         self.state
                             .retry
                             .include_acks(self.state.connector.pending_acks(&self.state.buffer));
+                        // Not reaching the destination fails every batch the emitter holds.
+                        self.state
+                            .give_up
+                            .record_unavailable(&mut self.state.buffer, &reason);
+                        self.state
+                            .give_up_due_work(self.context, &self.batch_context)
+                            .await;
                         if self.state.retry.is_active() {
                             self.context.record_retry(
                                 reason.clone(),
                                 self.state.backoff.next_delay(),
                                 EmitterRetryKind::Infrastructure,
+                                self.state.next_give_up(),
                             );
                         } else {
                             self.state.retry.defer(
@@ -1603,6 +1737,8 @@ impl EmitterTaskLoop<'_> {
                                         .fault_injection
                                         .emitter_should_stall(&self.context.emitter),
                                     reason: Some(&reason),
+                                    kind: EmitterRetryKind::Infrastructure,
+                                    give_up_at: self.state.next_give_up(),
                                 },
                             );
                         }
@@ -1625,6 +1761,7 @@ impl EmitterTaskLoop<'_> {
                             buffer,
                             backoff,
                             retry,
+                            give_up,
                             ..
                         } = &mut self.state;
                         let mut control = EmitterPublishControl {
@@ -1632,6 +1769,7 @@ impl EmitterTaskLoop<'_> {
                             shutdown_rx: &mut *self.shutdown_rx,
                             stop_rx: &mut *self.stop_rx,
                             backoff,
+                            give_up,
                         };
                         if stopping {
                             // One attempt: a failure goes back to the retry schedule, so the
@@ -1713,6 +1851,7 @@ impl EmitterTaskLoop<'_> {
                             connector,
                             buffer,
                             backoff,
+                            give_up,
                             ..
                         } = &mut self.state;
                         let mut control = EmitterPublishControl {
@@ -1720,6 +1859,7 @@ impl EmitterTaskLoop<'_> {
                             shutdown_rx: &mut *self.shutdown_rx,
                             stop_rx: &mut *self.stop_rx,
                             backoff,
+                            give_up,
                         };
                         connector
                             .flush_all(
@@ -1731,6 +1871,9 @@ impl EmitterTaskLoop<'_> {
                             )
                             .await
                     };
+                    self.state
+                        .deliver_given_up(self.context, &self.batch_context)
+                        .await;
                     match flush_result {
                         Ok(Some(report)) => self.batch_context.observe_sent(&report),
                         Ok(None) => {}
@@ -1756,6 +1899,15 @@ impl EmitterTaskLoop<'_> {
                     // An unreadable logical clock returns through the interaction's existing
                     // timing-error path on the next iteration, retaining all buffered work.
                     if !matches!(self.state.wake(self.context).is_reached(), Ok(true)) {
+                        continue;
+                    }
+                    // Work the emitter has retried for as long as its `GIVE UP AFTER` allows fails
+                    // now, before any further attempt carries it.
+                    let gave_up = self
+                        .state
+                        .give_up_due_work(self.context, &self.batch_context)
+                        .await;
+                    if gave_up && !self.state.retry.is_active() {
                         continue;
                     }
                     let retry_was_active = self.state.retry.is_active();
@@ -1806,6 +1958,14 @@ impl EmitterTaskLoop<'_> {
                             .buffer
                             .report_staged_messages(self.state.connector.staged_messages());
                         if let Some(reason) = self.state.connector.unavailable_reason() {
+                            let reason = reason.to_owned();
+                            // A reconnect that failed is a failed attempt for every batch held.
+                            self.state
+                                .give_up
+                                .record_unavailable(&mut self.state.buffer, &reason);
+                            self.state
+                                .give_up_due_work(self.context, &self.batch_context)
+                                .await;
                             self.state.retry.defer(
                                 self.context,
                                 EmitterRetryDeferral {
@@ -1816,7 +1976,9 @@ impl EmitterTaskLoop<'_> {
                                         .installation_retry_delay(&mut self.state.backoff),
                                     acks: self.state.connector.pending_acks(&self.state.buffer),
                                     waiting_for_stall_clear: false,
-                                    reason: Some(reason),
+                                    reason: Some(&reason),
+                                    kind: EmitterRetryKind::Infrastructure,
+                                    give_up_at: self.state.next_give_up(),
                                 },
                             );
                             self.state.reconnect_on_wake = true;
@@ -1829,6 +1991,7 @@ impl EmitterTaskLoop<'_> {
                             connector,
                             buffer,
                             backoff,
+                            give_up,
                             ..
                         } = &mut self.state;
                         let mut control = EmitterPublishControl {
@@ -1836,6 +1999,7 @@ impl EmitterTaskLoop<'_> {
                             shutdown_rx: &mut *self.shutdown_rx,
                             stop_rx: &mut *self.stop_rx,
                             backoff,
+                            give_up,
                         };
                         connector
                             .flush_due(
@@ -1924,6 +2088,14 @@ impl EmitterTaskLoop<'_> {
                             continue;
                         }
                         self.state.retry.include_acks(publish_batch.merged_acks());
+                        // A batch the emitter holds because it cannot reach its destination at all
+                        // has failed its first attempt. One that only waits for a retry already
+                        // scheduled has not been attempted yet.
+                        if let Some(reason) = unavailable.as_deref() {
+                            self.state
+                                .give_up
+                                .record_unavailable(&mut self.state.buffer, reason);
+                        }
                         if !self.state.retry.is_active() {
                             self.state.retry.defer(
                                 self.context,
@@ -1935,6 +2107,8 @@ impl EmitterTaskLoop<'_> {
                                         .fault_injection
                                         .emitter_should_stall(&self.context.emitter),
                                     reason: unavailable.as_deref(),
+                                    kind: EmitterRetryKind::Infrastructure,
+                                    give_up_at: self.state.next_give_up(),
                                 },
                             );
                             if let Some(reason) = unavailable.as_deref() {
@@ -1953,6 +2127,7 @@ impl EmitterTaskLoop<'_> {
                             connector,
                             buffer,
                             backoff,
+                            give_up,
                             ..
                         } = &mut self.state;
                         let mut control = EmitterPublishControl {
@@ -1960,6 +2135,7 @@ impl EmitterTaskLoop<'_> {
                             shutdown_rx: &mut *self.shutdown_rx,
                             stop_rx: &mut *self.stop_rx,
                             backoff,
+                            give_up,
                         };
                         connector
                             .publish_batch(
@@ -2022,6 +2198,60 @@ impl EmitterBatchContext<'_> {
         reason: String,
         failure: EmitterBatchFailure,
     ) {
+        self.fail_unresolved_rows(batch, reason, failure, None)
+            .await;
+    }
+
+    /// Fails what the emitter gave up: every unresolved row of a given-up batch with an
+    /// `unavailable` message error naming the latest failure, and the rows a connector staged for a
+    /// commit it gave up through the node's general error policy, since the host no longer holds
+    /// those rows and the failure names none of them.
+    async fn fail_given_up(&self, given_up: GivenUpWork) {
+        let GivenUpWork {
+            batches,
+            staged,
+            message,
+            external_code,
+        } = given_up;
+        let staged_commits = u64::from(!staged.is_empty());
+        let batch_count: u64 = batches.len().arch_into();
+        self.interactions.record_give_ups(
+            batch_count
+                .checked_add(staged_commits)
+                .assured("a give-up counts the batches one emitter buffer held, and one commit"),
+        );
+        for batch in batches {
+            self.fail_unresolved_rows(
+                batch,
+                message.clone(),
+                EmitterBatchFailure::GIVEN_UP,
+                external_code.clone(),
+            )
+            .await;
+        }
+        if !staged.is_empty() {
+            let error = Report::new(EmitterRuntimeError::CommitGivenUp).attach_printable(message);
+            self.runtime.handle_general_error_for_staged_acks(
+                self.domain,
+                &NodeRef::new(ModelKind::Emitter, self.emitter),
+                self.error_policies,
+                &staged,
+                MessageErrorClass::UNAVAILABLE,
+                &error,
+            );
+        }
+    }
+
+    /// Sends every row of `batch` an earlier attempt left unresolved to the emitter's message-error
+    /// policy, each with the class and operation of `failure`, `reason` as its message and
+    /// `external_code` as the outside system's code.
+    async fn fail_unresolved_rows(
+        &self,
+        batch: EmitterPublishBatch,
+        reason: String,
+        failure: EmitterBatchFailure,
+        external_code: Option<ExternalErrorCode>,
+    ) {
         // The rows an earlier attempt delivered are sent, and this is the last time the emitter
         // holds them, so they are counted before the rest follow the error policy.
         if let Some(report) = batch.delivered_report() {
@@ -2050,6 +2280,15 @@ impl EmitterBatchContext<'_> {
             if resolved.get(row).copied().unwrap_or(false) {
                 continue;
             }
+            let mut error = raised_message_error(
+                execution_now,
+                failure.class,
+                reason.clone(),
+                failure.operation,
+                None,
+                std::iter::empty(),
+            );
+            error.external_code = external_code.clone();
             self.runtime
                 .handle_structured_message_error(MessageErrorHandling {
                     routing: Some(&self.error_routing.load()),
@@ -2059,14 +2298,7 @@ impl EmitterBatchContext<'_> {
                     source_route: None,
                     policy: &self.error_policies.message,
                     message,
-                    error: raised_message_error(
-                        execution_now,
-                        failure.class,
-                        reason.clone(),
-                        failure.operation,
-                        None,
-                        std::iter::empty(),
-                    ),
+                    error,
                     partial_output: None,
                     materialized_state: HashMap::default(),
                     ingest_metadata: None,

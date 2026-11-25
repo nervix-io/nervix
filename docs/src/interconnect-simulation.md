@@ -65,7 +65,7 @@ them substitutes for another.
 | `crates/interconnect/tests/simulation/process_target.rs` | Harness | Exact-process requests before and after the receiver transport restarts under the same authenticated node name |
 | `crates/interconnect/src/authentication/simulation_tests.rs` | Harness | Certificate validity, expiry drain, handshake deadlines, and trace replay under the simulated clock |
 | `crates/interconnect/src/wire.rs`, module `simulation_checks` | Harness | Seeded rkyv round trips through the execution owner |
-| `crates/execution/src/workers.rs`, module `simulation_checks` | Harness | Queue slots, admission order, and charge ownership of the Turmoil CPU strategy |
+| `crates/execution/src/workers.rs`, module `simulation_checks` | Harness | Waiting jobs, admission order, and charge ownership of the Turmoil CPU strategy |
 | `crates/execution/src/workers.rs`, `HeldWorker` | Harness | The test-only owner hold that keeps a class's worker active without parking a thread, so every execution check that fills a class also completes on the simulated scheduler |
 | `crates/primitives/src/tests/simulated_host.rs` | Harness | The boundary's own check that sockets, name lookup, timers, and admitted CPU jobs belong to the simulated host whose task uses them |
 | `justfile` and the `turmoil` job in `.github/workflows/check.yaml` | Tooling | The recipes, budgets, validation, and CI artifact |
@@ -159,10 +159,10 @@ The transport encodes and decodes through `nervix-execution`, which submits ever
 through the boundary's `task::spawn_cpu`. In the Turmoil build that runs the job as a Tokio task on
 the host's scheduler instead of on the blocking pool, so the job body is one scheduling step of the
 simulation. The executor is the mechanism's only caller: the boundary check rejects it anywhere
-else, so no caller runs CPU work on the scheduler without admission. Queue slots, per-class worker reservations, memory charges,
-and cooperative cancellation follow the same policy as production. A queued caller that leaves
-releases its slot and charge; a running job keeps its worker and charge until it exits, even when
-its caller leaves.
+else, so no caller runs CPU work on the scheduler without admission. Per-class workers, the jobs
+waiting for them, memory charges and cooperative cancellation follow the same policy as production.
+A waiting caller that leaves gives up its turn and its charge; a running job keeps its worker and
+charge until it exits, even when its caller leaves.
 
 Turmoil can vary the order of tasks around a job, but not instructions inside it. Races inside a job
 need Shuttle or real threads. Storage jobs still run on a real blocking thread and are outside the
@@ -173,10 +173,13 @@ Because a CPU job's body is one scheduling step, a CPU job never waits for anoth
 build: a job that blocked until a test released it would stop the only thread that release can run
 on, and the suite would spend its whole budget on that test. The unit tests of `nervix-execution`
 run in this build as the `execution` invocation of `just test-turmoil`, apart from the ordinary
-drain regressions of `workers::dispatch_checks`. A check that needs a class's worker occupied, such
-as the capacity-wait checks, therefore holds it with the pool's test-only owner hold, `HeldWorker`,
-which marks the worker active without parking a thread and gives it back through the same transition
-as a job that ends. A storage job may still block, since it keeps its real blocking thread.
+drain regressions of `workers::dispatch_checks` and
+`tests::a_growing_job_that_ran_short_gives_back_its_charge_waits_and_runs_again`, whose job under
+test pauses inside its own first attempt until a charge queues behind it. A check that needs a
+class's worker occupied, such as the capacity-wait checks and the busy CPU worker check, therefore
+holds it with the pool's test-only owner hold, `HeldWorker`, which marks the worker active without
+parking a thread and gives it back through the same transition as a job that ends. A storage job
+may still block, since it keeps its real blocking thread.
 
 ### Time
 
@@ -700,13 +703,14 @@ never answers, leaves resource streams unread, and sends a relay batch the hub h
 admitting. The healthy peer keeps exchanging shared management work, liveness, typed Arrow commands,
 whole resource streams, and admitted relay batches with the hub throughout. Every observation of a
 host checks its pool connections per peer, leased streams per connection, admissions per direction
-and subquota, worker queues, and memory budgets against their configured bounds.
+and subquota, and memory budgets against their configured bounds, and the jobs each worker class
+runs against its workers.
 
 Key transitions assert exact values. The stalled peer holds all 32 shared management streams of its
 connection while liveness, cancellation, and discovery still use the reserved streams, and one more
-shared operation waits until its own deadline. A burst fills the one bulk worker and its eight-job
-queue, the two submissions beyond them are refused without a charge, and control work is admitted in
-the same pass. Unread 2 MiB resource streams stop at one bulk receive window each, which the stalled
+shared operation waits until its own deadline. A burst of eleven requests finds the one bulk worker
+busy with its first, the other ten wait for that worker, each holding only its own charge, and
+control work is admitted in the same pass. Unread 2 MiB resource streams stop at one bulk receive window each, which the stalled
 peer backs with one `bulk_window` reservation per stream. They release their admission and memory at
 the five-second progress deadline, and the stalled peer returns every window once its streams end.
 The held relay reserves its exact body, largest decoded batch, and scratch, plus its retained grant

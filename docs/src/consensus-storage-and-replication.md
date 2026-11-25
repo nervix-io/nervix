@@ -367,7 +367,9 @@ window is four decoded batches per live stream. Reaching the window stops frame 
 batch is decoded, closes the HTTP/2 flow-control window, and makes the leader wait.
 
 The default 24 MiB Commands budget is validated to hold the complete resident window beside one
-maximum-size 2 MiB batch being encoded. Other command and replication work shares that aggregate
+command state storage working set, the room the durable append of those entries waits for, and
+beside one maximum-size 2 MiB batch being encoded. A follower whose window is full therefore never
+waits for room only its own window can release: its append waits only for room other work frees. Other command and replication work shares that aggregate
 budget, so concurrent or superseded streams cannot grow memory without admission. Ending a stream
 releases its queued batches and reservations; batches from a generation the leader abandoned do not
 remain uncharged in the Raft core.
@@ -565,13 +567,12 @@ Transaction commit plans and step effects hold no lifecycle step.
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_logs`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_meta`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_state`, and
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_snapshots`. Opening it validates the complete
-keyspace namespace before reading any records. The committed cluster-parameter record
-stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
-pair before returning the record. The parameters also carry the coherent remote acknowledgement
+`raft_232bb63881d08871_logs`, `raft_232bb63881d08871_meta`, `raft_232bb63881d08871_state` and
+`raft_232bb63881d08871_snapshots`, named by the stored-shape marker `232bb63881d08871` ([Keyspace
+Names And The Stored-Shape Marker](#keyspace-names-and-the-stored-shape-marker)). Opening it
+validates the complete keyspace namespace before reading any records. The committed
+cluster-parameter record stores ordered typed TLS cipher suites and key-exchange groups. Recovery
+validates their complete pair before returning the record. The parameters also carry the coherent remote acknowledgement
 group, payload unfold policy and UDF compile budget. Their durations use validated, lossless seconds
 and nanoseconds projections so ordinary Raft records keep their inline footprint bound. Admitted node
 capabilities carry runtime capacities, the UDF watchdog among the engine capabilities, local shutdown
@@ -605,7 +606,7 @@ committed node records under record-family tag `C`, each with the revision that 
 incarnation-bound capacity claim, including transport, DNS, database (each database's open-file limit included), consensus, engine, connector
 host, membership, runtime, shutdown, operational (trace export and web console pacing included) and listener capacities, its detected properties and its tags. The boxed node record
 announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 58. The state carries the endpoint pause response
+requires the current `ClusterState` encoding, 60. The state carries the endpoint pause response
 choice, domain, resource and user labels, placement node rules, the label edit an administrative label command records, the cluster identity reference, committed cluster
 parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
@@ -650,6 +651,40 @@ finished one queues none and keeps the identity and admission of exactly as many
 accepted, a commit's results apply consecutive statements from the first and its
 progress stays inside the queue, and a failure names a statement the transaction accepted. Every
 log read checks that a log record is stored under its own entry's index.
+
+### Keyspace Names And The Stored-Shape Marker
+
+Each keyspace of the consensus database is named `raft_`, then the stored-shape marker, then the
+keyspace's role: `logs`, `meta`, `state` or `snapshots`. The marker identifies the shape of
+everything the consensus database stores, and it is the only part of the four names that ever
+changes. Opening refuses a database that holds any other keyspace, so a database written under an
+earlier marker fails with `invalid consensus record storage; recreate the node's stored state`
+before any of its records is read.
+
+The marker is 16 lowercase hexadecimal digits, a random 64-bit value, so the longest name,
+`raft_<marker>_snapshots`, stays 31 bytes long however many stored-shape changes follow. fjall
+opens a keyspace only when its name is non-empty and at most 255 bytes long, and panics on any
+other name. Consensus storage checks its four names against that limit when it compiles, so a name
+fjall would refuse fails the build with an error that names the limit, instead of failing every
+storage operation when the database opens. fjall also documents a set of characters a keyspace
+name may use (alphanumerics, `_`, `-`, `.`, `#` and `$`) but does not check it; the four names use
+only lowercase letters, digits and `_`.
+
+The marker changes by these rules:
+
+- A change to any shape the consensus database stores replaces the marker with a fresh random value
+  in the same change. That covers a log entry, the vote, log metadata, a state-machine record or
+  its metadata, a snapshot manifest or section, and every value one of them archives, such as a
+  command, a Model, a statement a transaction keeps, a node record or a cluster parameter.
+- A fresh marker is never an earlier one. An earlier marker would let a database written in that
+  earlier shape open and be read as the current one.
+- When a merge finds that both sides replaced the marker, the merged revision takes another fresh
+  value, never either side's, because the merged shape differs from the shape each side wrote.
+- A change that leaves every stored shape as it is keeps the marker.
+- The names this chapter quotes change with the marker, as do the ones in the [Credential Storage
+  Release Note](./developing-nervix.md#credential-storage-release-note), in [Typed States And
+  Validation Boundaries](./typed-states.md) and in the [storage representation coverage
+  map](https://github.com/nervix-io/nervix/blob/main/tests/storage-representation-coverage.md).
 
 ## Shutdown And Forced Endings
 

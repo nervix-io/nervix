@@ -7,7 +7,7 @@
 //!   harness with its filled consensus worker.
 //! - **Must not know.** Raft elections, the interconnect or node startup.
 
-use std::{error::Error, future::Future, io, num::NonZeroUsize, time::Duration};
+use std::{error::Error, future::Future, io, time::Duration};
 
 use futures_util::FutureExt as _;
 use nervix_execution::{ExecutionConfig, Executor, MemoryClass};
@@ -16,15 +16,10 @@ use openraft::storage::{RaftLogStorage as _, RaftLogStorageExt as _};
 use super::{FilledConsensusStorage, Harness, TestResult};
 use crate::storage::{StorageCharge, StoreInner};
 
-/// An executor whose single consensus worker has one waiting place, so a filled worker keeps a
-/// storage job queued after the store has admitted its working set.
-fn executor_with_one_waiting_place() -> Result<Executor, Box<dyn Error>> {
-    let mut workers = ExecutionConfig::default().workers;
-    workers.pending_jobs.consensus_storage = NonZeroUsize::MIN;
-    Ok(Executor::new(ExecutionConfig {
-        workers,
-        ..ExecutionConfig::default()
-    })?)
+/// An executor whose single consensus worker, once filled, keeps a storage job waiting after the
+/// store has admitted its working set.
+fn executor_with_one_consensus_worker() -> Result<Executor, Box<dyn Error>> {
+    Ok(Executor::new(ExecutionConfig::default())?)
 }
 
 /// A harness whose log holds, at index 1, a command larger than the management working set.
@@ -97,7 +92,7 @@ async fn charge_while_queued<T>(
 /// that entry, with the store's Commands working set every read of a log entry reserves.
 #[nervix_primitives::test]
 async fn the_log_state_read_is_charged_for_the_last_entry_it_reads() -> TestResult {
-    let executor = executor_with_one_waiting_place()?;
+    let executor = executor_with_one_consensus_worker()?;
     let mut harness = harness_with_large_first_entry(&executor).await?;
     let stored = stored_entry_bytes(&harness, 1)?;
     assert!(stored > StorageCharge::Management.working_bytes(&executor)?);
@@ -119,7 +114,7 @@ async fn the_log_state_read_is_charged_for_the_last_entry_it_reads() -> TestResu
 /// with the store's Commands working set, and still finds the same boundary.
 #[nervix_primitives::test]
 async fn the_retention_scan_is_charged_for_each_covered_entry_it_reads() -> TestResult {
-    let executor = executor_with_one_waiting_place()?;
+    let executor = executor_with_one_consensus_worker()?;
     let mut harness = harness_with_large_first_entry(&executor).await?;
     harness
         .store

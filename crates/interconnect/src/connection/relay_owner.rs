@@ -54,10 +54,8 @@ impl TransportState {
                 owner.bind_epoch(epoch, binding_sequence, member);
                 return Ok(owner.clone());
             }
-            if self.admission_closed.is_cancelled()
-                || current.owners.len() >= self.options.max_peers
-            {
-                return Err(Report::new(TransportError::PoolExhausted));
+            if self.admission_closed.is_cancelled() {
+                return Err(Report::new(TransportError::RelayIndeterminate));
             }
             let owner = StdArc::new(RelayPeerOwner::new(RelayPeerCapacity::of(&self.options)));
             assert!(
@@ -173,7 +171,8 @@ pub(super) enum RelayControl {
     /// The attempt's status.
     Status,
     /// Cancel the attempt. `fence` is the charge of the watermark that fencing a position the
-    /// owner never granted records there, or `None` when the relay memory class had no room for it.
+    /// owner never granted records there, or `None` when the relay memory class could not take
+    /// it, which only a closed budget leaves.
     Cancel { fence: Option<Reservation> },
 }
 

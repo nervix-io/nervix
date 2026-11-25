@@ -254,9 +254,10 @@ truncated, and it can never mix two reads of the server's state. Parts of one re
 but other replies and unsolicited frames may arrive between them, which is why a client keeps one
 reassembly per request identity. A reply above the transfer limit is not sent at all: the request
 receives the typed rejection `ReplyTooLarge` instead. A reply that carries an impact report is
-encoded on the bulk workers under the bulk memory class; when neither memory nor a worker is
-available for it, the request receives `ServerBusy`, which is safe to repeat because such a reply
-belongs to a request that changes nothing.
+encoded on the bulk workers under the bulk memory class. A full class or worker queue holds the
+reply back until it frees; the request receives `ServerBusy` only when the bulk workers do not run
+the encoding, because the node is stopping or the job failed, which is safe to repeat because such a
+reply belongs to a request that changes nothing.
 
 ### One Current Form
 
@@ -711,7 +712,7 @@ when there is one, and a message for display. The session keeps serving after an
 | `DuplicateRequestId` | The request identity is already in flight in this session. |
 | `TooManyRequestsInFlight` | The session already has 64 requests in flight. Nothing was admitted. |
 | `ReplyTooLarge` | The complete reply cannot be encoded within the session limits, above all because it exceeds the transfer limit. |
-| `ServerBusy` | The server had no memory or worker left to prepare the reply of an inspection. |
+| `ServerBusy` | The server's workers did not prepare the reply of an inspection: the node is stopping, or the job failed. A full memory class or worker queue holds a reply back instead. |
 
 The first five refuse a request before anything about it runs. `ReplyTooLarge` and `ServerBusy`
 replace a reply that could not be prepared. For a read, repeating the request reads again. For a
@@ -739,7 +740,7 @@ inspection text is not a complete configuration export. See the
 
 Inspection preflight can refuse a request when local capacity is full. After a transaction or
 restore has been accepted, its model application waits for client-inspection command memory and a
-filesystem worker-queue place. Temporary pressure supplies no failed configuration verdict; the
+filesystem worker. Temporary pressure supplies no failed configuration verdict; the
 existing execution identity, outcome recovery and node-shutdown rules continue to govern the command.
 
 A command's reply is a `CommandOutcome`: the execution reference it answers, whether the outcome was
@@ -2400,9 +2401,12 @@ client sees at each ending and what it recovers.
 
 **Graceful stop.** When a node begins to stop, it closes admission on its session gRPC and console
 listeners and ends the sessions they carry. Every request a session had not yet admitted is decided
-cancelled before admission and never begins an effect. Work that was admitted keeps running and no
-reply follows for it: a transaction commit continues, and the node waits for it until its shutdown
-deadline. Subscriptions and domain clock attachments stop with their session. Every session, native
+cancelled before admission and never begins an effect. Work that was admitted keeps running only
+until the node turns off, and no reply follows for it from that node: a command, a transaction
+commit or a restore then ends there, its replicated progress survives, and the leader that follows,
+or the node after its restart, continues it. A command whose node stops is never answered with a
+refusal of its own about the stop. Subscriptions and domain clock attachments stop with their
+session. Every session, native
 or console, receives `SessionEnding` with reason `ServerShuttingDown` after the control frames it
 had already queued; a native session's call then ends with status `OK`, and a console session's
 WebSocket with a normal close. An upload, a restore or a download call on the native listener ends
@@ -2869,5 +2873,10 @@ client pings in the other direction: while a call such as the session exchange i
 HTTP/2 ping once its `keepalive_interval` passes without call data or a ping answer arriving, and
 ends the connection as a transport failure when no answer arrives within its `keepalive_timeout` (30
 and 20 seconds by default), so a session that is only waiting for subscription or consumer data also
-notices a node that fell silent without closing the connection. These transport bounds introduce no
-session wire message and do not change command admission or recovery identity.
+notices a node that fell silent without closing the connection. The Rust client bounds the node in
+turn: it refuses a call whose header list reaches its `header_list_bytes`, queues at most
+`send_buffer_bytes` of one call's request for a node that stops reading, ignores frames for the
+`remembered_reset_streams` calls it most recently cancelled within `reset_stream_duration`, and ends
+the connection with `ENHANCE_YOUR_CALM` once it has reset `max_error_reset_streams` calls for the
+node's protocol errors. It lets the node open no stream towards it. These transport bounds introduce
+no session wire message and do not change command admission or recovery identity.

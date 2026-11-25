@@ -1,7 +1,7 @@
 //! Ordinary executor drain regressions over the production pool.
 //!
 //! Layer: test harness.
-//! - **Owns.** Backlog dispatch, callback panic isolation and interrupted-worker assertions.
+//! - **Owns.** Dispatch of waiting jobs, callback panic isolation and interrupted-worker assertions.
 //! - **Depends on.** The production execution owner and its deterministic worker hold.
 //! - **Must not know.** Graph, transport or domain behavior.
 
@@ -20,44 +20,40 @@ use super::*;
 use crate::{CpuClass, Executor, MemoryClass};
 
 #[nervix_primitives::test]
-async fn an_interrupted_worker_closes_its_queued_jobs_and_returns_the_class() {
-    let pool = WorkerPool::new(
-        WorkerClassName::Cpu(CpuClass::Control),
-        NonZeroUsize::MIN,
-        NonZeroUsize::new(2).assured("two queue slots are nonzero"),
-    );
+async fn an_interrupted_worker_closes_its_waiting_jobs_and_returns_the_class() {
+    let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Control), NonZeroUsize::MIN);
     let executor = Executor::default();
     let mut held = HeldWorker::new(&pool);
     let charge = executor
         .try_reserve(MemoryClass::Management, 1)
         .assured("one byte fits in the management budget");
-    let mut queued = Box::pin(pool.run(QueueAdmission::RefuseWhenFull, None, charge, |_, _| ()));
+    let mut first = Box::pin(pool.run(None, charge, |_, _| ()));
     assert!(
-        std::future::poll_fn(|cx| Poll::Ready(queued.as_mut().poll(cx)))
+        std::future::poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx)))
             .await
             .is_pending()
     );
     let charge = executor
         .try_reserve(MemoryClass::Management, 1)
         .assured("a second byte fits in the management budget");
-    let mut successor = Box::pin(pool.run(QueueAdmission::RefuseWhenFull, None, charge, |_, _| ()));
+    let mut successor = Box::pin(pool.run(None, charge, |_, _| ()));
     assert!(
         std::future::poll_fn(|cx| Poll::Ready(successor.as_mut().poll(cx)))
             .await
             .is_pending()
     );
     held.0.advance();
-    assert_eq!(pool.snapshot().pending, 1);
+    assert_eq!(pool.snapshot().waiting, 1);
     // Transfer the selected callback into its production destructor without executing it. This
     // is the transition when a runtime drops a worker before its next callback. Its successor
-    // remains queued and must lose its start channel as the selected job loses its result.
+    // still waits and must lose its start channel as the selected job loses its result.
     let interrupted = Worker {
         pool: Arc::clone(&held.0.pool),
         state: std::mem::replace(&mut held.0.state, WorkerState::Idle),
     };
     drop(held);
     drop(interrupted);
-    let error = queued
+    let error = first
         .await
         .expect_err("the interrupted worker closes its selected result channel");
     assert!(matches!(
@@ -68,7 +64,7 @@ async fn an_interrupted_worker_closes_its_queued_jobs_and_returns_the_class() {
     ));
     let error = successor
         .await
-        .expect_err("the interrupted worker closes its queued start channel");
+        .expect_err("the interrupted worker closes its waiting job's start channel");
     assert!(matches!(
         error.current_context(),
         ExecutionError::PoolClosed {
@@ -76,36 +72,30 @@ async fn an_interrupted_worker_closes_its_queued_jobs_and_returns_the_class() {
         }
     ));
     assert_eq!(pool.snapshot().running, 0);
-    assert_eq!(pool.snapshot().pending, 0);
+    assert_eq!(pool.snapshot().waiting, 0);
     assert_eq!(executor.snapshot().management_memory.reserved_bytes, 0);
     let charge = executor
         .try_reserve(MemoryClass::Management, 1)
         .assured("the interrupted job returned its charge");
     assert_eq!(
-        pool.run(QueueAdmission::RefuseWhenFull, None, charge, |_, _| 7)
+        pool.run(None, charge, |_, _| 7)
             .await
-            .assured("the returned active place admits a replacement"),
+            .assured("the returned worker takes a replacement"),
         7
     );
 }
 
 #[nervix_primitives::test]
 async fn a_panicking_job_reports_its_own_failure_and_the_worker_drains_its_successor() {
-    let pool = WorkerPool::new(
-        WorkerClassName::Cpu(CpuClass::Control),
-        NonZeroUsize::MIN,
-        NonZeroUsize::new(2).assured("two queue slots are nonzero"),
-    );
+    let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Control), NonZeroUsize::MIN);
     let executor = Executor::default();
     let held = HeldWorker::new(&pool);
     let charge = executor
         .try_reserve(MemoryClass::Management, 1)
         .assured("one byte fits in the management budget");
-    let mut panicking = Box::pin(
-        pool.run(QueueAdmission::RefuseWhenFull, None, charge, |_, _| {
-            panic!("the callback's deliberate panic")
-        }),
-    );
+    let mut panicking = Box::pin(pool.run(None, charge, |_, _| {
+        panic!("the callback's deliberate panic")
+    }));
     assert!(
         std::future::poll_fn(|cx| Poll::Ready(panicking.as_mut().poll(cx)))
             .await
@@ -114,7 +104,7 @@ async fn a_panicking_job_reports_its_own_failure_and_the_worker_drains_its_succe
     let charge = executor
         .try_reserve(MemoryClass::Management, 1)
         .assured("a second byte fits in the management budget");
-    let mut succeeding = Box::pin(pool.run(QueueAdmission::RefuseWhenFull, None, charge, |_, _| 7));
+    let mut succeeding = Box::pin(pool.run(None, charge, |_, _| 7));
     assert!(
         std::future::poll_fn(|cx| Poll::Ready(succeeding.as_mut().poll(cx)))
             .await
@@ -139,17 +129,88 @@ async fn a_panicking_job_reports_its_own_failure_and_the_worker_drains_its_succe
     let drained = pool.snapshot();
     assert_eq!(drained.completed, 2);
     assert_eq!(drained.running, 0);
-    assert_eq!(drained.pending, 0);
+    assert_eq!(drained.waiting, 0);
+    assert_eq!(executor.snapshot().management_memory.reserved_bytes, 0);
+}
+
+/// A carrying job whose callback panics reports the panic, and the state it carried goes with it,
+/// since only the callback could have handed it back. The worker survives and drains the next
+/// carrying job, whose state comes home with its outcome.
+#[nervix_primitives::test]
+async fn a_panicking_carrying_job_takes_its_state_and_the_worker_drains_its_successor() {
+    let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Control), NonZeroUsize::MIN);
+    let executor = Executor::default();
+    let held = HeldWorker::new(&pool);
+    let mut panicking_home: Option<Vec<u8>> = None;
+    let mut succeeding_home: Option<Vec<u8>> = None;
+    let charge = executor
+        .try_reserve(MemoryClass::Management, 1)
+        .assured("one byte fits in the management budget");
+    let mut panicking = Box::pin(pool.run_carrying(
+        None,
+        charge,
+        vec![1_u8],
+        &mut panicking_home,
+        |_state, _, _| -> (Vec<u8>, u8) { panic!("the callback's deliberate panic") },
+    ));
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(panicking.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    let charge = executor
+        .try_reserve(MemoryClass::Management, 1)
+        .assured("a second byte fits in the management budget");
+    let mut succeeding = Box::pin(pool.run_carrying(
+        None,
+        charge,
+        vec![2_u8],
+        &mut succeeding_home,
+        |mut state, _, _| {
+            state.push(3);
+            (state, 7)
+        },
+    ));
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(succeeding.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    drop(held);
+    let failure = panicking
+        .await
+        .expect_err("the deliberate panic is reported");
+    assert!(matches!(
+        failure.current_context(),
+        ExecutionError::JobPanicked {
+            class: "control_cpu"
+        }
+    ));
+    assert_eq!(
+        succeeding
+            .await
+            .assured("the worker survives the carrying callback's panic"),
+        7
+    );
+    assert_eq!(
+        panicking_home, None,
+        "the state the panicking callback held went with it"
+    );
+    assert_eq!(
+        succeeding_home,
+        Some(vec![2, 3]),
+        "the next job's state comes home with its outcome"
+    );
+    let drained = pool.snapshot();
+    assert_eq!(drained.completed, 2);
+    assert_eq!(drained.running, 0);
+    assert_eq!(drained.waiting, 0);
     assert_eq!(executor.snapshot().management_memory.reserved_bytes, 0);
 }
 
 #[nervix_primitives::test]
 async fn a_single_worker_drains_its_backlog_without_polling_submitters_again() {
-    let pool = WorkerPool::new(
-        WorkerClassName::Cpu(CpuClass::Control),
-        NonZeroUsize::MIN,
-        NonZeroUsize::new(8).assured("eight queue slots are nonzero"),
-    );
+    let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Control), NonZeroUsize::MIN);
     let executor = Executor::default();
     let (release, released) = nervix_primitives::sync::oneshot::channel();
     let mut gate = Some(released);
@@ -161,19 +222,16 @@ async fn a_single_worker_drains_its_backlog_without_polling_submitters_again() {
             .assured("eight bytes fit in the untouched management budget");
         let release = gate.take();
         let completed = completed.clone();
-        let mut submission =
-            Box::pin(
-                pool.run(QueueAdmission::RefuseWhenFull, None, charge, move |_, _| {
-                    if let Some(release) = release {
-                        release
-                            .blocking_recv()
-                            .assured("the test releases the first job");
-                    }
-                    completed
-                        .try_send(index)
-                        .assured("the channel holds all eight results");
-                }),
-            );
+        let mut submission = Box::pin(pool.run(None, charge, move |_, _| {
+            if let Some(release) = release {
+                release
+                    .blocking_recv()
+                    .assured("the test releases the first job");
+            }
+            completed
+                .try_send(index)
+                .assured("the channel holds all eight results");
+        }));
         let state = std::future::poll_fn(|cx| Poll::Ready(submission.as_mut().poll(cx))).await;
         assert!(state.is_pending(), "the first job holds the class's worker");
         submissions.push(submission);
@@ -200,6 +258,6 @@ async fn a_single_worker_drains_its_backlog_without_polling_submitters_again() {
     }
     assert_eq!(pool.snapshot().completed, 8);
     assert_eq!(pool.inner.dispatches.load(Ordering::Relaxed), 1);
-    assert_eq!(pool.snapshot().pending, 0);
+    assert_eq!(pool.snapshot().waiting, 0);
     assert_eq!(executor.snapshot().management_memory.reserved_bytes, 0);
 }

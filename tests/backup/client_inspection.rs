@@ -1,7 +1,7 @@
-//! Public restore progress while its real filesystem admission queue is full.
+//! Public restore progress while every filesystem worker is held.
 //!
 //! Layer: test harness.
-//! - **Owns.** Held filesystem workers and queue places and the public restore outcome probe.
+//! - **Owns.** Held filesystem workers and the public restore outcome probe.
 //! - **Depends on.** Registered executors, first-poll observations and the scenario world.
 //! - **Must not know.** Client validation or restore application implementation.
 
@@ -10,7 +10,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use nervix_execution::{Executor, MemoryClass, QueueAdmission, StorageClass};
+use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_primitives::sync::{blocking::mpsc, oneshot};
 
 use super::*;
@@ -48,9 +48,8 @@ impl FilesystemHold {
                             .try_reserve(MemoryClass::Management, 0)
                             .assured("zero charge");
                         worker
-                            .run_storage_with(
+                            .run_storage(
                                 StorageClass::Filesystem,
-                                QueueAdmission::WaitForPlace,
                                 charge,
                                 move |_charge, _cancel| {
                                     started.send(()).discarded(
@@ -66,31 +65,6 @@ impl FilesystemHold {
                     },
                 )));
             running.await.assured("the holding worker starts");
-        }
-        for _ in 0..shape.queue_capacity {
-            nervix_primitives::task::consume_budget().await;
-            let waiter = executor.clone();
-            held.tasks
-                .push(AbortOnDropHandle::new(nervix_primitives::task::spawn(
-                    async move {
-                        let charge = waiter
-                            .try_reserve(MemoryClass::Management, 0)
-                            .assured("zero charge");
-                        waiter
-                            .run_storage_with(
-                                StorageClass::Filesystem,
-                                QueueAdmission::WaitForPlace,
-                                charge,
-                                |_charge, _cancel| (),
-                            )
-                            .await
-                            .assured("a released queue holder runs");
-                    },
-                )));
-        }
-        while executor.snapshot().filesystem_storage.pending < shape.queue_capacity {
-            nervix_primitives::task::consume_budget().await;
-            nervix_primitives::task::yield_now().await;
         }
         held
     }
@@ -120,7 +94,7 @@ async fn then_restoring_model_batch_pauses(world: &mut ScenarioWorld, node: Stri
     .assured("the restoring batch reaches its admission pause");
 }
 
-#[when(expr = "filesystem workers and their queue on node {string} are held full")]
+#[when(expr = "every filesystem worker on node {string} is held")]
 async fn when_filesystem_capacity_is_held(world: &mut ScenarioWorld, node: String) {
     assert!(world.restore_inspection_capacity.is_none());
     let executor = world
@@ -129,7 +103,7 @@ async fn when_filesystem_capacity_is_held(world: &mut ScenarioWorld, node: Strin
     let held =
         nervix_primitives::time::timeout(Duration::from_secs(30), FilesystemHold::fill(&executor))
             .await
-            .assured("filesystem workers and their queue are full");
+            .assured("every filesystem worker is held");
     world.restore_inspection_capacity = Some(held);
 }
 
@@ -149,7 +123,7 @@ async fn then_inspection_admission_is_polled(world: &mut ScenarioWorld, domain: 
         }
     })
     .await
-    .assured("the actual inspector polls its storage admission while the queue is full");
+    .assured("the actual inspector polls its storage admission while every worker is held");
 }
 
 #[when("the scenario releases its client inspection capacity")]

@@ -138,7 +138,7 @@ render_description() {
               else "  capabilities: committed \($name)#\($node.incarnation) cpu-count=4 memory-bytes=8589934592 \(bounds($node.claim)) vm-inline-row-limit=1024 vm-regex-search-cache-bytes=2097152 wasm-stack-bytes=524288 wasm-parallel-compilation=false connector-retry-multiplier=2 delivery-capacity=8192 shutdown-timeout=50s task-grace-period=2s listeners=ListenerBounds { max_connections: 1024 } membership-round=1s"
               end),
              (if $node.claim == "awaiting" or ($node.claim | tostring | startswith("retained:")) then empty
-              else "  interconnect: max-peers=64 request-quota=128 health-probes=64 max-connections=768 handshakes=32 queue=1024 completion=4 watermarks=8192 stream-window=65536 connection-window=262144 setup=5s request=10s progress=5s backoff=200ms max-backoff=5s jitter-permille=0",
+              else "  interconnect: handshakes=32 queue=1024 stream-window=65536 connection-window=262144 setup=5s request=10s progress=5s backoff=200ms max-backoff=5s jitter-permille=0",
                    "  dns: cache-entries=4096 positive-max-ttl=1h negative-max-ttl=30s hook-budget=30s families=dual-stack trust-negative=true concurrent-lookups=64",
                    "  database: cache-bytes=33554432 journal-bytes=536870912 workers=4",
                    "  raft database: cache-bytes=33554432 journal-bytes=536870912 workers=4",
@@ -170,7 +170,7 @@ render_description() {
              else (($spec.running_values // {})[$name] // $spec.parameters) | to_entries[]
                   | "node=\($name) \(.key) running=\(.value) revision=\($running)" end),
           "local execution capacity:",
-          "  execution workers: class=control-cpu workers=1 pending_jobs=64",
+          "  execution workers: class=control-cpu workers=1",
           "  execution memory: class=relay bytes=1073741824"
     '
 }

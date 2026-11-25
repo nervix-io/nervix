@@ -19,8 +19,8 @@ marker = "simulation_checks"
 name = "execution"
 tests = [
   "workers::simulation_checks::cancelled_running_job_keeps_its_charge_until_exit",
-  "workers::simulation_checks::queued_jobs_take_the_worker_in_admission_order",
-  "workers::simulation_checks::saturation_and_dropped_waiters_restore_the_queue_and_charge",
+  "workers::simulation_checks::dropped_waiting_jobs_return_their_charges_and_leave_no_waiting_job",
+  "workers::simulation_checks::waiting_jobs_take_the_worker_in_the_order_they_asked",
 ]
 
 [[invocation]]

@@ -22,7 +22,7 @@ use nervix_backup::{
     ArchiveRecord, BRANCH_STATE_GROUP_BYTES, DeduplicatorStateDescriptor, DelayedHistogramRemoval,
     SectionContent, SectionPath, StateField, WindowAccumulatorRecord, WindowStateDescriptor,
 };
-use nervix_execution::ChargedBytes;
+use nervix_execution::{ChargedBytes, Executor};
 use nervix_interconnect::{RemoteOperationFailure, StateSchema};
 use nervix_models::{DomainName, DomainSchedule, NodeRef, SchemaFingerprint};
 
@@ -41,6 +41,7 @@ use crate::{
 impl SessionServiceImpl {
     pub(super) async fn stage_branch_state_sections(
         &self,
+        executor: &Executor,
         captured: Vec<CapturedBranchState>,
         schedule: Option<&DomainSchedule>,
         request: &CaptureDomainStateRequest,
@@ -82,16 +83,16 @@ impl SessionServiceImpl {
             let sections = match captured.state {
                 CapturedBranchStateKind::Inferencer(_)
                 | CapturedBranchStateKind::StoredInferencer(_) => {
-                    self.stage_inferencer_sections(captured, node, request)
+                    self.stage_inferencer_sections(executor, captured, node, request)
                         .await?
                 }
                 CapturedBranchStateKind::Deduplicator(_)
                 | CapturedBranchStateKind::StoredDeduplicator(_) => {
-                    self.stage_deduplicator_sections(captured, schema, &schemas, request)
+                    self.stage_deduplicator_sections(executor, captured, schema, &schemas, request)
                         .await?
                 }
                 CapturedBranchStateKind::Window(_) | CapturedBranchStateKind::StoredWindow(_) => {
-                    self.stage_window_sections(captured, schema, &schemas, request)
+                    self.stage_window_sections(executor, captured, schema, &schemas, request)
                         .await?
                 }
             };
@@ -102,6 +103,7 @@ impl SessionServiceImpl {
 
     async fn stage_deduplicator_sections(
         &self,
+        executor: &Executor,
         captured: CapturedBranchState,
         schema: SchemaFingerprint,
         schemas: &BranchStateSchemas,
@@ -118,7 +120,7 @@ impl SessionServiceImpl {
         let keyspace = match captured.state {
             CapturedBranchStateKind::Deduplicator(keyspace) => keyspace,
             CapturedBranchStateKind::StoredDeduplicator(checkpoint) => checkpoint
-                .open_keyspace(&self.inner.runtime)
+                .open_keyspace(&self.inner.runtime, executor)
                 .await
                 .map_err(|error| {
                     error.change_context(failure_context(
@@ -156,9 +158,8 @@ impl SessionServiceImpl {
                 ),
             ),
             content: SectionContent::Record(DeduplicatorStateDescriptor::KIND),
-            artifact: self.stage_captured_section(bytes, domain).await?,
+            artifact: self.stage_captured_section(executor, bytes, domain).await?,
         }];
-        let executor = self.inner.runtime.executor();
         for (index, group) in groups.into_iter().enumerate() {
             nervix_primitives::task::consume_budget().await;
             let index = u32::try_from(index).verified("the group count was checked above");
@@ -188,6 +189,7 @@ impl SessionServiceImpl {
 
     async fn stage_window_sections(
         &self,
+        executor: &Executor,
         captured: CapturedBranchState,
         schema: SchemaFingerprint,
         schemas: &BranchStateSchemas,
@@ -201,12 +203,12 @@ impl SessionServiceImpl {
                 &format!("window processor '{entity}' has no archive shape"),
             ));
         };
-        let executor = self.inner.runtime.executor();
         let window = match captured.state {
             CapturedBranchStateKind::Window(window) => window.open(),
             CapturedBranchStateKind::StoredWindow(checkpoint) => checkpoint
                 .open_window(
                     &self.inner.runtime,
+                    executor,
                     &window_schemas.input,
                     &window_schemas.arguments,
                 )
@@ -263,7 +265,7 @@ impl SessionServiceImpl {
                 ),
             ),
             content: SectionContent::Record(WindowStateDescriptor::KIND),
-            artifact: self.stage_captured_section(bytes, domain).await?,
+            artifact: self.stage_captured_section(executor, bytes, domain).await?,
         }];
         for (index, group) in groups.into_iter().enumerate() {
             nervix_primitives::task::consume_budget().await;

@@ -60,9 +60,12 @@ async fn restored_inferencer_replicas(world: &mut ScenarioWorld, file: String, i
         .run_command(&leader, &world.domain, "SHOW CLUSTER STATUS;")
         .await
         .assured("the restored schedule is publicly visible");
-    let (owner, replicas) =
-        scheduled_node_placement_from_status(&status, &world.domain, "inferencer", &inferencer)
+    let ScheduledPlacement { owner, replicas } =
+        ScheduledPlacement::from_status(&status, &world.domain, "inferencer", &inferencer)
             .assured("the restored inference unit is scheduled");
+    let Some(owner) = owner else {
+        panic!("the restored inference unit must have an owner, got: {status}");
+    };
     assert!(
         !replicas.is_empty(),
         "the three-node restore installs a replica"
@@ -92,7 +95,7 @@ fn snapshot_tenant_placeholders(world: &mut ScenarioWorld, bytes: usize) {
 }
 
 #[then(
-    expr = "snapshot checkpoints in backup {string} refuse overlapping receive memory on node \
+    expr = "snapshot checkpoints in backup {string} wait for overlapping receive memory on node \
             {string} and transfer completely after release"
 )]
 async fn snapshot_receive_admission(world: &mut ScenarioWorld, file: String, node: String) {
@@ -138,7 +141,10 @@ async fn snapshot_receive_admission(world: &mut ScenarioWorld, file: String, nod
         .cluster()
         .verify_snapshot_receive_admission(&node, placements)
         .await
-        .assured("both actual snapshot receivers refuse promptly and recover complete checkpoints");
+        .assured(
+            "both actual snapshot receivers wait while the class is full and recover complete \
+             checkpoints",
+        );
 }
 
 /// The archive supplies the production lifecycle identity without reconstructing a schema digest.

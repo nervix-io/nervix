@@ -10,7 +10,7 @@
 
 use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{AdmissionError, ChargedBytes, CpuClass, Executor, MemoryClass};
+use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass};
 use nervix_recovery::Discarded as _;
 
 use crate::{PoolClass, request::RequestEnvelope};
@@ -23,90 +23,96 @@ fn request() -> RequestEnvelope {
     }
 }
 
-async fn outer_bulk_decode_refuses_behind_a_waiter_that_needs_its_input() {
+/// A body read together with the room its decoding takes decodes within that room: it takes no
+/// further charge, so it never waits for room behind a waiter that needs more than the class has
+/// left.
+async fn a_decode_read_with_its_input_takes_no_charge_behind_a_waiter() {
     let executor = Executor::default();
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&request())
         .assured("the current fixture envelope serializes")
         .to_vec();
+    let length = u64::try_from(bytes.len()).assured("the bounded fixture length fits");
+    let whole = length
+        .checked_mul(2)
+        .assured("the fixture and its decoding fit u64");
     let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+    let read = executor
+        .try_reserve(MemoryClass::Bulk, whole)
+        .assured("the body and its decoding fit");
+    let (input, decoding) = read
+        .split(length)
+        .assured("a charge splits at a size it holds");
     let held = executor
-        .try_reserve(MemoryClass::Bulk, capacity - 8192)
-        .assured("the fixture leaves room for the encoded input");
-    let input = executor
-        .try_reserve(MemoryClass::Bulk, 4096)
-        .assured("the encoded envelope fits");
+        .try_reserve(
+            MemoryClass::Bulk,
+            capacity
+                .checked_sub(whole)
+                .assured("the class holds the fixture"),
+        )
+        .assured("the rest of the class is held");
     let waiting = executor.reserve(MemoryClass::Bulk, 8192);
     let mut waiting = std::pin::pin!(waiting);
     assert!(waiting.as_mut().now_or_never().is_none());
-    let result = super::decode_rkyv::<RequestEnvelope>(
+    let decoded = super::decode_rkyv_within::<RequestEnvelope>(
         &executor,
-        MemoryClass::Bulk,
         CpuClass::Bulk,
         ChargedBytes::from_owned(bytes, input),
+        decoding,
     )
-    .now_or_never();
-    assert!(
-        result.is_some(),
-        "decoding must refuse without retaining its input behind the waiter"
-    );
-    let error = result
-        .verified("the decoder returned immediately")
-        .err()
-        .assured("the queued reservation leaves no decode room");
-    assert!(matches!(
-        error.downcast_ref::<AdmissionError>(),
-        Some(AdmissionError::BudgetExhausted { class: "bulk", .. })
-    ));
+    .await
+    .assured("decoding within the room read with its input waits for nothing");
+    assert_eq!(decoded.value, request());
+    drop(decoded);
+    drop(held);
     drop(
         waiting
             .await
-            .assured("releasing the input lets the earlier waiter finish"),
+            .assured("the waiter is granted once the class frees"),
     );
-    drop(held);
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
-async fn nested_bulk_decode_refuses_behind_a_waiter_that_needs_its_envelope() {
+/// A nested payload's decoding waits for its copy and its decoded value as one charge, holding
+/// nothing of the class meanwhile, and decodes once room frees.
+async fn a_nested_decode_waits_for_its_whole_charge_holding_nothing() {
     let executor = Executor::default();
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&request())
         .assured("the current fixture envelope serializes")
         .to_vec();
+    let length = u64::try_from(bytes.len()).assured("the bounded fixture length fits");
     let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+    // The class has room for the payload's copy, but not for its decoded value beside it.
     let held = executor
-        .try_reserve(MemoryClass::Bulk, capacity - 8192)
-        .assured("the fixture leaves room for the envelope");
-    let envelope = executor
-        .try_reserve(MemoryClass::Bulk, 4096)
-        .assured("the caller's outer envelope fits");
-    let waiting = executor.reserve(MemoryClass::Bulk, 8192);
-    let mut waiting = std::pin::pin!(waiting);
-    assert!(waiting.as_mut().now_or_never().is_none());
-    let result = super::decode_rkyv_payload::<RequestEnvelope>(
+        .try_reserve(
+            MemoryClass::Bulk,
+            capacity
+                .checked_sub(length)
+                .assured("the class holds the fixture"),
+        )
+        .assured("the rest of the class is held");
+    let mut decoding = Box::pin(super::decode_rkyv_payload::<RequestEnvelope>(
         &executor,
         MemoryClass::Bulk,
         CpuClass::Bulk,
         bytes,
-    )
-    .now_or_never();
-    assert!(
-        result.is_some(),
-        "nested decoding must refuse before waiting on its caller's envelope"
-    );
-    let error = result
-        .verified("the decoder returned immediately")
-        .err()
-        .assured("the queued reservation leaves no decode room");
-    assert!(matches!(
-        error.downcast_ref::<AdmissionError>(),
-        Some(AdmissionError::BudgetExhausted { class: "bulk", .. })
     ));
-    drop(envelope);
-    drop(
-        waiting
-            .await
-            .assured("releasing the outer envelope lets the waiter finish"),
+    assert!(
+        decoding.as_mut().now_or_never().is_none(),
+        "a full class holds the nested decoding back instead of refusing it"
     );
     drop(held);
+    let (value, charge) = decoding
+        .await
+        .assured("the nested decoding runs once its class has room")
+        .into_parts();
+    assert_eq!(value, request());
+    assert_eq!(
+        charge.bytes(),
+        length,
+        "the decoded value keeps only its own charge"
+    );
+    drop(value);
+    drop(charge);
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
@@ -160,7 +166,7 @@ async fn nested_decode_cancellation_keeps_its_own_input_charge() {
         bytes,
     ));
     assert!(decoding.as_mut().now_or_never().is_none());
-    assert_eq!(executor.snapshot().bulk_cpu.pending, 1);
+    assert_eq!(executor.snapshot().bulk_cpu.waiting, 1);
     drop(envelope);
     assert_eq!(
         executor.memory(MemoryClass::Bulk).reserved_bytes,
@@ -171,7 +177,7 @@ async fn nested_decode_cancellation_keeps_its_own_input_charge() {
         "the queued decoder owns both input and output after its caller's envelope ends"
     );
     drop(decoding);
-    assert_eq!(executor.snapshot().bulk_cpu.pending, 0);
+    assert_eq!(executor.snapshot().bulk_cpu.waiting, 0);
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 1);
     release
         .send(())
@@ -197,25 +203,21 @@ async fn nested_decode_cancellation_keeps_its_own_input_charge() {
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
-/// A request frame its caller still holds is refused at once when its CPU class has no worker and
-/// no place in its queue, and it keeps no charge, so a burst beyond the class cannot hold the
-/// class's memory. A response frame carries work a handler already did, so its encoding and its
-/// decoding wait for a place instead, and both complete once the class frees.
+/// A busy CPU class is backpressure for every frame: when its one worker is busy and another job
+/// waits behind it, a request frame's encoding and decoding wait for a place on the worker exactly
+/// as a response frame's do, and all of them complete once the class frees.
 #[cfg(not(feature = "shuttle"))]
 #[nervix_primitives::test]
-async fn a_full_class_refuses_a_request_frame_and_holds_a_response_frame_back() {
+async fn a_full_class_holds_request_and_response_frames_back_until_a_place_frees() {
     use std::num::NonZeroUsize;
 
-    use nervix_execution::{
-        ExecutionConfig, ExecutionError, PendingJobCounts, QueueAdmission, WorkerCounts,
-    };
+    use nervix_execution::{ExecutionConfig, WorkerCounts};
 
     use crate::request::ResponseEnvelope;
 
     let executor = Executor::new(ExecutionConfig {
         workers: WorkerCounts {
             bulk_cpu: NonZeroUsize::MIN,
-            pending_jobs: PendingJobCounts::uniform(NonZeroUsize::MIN),
             ..WorkerCounts::default()
         },
         ..ExecutionConfig::default()
@@ -244,66 +246,28 @@ async fn a_full_class_refuses_a_request_frame_and_holds_a_response_frame_back() 
     let queued = nervix_primitives::task::spawn(async move {
         queued.run_cpu(CpuClass::Bulk, charge, |_, _| ()).await
     });
-    while executor.snapshot().cpu_class(CpuClass::Bulk).pending == 0 {
+    while executor.snapshot().cpu_class(CpuClass::Bulk).waiting == 0 {
         nervix_primitives::task::yield_now().await;
     }
-    let before = executor.snapshot().cpu_class(CpuClass::Bulk);
-    let reserved_before = executor.memory(MemoryClass::Bulk).reserved_bytes;
+    // Each frame is read together with the room its decoding takes.
     let charged = |bytes: Vec<u8>| {
-        let input = executor
+        let length = u64::try_from(bytes.len()).assured("the fixture envelope's length fits u64");
+        let read = executor
             .try_reserve(
                 MemoryClass::Bulk,
-                u64::try_from(bytes.len()).assured("the fixture envelope's length fits u64"),
+                length
+                    .checked_mul(2)
+                    .assured("the fixture and its decoding fit u64"),
             )
-            .assured("the encoded envelope fits");
-        ChargedBytes::from_owned(bytes, input)
+            .assured("the encoded envelope and its decoding fit");
+        let (input, decoding) = read
+            .split(length)
+            .assured("a charge splits at a size it holds");
+        (ChargedBytes::from_owned(bytes, input), decoding)
     };
     let request_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&request())
         .assured("the current fixture envelope serializes")
         .to_vec();
-
-    let refused_encoding = super::encode_rkyv(
-        &executor,
-        MemoryClass::Bulk,
-        CpuClass::Bulk,
-        1024 * 1024,
-        request(),
-    )
-    .now_or_never()
-    .assured("a full class answers a request frame's encoding at once");
-    let refused_decoding = super::decode_rkyv::<RequestEnvelope>(
-        &executor,
-        MemoryClass::Bulk,
-        CpuClass::Bulk,
-        charged(request_bytes),
-    )
-    .now_or_never()
-    .assured("a full class answers a request frame's decoding at once");
-    for refused in [refused_encoding.map(drop), refused_decoding.map(drop)] {
-        let error = refused
-            .err()
-            .assured("a full class refuses a request frame");
-        assert!(
-            matches!(
-                error.downcast_ref::<ExecutionError>(),
-                Some(ExecutionError::QueueFull { .. })
-            ),
-            "{error:?}"
-        );
-    }
-    assert_eq!(
-        executor.memory(MemoryClass::Bulk).reserved_bytes,
-        reserved_before,
-        "a refused request frame keeps no charge"
-    );
-    let refused = executor
-        .snapshot()
-        .cpu_class(CpuClass::Bulk)
-        .refused
-        .checked_sub(before.refused)
-        .assured("the refusal counter only grows");
-    assert_eq!(refused, 2, "each request frame is refused once");
-
     let response = || ResponseEnvelope {
         class: PoolClass::Bulk,
         request: "fetch_state_snapshot".to_owned(),
@@ -312,37 +276,67 @@ async fn a_full_class_refuses_a_request_frame_and_holds_a_response_frame_back() 
     let response_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&response())
         .assured("the current fixture envelope serializes")
         .to_vec();
-    let mut decoding = std::pin::pin!(super::decode_rkyv_with::<ResponseEnvelope>(
-        &executor,
-        MemoryClass::Bulk,
-        CpuClass::Bulk,
-        QueueAdmission::WaitForPlace,
-        charged(response_bytes),
-    ));
-    let mut encoding = std::pin::pin!(super::encode_rkyv_with(
+
+    let mut request_encoding = std::pin::pin!(super::encode_rkyv(
         &executor,
         MemoryClass::Bulk,
         CpuClass::Bulk,
         1024 * 1024,
-        QueueAdmission::WaitForPlace,
+        request(),
+    ));
+    let (request_input, request_room) = charged(request_bytes);
+    let mut request_decoding = std::pin::pin!(super::decode_rkyv_within::<RequestEnvelope>(
+        &executor,
+        CpuClass::Bulk,
+        request_input,
+        request_room,
+    ));
+    let (response_input, response_room) = charged(response_bytes);
+    let mut response_decoding = std::pin::pin!(super::decode_rkyv_within::<ResponseEnvelope>(
+        &executor,
+        CpuClass::Bulk,
+        response_input,
+        response_room,
+    ));
+    let mut response_encoding = std::pin::pin!(super::encode_rkyv(
+        &executor,
+        MemoryClass::Bulk,
+        CpuClass::Bulk,
+        1024 * 1024,
         response(),
     ));
     assert!(
-        decoding.as_mut().now_or_never().is_none(),
+        request_encoding.as_mut().now_or_never().is_none(),
+        "a full class holds a request frame's encoding back instead of refusing it"
+    );
+    assert!(
+        request_decoding.as_mut().now_or_never().is_none(),
+        "a full class holds a request frame's decoding back instead of refusing it"
+    );
+    assert!(
+        response_decoding.as_mut().now_or_never().is_none(),
         "a full class holds a response frame's decoding back"
     );
     assert!(
-        encoding.as_mut().now_or_never().is_none(),
+        response_encoding.as_mut().now_or_never().is_none(),
         "a full class holds a response frame's encoding back"
     );
 
     drop(release);
-    let decoded = decoding
+    let encoded_request = request_encoding
         .await
-        .assured("the decoding runs once a place frees");
-    let encoded = encoding
+        .assured("the request frame's encoding runs once a place frees");
+    let decoded_request = request_decoding
         .await
-        .assured("the encoding runs once a place frees");
+        .assured("the request frame's decoding runs once a place frees");
+    let decoded = response_decoding
+        .await
+        .assured("the response frame's decoding runs once a place frees");
+    let encoded = response_encoding
+        .await
+        .assured("the response frame's encoding runs once a place frees");
+    assert!(!encoded_request.is_empty());
+    assert_eq!(decoded_request.value.request, request().request);
     assert_eq!(decoded.value.request, response().request);
     assert_eq!(decoded.value.result, response().result);
     assert!(!encoded.is_empty());
@@ -354,25 +348,22 @@ async fn a_full_class_refuses_a_request_frame_and_holds_a_response_frame_back() 
         .await
         .assured("the queued job's supervisor is joined")
         .assured("the queued job ran once the worker freed");
-    let refused = executor
-        .snapshot()
-        .cpu_class(CpuClass::Bulk)
-        .refused
-        .checked_sub(before.refused)
-        .assured("the refusal counter only grows");
-    assert_eq!(refused, 2, "a full class refuses no response frame");
+    drop(decoded_request);
+    drop(decoded);
+    drop(encoded_request);
+    drop(encoded);
+    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
-/// An executor whose bulk class has one worker and one place in its wait queue.
+/// An executor whose bulk class has one worker.
 fn one_place_executor() -> Executor {
     use std::num::NonZeroUsize;
 
-    use nervix_execution::{ExecutionConfig, PendingJobCounts, WorkerCounts};
+    use nervix_execution::{ExecutionConfig, WorkerCounts};
 
     Executor::new(ExecutionConfig {
         workers: WorkerCounts {
             bulk_cpu: NonZeroUsize::MIN,
-            pending_jobs: PendingJobCounts::uniform(NonZeroUsize::MIN),
             ..WorkerCounts::default()
         },
         ..ExecutionConfig::default()
@@ -380,9 +371,9 @@ fn one_place_executor() -> Executor {
     .assured("the test changes only worker counts")
 }
 
-/// The bulk class of a [`one_place_executor`] held full: its worker runs a job that waits for the
-/// test, and its one place is taken by a job waiting behind it. A job that refuses on a full class
-/// is refused, and one that waits for a place waits, until the hold is released.
+/// The bulk class of a [`one_place_executor`] held busy: its worker runs a job that waits for the
+/// test, and another job waits behind it, so the next job waits for the worker until the hold is
+/// released.
 struct FullBulkClass {
     release: nervix_primitives::sync::oneshot::Sender<()>,
     occupying: nervix_primitives::task::JoinHandle<()>,
@@ -425,7 +416,7 @@ impl FullBulkClass {
                 .await
                 .assured("the queued job runs once the worker frees");
         });
-        while executor.snapshot().cpu_class(CpuClass::Bulk).pending == 0 {
+        while executor.snapshot().cpu_class(CpuClass::Bulk).waiting == 0 {
             nervix_primitives::task::yield_now().await;
         }
         Self {
@@ -435,8 +426,8 @@ impl FullBulkClass {
         }
     }
 
-    /// Let the occupying job exit, so the queued job takes the worker and frees its place, and
-    /// wait for both.
+    /// Let the occupying job exit, so the job waiting behind it takes the worker, and wait for
+    /// both.
     async fn release(self) {
         self.release
             .send(())
@@ -458,11 +449,17 @@ fn answer() -> crate::request::ResponseEnvelope {
 
 /// Decodes what [`super::encode_answer`] encoded and checks that it is the complete answer.
 async fn assert_complete_answer(executor: &Executor, encoded: ChargedBytes) {
-    let decoded = super::decode_rkyv::<crate::request::ResponseEnvelope>(
+    let decoding = executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            u64::try_from(encoded.len()).assured("an encoded answer's length fits u64"),
+        )
+        .assured("the class has room to decode the answer");
+    let decoded = super::decode_rkyv_within::<crate::request::ResponseEnvelope>(
         executor,
-        MemoryClass::Bulk,
         CpuClass::Bulk,
         encoded,
+        decoding,
     )
     .await
     .assured("an encoded answer decodes once its class has room");
@@ -474,7 +471,7 @@ async fn assert_complete_answer(executor: &Executor, encoded: ChargedBytes) {
 
 /// An answer's encoding on a full class waits for a place, keeping only its own charge, and the
 /// end of its exchange ends the wait with that charge given back. The class refuses nothing on the
-/// answer's account, and the answer never takes a place.
+/// answer's account, and the answer never takes a worker.
 #[cfg(not(feature = "shuttle"))]
 async fn an_ended_exchange_ends_its_answers_wait_for_a_place() {
     let executor = one_place_executor();
@@ -514,12 +511,17 @@ async fn an_ended_exchange_ends_its_answers_wait_for_a_place() {
     full.release().await;
     let after = executor.snapshot().cpu_class(CpuClass::Bulk);
     assert_eq!(
-        after.refused, before.refused,
-        "a full class refuses no answer"
+        after.admitted,
+        before
+            .admitted
+            .checked_add(1)
+            .assured("a test's executor admits few jobs"),
+        "the answer's encoding was handed to the class once"
     );
     assert_eq!(
-        after.admitted, before.admitted,
-        "an answer whose exchange ended never took a place"
+        after.completed, before.admitted,
+        "an answer whose exchange ended never took a worker: only the jobs handed to the class \
+         before it ran"
     );
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
@@ -530,7 +532,6 @@ async fn an_ended_exchange_ends_its_answers_wait_for_a_place() {
 async fn an_answer_takes_the_first_place_that_frees() {
     let executor = one_place_executor();
     let full = FullBulkClass::fill(&executor).await;
-    let refused_before = executor.snapshot().cpu_class(CpuClass::Bulk).refused;
     let mut encoding = std::pin::pin!(super::encode_answer(
         &executor,
         MemoryClass::Bulk,
@@ -551,11 +552,6 @@ async fn an_answer_takes_the_first_place_that_frees() {
         panic!("an exchange that never ends cannot end the answer's wait");
     };
     assert_complete_answer(&executor, encoded).await;
-    assert_eq!(
-        executor.snapshot().cpu_class(CpuClass::Bulk).refused,
-        refused_before,
-        "a full class refuses no answer"
-    );
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
@@ -587,27 +583,34 @@ async fn an_answers_decoding_waits_for_a_place_until_its_requests_deadline() {
 
     let executor = one_place_executor();
     let peer = ClusterNodeName::parse("node-b").assured("the fixture node name is valid");
+    // Each answer is read together with the room its decoding takes.
     let encoded = || {
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&answer())
             .assured("the current fixture envelope serializes")
             .to_vec();
-        let input = executor
+        let length = u64::try_from(bytes.len()).assured("the fixture envelope's length fits u64");
+        let read = executor
             .try_reserve(
                 MemoryClass::Bulk,
-                u64::try_from(bytes.len()).assured("the fixture envelope's length fits u64"),
+                length
+                    .checked_mul(2)
+                    .assured("the fixture and its decoding fit u64"),
             )
-            .assured("the encoded answer fits");
-        ChargedBytes::from_owned(bytes, input)
+            .assured("the encoded answer and its decoding fit");
+        let (input, decoding) = read
+            .split(length)
+            .assured("a charge splits at a size it holds");
+        (ChargedBytes::from_owned(bytes, input), decoding)
     };
     let full = FullBulkClass::fill(&executor).await;
-    let before = executor.snapshot().cpu_class(CpuClass::Bulk);
     let held = executor.memory(MemoryClass::Bulk).reserved_bytes;
     let timeout = Duration::from_millis(50);
+    let (input, decoding) = encoded();
     let timed_out = super::decode_answer::<crate::request::ResponseEnvelope>(
         &executor,
-        MemoryClass::Bulk,
         CpuClass::Bulk,
-        encoded(),
+        input,
+        decoding,
         super::AnswerDeadline {
             peer: &peer,
             at: Instant::now()
@@ -635,17 +638,13 @@ async fn an_answers_decoding_waits_for_a_place_until_its_requests_deadline() {
         held,
         "a timed-out decoding returns its input and output charges"
     );
-    let after = executor.snapshot().cpu_class(CpuClass::Bulk);
-    assert_eq!(
-        after.refused, before.refused,
-        "a full class refuses no answer"
-    );
 
+    let (input, room) = encoded();
     let mut decoding = std::pin::pin!(super::decode_answer::<crate::request::ResponseEnvelope>(
         &executor,
-        MemoryClass::Bulk,
         CpuClass::Bulk,
-        encoded(),
+        input,
+        room,
         super::AnswerDeadline {
             peer: &peer,
             at: Instant::now()
@@ -665,23 +664,18 @@ async fn an_answers_decoding_waits_for_a_place_until_its_requests_deadline() {
         .into_value();
     assert_eq!(decoded.request, answer().request);
     assert_eq!(decoded.result, answer().result);
-    assert_eq!(
-        executor.snapshot().cpu_class(CpuClass::Bulk).refused,
-        before.refused,
-        "a full class refuses no answer"
-    );
 }
 
 #[cfg(not(feature = "shuttle"))]
 #[nervix_primitives::test]
-async fn outer_bulk_decode_refusal_releases_its_input() {
-    outer_bulk_decode_refuses_behind_a_waiter_that_needs_its_input().await;
+async fn an_outer_decode_takes_no_charge_beyond_the_room_read_with_its_input() {
+    a_decode_read_with_its_input_takes_no_charge_behind_a_waiter().await;
 }
 
 #[cfg(not(feature = "shuttle"))]
 #[nervix_primitives::test]
-async fn nested_bulk_decode_refusal_releases_its_envelope() {
-    nested_bulk_decode_refuses_behind_a_waiter_that_needs_its_envelope().await;
+async fn a_nested_decode_waits_for_its_whole_charge_and_runs_once_room_frees() {
+    a_nested_decode_waits_for_its_whole_charge_holding_nothing().await;
 }
 
 #[cfg(not(feature = "shuttle"))]
@@ -700,8 +694,6 @@ async fn nested_bulk_decode_cancellation_returns_input_output_and_queue_slot() {
 #[cfg(feature = "shuttle")]
 #[test]
 fn shuttle_an_answer_waiting_for_a_place_ends_with_its_exchange_or_takes_the_freed_place() {
-    use nervix_execution::QueueAdmission;
-
     fn answering(
         executor: &Executor,
     ) -> (
@@ -784,18 +776,164 @@ fn shuttle_an_answer_waiting_for_a_place_ends_with_its_exchange_or_takes_the_fre
                 .await
                 .assured("every charge returns once the last job leaves its worker");
             executor
-                .run_cpu_with(
-                    CpuClass::Bulk,
-                    QueueAdmission::WaitForPlace,
-                    whole_class,
-                    |_charge, _cancellation| (),
-                )
+                .run_cpu(CpuClass::Bulk, whole_class, |_charge, _cancellation| ())
                 .await
                 .assured("the last job gives back its worker");
             let class = executor.snapshot().cpu_class(CpuClass::Bulk);
-            assert_eq!(class.refused, 0, "a full class refuses no answer");
+            assert_eq!(class.waiting, 0, "no answer still waits for a place");
             assert_eq!(class.running, 0, "every job left its worker");
-            assert_eq!(class.pending, 0, "no job keeps a place");
+            assert_eq!(
+                executor.memory(MemoryClass::Bulk).reserved_bytes,
+                0,
+                "no charge remains"
+            );
+        });
+    });
+}
+
+/// Invariant: a received body whose decoding waits for a place on a full class ends in exactly one
+/// of two ways, whichever comes first: the place frees and the whole body is decoded, or the peer
+/// ends the exchange and the decoding gives back its place in line together with the body's charge
+/// and the room its decoding took. While the class stays full the end of the exchange alone ends
+/// the wait, so a decoding that ignored it would never finish. In every interleaving of a place
+/// freeing with an exchange ending, the class refuses nothing, and every job leaves its worker
+/// with its charge: a job the end finds already on its worker finishes its bounded decoding first,
+/// as every running job does.
+#[cfg(feature = "shuttle")]
+#[test]
+fn shuttle_a_received_body_waiting_for_a_place_ends_with_its_exchange_or_takes_the_freed_place() {
+    /// A body as a receiver holds it once it has read it: the encoded answer, charged, with room
+    /// for its decoding as large as the body. Encoded while the class still has a free place.
+    struct ReceivedBody {
+        bytes: ChargedBytes,
+        decoding: nervix_execution::Reservation,
+    }
+
+    async fn received(executor: &Executor) -> ReceivedBody {
+        let bytes = super::encode_rkyv(
+            executor,
+            MemoryClass::Bulk,
+            CpuClass::Bulk,
+            1024 * 1024,
+            answer(),
+        )
+        .await
+        .assured("an idle class encodes the answer");
+        let decoding = executor
+            .reserve(
+                MemoryClass::Bulk,
+                u64::try_from(bytes.len()).assured("an encoded answer's length fits u64"),
+            )
+            .await
+            .assured("an idle class holds the answer's decoding room");
+        ReceivedBody { bytes, decoding }
+    }
+
+    /// What a decoding reports: the decoded answer, nothing when the exchange ended first, or the
+    /// transport's failure.
+    type DecodingOutcome = Result<
+        Option<super::Decoded<crate::request::ResponseEnvelope>>,
+        error_stack::Report<crate::TransportError>,
+    >;
+
+    fn decoding(
+        executor: &Executor,
+        body: ReceivedBody,
+    ) -> (
+        nervix_primitives::sync::oneshot::Sender<()>,
+        nervix_primitives::task::JoinHandle<DecodingOutcome>,
+    ) {
+        let (end, ended) = nervix_primitives::sync::oneshot::channel::<()>();
+        let executor = executor.clone();
+        let decoding = nervix_primitives::task::spawn(async move {
+            super::until_ended(
+                async move {
+                    ended
+                        .await
+                        .discarded("a decoding that finished first stops waiting for the end");
+                    Ok(())
+                },
+                super::decode_rkyv_within::<crate::request::ResponseEnvelope>(
+                    &executor,
+                    CpuClass::Bulk,
+                    body.bytes,
+                    body.decoding,
+                ),
+            )
+            .await
+        });
+        (end, decoding)
+    }
+
+    nervix_model_harness::shuttle::check_spinning_interleavings(|| {
+        shuttle::future::block_on(async {
+            let executor = one_place_executor();
+            let first = received(&executor).await;
+            // The executor is fresh, so everything it counts is the first body's charge.
+            let first_charge = executor.memory(MemoryClass::Bulk).reserved_bytes;
+            let second = received(&executor).await;
+            let full = FullBulkClass::fill(&executor).await;
+            let held = executor.memory(MemoryClass::Bulk).reserved_bytes;
+
+            // The class stays full, so only the end of the exchange can end this wait.
+            let (end, waiting) = decoding(&executor, first);
+            let ending = nervix_primitives::task::spawn(async move {
+                end.send(())
+                    .assured("the decoding waits for its exchange while its class stays full");
+            });
+            let outcome = waiting
+                .await
+                .assured("the decoding task is joined")
+                .assured("an exchange that ends is not a failure");
+            ending.await.assured("the ending task is joined");
+            assert!(
+                outcome.is_none(),
+                "a class that stays full frees no place for the decoding"
+            );
+            let given_back = held
+                .checked_sub(first_charge)
+                .assured("the held class still counts the first body and its decoding room");
+            assert_eq!(
+                executor.memory(MemoryClass::Bulk).reserved_bytes,
+                given_back,
+                "the ended decoding gave back its body and its decoding room"
+            );
+
+            // A freed place races the end of the next exchange.
+            let (end, waiting) = decoding(&executor, second);
+            let ending = nervix_primitives::task::spawn(async move {
+                end.send(())
+                    .discarded("a decoding that finished first no longer waits for the end");
+            });
+            full.release().await;
+            ending.await.assured("the ending task is joined");
+            let outcome = waiting
+                .await
+                .assured("the decoding task is joined")
+                .assured("neither a freed place nor an ended exchange is a failure");
+            if let Some(decoded) = outcome {
+                let decoded = decoded.into_value();
+                assert_eq!(decoded.class, answer().class);
+                assert_eq!(decoded.request, answer().request);
+                assert_eq!(decoded.result, answer().result);
+            }
+            // The end of an exchange can find the decoding's job already on the class's worker.
+            // Dropping the decoding cannot stop a running job: it finishes its bounded decoding and
+            // only then gives back its worker and its charge, as every running job does. So the
+            // class is idle once a charge of its whole capacity is granted and a job then runs on
+            // its one worker.
+            let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+            let whole_class = executor
+                .reserve(MemoryClass::Bulk, capacity)
+                .await
+                .assured("every charge returns once the last job leaves its worker");
+            executor
+                .run_cpu(CpuClass::Bulk, whole_class, |_charge, _cancellation| ())
+                .await
+                .assured("the last job gives back its worker");
+            let class = executor.snapshot().cpu_class(CpuClass::Bulk);
+            assert_eq!(class.waiting, 0, "no decoding still waits for a place");
+            assert_eq!(class.running, 0, "every job left its worker");
             assert_eq!(
                 executor.memory(MemoryClass::Bulk).reserved_bytes,
                 0,
@@ -810,9 +948,75 @@ fn shuttle_an_answer_waiting_for_a_place_ends_with_its_exchange_or_takes_the_fre
 fn shuttle_bulk_receive_admission_releases_held_input_and_cancelled_jobs() {
     nervix_model_harness::shuttle::check_random_and_pct(|| {
         shuttle::future::block_on(async {
-            outer_bulk_decode_refuses_behind_a_waiter_that_needs_its_input().await;
-            nested_bulk_decode_refuses_behind_a_waiter_that_needs_its_envelope().await;
+            a_decode_read_with_its_input_takes_no_charge_behind_a_waiter().await;
+            a_nested_decode_waits_for_its_whole_charge_holding_nothing().await;
             nested_decode_cancellation_keeps_its_own_input_charge().await;
         });
     });
+}
+
+/// An encoding whose output outgrows its first charge while its class has no room for more is
+/// backpressure, not a failed frame: it gives back what it holds, waits for the larger charge, and
+/// completes once room frees.
+#[cfg(not(feature = "shuttle"))]
+#[nervix_primitives::test]
+async fn an_encoding_that_outgrows_a_full_class_waits_for_room_and_completes() {
+    let executor = Executor::default();
+    let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+    let before = executor.snapshot().cpu_class(CpuClass::Bulk);
+    // The class keeps exactly the first charge an encoding takes, so the encoding starts and then
+    // finds no room to grow.
+    let held = executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            capacity
+                .checked_sub(super::INITIAL_MESSAGE_CHARGE)
+                .assured("the bulk class is larger than one message's first charge"),
+        )
+        .assured("the empty bulk class holds all but one first charge");
+    let envelope = RequestEnvelope {
+        class: PoolClass::Bulk,
+        request: "fetch_state_snapshot".to_owned(),
+        payload: vec![7; 64 * 1024],
+    };
+    let encoder = executor.clone();
+    let encoding = nervix_primitives::task::spawn(async move {
+        super::encode_rkyv(
+            &encoder,
+            MemoryClass::Bulk,
+            CpuClass::Bulk,
+            1024 * 1024,
+            envelope,
+        )
+        .await
+    });
+    while executor.snapshot().cpu_class(CpuClass::Bulk).completed == before.completed {
+        nervix_primitives::task::consume_budget().await;
+        nervix_primitives::task::yield_now().await;
+    }
+    for _ in 0..256 {
+        nervix_primitives::task::yield_now().await;
+    }
+    assert!(
+        !encoding.is_finished(),
+        "an encoding that found its class full waits for room instead of failing its frame"
+    );
+    drop(held);
+    let encoded = encoding
+        .await
+        .assured("the encoding task is joined")
+        .assured("the encoding completes once its class has room");
+    let decoding = executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            u64::try_from(encoded.len()).assured("the encoded envelope's length fits u64"),
+        )
+        .assured("the class has room to decode the envelope");
+    let decoded =
+        super::decode_rkyv_within::<RequestEnvelope>(&executor, CpuClass::Bulk, encoded, decoding)
+            .await
+            .assured("the completed encoding decodes as an envelope");
+    assert_eq!(decoded.value.payload, vec![7; 64 * 1024]);
+    drop(decoded);
+    assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }

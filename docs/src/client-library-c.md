@@ -48,11 +48,23 @@ server progress report, which restarts them, so a long-running statement such as
 still answered. `NX_TIMEOUT_KEEPALIVE_INTERVAL` and `NX_TIMEOUT_KEEPALIVE_TIMEOUT` (30 and 20
 seconds by default) make the session ping its node after that long without hearing from it while a
 call is open, and treat the connection as lost when the ping goes unanswered within the timeout; the
-session then reconnects and restores its subscriptions as after any other dropped connection. Every
-timeout value is milliseconds, validated from 1 ms through 24 hours. `nx_connect_options_window`
-sets how many bytes of one call (`NX_WINDOW_STREAM`, 2 MiB by default, 1 byte through 2,147,483,647)
-and of all calls on a connection together (`NX_WINDOW_CONNECTION`, 5 MiB by default, 65,535 through
-2,147,483,647) the node may send before the session reads them. Add further session URLs with
+session then reconnects and restores its subscriptions as after any other dropped connection.
+`NX_TIMEOUT_RESET_STREAM_DURATION` (1 second by default) is how long the session remembers a call it
+cancelled, so that frames the node had already sent for it are ignored, and
+`NX_TIMEOUT_CONNECTION_ATTEMPT_DELAY` (300 milliseconds) how long an attempt to one address family of
+a node's host name runs before the other family is tried too. Every timeout value is milliseconds,
+validated from 1 ms through 24 hours, except the connection attempt delay, which RFC 8305 bounds to
+10 ms through 2 seconds. `nx_connect_options_window` sets how many bytes of one call
+(`NX_WINDOW_STREAM`, 2 MiB by default, 1 byte through 2,147,483,647) and of all calls on a
+connection together (`NX_WINDOW_CONNECTION`, 5 MiB by default, 65,535 through 2,147,483,647) the
+node may send before the session reads them. `nx_connect_options_limit` sets the connection's other
+limits: the calls that queue while a connection is opened (`NX_LIMIT_CALL_QUEUE_CAPACITY`, 1,024),
+the largest header list the session accepts from the node on one call
+(`NX_LIMIT_HEADER_LIST_BYTES`, 16 KiB), the request bytes one call queues before it waits for the
+node to read (`NX_LIMIT_SEND_BUFFER_BYTES`, 1 MiB), the calls reset for the node's protocol errors
+before the session ends the connection (`NX_LIMIT_MAX_ERROR_RESET_STREAMS`, 1,024), and the
+cancelled calls remembered at once (`NX_LIMIT_REMEMBERED_RESET_STREAMS`, 50). Zero, and a byte bound
+or stream count above `UINT32_MAX`, are refused at once. Add further session URLs with
 `nx_connect_options_add_seed`. The suite supplies its fixture credentials, certificate path and
 server URLs through environment variables.
 

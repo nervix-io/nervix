@@ -16,12 +16,10 @@ async fn remote_relay_frame_cost() {
     use sorted_vec::SortedVec;
 
     let mut pair = connected_transports().await;
-    pair.transport_b
-        .register_outbound_target(
-            pair.node_a.clone(),
-            NodeEndpoint::new("localhost", pair.transport_a.local_addr().port()),
-        )
-        .assured("the terminal ACK has a reverse authenticated route");
+    pair.transport_b.register_outbound_target(
+        pair.node_a.clone(),
+        NodeEndpoint::new("localhost", pair.transport_a.local_addr().port()),
+    );
     let schema = StdArc::new(Schema::new(vec![Field::new(
         "value",
         DataType::Int32,
@@ -287,12 +285,10 @@ async fn a_receiver_charges_every_channel_watermark_until_its_retention_passes()
     };
     let timing = one_second_timing();
     let mut pair = connected_transports_with_options(options).await;
-    pair.transport_b
-        .register_outbound_target(
-            pair.node_a.clone(),
-            NodeEndpoint::new("localhost", pair.transport_a.local_addr().port()),
-        )
-        .assured("the terminal outcome has a reverse authenticated route");
+    pair.transport_b.register_outbound_target(
+        pair.node_a.clone(),
+        NodeEndpoint::new("localhost", pair.transport_a.local_addr().port()),
+    );
     for channel in 1..=6_u8 {
         let delivery = RelayDelivery {
             channel_incarnation: [channel; 16],
@@ -423,6 +419,55 @@ async fn a_receiver_charges_every_channel_watermark_until_its_retention_passes()
     assert!(
         pair.incoming_b.try_recv().is_err(),
         "a channel's batch never reaches the application twice"
+    );
+    pair.transport_a.shutdown().await;
+    pair.transport_b.shutdown().await;
+}
+
+/// A cancellation that fences a position its receiver never granted takes that watermark's relay
+/// charge first. While the receiver's relay budget has no room for it, the cancellation waits,
+/// holding none of the class, rather than being answered `Unknown`; once room returns it is
+/// answered as cancelled, and the fence keeps that position cancelled.
+#[nervix_primitives::test]
+async fn a_cancellation_that_fences_a_position_waits_for_its_watermark_charge() {
+    let pair = connected_transports().await;
+    let timing = nervix_models::RemoteAckTiming::default();
+    let relay_memory = pair.executor_b.memory(MemoryClass::Relay);
+    let room = relay_memory
+        .capacity_bytes
+        .checked_sub(relay_memory.reserved_bytes)
+        .verified("a budget never reserves more than its capacity");
+    let occupied = pair
+        .executor_b
+        .try_reserve(MemoryClass::Relay, room)
+        .assured("an idle receiver's relay budget takes all of its room");
+    let delivery = RelayDelivery {
+        channel_incarnation: [9; 16],
+        sequence: 0,
+    };
+    let canceller = pair.transport_a.clone();
+    let receiver = pair.node_b.clone();
+    let cancelling = nervix_primitives::task::spawn(async move {
+        canceller.cancel_relay(&receiver, delivery, timing).await
+    });
+    nervix_primitives::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !cancelling.is_finished(),
+        "a receiver without relay room holds the cancellation back instead of answering Unknown"
+    );
+
+    drop(occupied);
+    let answered = cancelling
+        .await
+        .assured("the cancelling task is joined")
+        .assured("the receiver answers the cancellation once it has room");
+    assert_eq!(answered, RelayAdmissionStatus::Cancelled);
+    assert_eq!(
+        pair.transport_a
+            .relay_admission_status(&pair.node_b, delivery, timing)
+            .await
+            .assured("the receiver answers the status of a fenced position"),
+        RelayAdmissionStatus::Cancelled
     );
     pair.transport_a.shutdown().await;
     pair.transport_b.shutdown().await;

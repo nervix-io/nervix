@@ -143,6 +143,12 @@ pub enum ClientError {
         bytes: u32,
         smallest: u32,
     },
+    #[error(
+        "connection-attempt-delay {delay:?} must be between {:?} and {:?}, RFC 8305's bounds",
+        crate::capabilities::SHORTEST_CONNECTION_ATTEMPT_DELAY,
+        crate::capabilities::LONGEST_CONNECTION_ATTEMPT_DELAY
+    )]
+    InvalidConnectionAttemptDelay { delay: std::time::Duration },
     #[error("retry-backoff must not exceed retry-max-backoff")]
     InvalidRetryBackoff,
     #[error("restoration-backoff must not exceed restoration-max-backoff")]

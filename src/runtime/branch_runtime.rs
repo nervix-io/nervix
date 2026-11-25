@@ -1409,7 +1409,7 @@ impl BranchExecutionRuntime {
                         domain,
                         key.clone(),
                         incarnation,
-                        &RetainedStateOpening::RefusedWhenFull,
+                        &RetainedStateOpening::OnNodeExecutor,
                     )
                 )
                 .await
@@ -2340,7 +2340,7 @@ pub(super) async fn restore_branch_instance_lru_snapshot(
                 domain,
                 lifetime.key.clone(),
                 lifetime.incarnation,
-                &RetainedStateOpening::RefusedWhenFull,
+                &RetainedStateOpening::OnNodeExecutor,
             )
             .await
             .change_context(BranchLruSnapshotError::Restore { entry })?;

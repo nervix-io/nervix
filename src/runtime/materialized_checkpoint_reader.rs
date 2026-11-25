@@ -22,9 +22,7 @@
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
-use nervix_execution::{
-    ChargedBytes, CpuClass, Executor, MemoryClass, QueueAdmission, Reservation,
-};
+use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass, Reservation};
 use nervix_models::RemoteRuntimeRecordMetadata;
 
 use super::{
@@ -74,9 +72,7 @@ impl CapturedMaterializedCheckpoint {
         let mut source = self.source;
         // A checkpoint is read here for a backup, a request whose caller is answered at once, so
         // a full bulk queue refuses the read as the reader's own decoding does.
-        let header = source
-            .take_header(executor, QueueAdmission::RefuseWhenFull)
-            .await?;
+        let header = source.take_header(executor).await?;
         let _layout = header.metadata_layout(
             super::RestoredRows::Relay,
             executor.memory(MemoryClass::Relay).capacity_bytes,
@@ -126,15 +122,11 @@ impl MaterializedCheckpointReader {
             .checked_mul(8)
             .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
         let metadata = executor
-            .try_reserve(MemoryClass::Bulk, metadata_bytes.max(1))
+            .reserve(MemoryClass::Bulk, metadata_bytes.max(1))
+            .await
             .change_context(MaterializedSnapshotError::Admission)?;
-        let identities = decode_rkyv::<SealedRecordIdentities>(
-            executor,
-            QueueAdmission::RefuseWhenFull,
-            bytes,
-            identity_limit,
-        )
-        .await?;
+        let identities =
+            decode_rkyv::<SealedRecordIdentities>(executor, bytes, identity_limit).await?;
         if identities.identities.is_empty() {
             return Err(MaterializedSnapshotError::decoding(
                 "materialized group has no identities",
@@ -224,63 +216,64 @@ mod tests {
         .await
     }
 
+    /// A captured reader opened within its capture's bulk share never waits while it holds its
+    /// working set: a header the share has no room for fails at once, with the share the capture
+    /// needs, so the capture gives everything back and runs again within it.
     #[nervix_primitives::test]
-    async fn captured_header_bulk_admission_refuses_overlap_without_waiting() {
+    async fn a_captured_header_short_of_its_share_fails_at_once_with_the_share_it_needs() {
         let executor = Executor::default();
-        let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
         let room = crate::runtime::RESTORE_STATE_WORKING_BYTES + 1024;
-        let held = executor
-            .try_reserve(MemoryClass::Bulk, capacity - room)
-            .assured("the untouched class holds the contention fixture");
-        let result = open(&executor, container(1)).now_or_never();
+        let share = executor
+            .reserve_allowance(MemoryClass::Bulk, room)
+            .await
+            .assured("the untouched class grants the share");
+        let result = open(&share, container(1)).now_or_never();
         assert!(
             result.is_some(),
-            "a captured reader must refuse its overlapping read instead of waiting while holding \
-             its working set"
+            "a captured reader never waits within its share while it holds its working set"
         );
         let error = result
             .verified("the read returned without waiting")
             .err()
-            .assured("the read and working set do not fit together");
-        assert!(error.contains::<nervix_execution::AdmissionError>());
-        drop(held);
+            .assured("the read and working set do not fit the share together");
+        let needed = nervix_execution::Shortfall::of(&error)
+            .assured("the failure names the share the capture needs");
+        assert!(
+            needed > room,
+            "the capture needs more than its share, found {needed}"
+        );
+        drop(share);
         assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
     }
 
+    /// A group read within a share without room for it fails at once with the share it needs,
+    /// and never waits: the capture it belongs to then gives everything back and cuts again
+    /// within that share, with a reader of its own.
     #[nervix_primitives::test]
-    async fn captured_group_bulk_admission_refuses_without_losing_its_next_group() {
+    async fn a_captured_group_short_of_its_share_fails_at_once_with_the_share_it_needs() {
         let executor = Executor::default();
         let mut reader = open(&executor, container(1))
             .await
             .assured("the header opens");
-        let memory = executor.memory(MemoryClass::Bulk);
-        let held = executor
-            .try_reserve(
-                MemoryClass::Bulk,
-                memory.capacity_bytes - memory.reserved_bytes,
-            )
-            .assured("the fixture occupies all remaining room");
-        let result = reader
-            .next_group(&executor, 1024 * 1024, 1024 * 1024)
-            .now_or_never();
-        assert!(
-            result.is_some(),
-            "a captured group must refuse its read instead of waiting while holding its reader \
-             working set"
-        );
-        let error = result
-            .verified("the group returned without waiting")
-            .err()
-            .assured("the bulk class is full");
-        assert!(error.contains::<nervix_execution::AdmissionError>());
-        drop(held);
-        let group = reader
-            .next_group(&executor, 1024 * 1024, 1024 * 1024)
+        let share = executor
+            .reserve_allowance(MemoryClass::Bulk, 1)
             .await
-            .assured("a refused first frame consumed nothing")
-            .assured("the group is still present");
-        assert_eq!(group.columns.as_ref(), vec![0; 513]);
-        drop(group);
+            .assured("the class grants a one-byte share");
+        // The read takes its section through a storage job, so it ends after that job rather than at
+        // once; within its share it never waits for room.
+        let error = nervix_primitives::time::timeout(
+            std::time::Duration::from_secs(30),
+            reader.next_group(&share, 1024 * 1024, 1024 * 1024),
+        )
+        .await
+        .assured("a captured group read never waits for room within its share")
+        .err()
+        .assured("the share has no room for the group");
+        assert!(
+            nervix_execution::Shortfall::of(&error).is_some(),
+            "the failure names the share the read needs"
+        );
+        drop(share);
         drop(reader);
         assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
     }

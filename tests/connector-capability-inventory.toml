@@ -2342,3 +2342,162 @@ entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/inherited_partitions.feature", scenario = "A Pulsar <subscription_type> reader follows the inherited partition topics" },
 ]
+
+# GIVE UP AFTER is a clause of every emitter entity's retry policy, which the host applies alike;
+# one scenario aims every network entity at a destination that refuses every connection.
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "CLICKHOUSE TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "HTTP REQUEST EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+  { feature = "tests/features/runtime/emitter_give_up.feature", scenario = "An HTTP emitter that cannot reach its destination for longer than GIVE UP AFTER fails exactly the rows it did not deliver" },
+  { feature = "tests/features/runtime/emitter_give_up.feature", scenario = "An emitter whose GIVE UP AFTER is 0s never retries a row its destination did not take" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "ICEBERG TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "KAFKA TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "MONGODB COLLECTION EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "MQTT TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "MYSQL TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "NATS STREAM EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "NATS SUBJECT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "OTEL LOGS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "OTEL METRICS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "OTEL TRACES EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "POSTGRES TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "PULSAR TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "REDIS PUBSUB EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "SENTRY EVENT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "SQS QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "SYSLOG COLLECTOR EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "ZEROMQ PUSH EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "Every network emitter entity whose destination refuses every connection gives up its row once GIVE UP AFTER passes" },
+]
+
+[[capability]]
+capability = "GIVE UP AFTER"
+entity = "CLIENT CONSUMER EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "A client consumer emitter whose application asks for a batch again gives the batch up once GIVE UP AFTER passes" },
+]

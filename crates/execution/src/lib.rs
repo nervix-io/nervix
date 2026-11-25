@@ -20,15 +20,27 @@
 //! - **Must not know.** What a job computes. It admits, charges, runs and cancels; it decides
 //!   nothing about relays, branches, domains, peers, graphs or the cluster.
 //!
-//! Admission is always in one order: reserve the memory an operation will allocate, then take a
-//! job slot, then submit. A submission that is dropped before it reaches a worker releases its
+//! Admission is always in one order: reserve the memory an operation will allocate, then submit
+//! the job for a worker. A submission that is dropped before a worker takes it releases its
 //! reservation with it; a submission already running keeps its reservation until the work actually
-//! exits, because the memory is still allocated until then. A class whose wait queue is full refuses
-//! a job that answers a request, whose sender can present it again, and holds a job the node already
-//! accepted and keeps until a place frees, ahead of any job asking afterwards: the caller states
-//! which with a [`QueueAdmission`]. An owner that must keep serving others while its own work
-//! waits submits through a handle that tells it, with [`CapacityWaits`], while that work waits for
-//! a place or for memory room.
+//! exits, because the memory is still allocated until then.
+//!
+//! A full class is backpressure, never a refusal. A memory charge waits for room in its class, and
+//! a job that finds every worker of its class busy waits for one, ahead of any job asking
+//! afterwards. A worker class is a semaphore over its workers, not a queue with places of its own:
+//! nothing bounds how many jobs wait. The caller bounds either wait by dropping the future, which
+//! gives up its place in line and returns what it holds. Admission fails only for an operation
+//! larger than its whole class, which could never fit, and once the executor admits no more work.
+//!
+//! Nothing waits for room while it holds part of the same class: a queued charge takes every byte
+//! its class frees until it is satisfied, so it could stall behind the very bytes it holds. An
+//! owner takes the whole charge an operation needs at once, and a synchronous job, which cannot
+//! wait at all, that outgrows its charge gives everything back and reports the charge it needs: its
+//! owner waits for that charge while holding nothing and runs the job again under it
+//! ([`Executor::run_cpu_growing`]).
+//!
+//! An owner that must keep serving others while its own work waits submits through a handle that
+//! tells it, with [`CapacityWaits`], while that work waits for a worker or for memory room.
 //!
 //! A class bounds admission, not threads. Jobs run on the process-wide Tokio blocking pool, and a
 //! class's worker count is the number of its jobs that may be on that pool at once — taken before
@@ -36,13 +48,15 @@
 //! guarantees is therefore that no other class can consume its share of admission. It does not
 //! guarantee a free thread: the pool is shared with the few owners the primitive boundary lets run
 //! there without admission, each declared in `crates/primitives/blocking-permissions.toml` with
-//! what bounds it, and a class holding a free permit still queues behind whatever is already
-//! running there. Reserving threads per class would isolate them physically, at the cost of a pool
+//! what bounds it, and a class with a free worker still waits behind whatever is already running
+//! there. Reserving threads per class would isolate them physically, at the cost of a pool
 //! per class; the node deliberately does not do that.
 //!
-//! A class worker drains its admitted FIFO directly, retaining one blocking-pool dispatch until
-//! it becomes idle. Submission and the last worker's idle transition share a bounded queue fence;
-//! callbacks and charge release run outside it. Queued cancellation removes the exact entry.
+//! A worker that finishes a job takes the next waiting job itself, in the order the jobs asked,
+//! retaining one blocking-pool dispatch until no job waits, so a freed worker never waits for an
+//! async wake-up to hand on its place. Submission and the last worker's idle transition share one
+//! bounded fence over the waiting jobs; callbacks and charge release run outside it. A withdrawn
+//! waiting job is removed exactly.
 //!
 //! In the Turmoil test build, the boundary runs a CPU worker on the simulated scheduler and yields
 //! between callbacks, so each bounded synchronous job body is one scheduling step. Storage jobs still use
@@ -58,10 +72,10 @@
     )
 )]
 
-mod accepted_work;
 mod cancellation;
 mod capacity_waits;
 mod executor;
+mod growing;
 mod limits;
 mod memory;
 mod runtime_capacity;
@@ -73,31 +87,28 @@ pub use runtime_capacity::{
     RuntimeThreadStackSize, RuntimeWorkerThreads,
 };
 pub use settings::{
-    BulkChunkBytes, BulkCpuPendingJobs, BulkCpuWorkers, BulkMemory, BulkWindowMemory,
-    CommandsMemory, ConnectorStoragePendingJobs, ConsensusStoragePendingJobs,
-    ConsensusStorageWorkers, ControlCpuPendingJobs, ControlCpuWorkers, CredentialsCpuPendingJobs,
-    CredentialsCpuWorkers, CredentialsMemory, DataCpuPendingJobs, DataCpuWorkers,
-    ExecutionOverrides, ExecutionSettings, ExtensionCpuPendingJobs, ExtensionCpuWorkers,
-    FilesystemStoragePendingJobs, FilesystemStorageWorkers, IntakeMemory, ManagementMemory,
-    PendingJobCounts, RelayDecodedBytes, RelayEncodedBytes, RelayMemory, RelayScratchBytes,
-    ResidentReplicationBatches, RestoreMetadataMemory, StateReadCacheMemory, StateReadMemory,
-    WorkerSettings,
+    BulkChunkBytes, BulkCpuWorkers, BulkMemory, BulkWindowMemory, CommandsMemory,
+    ConsensusStorageWorkers, ControlCpuWorkers, CredentialsCpuWorkers, CredentialsMemory,
+    DataCpuWorkers, ExecutionOverrides, ExecutionSettings, ExtensionCpuWorkers,
+    FilesystemStorageWorkers, IntakeMemory, ManagementMemory, RelayDecodedBytes, RelayEncodedBytes,
+    RelayMemory, RelayScratchBytes, ResidentReplicationBatches, RestoreMetadataMemory,
+    StateReadCacheMemory, StateReadMemory, WorkerSettings,
 };
 
 pub use crate::{
-    accepted_work::{AcceptedCpu, AcceptedWork},
     cancellation::{Cancellation, Cancelled},
     capacity_waits::CapacityWaits,
     executor::{ExecutionFailure, Executor, ExecutorSnapshot},
+    growing::Attempt,
     limits::{
         ConnectorStorageWorkers, CpuClass, ExecutionConfig, ExecutionConfigError, MemoryBudgets,
         MemoryClass, OperationLimits, StorageClass, WorkerClassName, WorkerCounts,
     },
     memory::{
         AdmissionError, BudgetedBuffer, BufferGrowthError, BufferLimitExceeded, ChargedBytes,
-        MemoryBudgetSnapshot, Reservation,
+        GrowingCharge, MemoryBudgetSnapshot, Reservation, Shortfall,
     },
-    workers::{ExecutionError, QueueAdmission, WorkerClassSnapshot},
+    workers::{ExecutionError, WorkerClassSnapshot},
 };
 
 // The ordinary tests build executors whose atomics would be Loom's in a Loom build, outside any

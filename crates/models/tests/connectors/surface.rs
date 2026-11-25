@@ -741,6 +741,7 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
         ),
         [
             "MODE ACK",
+            "GIVE UP AFTER",
             "FIFO GROUP",
             "SEND SINGLE",
             "SEND BATCH",
@@ -756,7 +757,13 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
                 .capabilities()
                 .runtime_capabilities()
         ),
-        ["MODE ACK", "METHOD", "PATH", "STALLED PEER timeout_ms"]
+        [
+            "MODE ACK",
+            "GIVE UP AFTER",
+            "METHOD",
+            "PATH",
+            "STALLED PEER timeout_ms"
+        ]
     );
 }
 

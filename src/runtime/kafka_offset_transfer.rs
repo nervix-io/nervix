@@ -195,7 +195,8 @@ impl Runtime {
         let metadata = self
             .inner
             .executor
-            .try_reserve(MemoryClass::RestoreMetadata, scratch)
+            .reserve(MemoryClass::RestoreMetadata, scratch)
+            .await
             .map_err(StreamHandlerError::with_cause)?;
         let working = self
             .inner
@@ -366,7 +367,8 @@ impl Runtime {
         let charge = self
             .inner
             .executor
-            .try_reserve(MemoryClass::RestoreMetadata, working)
+            .reserve(MemoryClass::RestoreMetadata, working)
+            .await
             .change_context_lazy(failure)?;
         let (read_charge, decode_charge) = charge
             .split(length + self.inner.executor.limits().bulk_chunk_bytes.as_u64())
@@ -378,9 +380,8 @@ impl Runtime {
         let installer = installer.clone();
         self.inner
             .executor
-            .run_cpu_with(
+            .run_cpu(
                 CpuClass::Bulk,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 decode_charge,
                 move |_charge, cancellation| {
                     cancellation

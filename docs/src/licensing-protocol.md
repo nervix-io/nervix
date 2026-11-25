@@ -172,7 +172,9 @@ An expired lifetime is a firm stop even if the license or activation also has an
 The verifier returns a private verified outcome. Validation then checks these rules against typed
 caller inputs and returns `DecisionRejection` on failure:
 
-1. The exact envelope, signature, authorization and apply/reload revocation rules above hold.
+1. The exact envelope, signature, authorization and apply/reload revocation rules above hold. A
+   decision whose signature profile or payload does not verify is refused as a decision, never as
+   a trust document.
 2. The document kind and protocol match this build.
 3. The service equals the caller's compiled deployment address.
 4. Activation, cluster, kind, creation, expiry, request and key identity match the committed binding.

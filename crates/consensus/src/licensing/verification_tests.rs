@@ -294,6 +294,183 @@ fn invalid_signed_binding_never_changes_committed_state_and_reload_is_semantic()
     );
 }
 
+/// The receipt check a node runs before it proposes an activation reports a rejected decision
+/// with every cause once: the rejection, the protocol's reason beneath it and the condition that
+/// reason names.
+#[test]
+fn a_rejected_decision_names_each_cause_once() {
+    use nervix_licensing_protocol::{conditions::REFRESH_INTERVAL, validation::DecisionRejection};
+
+    let fixture = SignedFixture::new();
+    let mut incomplete = fixture.decision.clone();
+    assert!(
+        incomplete
+            .conditions
+            .operating
+            .durations
+            .remove(REFRESH_INTERVAL)
+            .is_some(),
+        "the fixture decision lists the refresh interval"
+    );
+    let received = fixture.received(&incomplete, &[]);
+    let report = LicensingRecord::free(fixture.identity.public().created_at)
+        .prepare_activation(
+            &fixture.identity.public(),
+            nervix_models::ActivationKind::Persistent,
+            "TESTABCD".to_owned(),
+            &received,
+            &fixture.environment,
+        )
+        .expect_err("a decision without the refresh interval is incomplete");
+    assert_eq!(
+        report.current_context(),
+        &LicenseDecisionError::Rejected {
+            reason: DecisionRejection::Content
+        }
+    );
+    assert_eq!(
+        report.downcast_ref::<DecisionRejection>(),
+        Some(&DecisionRejection::Content)
+    );
+    assert_eq!(
+        format!("{report:#}"),
+        "licensing decision was rejected: the decision conditions, status or acknowledged \
+         transitions are invalid: condition refresh.interval is missing"
+    );
+}
+
+/// A decision whose signature does not verify is refused at receipt as a decision, beneath the
+/// rejection's reason, with the document's refusal and the verifier's beneath it, each once.
+#[test]
+fn a_decision_whose_signature_does_not_verify_is_refused_as_a_decision_at_receipt() {
+    use nervix_licensing_protocol::{trust::TrustError, validation::DecisionRejection};
+
+    let fixture = SignedFixture::new();
+    let mut received = fixture.received(&fixture.decision, &[]);
+    corrupt_signature(&mut received.bytes);
+    let report = LicensingRecord::free(fixture.identity.public().created_at)
+        .prepare_activation(
+            &fixture.identity.public(),
+            nervix_models::ActivationKind::Persistent,
+            "TESTABCD".to_owned(),
+            &received,
+            &fixture.environment,
+        )
+        .expect_err("a decision with a corrupted signature does not verify");
+    assert_eq!(
+        report.current_context(),
+        &LicenseDecisionError::Rejected {
+            reason: DecisionRejection::Envelope
+        }
+    );
+    assert!(matches!(
+        report.downcast_ref::<TrustError>(),
+        Some(TrustError::Decision)
+    ));
+    assert_eq!(
+        format!("{report:#}"),
+        "licensing decision was rejected: the decision envelope or signing authorization is \
+         invalid: the decision has an invalid signature profile or payload: the document \
+         signature is invalid: JWS signature verification failed: InvalidSignature"
+    );
+}
+
+/// `compact` with the first character of its signature segment replaced, as the licensing test
+/// service tampers a signature: still canonical base64url, but no longer the key's signature.
+fn corrupt_signature(compact: &mut String) {
+    let separator = compact
+        .rfind('.')
+        .assured("a signed decision is a compact JWS");
+    let position = separator
+        .checked_add(1)
+        .assured("the signature segment follows a separator inside the string");
+    let end = position
+        .checked_add(1)
+        .assured("the signature segment holds at least one character");
+    let replacement = if compact.as_bytes()[position] == b'A' {
+        "B"
+    } else {
+        "A"
+    };
+    compact.replace_range(position..end, replacement);
+}
+
+/// The stored verification keeps only the error value, without its report. A report made from
+/// that value, as `DESCRIBE LICENSE` renders it, still names the rejection and its reason once
+/// each.
+#[test]
+fn a_stored_rejection_reports_its_reason_once() {
+    use nervix_licensing_protocol::validation::DecisionRejection;
+
+    let fixture = SignedFixture::new();
+    let received = fixture.received(&fixture.decision, &[]);
+    let binding = fixture.binding(&received);
+    let mut damaged = LicensingRecord::free(fixture.identity.public().created_at)
+        .accept(
+            &fixture.identity.public(),
+            &binding,
+            &received,
+            None,
+            &fixture.environment,
+        )
+        .assured("valid current decision applies");
+    let LicensingMode::Activated(activation) = &mut damaged.mode else {
+        unreachable!("an accepted activation is activated")
+    };
+    activation.decision.bytes.push('!');
+    let rejection = damaged
+        .verify(&fixture.identity.public(), &fixture.environment)
+        .verified("activated verification is present")
+        .expect_err("a damaged stored decision does not verify");
+    assert_eq!(
+        rejection,
+        LicenseDecisionError::Rejected {
+            reason: DecisionRejection::Envelope
+        }
+    );
+    assert_eq!(
+        format!("{:#}", error_stack::Report::new(rejection)),
+        "licensing decision was rejected: the decision envelope or signing authorization is \
+         invalid"
+    );
+}
+
+/// A decision Raft rejects while it applies it reaches the proposer as a typed conflict, which
+/// still names the protocol's reason for the rejection, once.
+#[test]
+fn a_decision_rejected_at_apply_names_its_reason_once_at_the_proposer() {
+    use nervix_licensing_protocol::validation::DecisionRejection;
+
+    let fixture = SignedFixture::new();
+    let mut state = fixture.state();
+    let received = fixture.received(&fixture.decision, &[]);
+    let binding = fixture.binding(&received);
+    let mut damaged = received.clone();
+    damaged.bytes.push('!');
+    let result = apply_consensus_command(
+        &mut state,
+        &ConsensusCommand::ActivateLicense {
+            binding: Box::new(binding),
+            decision: Box::new(damaged),
+        },
+    );
+    assert_eq!(
+        result.response,
+        ConsensusResponse::Conflict(ConsensusConflict::LicenseDecision {
+            reason: LicenseDecisionError::Rejected {
+                reason: DecisionRejection::Envelope
+            }
+        })
+    );
+    let report = crate::Proposer::applied_response(result.response)
+        .expect_err("a rejected decision is a typed conflict at the proposer");
+    assert_eq!(
+        crate::ConsensusError::report_message(&report),
+        "consensus state changed: licensing decision was refused: licensing decision was \
+         rejected: the decision envelope or signing authorization is invalid"
+    );
+}
+
 #[test]
 fn trust_installation_retains_a_revoked_committed_decision_and_refuses_new_signatures() {
     use nervix_licensing_protocol::{

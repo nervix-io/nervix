@@ -5,8 +5,8 @@
 //! Layer: test harness.
 //!
 //! - **Owns.** Holding a worker class full around one exchange, and the owner checks that each
-//!   answer waits with its own charge, refuses nothing, arrives once the class frees and returns
-//!   its charge once its exchange ends.
+//!   answer waits with its own charge, arrives once the class frees and returns its charge once its
+//!   exchange ends.
 //! - **Depends on.** The interconnect test fixture, its two bound transports and their executors.
 //! - **Must not know.** Product runtime graphs or what the answers carry for the runtime.
 
@@ -18,7 +18,7 @@
 use std::{collections::BTreeSet, time::Duration};
 
 use error_stack::Report;
-use nervix_execution::{CpuClass, Executor, MemoryClass, QueueAdmission};
+use nervix_execution::{CpuClass, Executor, MemoryClass};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainName, NodeEndpoint,
     PrerequisiteMismatch, PrerequisiteTimings, RelayName, RemoteAckOutcome, RemoteAckRegistration,
@@ -56,13 +56,10 @@ impl InterconnectRequest for AnswerProbe {
 /// Two bound transports with the first dialing the second.
 async fn connected_with_options(options: TransportOptions) -> ConnectedTransports {
     let transports = bound_transports_with_options(options).await;
-    transports
-        .transport_a
-        .register_outbound_target(
-            transports.node_b.clone(),
-            NodeEndpoint::new("localhost", transports.transport_b.local_addr().port()),
-        )
-        .expect("authenticated test target should register");
+    transports.transport_a.register_outbound_target(
+        transports.node_b.clone(),
+        NodeEndpoint::new("localhost", transports.transport_b.local_addr().port()),
+    );
     transports
 }
 
@@ -74,9 +71,8 @@ fn registration(ack_id: u64, registrar: &ClusterNodeName) -> RemoteAckRegistrati
     }
 }
 
-/// Every worker of one CPU class busy with a job the test releases, and every place in its wait
-/// queue taken by a job waiting behind them. A job that refuses on a full class is refused, and
-/// one that waits for a place waits, until the hold is released.
+/// Every worker of one CPU class busy with a job the test releases. The next job the class is handed
+/// waits for a worker until the hold is released, and it is the only job counted as waiting.
 pub(crate) struct HeldCpuClass {
     releases: Vec<nervix_primitives::sync::oneshot::Sender<()>>,
     jobs: Vec<nervix_primitives::task::JoinHandle<()>>,
@@ -112,26 +108,11 @@ impl HeldCpuClass {
                 .await
                 .expect("an occupying job reports once it holds its worker");
         }
-        for _ in 0..capacity.queue_capacity {
-            let charge = executor
-                .try_reserve(MemoryClass::Bulk, 1)
-                .expect("the test's bulk class has room for one byte per held job");
-            let queuer = executor.clone();
-            jobs.push(nervix_primitives::task::spawn(async move {
-                queuer
-                    .run_cpu(class, charge, |_charge, _cancellation| ())
-                    .await
-                    .expect("a queued job takes a place behind the occupied workers");
-            }));
-        }
-        while executor.snapshot().cpu_class(class).pending < capacity.queue_capacity {
-            nervix_primitives::task::yield_now().await;
-        }
         Self { releases, jobs }
     }
 
-    /// Let every occupying job exit, so the queued jobs run and free their places, and wait for
-    /// all of them.
+    /// Let every occupying job exit, so the jobs waiting for a worker run, and wait for the
+    /// occupying jobs.
     pub(crate) async fn release(self) {
         for release in self.releases {
             release
@@ -164,8 +145,8 @@ async fn announce_after_first_poll<F: Future>(
     future.await
 }
 
-/// Every worker of one CPU class busy with a job the test releases, with its wait queue left to
-/// whatever arrives next.
+/// Every worker of one CPU class busy with a job the test releases, the jobs that arrive next left
+/// waiting for them.
 pub(crate) struct OccupiedWorkers {
     executor: Executor,
     class: CpuClass,
@@ -183,7 +164,7 @@ impl OccupiedWorkers {
             jobs: Vec::new(),
         };
         for _ in 0..workers {
-            let started = occupied.hold_worker(QueueAdmission::RefuseWhenFull);
+            let started = occupied.hold_worker();
             started
                 .await
                 .expect("an occupying job reports once it holds its worker");
@@ -193,10 +174,7 @@ impl OccupiedWorkers {
 
     /// Submit a job that holds a worker until the test releases it, and return the signal it sends
     /// once it holds one.
-    fn hold_worker(
-        &mut self,
-        admission: QueueAdmission,
-    ) -> nervix_primitives::sync::oneshot::Receiver<()> {
+    fn hold_worker(&mut self) -> nervix_primitives::sync::oneshot::Receiver<()> {
         let (started, has_started) = nervix_primitives::sync::oneshot::channel();
         let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
         self.releases.push(release);
@@ -208,7 +186,7 @@ impl OccupiedWorkers {
         let class = self.class;
         self.jobs.push(nervix_primitives::task::spawn(async move {
             occupier
-                .run_cpu_with(class, admission, charge, move |_charge, _cancellation| {
+                .run_cpu(class, charge, move |_charge, _cancellation| {
                     started.send(()).expect("the test awaits each holding job");
                     released
                         .blocking_recv()
@@ -220,17 +198,11 @@ impl OccupiedWorkers {
         has_started
     }
 
-    /// Keep the class full past the job now at the head of its queue. A job that will hold a worker
-    /// and one waiting job per place join the line behind the head job, then one worker frees: the
-    /// head job runs, the holding job takes the worker after it, and the waiting jobs take every
-    /// place that frees. The next job the class is handed finds every worker busy and every place
-    /// taken, and it stays so until the test releases the class.
+    /// Keep every worker of the class busy past the job now waiting first for one. A job that will
+    /// hold a worker joins the line behind that job, then one worker frees: the first job runs, and
+    /// the holding job takes the worker after it. The next job the class is handed finds every
+    /// worker busy, and it stays so until the test releases the class.
     pub(crate) async fn keep_full_after_head(mut self) -> Self {
-        let capacity = self
-            .executor
-            .snapshot()
-            .cpu_class(self.class)
-            .queue_capacity;
         let (started, has_started) = nervix_primitives::sync::oneshot::channel();
         let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
         let charge = self
@@ -241,19 +213,14 @@ impl OccupiedWorkers {
         let class = self.class;
         let (joined, has_joined) = nervix_primitives::sync::oneshot::channel();
         self.jobs.push(nervix_primitives::task::spawn(async move {
-            let job = holder.run_cpu_with(
-                class,
-                QueueAdmission::WaitForPlace,
-                charge,
-                move |_charge, _cancellation| {
-                    started
-                        .send(())
-                        .expect("the test awaits the job that keeps the class full");
-                    released
-                        .blocking_recv()
-                        .expect("the test releases the job that keeps the class full");
-                },
-            );
+            let job = holder.run_cpu(class, charge, move |_charge, _cancellation| {
+                started
+                    .send(())
+                    .expect("the test awaits the job that keeps the class full");
+                released
+                    .blocking_recv()
+                    .expect("the test releases the job that keeps the class full");
+            });
             announce_after_first_poll(job, joined)
                 .await
                 .expect("the job that keeps the class full takes a worker");
@@ -261,28 +228,6 @@ impl OccupiedWorkers {
         has_joined
             .await
             .expect("the job that keeps the class full joins its line");
-        for _ in 0..capacity {
-            let charge = self
-                .executor
-                .try_reserve(MemoryClass::Bulk, 1)
-                .expect("the test's bulk class has room for one byte per held job");
-            let waiter = self.executor.clone();
-            let (joined, has_joined) = nervix_primitives::sync::oneshot::channel();
-            self.jobs.push(nervix_primitives::task::spawn(async move {
-                let job = waiter.run_cpu_with(
-                    class,
-                    QueueAdmission::WaitForPlace,
-                    charge,
-                    |_charge, _cancellation| (),
-                );
-                announce_after_first_poll(job, joined)
-                    .await
-                    .expect("a job that keeps a place runs once the class is released");
-            }));
-            has_joined
-                .await
-                .expect("a job that keeps a place joins its line");
-        }
         let freed = self.releases.remove(0);
         freed
             .send(())
@@ -384,7 +329,6 @@ async fn a_relay_grant_answer_waits_for_a_place_on_its_receivers_full_control_cl
 
         let executor_b = transports.transport_b.inner.executor().clone();
         let held = HeldCpuClass::hold(&executor_b, CpuClass::Control).await;
-        let refused = executor_b.snapshot().cpu_class(CpuClass::Control).refused;
         let reserved = executor_b.memory(MemoryClass::Management).reserved_bytes;
         let transport_a = transports.transport_a.clone();
         let node_b = transports.node_b.clone();
@@ -397,17 +341,9 @@ async fn a_relay_grant_answer_waits_for_a_place_on_its_receivers_full_control_cl
         eventually(
             &executor_b,
             "the grant's answer waiting with its charge",
-            |executor| {
-                executor.memory(MemoryClass::Management).reserved_bytes > reserved
-                    || executor.snapshot().cpu_class(CpuClass::Control).refused > refused
-            },
+            |executor| executor.memory(MemoryClass::Management).reserved_bytes > reserved,
         )
         .await;
-        assert_eq!(
-            executor_b.snapshot().cpu_class(CpuClass::Control).refused,
-            refused,
-            "a full class refuses no grant answer"
-        );
 
         if sender_gives_up {
             // Dropping the delivery resets its grant exchange, which ends the answer's wait.
@@ -418,11 +354,6 @@ async fn a_relay_grant_answer_waits_for_a_place_on_its_receivers_full_control_cl
                 |executor| executor.memory(MemoryClass::Management).reserved_bytes <= reserved,
             )
             .await;
-            assert_eq!(
-                executor_b.snapshot().cpu_class(CpuClass::Control).refused,
-                refused,
-                "a full class refuses no grant answer"
-            );
             held.release().await;
         } else {
             held.release().await;
@@ -466,7 +397,6 @@ async fn a_relay_grant_answer_waits_for_a_place_on_its_senders_full_control_clas
 
         let executor_a = transports.transport_a.inner.executor().clone();
         let held = HeldCpuClass::hold(&executor_a, CpuClass::Control).await;
-        let refused = executor_a.snapshot().cpu_class(CpuClass::Control).refused;
         let reserved = executor_a.memory(MemoryClass::Management).reserved_bytes;
         let transport_a = transports.transport_a.clone();
         let node_b = transports.node_b.clone();
@@ -494,27 +424,14 @@ async fn a_relay_grant_answer_waits_for_a_place_on_its_senders_full_control_clas
                 executor_a.memory(MemoryClass::Management).reserved_bytes <= reserved,
                 "the timed-out decoding returned its charge"
             );
-            assert_eq!(
-                executor_a.snapshot().cpu_class(CpuClass::Control).refused,
-                refused,
-                "a full class refuses no grant answer"
-            );
             held.release().await;
         } else {
             eventually(
                 &executor_a,
                 "the grant's answer waiting to be decoded with its charge",
-                |executor| {
-                    executor.memory(MemoryClass::Management).reserved_bytes > reserved
-                        || executor.snapshot().cpu_class(CpuClass::Control).refused > refused
-                },
+                |executor| executor.memory(MemoryClass::Management).reserved_bytes > reserved,
             )
             .await;
-            assert_eq!(
-                executor_a.snapshot().cpu_class(CpuClass::Control).refused,
-                refused,
-                "a full class refuses no grant answer"
-            );
             held.release().await;
             timeout(Duration::from_secs(10), sending)
                 .await
@@ -587,7 +504,6 @@ async fn a_connection_answer_waits_for_a_place_on_its_acceptors_full_control_cla
 
         let executor_b = transports.transport_b.inner.executor().clone();
         let occupied = OccupiedWorkers::occupy(&executor_b, CpuClass::Control).await;
-        let refused = executor_b.snapshot().cpu_class(CpuClass::Control).refused;
         let transport_a = transports.transport_a.clone();
         let node_b = transports.node_b.clone();
         // A bulk connection is dialed on first use, so this request starts exactly one handshake.
@@ -596,8 +512,8 @@ async fn a_connection_answer_waits_for_a_place_on_its_acceptors_full_control_cla
         });
         eventually(
             &executor_b,
-            "the hello waiting at the head of the control queue",
-            |executor| executor.snapshot().cpu_class(CpuClass::Control).pending == 1,
+            "the hello waiting first for the busy control workers",
+            |executor| executor.snapshot().cpu_class(CpuClass::Control).waiting == 1,
         )
         .await;
         // The queued hello holds its own small charges, which it gives back once decoded; the
@@ -612,15 +528,9 @@ async fn a_connection_answer_waits_for_a_place_on_its_acceptors_full_control_cla
                     >= baseline
                         .checked_add(answer_charge)
                         .expect("a test's charges are small")
-                    || executor.snapshot().cpu_class(CpuClass::Control).refused > refused
             },
         )
         .await;
-        assert_eq!(
-            executor_b.snapshot().cpu_class(CpuClass::Control).refused,
-            refused,
-            "a full class refuses no connection answer"
-        );
 
         if dialer_gives_up {
             // The dial runs in its pool's connection worker, so the dialing node stops it by
@@ -638,11 +548,6 @@ async fn a_connection_answer_waits_for_a_place_on_its_acceptors_full_control_cla
                 },
             )
             .await;
-            assert_eq!(
-                executor_b.snapshot().cpu_class(CpuClass::Control).refused,
-                refused,
-                "a full class refuses no connection answer"
-            );
             held.release().await;
         } else {
             held.release().await;
@@ -732,12 +637,10 @@ impl MismatchedTransports {
 
     /// Start every preconnected connection the dialing node keeps to the accepting node.
     fn dial(&self) {
-        self.dialing
-            .register_outbound_target(
-                self.accepting_node.clone(),
-                NodeEndpoint::new("localhost", self.accepting.local_addr().port()),
-            )
-            .expect("authenticated test target should register");
+        self.dialing.register_outbound_target(
+            self.accepting_node.clone(),
+            NodeEndpoint::new("localhost", self.accepting.local_addr().port()),
+        );
     }
 
     /// The refusal the dialing node reads once the accepting node has refused its hello.
@@ -774,14 +677,13 @@ async fn a_connection_refusal_waits_for_a_place_on_its_acceptors_full_control_cl
         .await;
         let executor_b = transports.accepting_executor.clone();
         let occupied = OccupiedWorkers::occupy(&executor_b, CpuClass::Control).await;
-        let refused = executor_b.snapshot().cpu_class(CpuClass::Control).refused;
         let mut progress = transports.dialing.join_progress();
         // Nothing else dials the accepting node, so these are the only handshakes it sees.
         transports.dial();
         eventually(
             &executor_b,
-            "every preconnected hello waiting in the control queue",
-            |executor| executor.snapshot().cpu_class(CpuClass::Control).pending == hellos,
+            "every preconnected hello waiting for the busy control workers",
+            |executor| executor.snapshot().cpu_class(CpuClass::Control).waiting == hellos,
         )
         .await;
         // The queued hellos hold their own small charges, which each gives back once decoded; a
@@ -796,15 +698,9 @@ async fn a_connection_refusal_waits_for_a_place_on_its_acceptors_full_control_cl
                     >= baseline
                         .checked_add(refusal_charge)
                         .expect("a test's charges are small")
-                    || executor.snapshot().cpu_class(CpuClass::Control).refused > refused
             },
         )
         .await;
-        assert_eq!(
-            executor_b.snapshot().cpu_class(CpuClass::Control).refused,
-            refused,
-            "a full class refuses no connection refusal"
-        );
         assert_eq!(
             *progress.borrow(),
             JoinProgress::Joining,
@@ -824,11 +720,6 @@ async fn a_connection_refusal_waits_for_a_place_on_its_acceptors_full_control_cl
                 },
             )
             .await;
-            assert_eq!(
-                executor_b.snapshot().cpu_class(CpuClass::Control).refused,
-                refused,
-                "a full class refuses no connection refusal"
-            );
             held.release().await;
         } else {
             held.release().await;
@@ -886,7 +777,6 @@ async fn an_ack_waits_for_a_place_on_its_senders_full_data_class() {
 
         let executor_a = transports.transport_a.inner.executor().clone();
         let held = HeldCpuClass::hold(&executor_a, CpuClass::Data).await;
-        let refused = executor_a.snapshot().cpu_class(CpuClass::Data).refused;
         let reserved = executor_a.memory(MemoryClass::Management).reserved_bytes;
         let transport_a = transports.transport_a.clone();
         let node_b = transports.node_b.clone();
@@ -911,27 +801,14 @@ async fn an_ack_waits_for_a_place_on_its_senders_full_data_class() {
                 executor_a.memory(MemoryClass::Management).reserved_bytes <= reserved,
                 "the timed-out encoding returned its charge"
             );
-            assert_eq!(
-                executor_a.snapshot().cpu_class(CpuClass::Data).refused,
-                refused,
-                "a full class refuses no ack"
-            );
             held.release().await;
         } else {
             eventually(
                 &executor_a,
                 "the ack's encoding waiting with its charge",
-                |executor| {
-                    executor.memory(MemoryClass::Management).reserved_bytes > reserved
-                        || executor.snapshot().cpu_class(CpuClass::Data).refused > refused
-                },
+                |executor| executor.memory(MemoryClass::Management).reserved_bytes > reserved,
             )
             .await;
-            assert_eq!(
-                executor_a.snapshot().cpu_class(CpuClass::Data).refused,
-                refused,
-                "a full class refuses no ack"
-            );
             held.release().await;
             timeout(Duration::from_secs(10), sending)
                 .await
@@ -975,7 +852,6 @@ async fn a_relay_status_answer_waits_for_a_place_on_its_receivers_full_control_c
 
         let executor_b = transports.transport_b.inner.executor().clone();
         let occupied = OccupiedWorkers::occupy(&executor_b, CpuClass::Control).await;
-        let refused = executor_b.snapshot().cpu_class(CpuClass::Control).refused;
         let transport_a = transports.transport_a.clone();
         let node_b = transports.node_b.clone();
         let querying = nervix_primitives::task::spawn(async move {
@@ -989,8 +865,8 @@ async fn a_relay_status_answer_waits_for_a_place_on_its_receivers_full_control_c
         });
         eventually(
             &executor_b,
-            "the query waiting at the head of the control queue",
-            |executor| executor.snapshot().cpu_class(CpuClass::Control).pending == 1,
+            "the query waiting first for the busy control workers",
+            |executor| executor.snapshot().cpu_class(CpuClass::Control).waiting == 1,
         )
         .await;
         // The queued query holds its own small charges, which it gives back once decoded; the
@@ -1005,15 +881,9 @@ async fn a_relay_status_answer_waits_for_a_place_on_its_receivers_full_control_c
                     >= baseline
                         .checked_add(answer_charge)
                         .expect("a test's charges are small")
-                    || executor.snapshot().cpu_class(CpuClass::Control).refused > refused
             },
         )
         .await;
-        assert_eq!(
-            executor_b.snapshot().cpu_class(CpuClass::Control).refused,
-            refused,
-            "a full class refuses no status answer"
-        );
 
         if sender_gives_up {
             querying.abort();
@@ -1028,11 +898,6 @@ async fn a_relay_status_answer_waits_for_a_place_on_its_receivers_full_control_c
                 },
             )
             .await;
-            assert_eq!(
-                executor_b.snapshot().cpu_class(CpuClass::Control).refused,
-                refused,
-                "a full class refuses no status answer"
-            );
             held.release().await;
         } else {
             held.release().await;

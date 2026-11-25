@@ -45,7 +45,16 @@ make the session ping its node after that long without hearing from it while a c
 treat the connection as lost when the ping goes unanswered within the timeout; the session then
 reconnects and restores its subscriptions as after any other dropped connection. `streamWindowBytes`
 and `connectionWindowBytes` set how many bytes of one call, and of all calls on a connection
-together, the node may send before the session reads them (2 MiB and 5 MiB by default).
+together, the node may send before the session reads them (2 MiB and 5 MiB by default). The other
+connection limits are also options: `callQueueCapacity`, the calls that queue while a connection is
+opened (1,024); `headerListBytes`, the largest header list the session accepts from the node on one
+call (16 KiB); `sendBufferBytes`, the request bytes one call queues before it waits for the node to
+read (1 MiB); `maxErrorResetStreams`, the calls reset for the node's protocol errors before the
+session ends the connection (1,024); `rememberedResetStreams`, the cancelled calls remembered at
+once so that frames the node had already sent for them are ignored (50); and, in seconds,
+`resetStreamDuration`, how long each is remembered (1), and `connectionAttemptDelay`, how long an
+attempt to one address family of a node's host name runs before the other family is tried too (0.3,
+from 0.01 through 2 as RFC 8305 bounds it).
 
 ```java
 {{#include ../../tests/client_conformance/java/suite/cluster/ClusterTests.java:seeds}}

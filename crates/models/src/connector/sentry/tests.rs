@@ -37,9 +37,12 @@ impl SentryEventEmitter {
         Self {
             client: ClientName::parse("sentry").assured("sentry is a valid client identifier"),
             mode: SentryEventPublishingMode::Ack {
-                retry_policy: crate::RetryPolicy {
-                    backoff: "100ms".into(),
-                    max_backoff: "1s".into(),
+                retry_policy: crate::EmitterRetryPolicy {
+                    pacing: crate::RetryPolicy {
+                        backoff: "100ms".into(),
+                        max_backoff: "1s".into(),
+                    },
+                    give_up_after: None,
                 },
             },
             platform,

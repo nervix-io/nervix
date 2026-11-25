@@ -207,6 +207,7 @@ use crate::common::{
     },
     tcp_forwarder::TcpForwarders,
     unaccepted_address::UnacceptedAddress,
+    unit_placement::{ScheduledPlacement, described_owner, described_replicas},
 };
 
 mod backup;
@@ -653,8 +654,12 @@ struct ScenarioWorld {
     saved_relocation_plan: Option<String>,
     last_server_error: Option<CapturedServerError>,
     last_auth_attempts_elapsed: Option<Duration>,
-    /// The node whose credentials worker and wait queue a scenario filled, until it releases them.
+    /// The node whose credentials workers a scenario holds, until it releases them.
     saturated_credentials_node: Option<String>,
+    /// A client connection a scenario began without waiting for it: what the connection's status
+    /// command printed, or the error it ended with.
+    pending_client_connection:
+        Option<nervix_primitives::task::AbortOnDropHandle<Result<String, String>>>,
     broker_observer: Option<BrokerObserver>,
     /// The Kafka consumer group members a scenario runs beside Nervix's consumers, by group.
     external_kafka_members: BTreeMap<String, ExternalKafkaGroupMember>,
@@ -876,6 +881,10 @@ impl fmt::Debug for ScenarioWorld {
             .field(
                 "saturated_credentials_node",
                 &self.saturated_credentials_node,
+            )
+            .field(
+                "pending_client_connection",
+                &self.pending_client_connection.is_some(),
             )
             .field(
                 "last_cluster_operation_elapsed",
@@ -2895,6 +2904,9 @@ enum OtlpAnswer {
     Reject,
     /// HTTP `503`, or gRPC `UNAVAILABLE`: the receiver asks the client to try again.
     Unavailable,
+    /// HTTP `403`, or gRPC `PERMISSION_DENIED`: the receiver refuses this client as it is
+    /// configured, which no retry of the same request changes until the receiver is repaired.
+    Forbidden,
     /// The receiver reads the whole request, then closes the connection without answering.
     LoseResponse,
     /// The receiver reads the whole request, then answers nothing until the client gives up.
@@ -2909,11 +2921,12 @@ impl FromStr for OtlpAnswer {
             "accept" => Ok(Self::Accept),
             "reject" => Ok(Self::Reject),
             "unavailable" => Ok(Self::Unavailable),
+            "forbidden" => Ok(Self::Forbidden),
             "lose response" => Ok(Self::LoseResponse),
             "hold response" => Ok(Self::HoldResponse),
             other => Err(format!(
                 "unknown OTLP receiver answer '{other}'; expected accept, reject, unavailable, \
-                 lose response, or hold response"
+                 forbidden, lose response, or hold response"
             )),
         }
     }
@@ -2926,6 +2939,7 @@ impl OtlpAnswer {
             Self::Accept => "respond 200",
             Self::Reject => "respond 400",
             Self::Unavailable => "respond 503",
+            Self::Forbidden => "respond 403",
             Self::LoseResponse => "lose response",
             Self::HoldResponse => "hold response",
         };
@@ -2940,6 +2954,7 @@ impl OtlpAnswer {
             Self::Accept => GrpcAnswer::Accept,
             Self::Reject => GrpcAnswer::Status(tonic::Code::InvalidArgument),
             Self::Unavailable => GrpcAnswer::Status(tonic::Code::Unavailable),
+            Self::Forbidden => GrpcAnswer::Status(tonic::Code::PermissionDenied),
             Self::LoseResponse => GrpcAnswer::LoseResponse,
             Self::HoldResponse => GrpcAnswer::HoldResponse,
         }
@@ -3108,7 +3123,8 @@ async fn given_otlp_receiver_is_running(world: &mut ScenarioWorld, name: String,
 }
 
 /// Each line is one answer, taken by the next Export request in order: `accept`, `reject`,
-/// `unavailable`, `lose response`, or `hold response`. Requests beyond the script are accepted.
+/// `unavailable`, `forbidden`, `lose response`, or `hold response`. Requests beyond the script are
+/// accepted.
 #[given(expr = "OTLP receiver {string} answers with")]
 async fn given_otlp_receiver_answers_with(
     world: &mut ScenarioWorld,
@@ -9796,16 +9812,17 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
                 "WASM reset placement status must succeed: {}",
                 outcome.message
             );
-            let placed = scheduled_node_placement_from_status(
+            let placed = ScheduledPlacement::from_status(
                 &outcome.message,
                 &world.domain,
                 "wasm_processor",
                 "counting_guest",
             )
-            .is_some_and(|(owner, replicas)| match placement {
-                WasmStateResetGraphPlacement::NodeOne => owner == "node-1",
+            .is_some_and(|scheduled| match placement {
+                WasmStateResetGraphPlacement::NodeOne => scheduled.owner == Some("node-1"),
                 WasmStateResetGraphPlacement::AwayFromNodeOne => {
-                    owner != "node-1" && !replicas.is_empty()
+                    scheduled.is_owned_by_node_other_than("node-1")
+                        && !scheduled.replicas.is_empty()
                 }
                 WasmStateResetGraphPlacement::Unconstrained => true,
             });
@@ -11440,6 +11457,43 @@ fn two_objects_wasm_fixture(objects: &str) -> Vec<u8> {
         "tables" => "(memory (export \"memory\") 1) (table 1 funcref) (table 1 funcref)",
         other => panic!("unsupported defined objects '{other}'"),
     };
+    every_host_export_wasm_fixture(declarations)
+}
+
+#[given(
+    regex = r#"^node "([^"]+)" has a WASM fixture whose memory (is shared between threads|has one-byte pages) in resource directory "([^"]+)"$"#
+)]
+async fn given_node_has_refused_memory_wasm_processor_fixture_resource_directory(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    memory: String,
+    placeholder: String,
+) {
+    place_generated_wasm_processor_fixture(
+        world,
+        &node_id,
+        &placeholder,
+        refused_memory_wasm_fixture(&memory),
+    )
+    .await;
+}
+
+/// A guest that implements every export the host requires around the one linear memory it
+/// exports, declared with a WebAssembly proposal the guest contract refuses: a memory shared
+/// between threads needs the threads proposal, and one of 64 KiB in one-byte pages needs the
+/// custom page sizes proposal.
+fn refused_memory_wasm_fixture(memory: &str) -> Vec<u8> {
+    let declaration = match memory {
+        "is shared between threads" => "(memory (export \"memory\") 1 1 shared)",
+        "has one-byte pages" => "(memory (export \"memory\") 65536 (pagesize 1))",
+        other => panic!("unsupported refused memory '{other}'"),
+    };
+    every_host_export_wasm_fixture(declaration)
+}
+
+/// A guest that implements every export the host requires beside `declarations`, which define
+/// its linear memory, exported as `memory`, and whatever else the fixture needs.
+fn every_host_export_wasm_fixture(declarations: &str) -> Vec<u8> {
     format!(
         r#"(module
       {declarations}
@@ -14430,10 +14484,10 @@ async fn when_accepted_work_class_full(world: &mut ScenarioWorld, class: String)
             Duration::from_secs(60),
             world
                 .fault_injection
-                .saturate_execution(&crate::common::cluster::node_name(&node_id), class),
+                .occupy_execution(&crate::common::cluster::node_name(&node_id), class),
         )
         .await
-        .assured("the class fills all workers and waiting places before input is polled");
+        .assured("every worker of the class is held before input is polled");
     }
 }
 
@@ -14451,9 +14505,9 @@ async fn when_accepted_work_class_released(world: &mut ScenarioWorld) {
             if executors.iter().all(|(_, executor)| {
                 let snapshot = executor.snapshot();
                 snapshot.data_cpu.running == 0
-                    && snapshot.data_cpu.pending == 0
+                    && snapshot.data_cpu.waiting == 0
                     && snapshot.extension_cpu.running == 0
-                    && snapshot.extension_cpu.pending == 0
+                    && snapshot.extension_cpu.waiting == 0
             }) {
                 return;
             }
@@ -14470,49 +14524,6 @@ async fn when_accepted_work_class_released(world: &mut ScenarioWorld) {
                 .collect::<Vec<_>>()
         )
     });
-}
-
-#[then(
-    expr = "within {string} HTTP admission on node {string} host {string} path {string} refuses \
-            with retry-after"
-)]
-async fn then_http_admission_refuses_without_waiting(
-    world: &mut ScenarioWorld,
-    duration: String,
-    node: String,
-    host: String,
-    path: String,
-    #[step] step: &Step,
-) {
-    let uri = world
-        .cluster()
-        .http_uri(
-            &expand_placeholders(world, &node),
-            &expand_placeholders(world, &path),
-        )
-        .assured("the configured endpoint has a listener");
-    let request = reqwest::Client::new()
-        .post(uri)
-        .header("Host", expand_placeholders(world, &host))
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(expand_placeholders(world, docstring(step)));
-    let response = nervix_primitives::time::timeout(
-        parse_duration_text(&duration).assured("the step duration is valid"),
-        request.send(),
-    )
-    .await
-    .assured("request admission answers while the worker remains held")
-    .assured("the HTTP listener answers");
-    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-    let retry = response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .assured("typed admission refusal supplies Retry-After")
-        .to_str()
-        .assured("Retry-After is ASCII")
-        .parse::<u64>()
-        .assured("Retry-After is a delay in seconds");
-    assert!(retry > 0);
 }
 
 /// The junction's first read of a message's dependency is slowed too, so a payload that reached
@@ -15074,8 +15085,28 @@ async fn given_leadership_moves_before_next_admission_proposal(
     world.leadership_move = Some(moved);
 }
 
+#[given(
+    expr = "leadership moves from node {string} to node {string} before its next command outcome \
+            is recorded"
+)]
+async fn given_leadership_moves_before_next_outcome_record(
+    world: &mut ScenarioWorld,
+    from_node_id: String,
+    to_node_id: String,
+) {
+    let from_node_id = expand_placeholders(world, &from_node_id);
+    let to_node_id = expand_placeholders(world, &to_node_id);
+    let moved = world.cluster().move_leadership_under_next_command(
+        CommandHold::BeforeOutcomeRecord,
+        &from_node_id,
+        &to_node_id,
+    );
+    world.leadership_move = Some(moved);
+}
+
 #[then("the leadership move under the durably admitted command completed")]
 #[then("the leadership move before the admission proposal completed")]
+#[then("the leadership move before the command outcome record completed")]
 async fn then_leadership_move_completed(world: &mut ScenarioWorld) {
     let moved = world
         .leadership_move
@@ -16648,6 +16679,187 @@ async fn when_ownership_handoff_preparation_pause_is_released(
     world
         .fault_injection
         .release_ownership_handoff_preparation_pause(&domain);
+}
+
+#[given(expr = "ownership handoff for domain {string} pauses before its schedule commit")]
+async fn given_ownership_handoff_commit_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    world.fault_injection.pause_ownership_handoff_commit(domain);
+}
+
+/// The handoff reaches its commit pause once every participant confirmed its prepared moves, which
+/// takes a gate engagement, a drain, a capture, a preparation and the confirmations. The wait also
+/// ends the moment the background command finishes, so a handoff that failed before its commit
+/// reports its own outcome rather than this deadline.
+#[then(expr = "the ownership handoff commit pause for domain {string} is reached")]
+async fn then_ownership_handoff_commit_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    let fault_injection = world.fault_injection.clone();
+    let deadline = Instant::now() + ENTITY_GATE_PAUSE_TIMEOUT;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        if nervix_primitives::time::timeout(
+            Duration::from_millis(50),
+            fault_injection.wait_for_ownership_handoff_commit_pause(&domain),
+        )
+        .await
+        .is_ok()
+        {
+            return;
+        }
+        if let Some(background) = world.background_plexus.as_ref()
+            && background.is_finished()
+        {
+            let outcome = world
+                .background_plexus
+                .take()
+                .verified("the branch above already observed the background execution")
+                .await
+                .expect("background Plexus task must not panic");
+            panic!(
+                "ownership handoff did not reach the armed commit pause for domain '{domain}': \
+                 the command finished first with {outcome:?}"
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ownership handoff did not reach the armed commit pause for domain '{domain}' within \
+             {ENTITY_GATE_PAUSE_TIMEOUT:?}; the command is still running"
+        );
+    }
+}
+
+#[when(expr = "the ownership handoff commit pause for domain {string} is released")]
+async fn when_ownership_handoff_commit_pause_is_released(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    world
+        .fault_injection
+        .release_ownership_handoff_commit_pause(&domain);
+}
+
+/// Counts the ownership-handoff preparation reconciliations a node completes from now on. A
+/// scenario observes a node while it is stopped, so the next reconciliation the node completes
+/// belongs to its new run.
+#[when(expr = "ownership handoff preparation reconciliations of node {string} are observed")]
+async fn when_ownership_handoff_reconciliations_are_observed(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .observe_ownership_handoff_reconciliations(crate::common::cluster::node_name(&node_id));
+}
+
+/// Holds back the announcement of a node's record until a later step lets it announce. Armed
+/// while the node is stopped, its next run keeps the record of its previous run committed, as a
+/// restarted node whose announcement is slow to commit does.
+#[when(expr = "node {string} holds back the announcement of its node record")]
+async fn when_node_holds_back_its_record_announcement(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .hold_node_record_announcement(crate::common::cluster::node_name(&node_id));
+}
+
+#[when(expr = "node {string} announces its node record again")]
+async fn when_node_announces_its_record_again(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_node_record_announcement(&crate::common::cluster::node_name(&node_id));
+}
+
+/// The leader asks every node to reconcile its preparations after it observes a change of
+/// leadership or of a node's run, such as a restart. A restarted node first rejoins, and the
+/// leader then reaches it on its next poll, which takes a while on a loaded machine.
+#[then(expr = "node {string} eventually reconciles its ownership handoff preparations")]
+async fn then_node_reconciles_ownership_handoff_preparations(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node = crate::common::cluster::node_name(&node_id);
+    let reconciled = nervix_primitives::time::timeout(
+        Duration::from_secs(120),
+        world
+            .fault_injection
+            .wait_for_ownership_handoff_reconciliation(&node),
+    )
+    .await;
+    let Ok(observed) = reconciled else {
+        panic!("node '{node_id}' did not reconcile its ownership handoff preparations within 120s");
+    };
+    append_cucumber_log_line(&format!(
+        "node '{node_id}' completed {} ownership handoff preparation reconciliation(s), \
+         discarding {} preparation(s)",
+        observed.completed, observed.discarded
+    ));
+}
+
+/// A restarted node announces the record of its new run in the background. Until that record is
+/// committed, `DESCRIBE CLUSTER` shows the node's live run as awaiting its capabilities.
+#[then(
+    expr = "within {string} node {string} eventually describes the current run of node {string} \
+            as recorded"
+)]
+async fn then_node_describes_current_run_as_recorded(
+    world: &mut ScenarioWorld,
+    duration: String,
+    observer: String,
+    node_id: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let observer = expand_placeholders(world, &observer);
+    let node_id = expand_placeholders(world, &node_id);
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        match run_plexus_commands_on_node(world, &observer, "DESCRIBE CLUSTER;").await {
+            Ok(output) => {
+                let recorded = describe_cluster_node_run_is_recorded(&output, &node_id);
+                world.last_command_output = Some(output);
+                if recorded {
+                    return;
+                }
+            }
+            Err(error) => world.last_command_error = Some(error),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node '{observer}' did not describe the current run of node '{node_id}' as recorded \
+             within {duration:?}. last output: {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Whether `DESCRIBE CLUSTER` lists `node_id` as live with the record of its current run
+/// committed: its block names capabilities rather than awaiting them.
+fn describe_cluster_node_run_is_recorded(output: &str, node_id: &str) -> bool {
+    let heading = format!("node: {node_id}");
+    let leader_heading = format!("node: {node_id} (leader)");
+    let mut lines = output.lines();
+    let found = lines
+        .by_ref()
+        .any(|line| line == heading || line == leader_heading);
+    if !found {
+        return false;
+    }
+    let mut block = lines.take_while(|line| line.starts_with("  "));
+    let capabilities = block.find(|line| line.starts_with("  capabilities:"));
+    match capabilities {
+        Some(line) => !line.contains("awaiting"),
+        None => false,
+    }
 }
 
 #[then(expr = "the ownership handoff prepare response pause for domain {string} is reached")]
@@ -19277,6 +19489,23 @@ async fn then_background_command_request_redirects(world: &mut ScenarioWorld, no
     );
 }
 
+#[then(expr = "the background command request has not completed within {string}")]
+async fn then_background_command_request_has_not_completed_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    nervix_primitives::time::sleep(duration).await;
+    let task = world
+        .background_command_result
+        .as_ref()
+        .verified("the preceding step started a background command request");
+    assert!(
+        !task.is_finished(),
+        "the background command request completed within {duration:?} while the node held it"
+    );
+}
+
 #[then("the background command request succeeds")]
 async fn then_background_command_request_succeeds(world: &mut ScenarioWorld) {
     let task = world
@@ -19517,6 +19746,43 @@ async fn then_the_background_plexus_execution_fails_because_either(
         "background Plexus error must contain '{first}' or '{second}', got: {error}"
     );
     world.last_command_error = Some(error);
+}
+
+/// A durable command whose first run failed may be run again under its execution reference by the
+/// leader that records its outcome, when leadership moved or the lease went unconfirmed before the
+/// first run's outcome was recorded. The later run finds the effects the first run committed and
+/// can succeed, so either outcome is the command's.
+#[then(
+    expr = "the background Plexus execution either fails with {string} or succeeds with {string}"
+)]
+async fn then_the_background_plexus_execution_either_fails_or_succeeds(
+    world: &mut ScenarioWorld,
+    failure: String,
+    success: String,
+) {
+    let failure = expand_placeholders(world, &failure);
+    let success = expand_placeholders(world, &success);
+    let task = world
+        .background_plexus
+        .take()
+        .expect("a background Plexus execution must be active");
+    let outcome = task.await.expect("background Plexus task must not panic");
+    match outcome {
+        Ok(output) => {
+            assert!(
+                output.contains(&success),
+                "a successful background Plexus execution must report '{success}', got: {output}"
+            );
+            world.last_command_output = Some(output);
+        }
+        Err(error) => {
+            assert!(
+                error.contains(&failure),
+                "a failed background Plexus execution must report '{failure}', got: {error}"
+            );
+            world.last_command_error = Some(error);
+        }
+    }
 }
 
 async fn take_background_plexus_failure(world: &mut ScenarioWorld) -> String {
@@ -22610,6 +22876,52 @@ async fn when_held_window_processor_branch_restore_is_released(
         .release_processor_branch_restore(&processor);
 }
 
+/// The window processor's next claim of a moved key stops once the key's holder released it and
+/// before the claiming unit installs its state, wherever that unit runs.
+#[when(expr = "the next partition install of window processor {string} is held")]
+async fn when_window_processor_partition_install_is_held(
+    world: &mut ScenarioWorld,
+    processor: String,
+) {
+    let processor = window_processor_ref(world, &processor);
+    world
+        .fault_injection
+        .pause_processor_partition_install(processor);
+}
+
+#[then(
+    expr = "within {string} the partition install of window processor {string} reaches its hold"
+)]
+async fn then_window_processor_partition_install_reaches_its_hold(
+    world: &mut ScenarioWorld,
+    duration: String,
+    processor: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let processor = window_processor_ref(world, &processor);
+    nervix_primitives::time::timeout(
+        duration,
+        world
+            .fault_injection
+            .wait_for_processor_partition_install(&processor),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the partition install of {processor:?} did not reach its hold within {duration:?}")
+    });
+}
+
+#[when(expr = "the held partition install of window processor {string} is released")]
+async fn when_held_window_processor_partition_install_is_released(
+    world: &mut ScenarioWorld,
+    processor: String,
+) {
+    let processor = window_processor_ref(world, &processor);
+    world
+        .fault_injection
+        .release_processor_partition_install(&processor);
+}
+
 /// Leave room for transport on the selected node while refusing larger decoding reservations.
 #[when(expr = "bulk memory on node {string} keeps only {string} bytes free")]
 async fn when_bulk_memory_on_node_keeps_only_bytes_free(
@@ -22628,7 +22940,7 @@ async fn when_bulk_memory_on_node_keeps_only_bytes_free(
 }
 
 /// Hold every byte of bulk memory on every node but `room`, so a charge that needs more room than
-/// that is refused until the scenario releases the hold.
+/// that waits until the scenario releases the hold.
 #[when(expr = "bulk memory on every node keeps only {string} bytes free")]
 async fn when_bulk_memory_on_every_node_keeps_only_bytes_free(
     world: &mut ScenarioWorld,
@@ -22811,25 +23123,23 @@ async fn then_within_duration_describe_emitter_reports_metric_total(
     }
 }
 
-/// Fill the credentials worker and every place in its wait queue on the leader, so the next
-/// password the leader is asked to verify is refused rather than queued. The leader is the node
-/// the scenario created its user through, so the user is already visible there.
+/// Hold every credentials worker on the leader, so the next password the leader is asked to verify
+/// waits for one. The leader is the node the scenario created its user through, so the user is
+/// already visible there.
 #[when("credential verification on the leader node is saturated")]
 async fn when_credential_verification_on_the_leader_node_is_saturated(world: &mut ScenarioWorld) {
     let leader = current_leader_node(world).await;
     let fault_injection = world.fault_injection.clone();
     nervix_primitives::time::timeout(
         Duration::from_secs(60),
-        fault_injection.saturate_execution(
+        fault_injection.occupy_execution(
             &crate::common::cluster::node_name(&leader),
             nervix_execution::CpuClass::Credentials,
         ),
     )
     .await
     .unwrap_or_else(|error| {
-        panic!(
-            "credential verification on '{leader}' never filled its worker and wait queue: {error}"
-        )
+        panic!("credential verification on '{leader}' never held all its workers: {error}")
     });
     world.saturated_credentials_node = Some(leader);
 }
@@ -22847,6 +23157,83 @@ async fn when_the_client_connects_to_the_saturated_node_as_user_with_password(
         .clone()
         .expect("an earlier step saturated credential verification on a node");
     connect_to_node_with_credentials(world, &node_id, username, password).await;
+}
+
+/// Begin connecting to the saturated node without waiting for the connection: its credentials
+/// wait for a place on the node's credentials worker.
+#[when(
+    expr = "the client begins connecting to the saturated node as user {string} with password \
+            {string}"
+)]
+async fn when_the_client_begins_connecting_to_the_saturated_node(
+    world: &mut ScenarioWorld,
+    username: String,
+    password: String,
+) {
+    let node_id = world
+        .saturated_credentials_node
+        .clone()
+        .expect("an earlier step saturated credential verification on a node");
+    let username = expand_placeholders(world, &username);
+    let password = expand_placeholders(world, &password);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node_id)
+        .expect("failed to resolve node gRPC URI");
+    let mut options =
+        client_connect_options(&grpc_uri).expect("failed to build client tls options");
+    options.username = Some(username);
+    options.password = Some(password);
+    let domain = client_domain(&world.domain);
+    let connection = nervix_primitives::task::spawn(async move {
+        let client = Client::connect_with_options(&grpc_uri, domain, options)
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+        match client.execute("SHOW CLUSTER STATUS;".to_string()).await {
+            Ok(outcome) if outcome.succeeded() => Ok(outcome.message),
+            Ok(outcome) => Err(outcome.message),
+            Err(error) => Err(format!("{error:#}")),
+        }
+    });
+    world.pending_client_connection =
+        Some(nervix_primitives::task::AbortOnDropHandle::new(connection));
+}
+
+#[then(expr = "the pending client connection has not completed within {string}")]
+async fn then_the_pending_client_connection_has_not_completed_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    nervix_primitives::time::sleep(duration).await;
+    let connection = world
+        .pending_client_connection
+        .as_ref()
+        .expect("an earlier step began a client connection");
+    assert!(
+        !connection.is_finished(),
+        "the client connection completed within {duration:?} while the node held its credentials"
+    );
+}
+
+/// Wait for the pending connection, and record its status command's output or its error as a
+/// connection step does.
+#[then("the pending client connection completes")]
+async fn then_the_pending_client_connection_completes(world: &mut ScenarioWorld) {
+    let connection = world
+        .pending_client_connection
+        .take()
+        .expect("an earlier step began a client connection");
+    let result = nervix_primitives::time::timeout(Duration::from_secs(60), connection)
+        .await
+        .expect("the pending client connection completes once the node can verify it")
+        .expect("the pending client connection's task is joined");
+    world.last_command_error = None;
+    world.last_command_output = None;
+    match result {
+        Ok(output) => world.last_command_output = Some(output),
+        Err(error) => world.last_command_error = Some(error),
+    }
 }
 
 #[when("the saturated credential verification is released")]
@@ -23456,12 +23843,15 @@ async fn when_the_ingestor_logic_fixture_starts_with_output_schema_and_program(
                 .unwrap_or_else(|error| {
                     panic!("failed to inspect ingestor logic schedule: {error:#}")
                 });
-            if let Some((owner, _)) = scheduled_node_placement_from_status(
+            let scheduled = ScheduledPlacement::from_status(
                 &output,
                 &world.domain,
                 "ingestor",
                 "logic_ingestor",
-            ) {
+            );
+            if let Some(scheduled) = scheduled
+                && let Some(owner) = scheduled.owner
+            {
                 break owner.to_string();
             }
             last_output = Some(output);
@@ -24880,33 +25270,6 @@ async fn then_parallel_graph_edges_are_drawn_apart(
         "two relations between one pair of items to leave and arrive through their own ports",
     )
     .await;
-}
-
-#[then(expr = "graph edge from {string} to {string} is a return path")]
-async fn then_graph_edge_is_a_return_path(
-    world: &mut ScenarioWorld,
-    source: String,
-    target: String,
-) {
-    let page = world
-        .browser_page
-        .as_ref()
-        .expect("a browser page must be opened before graph assertions");
-    let source = expand_placeholders(world, &source);
-    let target = expand_placeholders(world, &target);
-    let script = format!(
-        r#"
-        () => {{
-            {GRAPH_GEOMETRY_HELPERS}
-            const path = edgePath({source:?}, {target:?});
-            if (!path) {{
-                return "edge is not drawn";
-            }}
-            return path.dataset.feedback === "true" ? "OK" : "edge is not marked as a return path";
-        }}
-        "#
-    );
-    assert_graph_probe(page, &script, "a backwards edge must be marked").await;
 }
 
 #[then(expr = "branch group {string} header shows key fields {string}")]
@@ -27431,74 +27794,6 @@ async fn then_last_command_error_does_not_contain(world: &mut ScenarioWorld, #[s
     );
 }
 
-fn owner_from_describe_output(output: &str) -> Option<&str> {
-    output
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("owner: ").map(str::trim))
-}
-
-fn replica_nodes_from_describe_output(output: &str) -> Vec<&str> {
-    output
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("replicas: ").map(str::trim))
-        .map(|replicas| {
-            replicas
-                .split(',')
-                .map(str::trim)
-                .filter(|replica| !replica.is_empty() && *replica != "-")
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn scheduled_node_placement_from_status<'a>(
-    status: &'a str,
-    domain: &str,
-    kind: &str,
-    name: &str,
-) -> Option<(&'a str, Vec<&'a str>)> {
-    status.lines().map(str::trim).find_map(|line| {
-        let line = line.strip_prefix("- ")?;
-        let mut line_domain = None;
-        let mut line_kind = None;
-        let mut line_name = None;
-        let mut owner = None;
-        let mut replicas = None;
-
-        for field in line.split_whitespace() {
-            if let Some(value) = field.strip_prefix("domain=") {
-                line_domain = Some(value);
-            } else if let Some(value) = field.strip_prefix("kind=") {
-                line_kind = Some(value);
-            } else if let Some(value) = field.strip_prefix("name=") {
-                line_name = Some(value);
-            } else if let Some(value) = field.strip_prefix("owner=") {
-                owner = Some(value);
-            } else if let Some(value) = field.strip_prefix("replicas=") {
-                replicas = Some(value);
-            }
-        }
-
-        if line_domain == Some(domain) && line_kind == Some(kind) && line_name == Some(name) {
-            let replica_nodes = replicas
-                .filter(|value| *value != "-")
-                .map(|value| {
-                    value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|replica| !replica.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default();
-            owner.map(|owner| (owner, replica_nodes))
-        } else {
-            None
-        }
-    })
-}
-
 /// Every whitespace-separated field of the first `SHOW CLUSTER STATUS` schedule line naming the
 /// unit of `kind` `name` in `domain`.
 fn scheduled_node_status_fields<'a>(
@@ -27700,14 +27995,14 @@ async fn observe_healthy_peers(
                 "'{source}' dropped connected peer '{peer}' from gossip: {status}"
             );
             for placement in &world.saved_healthy_placements {
-                let current = scheduled_node_placement_from_status(
+                let current = ScheduledPlacement::from_status(
                     &status,
                     &world.domain,
                     &placement.kind,
                     &placement.name,
                 );
                 assert_eq!(
-                    current.map(|(owner, _)| owner),
+                    current.and_then(|current| current.owner),
                     Some(placement.owner.as_str()),
                     "'{source}' moved healthy work while another peer was unavailable: {status}"
                 );
@@ -27810,8 +28105,10 @@ async fn then_last_command_output_owner_is_saved_as_placeholder(
         .last_command_output
         .as_deref()
         .expect("a command output must exist before saving its owner");
-    let owner = owner_from_describe_output(output)
-        .unwrap_or_else(|| panic!("last command output must contain an owner line, got: {output}"))
+    let owner = described_owner(output)
+        .unwrap_or_else(|| {
+            panic!("last command output must name the node that owns its unit, got: {output}")
+        })
         .to_string();
     world.placeholders.insert(placeholder, owner);
 }
@@ -27825,7 +28122,7 @@ async fn then_first_replica_in_last_command_output_is_saved_as_placeholder(
         .last_command_output
         .as_deref()
         .expect("a command output must exist before saving its replica");
-    let replica = replica_nodes_from_describe_output(output)
+    let replica = described_replicas(output)
         .into_iter()
         .next()
         .unwrap_or_else(|| {
@@ -27851,7 +28148,7 @@ async fn then_last_cluster_status_scheduled_owner_is_saved_as_placeholder(
         .last_command_output
         .as_deref()
         .expect("a cluster status output must exist before saving its scheduled owner");
-    let (owner, _) = scheduled_node_placement_from_status(output, &world.domain, &kind, &name)
+    let placement = ScheduledPlacement::from_status(output, &world.domain, &kind, &name)
         .unwrap_or_else(|| {
             panic!(
                 "last command output must contain scheduled {kind} {name} placement for domain \
@@ -27859,11 +28156,12 @@ async fn then_last_cluster_status_scheduled_owner_is_saved_as_placeholder(
                 world.domain
             )
         });
-    assert_ne!(
-        owner, "-",
-        "scheduled {kind} {name} in domain '{}' must have an owner, got: {output}",
-        world.domain
-    );
+    let Some(owner) = placement.owner else {
+        panic!(
+            "scheduled {kind} {name} in domain '{}' must have an owner, got: {output}",
+            world.domain
+        );
+    };
     world.placeholders.insert(placeholder, owner.to_string());
 }
 
@@ -27883,7 +28181,7 @@ async fn then_last_cluster_status_scheduled_first_replica_is_saved_as_placeholde
         .last_command_output
         .as_deref()
         .expect("a cluster status output must exist before saving its scheduled replica");
-    let (_, replicas) = scheduled_node_placement_from_status(output, &world.domain, &kind, &name)
+    let placement = ScheduledPlacement::from_status(output, &world.domain, &kind, &name)
         .unwrap_or_else(|| {
             panic!(
                 "last command output must contain scheduled {kind} {name} placement for domain \
@@ -27891,7 +28189,8 @@ async fn then_last_cluster_status_scheduled_first_replica_is_saved_as_placeholde
                 world.domain
             )
         });
-    let replica = replicas
+    let replica = placement
+        .replicas
         .into_iter()
         .next()
         .unwrap_or_else(|| panic!("scheduled {kind} {name} must contain at least one replica"));
@@ -27969,8 +28268,9 @@ async fn then_last_command_output_owner_equals_placeholder(
         .last_command_output
         .as_deref()
         .expect("a command output must exist before owner assertion");
-    let actual = owner_from_describe_output(output)
-        .unwrap_or_else(|| panic!("last command output must contain an owner line, got: {output}"));
+    let actual = described_owner(output).unwrap_or_else(|| {
+        panic!("last command output must name the node that owns its unit, got: {output}")
+    });
     assert_eq!(
         actual, expected,
         "expected owner placeholder '{placeholder}' to match last command output owner"
@@ -27989,7 +28289,7 @@ async fn when_these_plexus_commands_are_executed_on_non_hash_map_owner(
     let owner = world
         .last_command_output
         .as_deref()
-        .and_then(owner_from_describe_output)
+        .and_then(described_owner)
         .expect("last command output must be DESCRIBE HASH MAP output with an owner")
         .to_string();
     let node_id = world
@@ -28019,10 +28319,10 @@ async fn when_these_plexus_commands_are_executed_on_non_hash_map_holder(
         .last_command_output
         .as_deref()
         .expect("last command output must be DESCRIBE HASH MAP output");
-    let owner = owner_from_describe_output(output)
+    let owner = described_owner(output)
         .expect("last command output must be DESCRIBE HASH MAP output with an owner")
         .to_string();
-    let replicas = replica_nodes_from_describe_output(output)
+    let replicas = described_replicas(output)
         .into_iter()
         .map(str::to_string)
         .collect::<Vec<_>>();
@@ -28543,7 +28843,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_equals_
         {
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
-                if owner_from_describe_output(&output) == Some(expected.as_str()) {
+                if described_owner(&output) == Some(expected.as_str()) {
                     return;
                 }
             }
@@ -28592,9 +28892,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_differe
         {
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
-                if owner_from_describe_output(&output)
-                    .is_some_and(|owner| owner != unexpected.as_str())
-                {
+                if described_owner(&output).is_some_and(|owner| owner != unexpected.as_str()) {
                     return;
                 }
             }
@@ -28602,8 +28900,8 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_differe
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for deduplicator '{deduplicator}' owner to differ from \
-             '{unexpected}'. last output: {:?}, last error: {:?}",
+            "timed out waiting for a node other than '{unexpected}' to own deduplicator \
+             '{deduplicator}'. last output: {:?}, last error: {:?}",
             world.last_command_output,
             world.last_command_error
         );
@@ -28646,8 +28944,8 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_equals_pla
         match world.cluster().status_text(&node_id, placement).await {
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
-                if scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
-                    .is_some_and(|(owner, _)| owner == expected)
+                if ScheduledPlacement::from_status(&output, &world.domain, &kind, &name)
+                    .is_some_and(|scheduled| scheduled.owner == Some(expected.as_str()))
                 {
                     return;
                 }
@@ -28696,13 +28994,13 @@ async fn then_for_duration_node_keeps_reporting_scheduled_owner_equal_to_placeho
                 )
             });
         world.last_command_output = Some(output.clone());
-        let owner = scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
-            .map(|(owner, _)| owner.to_string())
+        let scheduled = ScheduledPlacement::from_status(&output, &world.domain, &kind, &name)
             .unwrap_or_else(|| {
                 panic!("scheduled {kind} {name} must remain in the schedule, got: {output}")
             });
         assert_eq!(
-            owner, expected,
+            scheduled.owner,
+            Some(expected.as_str()),
             "scheduled {kind} {name} must keep owner '{expected}', got: {output}"
         );
         observation.pause(Duration::from_millis(250)).await;
@@ -28736,16 +29034,16 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_different_
         nervix_primitives::task::consume_budget().await;
         assert!(
             !placement.has_passed(),
-            "timed out waiting for scheduled {kind} {name} owner to differ from '{unexpected}'. \
-             last output: {:?}, last error: {:?}",
+            "timed out waiting for a node other than '{unexpected}' to own scheduled {kind} \
+             {name}. last output: {:?}, last error: {:?}",
             world.last_command_output,
             world.last_command_error
         );
         match world.cluster().status_text(&node_id, placement).await {
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
-                if scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
-                    .is_some_and(|(owner, _)| owner != unexpected)
+                if ScheduledPlacement::from_status(&output, &world.domain, &kind, &name)
+                    .is_some_and(|scheduled| scheduled.is_owned_by_node_other_than(&unexpected))
                 {
                     return;
                 }
@@ -28789,8 +29087,8 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner(
         match world.cluster().status_text(&node_id, placement).await {
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
-                if scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
-                    .is_some_and(|(owner, _)| owner == expected)
+                if ScheduledPlacement::from_status(&output, &world.domain, &kind, &name)
+                    .is_some_and(|scheduled| scheduled.owner == Some(expected.as_str()))
                 {
                     return;
                 }
@@ -28881,11 +29179,10 @@ async fn then_within_duration_node_eventually_reports_scheduled_replicas_without
         match world.cluster().status_text(&node_id, placement).await {
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
-                let placed =
-                    scheduled_node_placement_from_status(&output, &world.domain, &kind, &name);
-                if let Some((_, replicas)) = placed
-                    && !replicas.is_empty()
-                    && !replicas.contains(&replaced.as_str())
+                let placed = ScheduledPlacement::from_status(&output, &world.domain, &kind, &name);
+                if let Some(scheduled) = placed
+                    && !scheduled.replicas.is_empty()
+                    && !scheduled.replicas.contains(&replaced.as_str())
                 {
                     return;
                 }
@@ -39550,6 +39847,36 @@ async fn then_node_eventually_reports_interconnect_status(
         .wait_for_interconnect_status(&node_id, &peer_node_id, &expected_status)
         .await
         .expect("interconnect status did not converge");
+}
+
+/// Every other node of the cluster plans against the run `node_id` started last: its gossip calls
+/// that run live and not terminating, so a plan no longer reads an earlier run of `node_id` that
+/// announced its stop. Each other node must be running.
+#[then(
+    expr = "every other node's gossip eventually lists a run of node {string} that is not \
+            terminating"
+)]
+async fn then_every_other_node_lists_a_running_gossip_node(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    for observer in world.cluster().node_ids() {
+        nervix_primitives::task::consume_budget().await;
+        if observer == node_id {
+            continue;
+        }
+        world
+            .cluster()
+            .wait_for_running_gossip_node(&observer, &node_id)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "node '{observer}' did not list a run of node '{node_id}' that is not \
+                     terminating: {error}"
+                )
+            });
+    }
 }
 
 #[then(expr = "node {string} eventually stops probing {string}")]

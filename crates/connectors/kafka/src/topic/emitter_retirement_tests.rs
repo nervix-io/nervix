@@ -4,7 +4,7 @@
 //! - **Owns.** Causal regressions for each owner that can hold a producer's last handle (an emitter its
 //!   host drops before it publishes or once it finished it, an emitter dropped while its broker holds
 //!   the answers to the records it sent, a flush that outlives the finish that started it), for a
-//!   destruction that waits for the producer's polling thread or meets a full connector queue, and
+//!   destruction that waits for the producer's polling thread or meets a busy connector worker, and
 //!   for the charge a producer holds for its own retirement.
 //! - **Depends on.** The connector contract, the bounded executor and librdkafka's mock broker.
 //! - **Must not know.** Runtime graph ownership, registry Models or cluster placement.
@@ -16,13 +16,12 @@ use std::{
     time::Duration,
 };
 
-use error_stack::{AttachmentKind, FrameKind};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::ResultExt as _;
 use nervix_connector::{
     BrokerPublishingMode, EmitterConnector as _, EmitterFinish, EmitterHost, EmitterLifecycle as _,
     EmitterRecordId, RecordEmitter as _,
 };
-use nervix_execution::{AdmissionError, Executor, MemoryClass};
+use nervix_execution::{Executor, MemoryClass};
 use nervix_primitives::{
     sync::oneshot,
     time::{Instant, timeout},
@@ -30,14 +29,15 @@ use nervix_primitives::{
 use rdkafka::{mocking::MockCluster, producer::DefaultProducerContext};
 
 use super::{
-    KafkaProducer, KafkaProducerStartError, KafkaTopicEmitter,
+    KafkaProducer, KafkaTopicEmitter,
     publish_tests::{
         FAST_RECONNECT, PARTITION_ZERO_KEYS, PollingThreadHold, SilentHost, awaited_hand_over,
         cluster, confirmed, emitter_config, emitter_on, record, small_payload,
     },
 };
 use crate::topic::retirement_tests::{
-    FullConnectorQueue, connector_workers_reach, connector_workers_reached, single_connector_worker,
+    BusyConnectorWorker, connector_workers_reach, connector_workers_reached,
+    single_connector_worker,
 };
 
 /// A broker round trip no test outlives, so a broker given it holds every answer.
@@ -308,14 +308,13 @@ async fn a_destruction_that_waits_for_the_polling_thread_waits_on_a_connector_wo
 }
 
 /// A producer whose last handle is gone is work the node already holds, which nothing can present
-/// again, so a full connector queue keeps its destruction waiting for a place instead of refusing
-/// it.
+/// again, so a busy connector worker keeps its destruction waiting instead of refusing it.
 #[nervix_primitives::test]
-async fn a_producer_destruction_waits_for_a_place_in_a_full_connector_queue() {
+async fn a_producer_destruction_waits_for_the_busy_connector_worker() {
     let cluster = cluster(1, 1);
     let executor = single_connector_worker();
     let emitter = emitter_on(&cluster, &[], BrokerPublishingMode::NoAck, executor.clone()).await;
-    let full = FullConnectorQueue::fill(&executor).await;
+    let full = BusyConnectorWorker::fill(&executor).await;
     let before = executor.snapshot().connector_storage;
 
     drop(emitter);
@@ -323,19 +322,17 @@ async fn a_producer_destruction_waits_for_a_place_in_a_full_connector_queue() {
 
     connector_workers_reach(
         &executor,
-        "the producer is destroyed by a connector job once a queue place frees",
+        "the producer is destroyed by a connector job once the worker frees",
         |workers| {
-            workers.admitted == before.admitted + 1
-                && workers.refused == before.refused
-                && workers.completed == before.completed + 3
+            workers.admitted == before.admitted + 1 && workers.completed == before.completed + 3
         },
     )
     .await;
 }
 
 /// A producer takes the charge of the job that will destroy it before it exists, so a node whose
-/// commands budget has no room refuses to start the emitter, and its retirement gives that charge
-/// back.
+/// commands budget has no room holds the emitter's start back until it has, and its retirement
+/// gives that charge back.
 #[nervix_primitives::test]
 async fn a_producer_holds_the_charge_of_its_retirement_from_its_creation() {
     let cluster = cluster(1, 1);
@@ -351,40 +348,20 @@ async fn a_producer_holds_the_charge_of_its_retirement_from_its_creation() {
     )
     .await
     .assured("network-free configuration does not reserve a native producer");
-    let refused = prepared.resume().await;
-
-    let Err(report) = refused else {
-        panic!("a full commands budget refuses the producer's retirement charge");
-    };
-    assert_eq!(
-        report.current_context(),
-        &nervix_connector::EmitterLifecycleError::Resume { connector: "kafka" }
-    );
-    assert_eq!(
-        report.downcast_ref::<KafkaProducerStartError>(),
-        Some(&KafkaProducerStartError::RetirementAdmission)
-    );
-    let mut description = None;
-    for frame in report.frames() {
-        if let FrameKind::Attachment(AttachmentKind::Printable(attachment)) = frame.kind() {
-            description = Some(attachment.to_string());
-            break;
-        }
+    {
+        let mut resuming = prepared.resume();
+        let first_poll =
+            poll_fn(|context| Poll::Ready(Pin::new(&mut resuming).poll(context))).await;
+        assert!(
+            first_poll.is_pending(),
+            "a full commands budget holds the producer's creation back instead of refusing it"
+        );
+        drop(occupied);
+        resuming
+            .await
+            .assured("the producer is created once the budget has room");
     }
-    let description = description.assured("the refusal is described for the emitter's status");
-    assert!(
-        description.starts_with("the KAFKA producer cannot reserve the job that will destroy it: "),
-        "the emitter's status names the refused charge and its cause: {description}"
-    );
-    assert!(matches!(
-        report.downcast_ref::<AdmissionError>(),
-        Some(AdmissionError::BudgetExhausted {
-            class: "commands",
-            ..
-        })
-    ));
-    drop(occupied);
-    let emitter = emitter_on(&cluster, &[], BrokerPublishingMode::NoAck, executor.clone()).await;
+    let emitter = prepared;
     let charge = u64::try_from(std::mem::size_of::<KafkaProducer>())
         .assured("a producer handle's size fits in u64");
     assert_eq!(executor.snapshot().commands_memory.reserved_bytes, charge);

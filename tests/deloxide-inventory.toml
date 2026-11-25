@@ -1141,19 +1141,19 @@ coverage = "Actual outer and nested snapshot decoders, their execution worker FI
 examples = 4
 feature = "tests/features/cluster/snapshot_receive_admission.feature"
 id = "scenario.snapshot-receive-admission"
-invariant = "On one and three nodes, outer and nested receive overlap returns 503, capacity release permits an exact complete checkpoint transfer for both interleaved branches, and every receive charge returns."
+invariant = "On one and three nodes, a receive that overlaps a full bulk class waits for room instead of answering 503, capacity release lets an exact complete checkpoint transfer for both interleaved branches, and every receive charge returns."
 invocation = "scenarios"
-scenario = "A snapshot receive refuses overlapping decode memory and preserves both branches on <cluster_size> nodes with <key_bytes> byte keys"
+scenario = "A snapshot receive waits for overlapping decode memory and preserves both branches on <cluster_size> nodes with <key_bytes> byte keys"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Under scheduling stress: actual snapshot decode worker admission and completion beside refused receive memory, public backup and native checkpoint reads. Semaphore waits remain outside the detector; queued decode cancellation remains covered by Shuttle."
+coverage = "Under scheduling stress: actual snapshot decode worker admission and completion beside receive memory that waits for room, public backup and native checkpoint reads. Semaphore waits remain outside the detector; queued decode cancellation remains covered by Shuttle."
 examples = 4
 feature = "tests/features/cluster/snapshot_receive_admission.feature"
 id = "stress.snapshot-receive-admission"
-invariant = "On one and three nodes, outer and nested receive overlap returns 503, capacity release permits an exact complete checkpoint transfer for both interleaved branches, and every receive charge returns."
+invariant = "On one and three nodes, a receive that overlaps a full bulk class waits for room instead of answering 503, capacity release lets an exact complete checkpoint transfer for both interleaved branches, and every receive charge returns."
 invocation = "stress-restore-scenarios"
-scenario = "A snapshot receive refuses overlapping decode memory and preserves both branches on <cluster_size> nodes with <key_bytes> byte keys"
+scenario = "A snapshot receive waits for overlapping decode memory and preserves both branches on <cluster_size> nodes with <key_bytes> byte keys"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
@@ -2013,23 +2013,23 @@ scenario = "A resumed materialized cut preserves interleaved branches and genera
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Stopped materialized capture under held Bulk memory, followed by a complete backup and restored branch-local generator output. Existing checkpoint and consensus storage locks are tracked; async memory admission and store-local semaphore turns are outside the detector."
+coverage = "Stopped materialized capture that waits for held Bulk memory and then completes its backup, followed by a restore and restored branch-local generator output. Existing checkpoint and consensus storage locks are tracked; async memory admission and store-local semaphore turns are outside the detector."
 examples = 2
 feature = "tests/features/cluster/backup_bulk_admission.feature"
 id = "scenario.materialized-bulk-overlap"
-invariant = "A captured reader refuses overlapping Bulk admission without retaining memory; a fresh backup after release restores both tenants completely."
+invariant = "A backup's capture waits for its Bulk share while it holds none of the class, so the backup stays pending while other work holds the memory; once it frees, the same backup completes and restores both tenants completely."
 invocation = "scenarios"
-scenario = "A stopped materialized capture refuses overlapping bulk memory and succeeds after release on <cluster_size> nodes"
+scenario = "A stopped materialized capture waits for bulk memory other work holds and succeeds once it frees on <cluster_size> nodes"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Under scheduling stress: stopped materialized capture refusal and recovery, including the existing tracked checkpoint and consensus storage lifecycle."
+coverage = "Under scheduling stress: a stopped materialized capture that waits for held Bulk memory and then completes, including the existing tracked checkpoint and consensus storage lifecycle."
 examples = 2
 feature = "tests/features/cluster/backup_bulk_admission.feature"
 id = "stress.materialized-bulk-overlap"
-invariant = "A captured reader refuses overlapping Bulk admission without retaining memory; a fresh backup after release restores both tenants completely."
+invariant = "A backup's capture waits for its Bulk share while it holds none of the class, so the backup stays pending while other work holds the memory; once it frees, the same backup completes and restores both tenants completely."
 invocation = "stress-restore-scenarios"
-scenario = "A stopped materialized capture refuses overlapping bulk memory and succeeds after release on <cluster_size> nodes"
+scenario = "A stopped materialized capture waits for bulk memory other work holds and succeeds once it frees on <cluster_size> nodes"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
@@ -2063,13 +2063,13 @@ scenario = "Remote materialized generators reuse each complete generation and ob
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "A generator moves to a remote source reader with constrained bulk room, holds its first fetch on a received chunk until restore maintenance asks for bulk memory, refuses snapshot decoding, releases its input and resumes both branches after the hold ends. Existing snapshot assignment and sealed-cache locks and the maintenance installation barrier are tracked; async memory admission and transport waits are outside Deloxide."
+coverage = "A generator moves to a remote source reader with constrained bulk room, holds its first fetch on a received chunk until restore maintenance asks for bulk memory, opens the fetched snapshot by waiting for a section and its decoder's room as one bulk charge and resumes both branches after the hold ends. Existing snapshot assignment and sealed-cache locks and the maintenance installation barrier are tracked; async memory admission and transport waits are outside Deloxide."
 examples = 1
 feature = "tests/features/cluster/backup_materialized.feature"
 id = "scenario.materialized-read-admission"
-invariant = "A refused snapshot read retains no bulk input and restore maintenance takes no queue place ahead of it; releasing contention lets the relocated generator emit every original and replacement branch."
+invariant = "A fetched snapshot's open waits for bulk room instead of being refused and restore maintenance takes no queue place ahead of it; releasing contention lets the relocated generator emit every original and replacement branch with nothing left charged."
 invocation = "scenarios"
-scenario = "A relocated materialized generator releases refused snapshot reads and resumes after bulk contention"
+scenario = "A relocated materialized generator waits for bulk room to open its fetched snapshot and resumes after bulk contention"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -2353,13 +2353,13 @@ scenario = "Batched inferencer isolates interleaved concrete branches"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Control-plane ONNX inspection admission, typed full-queue refusal and successful creation after releasing the bulk workers on diagnostic nodes. Dependency-owned ONNX threads and async queue waits remain untracked."
+coverage = "Control-plane ONNX inspection that waits for a place in the saturated bulk queue and creates the inferencer once the bulk workers are released, on diagnostic nodes. Dependency-owned ONNX threads and async queue waits remain untracked."
 examples = 2
 feature = "tests/features/runtime/inferencer.feature"
 id = "scenario.inferencer-inspection-admission"
-invariant = "A full bulk queue refuses model inspection before storing the inferencer, and releasing the queue permits the same inferencer to be validated and created on one and three nodes."
+invariant = "A full bulk queue holds model inspection back, so the command does not complete while the queue is saturated; once the queue is released, the same command validates and creates the inferencer on one and three nodes and leaves no bulk memory reserved."
 invocation = "scenarios"
-scenario = "Inferencer model inspection refuses a full bulk queue and recovers"
+scenario = "Inferencer model inspection waits for a full bulk queue and completes once it frees"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -2893,13 +2893,13 @@ scenario = "Batched inferencer isolates interleaved concrete branches"
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Under scheduling stress: control-plane ONNX inspection admission, typed full-queue refusal and successful creation after releasing the bulk workers. Dependency-owned ONNX threads and async queue waits remain untracked."
+coverage = "Under scheduling stress: control-plane ONNX inspection that waits for a place in the saturated bulk queue and creates the inferencer once the bulk workers are released. Dependency-owned ONNX threads and async queue waits remain untracked."
 examples = 2
 feature = "tests/features/runtime/inferencer.feature"
 id = "stress.inferencer-inspection-admission"
-invariant = "A full bulk queue refuses model inspection before storing the inferencer, and releasing the queue permits the same inferencer to be validated and created on one and three nodes."
+invariant = "A full bulk queue holds model inspection back, so the command does not complete while the queue is saturated; once the queue is released, the same command validates and creates the inferencer on one and three nodes and leaves no bulk memory reserved."
 invocation = "stress-scenarios"
-scenario = "Inferencer model inspection refuses a full bulk queue and recovers"
+scenario = "Inferencer model inspection waits for a full bulk queue and completes once it frees"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -3143,13 +3143,13 @@ scenario = "Remote materialized generators reuse each complete generation and ob
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
-coverage = "Under scheduling stress: a relocated generator holds its first fetch on a received chunk until restore maintenance asks for bulk memory, releases a refused snapshot's input and resumes complete remote generations. Existing snapshot assignment and sealed-cache locks and the maintenance installation barrier are tracked; async memory admission and transport waits are outside Deloxide."
+coverage = "Under scheduling stress: a relocated generator holds its first fetch on a received chunk until restore maintenance asks for bulk memory, waits for bulk room to open the fetched snapshot and resumes complete remote generations. Existing snapshot assignment and sealed-cache locks and the maintenance installation barrier are tracked; async memory admission and transport waits are outside Deloxide."
 examples = 1
 feature = "tests/features/cluster/backup_materialized.feature"
 id = "stress.materialized-read-admission"
-invariant = "A refused snapshot read retains no bulk input and restore maintenance takes no queue place ahead of it; releasing contention lets the relocated generator emit every original and replacement branch."
+invariant = "A fetched snapshot's open waits for bulk room instead of being refused and restore maintenance takes no queue place ahead of it; releasing contention lets the relocated generator emit every original and replacement branch with nothing left charged."
 invocation = "stress-restore-scenarios"
-scenario = "A relocated materialized generator releases refused snapshot reads and resumes after bulk contention"
+scenario = "A relocated materialized generator waits for bulk room to open its fetched snapshot and resumes after bulk contention"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
@@ -4154,7 +4154,7 @@ scenario = "MongoDB emitter inserts over mutual TLS with a mounted client identi
 selections = ["deloxide-stress"]
 
 [[owner]]
-gap = "CPU-worker interruption between simulated callbacks belongs to the mutually exclusive Turmoil mode. Native blocking-task teardown before its first callback is not deterministically reached by these public scenarios. Native workloads reach normal FIFO admission, cancellation and draining; the ordinary interrupted-worker regression covers selected and queued destructor cleanup without claiming tracked-lock interleavings."
+gap = "CPU-worker interruption between simulated callbacks belongs to the mutually exclusive Turmoil mode. Native blocking-task teardown before its first callback is not deterministically reached by these public scenarios, nor is a carrying job withdrawn as a worker frees to take it, whose race the Shuttle check shuttle_a_withdrawn_carrying_job_racing_its_worker_runs_or_hands_its_state_back covers. Native workloads reach normal FIFO admission, cancellation and draining; the ordinary interrupted-worker regression covers selected and waiting destructor cleanup without claiming tracked-lock interleavings."
 path = "crates/execution/src/workers.rs"
 workloads = [
   "scenario.password-credentials",
@@ -4540,6 +4540,17 @@ workloads = [
   "stress.paced.refused-tick-replay",
   "stress.paced.delayed-refusal",
   "stress.paced.reopen-failure",
+]
+
+[[owner]]
+path = "src/application/backup/interconnect.rs"
+workloads = [
+  "scenario.wasm-kafka-restore",
+  "scenario.backup-cut-diagnostics",
+  "scenario.guest-save-backup",
+  "stress.wasm-kafka-restore",
+  "stress.backup-cut-diagnostics",
+  "stress.guest-save-backup",
 ]
 
 [[owner]]

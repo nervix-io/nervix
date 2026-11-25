@@ -68,14 +68,15 @@ datetimes or bytes. JSON, CBOR and AVRO retain their own wire type enums; CBOR c
 native representation types, and an AVRO array nests its item type, arrays included, to a
 bounded depth. The Model/archive, registry and consensus properties preserve those complete
 values, including inferencer state bindings and their initial expressions, each
-inferencer's required working memory, and each WASM processor's required `MAX TABLE ELEMENTS`.
-The `NERVIX WASM TBLS` registry signature and `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_`
+inferencer's required working memory, each WASM processor's required `MAX TABLE ELEMENTS`, and
+each emitter's `RETRY POLICY` with its optional `GIVE UP AFTER`.
+The `NERVIX GIVE UP A` registry signature and `raft_232bb63881d08871_`
 consensus namespace identify the current Model layout before decoding, including the `parametrizer` kind text of the
 declared entity that defines a parametrization, the ordered `RATE LIMIT` clauses an
 ingestor body writes, the `SET RATE LIMIT` and `DROP RATE LIMIT` alterations, the required
 response timing of each endpoint pause buffer, the `DURATION` type with the duration literals
-expressions, subscription bindings and branch selections hold, and a WASM processor's
-`MAX TABLE ELEMENTS`.
+expressions, subscription bindings and branch selections hold, a WASM processor's
+`MAX TABLE ELEMENTS`, and an emitter's optional `GIVE UP AFTER`.
 
 Placement generators draw colocation rules, domain-wide or over corridors, and node rules for
 `FOR` members or `DOMAIN WIDE` with `REQUIRE NODES WHERE`, `PREFER NODES WHERE` and `ANY NODE`,
@@ -89,7 +90,7 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_` consensus namespace identifies the
+and the `raft_232bb63881d08871_` consensus namespace identifies the
 stored transaction statement layout before decoding.
 
 The complete cluster-parameter record uses each declaration's validated inline storage. Its
@@ -97,13 +98,14 @@ The complete cluster-parameter record uses each declaration's validated inline s
 entity-label limits retain their full 64-bit range. The direct parameter property compares complete
 archive and JSON round trips; consensus state and log properties recover every field through their
 production storage codecs. The
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_` namespace and `ClusterState` encoding 57
+`raft_232bb63881d08871_` namespace and `ClusterState` encoding 60
 identify the current layout, which includes labels on domains, logical resources and users and
 the one label edit, setting and removing keys, that administrative label commands and transaction
-statements store, each node's trace export and web console pacing capabilities and measured
-database volume in its committed capability claim, interconnect capabilities that announce no relay watermark count, and
-listener bounds that carry the gRPC listener's HTTP/2 windows, send buffer and reset limits, the
-HTTP/1 header count and the WebSocket write buffer.
+statements store, each node's trace export and web console pacing capabilities, measured database
+volume and both databases' open-file limits in its committed capability claim, interconnect
+capabilities that announce only the transport's handshake, queue, window, deadline and backoff
+policy, and listener bounds that carry the gRPC listener's HTTP/2 windows, send buffer and reset
+limits, the HTTP/1 header count and the WebSocket write buffer.
 
 `RESET WASM PROCESSOR ... STATE` statement generators draw a processor and an unbranched,
 all-branches or concrete-branch scope; the statement takes its domain from the transaction that

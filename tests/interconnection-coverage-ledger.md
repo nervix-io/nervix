@@ -69,7 +69,7 @@ carries a payload value.
 | Active connections and streams | `nervix_interconnect_connections`, `nervix_interconnect_streams` |
 | Pending operations | `nervix_interconnect_pending_operations`, `nervix_interconnect_relay_channels`, `nervix_interconnect_relay_attempts`, `nervix_interconnect_relay_grants` |
 | Queued and reserved bytes | `nervix_execution_memory_capacity_bytes`, `nervix_execution_memory_reserved_bytes` |
-| Serialization queue and work duration | `nervix_execution_job_queue_seconds_total`, `nervix_execution_job_work_seconds_total`, with `nervix_execution_jobs_running` and `nervix_execution_jobs_pending` |
+| Serialization queue and work duration | `nervix_execution_job_queue_seconds_total`, `nervix_execution_job_work_seconds_total`, with `nervix_execution_jobs_running` and `nervix_execution_jobs_waiting` |
 | Task poll delay | `nervix_node_scheduler_delay_seconds_total`, `nervix_node_scheduler_delay_peak_seconds`, `nervix_node_scheduler_samples_total` |
 | Admission latency | `nervix_interconnect_relay_admission_wait_seconds_total` over `nervix_interconnect_relay_admissions_total` |
 | ACK age | `nervix_interconnect_unresolved_outcome_age_seconds` |
@@ -79,7 +79,7 @@ carries a payload value.
 | Bulk progress | `nervix_interconnect_bulk_bytes_total` |
 | Snapshot pins | `nervix_consensus_snapshot_pinned_generations`, `nervix_consensus_snapshot_pinned_readers`, `nervix_consensus_snapshot_unreferenced_generations` |
 | Log retention | `nervix_consensus_log_last_index`, `nervix_consensus_log_snapshot_index`, `nervix_consensus_log_purged_index`, `nervix_consensus_log_retained_bytes` |
-| Quota failures | `nervix_interconnect_quota_failures_total`, `nervix_execution_memory_rejections_total`, `nervix_execution_job_rejections_total` |
+| Quota failures | `nervix_interconnect_quota_failures_total`, `nervix_execution_memory_rejections_total` |
 
 Evidence: `cluster/interconnect_observability.feature`. Its bounded-dimension step reads the whole
 exposition and fails on any interconnection sample carrying a label outside that closed set;

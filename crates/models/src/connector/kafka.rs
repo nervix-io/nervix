@@ -293,12 +293,15 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
                 overflow: BufferOverflow::Backpressure,
             },
         },
+        // A consumer runs one control operation at a time, under its control turn, and one
+        // group commit at a time; an emitter's producer looks its partitions up one publish at a
+        // time; a client's destruction runs only once those jobs gave its last handle back.
         DeclaredBuffer {
-            holds: "admitted synchronous control jobs per node",
+            holds: "admitted synchronous control jobs waiting for or holding a connector worker",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Items {
-                    count: 1024,
-                    unit: "pending jobs",
+                    count: 2,
+                    unit: "jobs per Kafka client",
                 },
                 overflow: BufferOverflow::Backpressure,
             },
@@ -786,8 +789,8 @@ connector_emitters! {
 
 super::publishing::emitter_modes! {
     pub enum KafkaTopicPublishingMode {
-        NoAck { retry_policy: crate::RetryPolicy } => NoAck,
-        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck,
+        NoAck { retry_policy: crate::EmitterRetryPolicy } => NoAck,
+        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::EmitterRetryPolicy } => BrokerAck,
     }
 }
 

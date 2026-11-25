@@ -59,23 +59,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             } else {
                 None
             },
-            control_cpu_pending_jobs: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
             credentials_cpu_workers: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
-            credentials_cpu_pending_jobs: if self.entropy.flag() {
                 std::num::NonZeroUsize::new(
                     usize::try_from(self.entropy.between(1..=8))
                         .verified("generated small counts fit usize"),
@@ -91,23 +75,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             } else {
                 None
             },
-            data_cpu_pending_jobs: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
             extension_cpu_workers: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
-            extension_cpu_pending_jobs: if self.entropy.flag() {
                 std::num::NonZeroUsize::new(
                     usize::try_from(self.entropy.between(1..=8))
                         .verified("generated small counts fit usize"),
@@ -123,23 +91,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             } else {
                 None
             },
-            bulk_cpu_pending_jobs: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
             consensus_storage_workers: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
-            consensus_storage_pending_jobs: if self.entropy.flag() {
                 std::num::NonZeroUsize::new(
                     usize::try_from(self.entropy.between(1..=8))
                         .verified("generated small counts fit usize"),
@@ -155,23 +107,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             } else {
                 None
             },
-            filesystem_storage_pending_jobs: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
             connector_storage_workers: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
-            connector_storage_pending_jobs: if self.entropy.flag() {
                 std::num::NonZeroUsize::new(
                     usize::try_from(self.entropy.between(1..=8))
                         .verified("generated small counts fit usize"),
@@ -467,24 +403,13 @@ impl<'bytes> GeneratedSettings<'bytes> {
     }
 
     fn interconnect(&mut self) -> nervix_interconnect::TransportSettings {
-        let max_peers = self.infrastructure_count(128);
         let queue = self.infrastructure_count(4096);
-        let request_quota =
-            if self.entropy.flag() {
-                Some(self.infrastructure_count(
-                    u64::try_from(queue).assured("the generated queue fits u64"),
-                ))
-            } else {
-                None
-            };
         let backoff = self.infrastructure_duration();
         let maximum = backoff.max(self.infrastructure_duration());
         nervix_interconnect::TransportSettings::resolve(
             nervix_interconnect::TransportSettingValues {
-                max_peers: Some(max_peers),
                 concurrent_handshakes: Some(self.infrastructure_count(128)),
                 incoming_queue_capacity: Some(queue),
-                request_quota,
                 stream_receive_window: Some(ByteUnit::Byte(
                     self.entropy.between(1..=(1 << 31) - 1),
                 )),
@@ -505,22 +430,20 @@ impl<'bytes> GeneratedSettings<'bytes> {
         .assured("generated positive bounds fit primitive and HTTP/2 limits")
     }
 
-    fn dns(&mut self, peers: usize) -> nervix_dns::DnsSettings {
-        nervix_dns::DnsSettings::resolve(
-            nervix_dns::DnsSettingValues {
-                cache_entries: Some(self.entropy.between(1..=65536)),
-                positive_max_ttl: Some(self.infrastructure_duration()),
-                negative_max_ttl: Some(self.infrastructure_duration()),
-                hook_lookup_budget: Some(self.infrastructure_duration()),
-                address_family_policy: Some(self.entropy.pick([
-                    nervix_dns::AddressFamilies::DualStack,
-                    nervix_dns::AddressFamilies::Ipv4,
-                    nervix_dns::AddressFamilies::Ipv6,
-                ])),
-                trust_negative_answers: Some(self.entropy.flag()),
-            },
-            peers,
-        )
+    fn dns(&mut self) -> nervix_dns::DnsSettings {
+        nervix_dns::DnsSettings::resolve(nervix_dns::DnsSettingValues {
+            cache_entries: Some(self.entropy.between(1..=65536)),
+            positive_max_ttl: Some(self.infrastructure_duration()),
+            negative_max_ttl: Some(self.infrastructure_duration()),
+            hook_lookup_budget: Some(self.infrastructure_duration()),
+            address_family_policy: Some(self.entropy.pick([
+                nervix_dns::AddressFamilies::DualStack,
+                nervix_dns::AddressFamilies::Ipv4,
+                nervix_dns::AddressFamilies::Ipv6,
+            ])),
+            trust_negative_answers: Some(self.entropy.flag()),
+            concurrent_lookups: Some(self.infrastructure_count(128)),
+        })
         .assured("generated resolver bounds are positive")
     }
 
@@ -820,7 +743,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             bulk_window_bytes: Some(ByteUnit::Byte(self.positive_bytes().as_u64().min(16 << 20))),
         };
         let interconnect = self.interconnect();
-        let dns = self.dns(interconnect.max_peers());
+        let dns = self.dns();
         let ack_unit = Duration::from_nanos(self.entropy.boundary_biased(1..=1_000_000_000));
         let mut settings = NodeSettings {
             interconnect,

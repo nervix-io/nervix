@@ -4,7 +4,7 @@
 //! Layer: test harness, outside the product layer order.
 //!
 //! - **Owns.** Each node's registered executor and what a scenario holds in it: occupied CPU and
-//!   storage workers, filled wait-queue places and held bulk memory.
+//!   storage workers and held bulk memory.
 //! - **Depends on.** The bounded executor's admission and snapshot API, typed node names, and the
 //!   primitive boundary's tasks, atomics and blocking channels.
 //! - **Must not know.** Which product work runs on the executor, how a node sizes its classes, or
@@ -94,7 +94,7 @@ impl FaultInjection {
             let executor = executor.clone();
             let started = started.clone();
             nervix_primitives::task::spawn(async move {
-                Self::run_refusing(
+                Self::run_holding(
                     &executor,
                     class,
                     reservation,
@@ -121,47 +121,10 @@ impl FaultInjection {
         }
     }
 
-    /// Fill every worker of `class`, a CPU or storage class, on `node_id`, then every place in its
-    /// wait queue, and return once the class refuses the next job it is handed. A job that waits
-    /// for a place instead then waits until the scenario releases the class.
-    pub async fn saturate_execution(
-        &self,
-        node_id: &ClusterNodeName,
-        class: impl Into<WorkerClassName>,
-    ) {
-        let class = class.into();
-        self.occupy_execution(node_id, class).await;
-        let executor = match self.inner.executions.get(node_id) {
-            Some(node) => node.executor.clone(),
-            None => panic!("node '{node_id}' has not registered its executor"),
-        };
-        let capacity = executor.snapshot().worker_class(class).queue_capacity;
-        for _ in 0..capacity {
-            let reservation = executor
-                .try_reserve(MemoryClass::Bulk, 0)
-                .unwrap_or_else(|error| {
-                    panic!("bulk admission must accept a zero charge: {error}")
-                });
-            let waiter = executor.clone();
-            nervix_primitives::task::spawn(async move {
-                Self::run_refusing(&waiter, class, reservation, |_charge, _cancellation| ())
-                    .await
-                    .discarded(
-                        "this job exists to hold a place in the wait queue; once the scenario \
-                         releases the workers it runs empty",
-                    );
-            });
-        }
-        while executor.snapshot().worker_class(class).pending < capacity {
-            nervix_primitives::task::consume_budget().await;
-            nervix_primitives::task::yield_now().await;
-        }
-    }
-
-    /// Run `job` on `class`'s workers the way request work runs: refused at once when the class's
-    /// wait queue is full. The jobs a scenario holds a class with therefore never wait themselves,
-    /// so they never count among the jobs waiting for a place.
-    async fn run_refusing<T: Send + 'static>(
+    /// Run `job` on `class`'s workers. A scenario submits exactly as many holding jobs as the
+    /// class has free workers, so they take free ones at once and never count among the jobs
+    /// waiting for a worker.
+    async fn run_holding<T: Send + 'static>(
         executor: &Executor,
         class: WorkerClassName,
         reservation: Reservation,
@@ -173,8 +136,8 @@ impl FaultInjection {
         }
     }
 
-    /// Release every worker a scenario occupied on `node_id`, of every class. The jobs that waited
-    /// behind them then run empty.
+    /// Release every worker a scenario occupied on `node_id`, of every class. The jobs waiting for
+    /// them then take the freed workers in the order they asked.
     pub fn release_execution(&self, node_id: &ClusterNodeName) {
         let node = match self.inner.executions.get(node_id) {
             Some(node) => node,
@@ -184,7 +147,7 @@ impl FaultInjection {
     }
 
     /// Release the workers of `class` a scenario occupied on `node_id`, keeping its holds of every
-    /// other class. The jobs that waited behind them then run empty.
+    /// other class. The jobs waiting for them then take the freed workers in the order they asked.
     pub fn release_execution_class(
         &self,
         node_id: &ClusterNodeName,
@@ -208,7 +171,7 @@ impl FaultInjection {
     }
 
     /// Hold every byte of `node_id`'s bulk memory but `room`, so that a charge needing more room
-    /// than that is refused until the scenario releases the hold. A node that already holds bulk
+    /// than that waits until the scenario releases the hold. A node that already holds bulk
     /// memory for the scenario adds what is free beyond `room` to its hold.
     pub fn hold_bulk_memory_leaving_room_on(&self, node_id: &ClusterNodeName, room: u64) {
         let Some(mut node) = self.inner.executions.get_mut(node_id) else {

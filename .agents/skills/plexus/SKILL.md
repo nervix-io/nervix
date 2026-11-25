@@ -713,6 +713,10 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - Select `BRANCHED BY <parametrizer>` or `UNBRANCHED` explicitly. Normal processors preserve their named
   branch. Use a reingestor to enter a parametrization distinct from every input relay's or to
   send records unbranched. See [Runtime Nodes](../../../docs/src/processors.md#reingestor).
+- Never design a loop: no route, `SEND TO` error route, correlation timeout or `USING MATERIALIZED
+  STATE` read may lead data back to a relay it already passed, so a node never writes into a relay
+  it reads, and a retry or feedback path goes through an outside system. Nervix refuses such a
+  graph; see [Runtime Nodes](../../../docs/src/processors.md#shared-input-and-branch-contracts).
 - Treat placement rules as path-gated overlays, not connectivity-independent groups. Use
   `REQUIRE COLOCATION` only for a hard same-cluster-node constraint; `PREFER COLOCATION` and
   `SUGGEST SEPARATION` are soft, `NEUTRAL` leaves scheduler heuristics active, and no hard
@@ -749,6 +753,12 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   `ENCODE USING`. Include every required variable: all modes declare `RETRY POLICY BACKOFF <d> MAX
   <d>`; asynchronous confirming modes also declare `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` and
   `ACK TIMEOUT <d>`. Do not invent a default mode, window, timeout, or retry cadence.
+- An emitter retries an outage without limit unless its `RETRY POLICY` ends with `GIVE UP AFTER
+  <d>`; then rows still unsent that long after their first failed attempt fail as `unavailable` /
+  `publish` through `ON MESSAGE ERROR`, and `GIVE UP AFTER 0s` never retries. Suggest it only when
+  the user would rather handle the rows than wait. Never write it on an ingestor's retry policy,
+  where it is a parse error. A destination refusing writes as configured is retried too, shown as
+  `misconfigured:` in `DESCRIBE EMITTER`. Read [Giving up](../../../docs/src/emitters.md#giving-up).
 - When an application receives constructed graph output, use `CREATE CLIENT CONSUMER EMITTER <name> FROM <relays> TO SCHEMA <output_schema>
   MODE ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
   Follow route construction with required `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` and an
@@ -984,9 +994,10 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   intake reject with HTTP 503, while withdrawn routes return 404. A node that has not installed a
   revision since it started answers 503 for every unpublished route, never 404. Another domain
   sharing the host and path retains its own intake when a domain is stopped.
-- Declare both required WASM limits immediately after `FILE`, in order: `MAX FUEL <positive_u64>
-  MAX MEMORY <positive_byte_size>`. Fuel is reset per logical guest operation; memory caps each
-  branch guest's Wasmtime linear memory.
+- Declare all three required WASM limits immediately after `FILE`, in order: `MAX FUEL
+  <positive_u64> MAX MEMORY <positive_byte_size> MAX TABLE ELEMENTS <u64>`. Fuel is reset per
+  logical guest operation; memory caps each branch guest's Wasmtime linear memory, and table
+  elements cap its table's slots.
 - Write the optional `ON REJECTED STATE PRESERVE|RESET` between the last `TO` clause and
   `ON GLOBAL ERROR`. It answers only a guest's own verdict on the snapshot it was handed, and it
   defaults to `PRESERVE`. Offer `RESET` only when the user accepts losing that branch's computation

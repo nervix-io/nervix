@@ -13,7 +13,7 @@
 use std::task::Poll;
 
 use meticulous::ResultExt as _;
-use nervix_execution::{AdmissionError, ExecutionError, Executor, QueueAdmission};
+use nervix_execution::Executor;
 use nervix_models::ClientName;
 use nervix_primitives::{
     sync::{blocking::mpsc, oneshot},
@@ -50,10 +50,7 @@ impl InspectionFixture {
         }
     }
 
-    async fn inspect(
-        &self,
-        admission: QueueAdmission,
-    ) -> error_stack::Result<(), ModelBindingValidationError> {
+    async fn inspect(&self) -> error_stack::Result<(), ModelBindingValidationError> {
         self.service
             .service
             .validate_client_configuration(
@@ -64,7 +61,6 @@ impl InspectionFixture {
                     mount: None,
                     config: &self.config,
                 },
-                admission,
             )
             .await
     }
@@ -123,9 +119,9 @@ impl FullFilesystem {
                     |_charge, _cancellation| (),
                 )
                 .await
-                .assured("the live executor runs the queued infallible closure after release");
+                .assured("the live executor runs the waiting infallible closure after release");
         }));
-        while executor.snapshot().filesystem_storage.pending != 1 {
+        while executor.snapshot().filesystem_storage.waiting != 1 {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
         }
@@ -147,9 +143,11 @@ impl FullFilesystem {
     }
 }
 
+/// An inspection is a preflight of a change the node already accepted, so a full command budget is
+/// backpressure: the inspection waits for room, and one abandoned while it waits gives its place
+/// back.
 #[nervix_primitives::test]
-async fn accepted_inspection_waits_for_memory_and_cancellation_returns_its_place()
--> anyhow::Result<()> {
+async fn inspection_waits_for_memory_and_cancellation_returns_its_place() -> anyhow::Result<()> {
     let executor = crate::runtime::single_worker_executor();
     let fixture = InspectionFixture::new(executor.clone()).await;
     let memory = executor.memory(MemoryClass::Commands);
@@ -157,28 +155,13 @@ async fn accepted_inspection_waits_for_memory_and_cancellation_returns_its_place
     let held = executor
         .try_reserve(MemoryClass::Commands, memory.capacity_bytes)
         .verified("the empty budget was asserted above and this reserves its exact capacity");
-    let refused = fixture
-        .inspect(QueueAdmission::RefuseWhenFull)
-        .await
-        .expect_err("request preflight refuses a full budget");
-    assert!(matches!(
-        refused.downcast_ref::<AdmissionError>(),
-        Some(AdmissionError::BudgetExhausted { .. })
-    ));
-    assert_eq!(
-        client_validation_message(&refused).as_deref(),
-        Some(
-            "invalid client 'api' in domain 'inspection': client configuration inspection could \
-             not be admitted"
-        )
-    );
-    let mut cancelled = Box::pin(fixture.inspect(QueueAdmission::WaitForPlace));
+    let mut cancelled = Box::pin(fixture.inspect());
     assert!(matches!(
         futures_util::poll!(cancelled.as_mut()),
         Poll::Pending
     ));
     drop(cancelled);
-    let mut accepted = Box::pin(fixture.inspect(QueueAdmission::WaitForPlace));
+    let mut accepted = Box::pin(fixture.inspect());
     assert!(matches!(
         futures_util::poll!(accepted.as_mut()),
         Poll::Pending
@@ -192,22 +175,16 @@ async fn accepted_inspection_waits_for_memory_and_cancellation_returns_its_place
     Ok(())
 }
 
+/// A full filesystem queue is backpressure too: the inspection holds its charge while it waits for
+/// a place, and one abandoned while it waits gives the charge back.
 #[nervix_primitives::test]
-async fn accepted_inspection_waits_for_a_full_filesystem_queue_and_cancellation_returns_its_charge()
+async fn inspection_waits_for_a_full_filesystem_queue_and_cancellation_returns_its_charge()
 -> anyhow::Result<()> {
     let executor = crate::runtime::single_worker_executor();
     let fixture = InspectionFixture::new(executor.clone()).await;
     let full = FullFilesystem::fill(&executor).await;
-    let refused = fixture
-        .inspect(QueueAdmission::RefuseWhenFull)
-        .await
-        .expect_err("request preflight refuses a full filesystem queue");
-    assert!(matches!(
-        refused.downcast_ref::<ExecutionError>(),
-        Some(ExecutionError::QueueFull { .. })
-    ));
     assert_eq!(executor.memory(MemoryClass::Commands).reserved_bytes, 0);
-    let mut cancelled = Box::pin(fixture.inspect(QueueAdmission::WaitForPlace));
+    let mut cancelled = Box::pin(fixture.inspect());
     assert!(matches!(
         futures_util::poll!(cancelled.as_mut()),
         Poll::Pending
@@ -215,7 +192,7 @@ async fn accepted_inspection_waits_for_a_full_filesystem_queue_and_cancellation_
     assert!(executor.memory(MemoryClass::Commands).reserved_bytes > 0);
     drop(cancelled);
     assert_eq!(executor.memory(MemoryClass::Commands).reserved_bytes, 0);
-    let mut accepted = Box::pin(fixture.inspect(QueueAdmission::WaitForPlace));
+    let mut accepted = Box::pin(fixture.inspect());
     assert!(matches!(
         futures_util::poll!(accepted.as_mut()),
         Poll::Pending

@@ -76,10 +76,9 @@ impl LocalExecutionDescription<'_> {
         let snapshot = runtime.executor().snapshot();
         for (class, workers) in snapshot.worker_classes() {
             lines.push(format!(
-                "  execution workers: class={} workers={} pending_jobs={}",
+                "  execution workers: class={} workers={}",
                 class.as_str(),
-                workers.workers,
-                workers.queue_capacity
+                workers.workers
             ));
         }
         for (class, memory) in snapshot.memory_classes() {
@@ -501,16 +500,10 @@ fn detected_line(detected: Detected<&PropertyText>) -> String {
 fn interconnect_line(record: &NodeCapabilityRecord) -> String {
     let capacity = record.capabilities.interconnect;
     format!(
-        "  interconnect: max-peers={} request-quota={} health-probes={} max-connections={} \
-         handshakes={} queue={} completion={} stream-window={} connection-window={} setup={} \
+        "  interconnect: handshakes={} queue={} stream-window={} connection-window={} setup={} \
          request={} progress={} backoff={} max-backoff={} jitter-permille={}",
-        capacity.max_peers,
-        capacity.request_quota,
-        capacity.health_probes,
-        capacity.max_connections,
         capacity.concurrent_handshakes,
         capacity.incoming_queue_capacity,
-        capacity.completion_quota,
         capacity.stream_window_bytes,
         capacity.connection_window_bytes,
         timing_text(capacity.connection_setup_timeout),

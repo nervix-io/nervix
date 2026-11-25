@@ -22,10 +22,18 @@ class ProfileScopeTests(unittest.TestCase):
     def test_build_instruments_source_and_preserves_the_configured_wrapper_and_flags(self) -> None:
         with mock.patch.dict(os.environ, {"RUSTFLAGS": "-C target-cpu=native", "RUSTC_WRAPPER": "kache"}, clear=True):
             environment = coverage.build_environment()
-            self.assertEqual(environment["RUSTFLAGS"], "-C target-cpu=native -C instrument-coverage")
+            self.assertEqual(
+                environment["RUSTFLAGS"],
+                "-C target-cpu=native -Znext-solver=coherence -C instrument-coverage",
+            )
             self.assertEqual(environment["LLVM_PROFILE_FILE"], "/dev/null")
             self.assertEqual(os.environ["RUSTC_WRAPPER"], "kache")
             self.assertNotIn("RUSTC_WRAPPER", environment)
+
+    def test_build_selects_the_stable_trait_solver_without_inherited_flags(self) -> None:
+        with mock.patch.dict(os.environ, {"RUSTC_WRAPPER": "kache"}, clear=True):
+            environment = coverage.build_environment()
+        self.assertEqual(environment["RUSTFLAGS"], "-Znext-solver=coherence -C instrument-coverage")
 
     def test_encoded_flags_cannot_override_sanitizer_and_source_instrumentation(self) -> None:
         for flags in ("", "-C\x1finstrument-coverage"):

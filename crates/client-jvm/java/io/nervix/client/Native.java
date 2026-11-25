@@ -128,6 +128,7 @@ final class Native {
     static native void optionsSeeds(long handle, Object[] seeds);
     static native void optionsTimeout(long handle, int kind, double value);
     static native void optionsWindow(long handle, int kind, long bytes);
+    static native void optionsLimit(long handle, int kind, long value);
     static native long cancelNew();
     static native long cancelDeadline(double value);
     static native void cancelTrigger(long handle);

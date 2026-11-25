@@ -47,7 +47,7 @@ const SETTINGS_HEADINGS: [&str; 22] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 270] = [
+const SETTING_NAMES: [&str; 261] = [
     "runtime-delivery-capacity",
     "runtime-ingest-group-max-rows",
     "runtime-ingest-group-idle-flush",
@@ -120,11 +120,10 @@ const SETTING_NAMES: [&str; 270] = [
     "dns-hook-lookup-budget",
     "dns-address-family-policy",
     "dns-trust-negative-answers",
+    "dns-concurrent-lookups",
     "interconnect-reconnect-jitter-permille",
-    "interconnect-max-peers",
     "interconnect-concurrent-handshakes",
     "interconnect-incoming-queue-capacity",
-    "interconnect-request-quota",
     "interconnect-stream-receive-window",
     "interconnect-connection-receive-window",
     "interconnect-connection-setup-timeout",
@@ -173,21 +172,13 @@ const SETTING_NAMES: [&str; 270] = [
     "memory-limit",
     "node-detection-timeout",
     "execution-control-cpu-workers",
-    "execution-control-cpu-pending-jobs",
     "execution-credentials-cpu-workers",
-    "execution-credentials-cpu-pending-jobs",
     "execution-data-cpu-workers",
-    "execution-data-cpu-pending-jobs",
     "execution-extension-cpu-workers",
-    "execution-extension-cpu-pending-jobs",
     "execution-bulk-cpu-workers",
-    "execution-bulk-cpu-pending-jobs",
     "execution-consensus-storage-workers",
-    "execution-consensus-storage-pending-jobs",
     "execution-filesystem-storage-workers",
-    "execution-filesystem-storage-pending-jobs",
     "execution-connector-storage-workers",
-    "execution-connector-storage-pending-jobs",
     "execution-management-memory-bytes",
     "execution-commands-memory-bytes",
     "execution-relay-memory-bytes",
@@ -577,8 +568,7 @@ fn help_lists_each_settings_area_under_its_own_heading() {
 fn infrastructure_overrides_preserve_derived_inputs_and_refuse_invalid_bounds() {
     let settings = NodeSettings::default()
         .with_overrides(&[
-            override_of("interconnect-max-peers", "16"),
-            override_of("interconnect-request-quota", "4"),
+            override_of("dns-concurrent-lookups", "16"),
             override_of("interconnect-request-timeout", "20s"),
             override_of("database-workers", "2"),
             override_of("raft-database-max-open-files", "64"),
@@ -589,7 +579,6 @@ fn infrastructure_overrides_preserve_derived_inputs_and_refuse_invalid_bounds() 
         .assured("consistent local infrastructure bounds");
     let rendered = settings.with_overrides(&[]).assured("settings read back");
     assert_eq!(rendered, settings);
-    assert_eq!(settings.interconnect.request_quota(), 4);
     assert_eq!(*settings.dns.concurrent_lookups.value(), 16);
     assert_eq!(*settings.node_database.workers.value(), Some(2));
     assert_eq!(*settings.consensus_database.workers.value(), None);
@@ -599,15 +588,9 @@ fn infrastructure_overrides_preserve_derived_inputs_and_refuse_invalid_bounds() 
         NodeSettings::default().node_database.max_open_files,
         "an omitted open-file limit keeps the platform default"
     );
-    assert_eq!(
-        NodeSettings::default().interconnect.values().request_quota,
-        None
-    );
 
     for (name, value) in [
-        ("interconnect-max-peers", "0"),
-        ("interconnect-request-quota", "0"),
-        ("interconnect-request-quota", "1025"),
+        ("dns-concurrent-lookups", "0"),
         ("interconnect-request-timeout", "0s"),
         ("interconnect-stream-receive-window", "2GiB"),
         ("interconnect-reconnect-jitter-permille", "1001"),

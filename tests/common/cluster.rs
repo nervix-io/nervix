@@ -871,6 +871,10 @@ pub(crate) enum CommandHold {
     /// After the command's applying record is committed and before its effect begins. The node
     /// that admitted the command then cannot know its outcome.
     AfterDurableAdmission,
+    /// After the command's effects ran and before its outcome is recorded. The node that ran it
+    /// then cannot record that outcome, and the node that leads next runs the command again under
+    /// its execution reference.
+    BeforeOutcomeRecord,
 }
 
 impl CommandHold {
@@ -882,6 +886,9 @@ impl CommandHold {
             }
             Self::AfterDurableAdmission => {
                 fault_injection.pause_command_after_durable_admission_on(node);
+            }
+            Self::BeforeOutcomeRecord => {
+                fault_injection.pause_command_finalization_on(node);
             }
         }
     }
@@ -899,6 +906,11 @@ impl CommandHold {
                     .wait_for_command_durable_admission_pause(node)
                     .await;
             }
+            Self::BeforeOutcomeRecord => {
+                fault_injection
+                    .wait_for_command_finalization_pause(node)
+                    .await;
+            }
         }
     }
 
@@ -910,6 +922,9 @@ impl CommandHold {
             }
             Self::AfterDurableAdmission => {
                 fault_injection.release_command_durable_admission_pause(node);
+            }
+            Self::BeforeOutcomeRecord => {
+                fault_injection.release_command_finalization_pause(node);
             }
         }
     }
@@ -2170,9 +2185,7 @@ impl Cluster {
         let peer_target = PeerTarget::new(target_addr, server_name);
         let attempt = if let InterconnectCredentialFault::WrongNodeIdentity = fault {
             let addressed_node = ClusterNodeName::parse("node-254").map_err(io::Error::other)?;
-            transport
-                .register_outbound_target(addressed_node.clone(), peer_target.endpoint())
-                .map_err(io::Error::other)?;
+            transport.register_outbound_target(addressed_node.clone(), peer_target.endpoint());
             transport
                 .send(
                     &addressed_node,
@@ -4137,6 +4150,20 @@ impl Cluster {
                 .interconnect
                 .get(peer_node_id)
                 .is_some_and(|value| value == expected_status)
+        })
+        .await
+    }
+
+    /// Waits until `observer_node_id`'s gossip calls a run of `node_id` live that has not announced
+    /// its stop, as the run `node_id` started after a restart, so that a plan `observer_node_id`
+    /// makes reads that run rather than an earlier one that is terminating.
+    pub(crate) async fn wait_for_running_gossip_node(
+        &self,
+        observer_node_id: &str,
+        node_id: &str,
+    ) -> io::Result<()> {
+        self.wait_until(observer_node_id, |status| {
+            status.lists_running_gossip_node(node_id)
         })
         .await
     }

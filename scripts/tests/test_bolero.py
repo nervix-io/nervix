@@ -206,6 +206,7 @@ class InventoryTests(unittest.TestCase):
             "interconnect-processor-state-inspection",
             "state-inspection-cursor",
             "interconnect-wasm-state-inspection",
+            "dataflow-node-status-wire",
             "wasm-state-inspection-cursor",
             "completion-page-continuations",
             "completion-page-cursors-malformed",
@@ -582,65 +583,65 @@ class InventoryTests(unittest.TestCase):
         }
         for target, version in {
             "client-wire-entity-labels": 4,
-            "client-wire-node-inspection": 8,
+            "client-wire-node-inspection": 9,
             "vm-node-tags": 1,
             "entity-label-decoding": 2,
             "entity-label-maps": 2,
             "entity-label-mutations": 2,
-            "backup-branch-state-descriptors": 24,
+            "backup-branch-state-descriptors": 25,
             "backup-materialized-columns": 6,
-            "backup-materialized-identities": 27,
+            "backup-materialized-identities": 28,
             "backup-native-lifecycle": 7,
-            "backup-runtime-state-records": 27,
-            "backup-streamed-state-records": 25,
-            "consensus-raft-records-malformed": 83,
-            "interconnect-processor-state-inspection": 19,
-            "interconnect-state-inspection": 20,
+            "backup-runtime-state-records": 28,
+            "backup-streamed-state-records": 26,
+            "consensus-raft-records-malformed": 85,
+            "interconnect-processor-state-inspection": 20,
+            "interconnect-state-inspection": 21,
             "partition-transition-wire": 2,
-            "relay-wire-messages": 32,
-            "relay-wire-messages-malformed": 32,
-            "remote-relay-rows": 27,
-            "remote-relay-rows-malformed": 27,
+            "relay-wire-messages": 33,
+            "relay-wire-messages-malformed": 33,
+            "remote-relay-rows": 28,
+            "remote-relay-rows-malformed": 28,
             "restore-native-lifecycle": 6,
             "runtime-checkpoint-description-wire": 3,
             "runtime-checkpoint-listing-malformed": 6,
             "runtime-checkpoint-listing-owner": 6,
-            "runtime-state-store-checkpoints": 28,
-            "scheduled-units": 29,
-            "wasm-stored-checkpoints": 25,
+            "runtime-state-store-checkpoints": 29,
+            "scheduled-units": 30,
+            "wasm-stored-checkpoints": 26,
             "wasm-stored-checkpoints-malformed": 6,
             "backup-partition-topology": 2,
             "benchmark-metrics-report": 1,
-            "ingestor-describe-envelope": 27,
-            "plexus-model": 80,
-            "plexus-archive-model": 84,
-            "plexus-statement": 93,
-            "plexus-statement-text": 92,
-            "plexus-format-document": 91,
-            "plexus-format-text": 90,
-            "models-archived-models": 88,
-            "registry-archived-models": 74,
-            "consensus-state-records": 101,
-            "consensus-state-corruption": 101,
-            "consensus-raft-records": 101,
-            "registry-stored-models": 67,
-            "registry-stored-models-corruption": 67,
+            "ingestor-describe-envelope": 28,
+            "plexus-model": 81,
+            "plexus-archive-model": 85,
+            "plexus-statement": 94,
+            "plexus-statement-text": 93,
+            "plexus-format-document": 92,
+            "plexus-format-text": 91,
+            "models-archived-models": 89,
+            "registry-archived-models": 75,
+            "consensus-state-records": 103,
+            "consensus-state-corruption": 103,
+            "consensus-raft-records": 103,
+            "registry-stored-models": 68,
+            "registry-stored-models-corruption": 68,
             "cluster-identity-record-rkyv": 4,
-            "node-settings-command-line": 28,
-            "node-records": 22,
-            "runtime-state-replication-wire": 30,
-            "runtime-state-replication-malformed": 30,
-            "client-consumer-stream-frames": 25,
-            "client-consumer-stream-frames-malformed": 25,
+            "node-settings-command-line": 30,
+            "node-records": 24,
+            "runtime-state-replication-wire": 31,
+            "runtime-state-replication-malformed": 31,
+            "client-consumer-stream-frames": 26,
+            "client-consumer-stream-frames-malformed": 26,
             "inferencer-describe-envelope": 1,
             "inferencer-tensor-columns": 2,
-            "inferencer-state-snapshots": 8,
+            "inferencer-state-snapshots": 9,
             "backup-inferencer-values": 8,
             "backup-inferencer-malformed": 8,
-            "backup-record-manifest": 33,
-            "backup-complete-archives": 34,
-            "backup-malformed-records": 34,
-            "backup-corrupt-archives": 35,
+            "backup-record-manifest": 34,
+            "backup-complete-archives": 35,
+            "backup-malformed-records": 35,
+            "backup-corrupt-archives": 36,
             "backup-capture-wire": 4,
             "backup-capture-wire-malformed": 4,
             "backup-section-mapping": 5,
@@ -649,16 +650,16 @@ class InventoryTests(unittest.TestCase):
             "runtime-window-sealed-checkpoints": 6,
             "backup-window-groups": 6,
 
-            "inferencer-state-snapshots-malformed": 8,
+            "inferencer-state-snapshots-malformed": 9,
             "inferencer-native-snapshot-projection": 2,
-            "console-emitter-drafts": 22,
-            "console-processor-drafts": 23,
-            "console-placement-drafts": 14,
-            "client-requests": 30,
-            "client-producer-link-frames": 25,
-            "client-producer-link-frames-malformed": 25,
+            "console-emitter-drafts": 23,
+            "console-processor-drafts": 24,
+            "console-placement-drafts": 15,
+            "client-requests": 31,
+            "client-producer-link-frames": 26,
+            "client-producer-link-frames-malformed": 26,
             "restore-installation-wire": 6,
-            "wasm-state-descriptors": 25,
+            "wasm-state-descriptors": 26,
             "pulsar-message-metadata": 2,
         }.items():
             with self.subTest(target=target):
@@ -667,10 +668,10 @@ class InventoryTests(unittest.TestCase):
     def test_state_inspection_representations_are_bounded_pairs(self) -> None:
         targets = {target.id: target for target in bolero.load_inventory().targets}
         for name, version in (
-            ("client-state-inspection", 21),
-            ("state-inspection-cursor", 22),
-            ("interconnect-wasm-state-inspection", 16),
-            ("wasm-state-inspection-cursor", 13),
+            ("client-state-inspection", 22),
+            ("state-inspection-cursor", 23),
+            ("interconnect-wasm-state-inspection", 17),
+            ("wasm-state-inspection-cursor", 14),
             ("client-published-processor-sections", 3),
         ):
             with self.subTest(target=name):
@@ -681,7 +682,7 @@ class InventoryTests(unittest.TestCase):
     def test_inference_inspection_transport_domain_has_tensor_sections(self) -> None:
         target = next(target for target in bolero.load_inventory().targets
                       if target.id == "interconnect-processor-state-inspection")
-        self.assertEqual(target.domain_version, 19)
+        self.assertEqual(target.domain_version, 20)
         self.assertEqual(target.max_input_bytes, 1024)
         self.assertTrue((target.corpus / "inference-tensor-layout").is_file())
 
@@ -1328,6 +1329,7 @@ class ExecutionTests(unittest.TestCase):
                 self.assertEqual(bolero.build_instrumented(self.inventory, target, run), binary)
             call = commands.call_args
             self.assertIn("-C instrument-coverage", call.kwargs.get("env", {}).get("RUSTFLAGS", ""))
+            self.assertIn("-Znext-solver=coherence", call.kwargs["env"]["RUSTFLAGS"].split())
             self.assertEqual(call.kwargs["env"]["LLVM_PROFILE_FILE"], "/dev/null")
             args = call.args[0]
             self.assertEqual(args[args.index("--sanitizer") + 1], self.inventory.sanitizer)
@@ -1516,6 +1518,8 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(report["target"], target.id)
             self.assertEqual(report["test_target"], "test:representations")
             self.assertEqual(report["features"], list(target.features))
+            # The record keeps the flags cargo-bolero inherited, the sanitizer nightly's last.
+            self.assertEqual(report["rustflags"].split()[-1:], ["-Znext-solver=coherence"])
             args = next(call.args[0] for call in commands.call_args_list
                         if call.args[0][:3] == ["cargo", "bolero", "test"])
             self.assertEqual(args[args.index("--runs") + 1], "0")
@@ -1716,6 +1720,9 @@ class ExecutionTests(unittest.TestCase):
                 self.assertIn("--engine-args=-print_funcs=0", call.args[0])
                 expected_timeout = 10 if call.args[0][-1].endswith("times_out_on_marker") else 1800
                 self.assertEqual(call.kwargs["timeout"], expected_timeout)
+                # cargo-bolero appends the inherited RUSTFLAGS to its sanitizer flags.
+                flags = call.kwargs.get("env", {}).get("RUSTFLAGS", "").split()
+                self.assertEqual(flags[-1:], ["-Znext-solver=coherence"])
             generated = runs / "qualification-assertion/0/discovery-ignored/src/lib.rs"
             self.assertIn("#[ignore]\n    fn bolero_ignored()", generated.read_text())
             self.assertTrue((generated.parent.parent / "Cargo.lock").is_file())

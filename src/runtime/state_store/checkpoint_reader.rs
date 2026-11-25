@@ -64,6 +64,25 @@ impl CheckpointReader {
         }
     }
 
+    /// Read the checkpoint again from its first byte, its checksum started afresh.
+    ///
+    /// Non-security BLAKE3: restarts the checksum for the checkpoint the node-owned view selected.
+    pub(in crate::runtime) fn rewind(&mut self) {
+        match self {
+            Self::Inline(reader) => reader.set_position(0),
+            Self::Segmented {
+                offset,
+                buffer,
+                hasher,
+                ..
+            } => {
+                *offset = 0;
+                *buffer = Cursor::new(Vec::new());
+                **hasher = blake3::Hasher::new();
+            }
+        }
+    }
+
     pub(in crate::runtime) fn remaining(&self) -> u64 {
         match self {
             Self::Inline(reader) => u64::try_from(reader.get_ref().len())
@@ -751,7 +770,7 @@ pub(super) mod tests {
                 nervix_execution::StorageClass::Filesystem,
                 charge,
                 move |_charge, cancellation| {
-                    runtime.capture_backup_state(
+                    runtime.capture_backup_state_on_node(
                         &placement.domain,
                         true,
                         nervix_models::DomainStatus::Stopped,

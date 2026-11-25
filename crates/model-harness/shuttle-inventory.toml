@@ -28,15 +28,16 @@ name = "nervix-relay-channel"
 
 [[package]]
 checks = [
-  "tests::shuttle_checks::shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge",
-  "tests::shuttle_checks::shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place",
-  "tests::shuttle_checks::shuttle_accepted_cpu_preparation_returns_waiting_and_reserved_places_with_their_charges",
-  "tests::shuttle_checks::shuttle_an_owner_sees_its_job_begin_and_end_waiting_for_a_place",
+  "tests::shuttle_checks::shuttle_a_dropped_waiting_job_gives_its_turn_to_the_job_after_it",
+  "tests::shuttle_checks::shuttle_a_dropped_waiting_job_releases_its_reservation_and_exact_entry",
+  "tests::shuttle_checks::shuttle_a_growing_job_that_ran_short_waits_for_its_charge_holding_nothing",
+  "tests::shuttle_checks::shuttle_a_job_that_finds_every_worker_busy_waits_until_one_frees",
+  "tests::shuttle_checks::shuttle_a_waiting_job_takes_the_freed_worker_ahead_of_a_later_job",
+  "tests::shuttle_checks::shuttle_a_withdrawn_carrying_job_racing_its_worker_runs_or_hands_its_state_back",
+  "tests::shuttle_checks::shuttle_an_owner_sees_its_job_begin_and_end_waiting_for_a_worker",
   "tests::shuttle_checks::shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit",
-  "tests::shuttle_checks::shuttle_full_wait_queue_is_exact_typed_backpressure",
   "tests::shuttle_checks::shuttle_occupied_bulk_execution_leaves_control_execution_untouched",
   "tests::shuttle_checks::shuttle_occupied_connector_leaves_filesystem_and_consensus_execution_untouched",
-  "tests::shuttle_checks::shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot",
   "tests::shuttle_checks::shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit",
   "tests::shuttle_checks::shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity",
   "tests::shuttle_checks::shuttle_submission_racing_worker_exit_never_strands_an_admitted_job",
@@ -57,6 +58,7 @@ checks = [
   "connection::stream_slots::shuttle_checks::replication_drain_stops_leasing_and_waits_for_every_leased_slot",
   "request::shuttle_checks::a_membership_change_between_a_callers_check_and_its_wait_is_never_lost",
   "request::shuttle_checks::racing_registrations_lose_no_handler_and_publish_each_name_once",
+  "wire::admission_tests::shuttle_a_received_body_waiting_for_a_place_ends_with_its_exchange_or_takes_the_freed_place",
   "wire::admission_tests::shuttle_an_answer_waiting_for_a_place_ends_with_its_exchange_or_takes_the_freed_place",
   "wire::admission_tests::shuttle_bulk_receive_admission_releases_held_input_and_cancelled_jobs",
 ]
@@ -150,6 +152,11 @@ name = "nervix-connector-rabbitmq"
 checks = [
   "application::client_producers::link::shuttle_tests::shuttle_the_link_opening_precedes_a_heartbeat_racing_receiver_close",
   "application::listener_input::shuttle_checks::shuttle_read_allocation_racing_input_cancellation_returns_its_entire_charge",
+  "application::licensing::request_turn::shuttle_tests::shuttle_a_release_holding_the_turn_always_gives_it_back_to_a_waiting_operator",
+  "application::licensing::request_turn::shuttle_tests::shuttle_a_refresh_retry_holding_the_turn_is_always_hurried_for_a_waiting_operator",
+  "application::licensing::request_turn::shuttle_tests::shuttle_an_uncontended_operator_request_leaves_no_wakeup_for_the_next_attempt",
+  "application::licensing::request_turn::shuttle_tests::shuttle_a_notification_hurries_a_refresh_retry_but_never_takes_an_operators_place",
+  "application::licensing::request_turn::shuttle_tests::shuttle_a_queued_background_attempt_consumes_the_notification_that_preceded_its_turn",
   "application::backup::retained::shuttle_tests::shuttle_a_download_stays_bounded_and_waits_for_its_client",
   "application::backup::retained::shuttle_tests::shuttle_a_lost_client_releases_its_hold_exactly_once",
   "application::backup::retained::shuttle_tests::shuttle_concurrent_downloads_collect_an_archive_exactly_once",
@@ -204,6 +211,7 @@ checks = [
   "runtime::domain_execution::shuttle_tests::shuttle_a_reader_observes_one_complete_typed_routing_revision",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once",
   "runtime::emitter_lifecycle::shuttle_tests::shuttle_cancelling_resume_retains_one_owner_until_finish_then_close",
+  "runtime::emitter_retry::shuttle_tests::shuttle_an_attempt_in_flight_when_the_limit_runs_out_never_fails_a_confirmed_row",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained",
   # The host's retained-payload owner is driven by the dev-only connector-fake record script.
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_retried_payload_acknowledges_each_fanned_in_member_once_after_every_emitter",
