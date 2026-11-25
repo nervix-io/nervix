@@ -385,7 +385,7 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_giveup_np_liveness_` keyspaces and `ClusterState`
+Consensus's `raft_bfe352c69af44e98_` keyspaces and `ClusterState`
 metadata encoding 61 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
 domain, resource and user labels, the one label edit that sets and removes keys, node selector statements, placement node rules,
 inferencer working memory, each WASM processor's `MAX TABLE ELEMENTS`, each emitter's `RETRY POLICY` with its optional `GIVE UP AFTER`, the `DURATION` type with the duration literals Models hold, each node's trace export and web console pacing capabilities, each node's WASM memory guard and growth reserve, the database volume size each node record's capacity claim carries, interconnect capabilities

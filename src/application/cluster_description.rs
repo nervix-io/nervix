@@ -76,10 +76,9 @@ impl LocalExecutionDescription<'_> {
         let snapshot = runtime.executor().snapshot();
         for (class, workers) in snapshot.worker_classes() {
             lines.push(format!(
-                "  execution workers: class={} workers={} pending_jobs={}",
+                "  execution workers: class={} workers={}",
                 class.as_str(),
-                workers.workers,
-                workers.queue_capacity
+                workers.workers
             ));
         }
         for (class, memory) in snapshot.memory_classes() {

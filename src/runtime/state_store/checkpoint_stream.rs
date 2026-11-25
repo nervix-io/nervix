@@ -15,7 +15,7 @@ use std::io::Read;
 
 use super::{generation::*, *};
 
-/// A periodic writer pins its namespace before entering the executor's wait queue.
+/// A periodic writer pins its namespace before it waits for the executor's workers.
 pub(in crate::runtime) struct CheckpointStreamWriter {
     writer: LatestSnapshotWriter,
     chunks: Keyspace,

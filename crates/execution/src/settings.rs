@@ -1,7 +1,7 @@
 //! Capability-derived execution settings and their checked projection into executor limits.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Execution setting declarations, CPU shares, per-class queues and memory derivations.
+//! - **Owns.** Execution setting declarations, CPU shares and memory derivations.
 //! - **Depends on.** Typed node capabilities, setting definitions and the executor's limits.
 //! - **Must not know.** Detection, command-line parsing, graphs, peers or running tasks.
 
@@ -24,21 +24,13 @@ use crate::{ExecutionConfig, ExecutionConfigError, MemoryBudgets, OperationLimit
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExecutionOverrides {
     pub control_cpu_workers: Option<NonZeroUsize>,
-    pub control_cpu_pending_jobs: Option<NonZeroUsize>,
     pub credentials_cpu_workers: Option<NonZeroUsize>,
-    pub credentials_cpu_pending_jobs: Option<NonZeroUsize>,
     pub data_cpu_workers: Option<NonZeroUsize>,
-    pub data_cpu_pending_jobs: Option<NonZeroUsize>,
     pub extension_cpu_workers: Option<NonZeroUsize>,
-    pub extension_cpu_pending_jobs: Option<NonZeroUsize>,
     pub bulk_cpu_workers: Option<NonZeroUsize>,
-    pub bulk_cpu_pending_jobs: Option<NonZeroUsize>,
     pub consensus_storage_workers: Option<NonZeroUsize>,
-    pub consensus_storage_pending_jobs: Option<NonZeroUsize>,
     pub filesystem_storage_workers: Option<NonZeroUsize>,
-    pub filesystem_storage_pending_jobs: Option<NonZeroUsize>,
     pub connector_storage_workers: Option<NonZeroUsize>,
-    pub connector_storage_pending_jobs: Option<NonZeroUsize>,
     pub management_memory_bytes: Option<ByteUnit>,
     pub commands_memory_bytes: Option<ByteUnit>,
     pub relay_memory_bytes: Option<ByteUnit>,
@@ -54,35 +46,6 @@ pub struct ExecutionOverrides {
     pub relay_scratch_bytes: Option<ByteUnit>,
     pub resident_replication_batches: Option<NonZeroU32>,
     pub bulk_chunk_bytes: Option<ByteUnit>,
-}
-
-/// Independently bounded queues; a blocked class never consumes another class's waiting places.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PendingJobCounts {
-    pub control_cpu: NonZeroUsize,
-    pub credentials_cpu: NonZeroUsize,
-    pub data_cpu: NonZeroUsize,
-    pub extension_cpu: NonZeroUsize,
-    pub bulk_cpu: NonZeroUsize,
-    pub consensus_storage: NonZeroUsize,
-    pub filesystem_storage: NonZeroUsize,
-    pub connector_storage: NonZeroUsize,
-}
-
-impl PendingJobCounts {
-    /// A uniform explicit queue bound, used by focused admission tests.
-    pub const fn uniform(capacity: NonZeroUsize) -> Self {
-        Self {
-            control_cpu: capacity,
-            credentials_cpu: capacity,
-            data_cpu: capacity,
-            extension_cpu: capacity,
-            bulk_cpu: capacity,
-            consensus_storage: capacity,
-            filesystem_storage: capacity,
-            connector_storage: capacity,
-        }
-    }
 }
 
 /// The CPU-share defaults, after reserving the control and credentials capacities.
@@ -225,33 +188,6 @@ macro_rules! worker_setting {
     };
 }
 
-macro_rules! queue_setting {
-    ($definition:ident, $name:literal) => {
-        pub struct $definition;
-        impl SettingDefinition for $definition {
-            type Class = NodeCapabilities;
-            type Value = NonZeroUsize;
-            type Context = NonZeroUsize;
-            type Error = ExecutionConfigError;
-            const NAME: &'static str = $name;
-            const DERIVATION: Option<&'static str> =
-                Some("64 pending jobs per worker, at most 1024 per class");
-            fn default_value(workers: &NonZeroUsize) -> NonZeroUsize {
-                let maximum = 1024;
-                let capacity = match workers.get().checked_mul(64) {
-                    Some(capacity) => capacity.min(maximum),
-                    None => maximum,
-                };
-                NonZeroUsize::new(capacity)
-                    .assured("positive workers yield positive queue capacity")
-            }
-            fn validate(value: &NonZeroUsize, _: &NonZeroUsize) -> Result<(), Report<Self::Error>> {
-                validate_count(Self::NAME, *value)
-            }
-        }
-    };
-}
-
 fn validate_count(
     name: &'static str,
     value: NonZeroUsize,
@@ -271,50 +207,27 @@ worker_setting!(
     "execution-control-cpu-workers",
     control_cpu
 );
-queue_setting!(ControlCpuPendingJobs, "execution-control-cpu-pending-jobs");
 worker_setting!(
     CredentialsCpuWorkers,
     "execution-credentials-cpu-workers",
     credentials_cpu
 );
-queue_setting!(
-    CredentialsCpuPendingJobs,
-    "execution-credentials-cpu-pending-jobs"
-);
 worker_setting!(DataCpuWorkers, "execution-data-cpu-workers", data_cpu);
-queue_setting!(DataCpuPendingJobs, "execution-data-cpu-pending-jobs");
 worker_setting!(
     ExtensionCpuWorkers,
     "execution-extension-cpu-workers",
     extension_cpu
 );
-queue_setting!(
-    ExtensionCpuPendingJobs,
-    "execution-extension-cpu-pending-jobs"
-);
 worker_setting!(BulkCpuWorkers, "execution-bulk-cpu-workers", bulk_cpu);
-queue_setting!(BulkCpuPendingJobs, "execution-bulk-cpu-pending-jobs");
 worker_setting!(
     ConsensusStorageWorkers,
     "execution-consensus-storage-workers",
     consensus_storage
 );
-queue_setting!(
-    ConsensusStoragePendingJobs,
-    "execution-consensus-storage-pending-jobs"
-);
 worker_setting!(
     FilesystemStorageWorkers,
     "execution-filesystem-storage-workers",
     filesystem_storage
-);
-queue_setting!(
-    FilesystemStoragePendingJobs,
-    "execution-filesystem-storage-pending-jobs"
-);
-queue_setting!(
-    ConnectorStoragePendingJobs,
-    "execution-connector-storage-pending-jobs"
 );
 
 macro_rules! memory_setting {
@@ -546,25 +459,17 @@ impl SettingDefinition for BulkChunkBytes {
     }
 }
 
-/// Resolved worker capacities and their independent queue bounds.
+/// Resolved worker capacities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerSettings {
     pub control_cpu_workers: Setting<ControlCpuWorkers>,
-    pub control_cpu_pending_jobs: Setting<ControlCpuPendingJobs>,
     pub credentials_cpu_workers: Setting<CredentialsCpuWorkers>,
-    pub credentials_cpu_pending_jobs: Setting<CredentialsCpuPendingJobs>,
     pub data_cpu_workers: Setting<DataCpuWorkers>,
-    pub data_cpu_pending_jobs: Setting<DataCpuPendingJobs>,
     pub extension_cpu_workers: Setting<ExtensionCpuWorkers>,
-    pub extension_cpu_pending_jobs: Setting<ExtensionCpuPendingJobs>,
     pub bulk_cpu_workers: Setting<BulkCpuWorkers>,
-    pub bulk_cpu_pending_jobs: Setting<BulkCpuPendingJobs>,
     pub consensus_storage_workers: Setting<ConsensusStorageWorkers>,
-    pub consensus_storage_pending_jobs: Setting<ConsensusStoragePendingJobs>,
     pub filesystem_storage_workers: Setting<FilesystemStorageWorkers>,
-    pub filesystem_storage_pending_jobs: Setting<FilesystemStoragePendingJobs>,
     pub connector_storage_workers: Setting<crate::ConnectorStorageWorkers>,
-    pub connector_storage_pending_jobs: Setting<ConnectorStoragePendingJobs>,
 }
 
 impl WorkerSettings {
@@ -575,75 +480,35 @@ impl WorkerSettings {
         let defaults = WorkerDefaults::resolve(overrides, cpus)?;
         let control_cpu_workers =
             Setting::<ControlCpuWorkers>::resolve(overrides.control_cpu_workers, &defaults)?;
-        let control_cpu_pending_jobs = Setting::<ControlCpuPendingJobs>::resolve(
-            overrides.control_cpu_pending_jobs,
-            control_cpu_workers.value(),
-        )?;
         let credentials_cpu_workers = Setting::<CredentialsCpuWorkers>::resolve(
             overrides.credentials_cpu_workers,
             &defaults,
         )?;
-        let credentials_cpu_pending_jobs = Setting::<CredentialsCpuPendingJobs>::resolve(
-            overrides.credentials_cpu_pending_jobs,
-            credentials_cpu_workers.value(),
-        )?;
         let data_cpu_workers =
             Setting::<DataCpuWorkers>::resolve(overrides.data_cpu_workers, &defaults)?;
-        let data_cpu_pending_jobs = Setting::<DataCpuPendingJobs>::resolve(
-            overrides.data_cpu_pending_jobs,
-            data_cpu_workers.value(),
-        )?;
         let extension_cpu_workers =
             Setting::<ExtensionCpuWorkers>::resolve(overrides.extension_cpu_workers, &defaults)?;
-        let extension_cpu_pending_jobs = Setting::<ExtensionCpuPendingJobs>::resolve(
-            overrides.extension_cpu_pending_jobs,
-            extension_cpu_workers.value(),
-        )?;
         let bulk_cpu_workers =
             Setting::<BulkCpuWorkers>::resolve(overrides.bulk_cpu_workers, &defaults)?;
-        let bulk_cpu_pending_jobs = Setting::<BulkCpuPendingJobs>::resolve(
-            overrides.bulk_cpu_pending_jobs,
-            bulk_cpu_workers.value(),
-        )?;
         let consensus_storage_workers = Setting::<ConsensusStorageWorkers>::resolve(
             overrides.consensus_storage_workers,
             &defaults,
-        )?;
-        let consensus_storage_pending_jobs = Setting::<ConsensusStoragePendingJobs>::resolve(
-            overrides.consensus_storage_pending_jobs,
-            consensus_storage_workers.value(),
         )?;
         let filesystem_storage_workers = Setting::<FilesystemStorageWorkers>::resolve(
             overrides.filesystem_storage_workers,
             &defaults,
         )?;
-        let filesystem_storage_pending_jobs = Setting::<FilesystemStoragePendingJobs>::resolve(
-            overrides.filesystem_storage_pending_jobs,
-            filesystem_storage_workers.value(),
-        )?;
         let connector_storage_workers =
             crate::ConnectorStorageWorkers::resolve(overrides.connector_storage_workers)?;
-        let connector_storage_pending_jobs = Setting::<ConnectorStoragePendingJobs>::resolve(
-            overrides.connector_storage_pending_jobs,
-            connector_storage_workers.value(),
-        )?;
         Ok(Self {
             control_cpu_workers,
-            control_cpu_pending_jobs,
             credentials_cpu_workers,
-            credentials_cpu_pending_jobs,
             data_cpu_workers,
-            data_cpu_pending_jobs,
             extension_cpu_workers,
-            extension_cpu_pending_jobs,
             bulk_cpu_workers,
-            bulk_cpu_pending_jobs,
             consensus_storage_workers,
-            consensus_storage_pending_jobs,
             filesystem_storage_workers,
-            filesystem_storage_pending_jobs,
             connector_storage_workers,
-            connector_storage_pending_jobs,
         })
     }
 
@@ -657,16 +522,6 @@ impl WorkerSettings {
             consensus_storage: *self.consensus_storage_workers.value(),
             filesystem_storage: *self.filesystem_storage_workers.value(),
             connector_storage: self.connector_storage_workers,
-            pending_jobs: PendingJobCounts {
-                control_cpu: *self.control_cpu_pending_jobs.value(),
-                credentials_cpu: *self.credentials_cpu_pending_jobs.value(),
-                data_cpu: *self.data_cpu_pending_jobs.value(),
-                extension_cpu: *self.extension_cpu_pending_jobs.value(),
-                bulk_cpu: *self.bulk_cpu_pending_jobs.value(),
-                consensus_storage: *self.consensus_storage_pending_jobs.value(),
-                filesystem_storage: *self.filesystem_storage_pending_jobs.value(),
-                connector_storage: *self.connector_storage_pending_jobs.value(),
-            },
         }
     }
 }
@@ -815,44 +670,21 @@ impl ExecutionOverrides {
     pub fn validate(&self) -> Result<(), Report<ExecutionConfigError>> {
         for (name, value) in [
             (ControlCpuWorkers::NAME, self.control_cpu_workers),
-            (ControlCpuPendingJobs::NAME, self.control_cpu_pending_jobs),
             (CredentialsCpuWorkers::NAME, self.credentials_cpu_workers),
-            (
-                CredentialsCpuPendingJobs::NAME,
-                self.credentials_cpu_pending_jobs,
-            ),
             (DataCpuWorkers::NAME, self.data_cpu_workers),
-            (DataCpuPendingJobs::NAME, self.data_cpu_pending_jobs),
             (ExtensionCpuWorkers::NAME, self.extension_cpu_workers),
-            (
-                ExtensionCpuPendingJobs::NAME,
-                self.extension_cpu_pending_jobs,
-            ),
             (BulkCpuWorkers::NAME, self.bulk_cpu_workers),
-            (BulkCpuPendingJobs::NAME, self.bulk_cpu_pending_jobs),
             (
                 ConsensusStorageWorkers::NAME,
                 self.consensus_storage_workers,
-            ),
-            (
-                ConsensusStoragePendingJobs::NAME,
-                self.consensus_storage_pending_jobs,
             ),
             (
                 FilesystemStorageWorkers::NAME,
                 self.filesystem_storage_workers,
             ),
             (
-                FilesystemStoragePendingJobs::NAME,
-                self.filesystem_storage_pending_jobs,
-            ),
-            (
                 crate::ConnectorStorageWorkers::NAME,
                 self.connector_storage_workers,
-            ),
-            (
-                ConnectorStoragePendingJobs::NAME,
-                self.connector_storage_pending_jobs,
             ),
         ] {
             if let Some(value) = value {

@@ -846,13 +846,14 @@ still receives grants and admission beside it, and cancelling the held batch ret
 reservation once the application drops the batch. Once the application has decoded a batch, it keeps
 only the batch's body and decoded columns charged while its runtime takes the batch in.
 
-A CPU class admits each job separately: one of its workers runs, a bounded number wait, and no job
-joins an unbounded queue. A typed request runs several jobs of its class in turn, encoding its
-payload and envelope and later decoding the response. A full queue holds each of them back until a
-place frees, the request's own jobs as well as its answer's: the executor's pools are backpressure
-on the node's resources, never a reason to refuse a frame. The caller's reset, the connection's end
-and a deadline the caller named end every wait, and a request that fails at one of its later stages
-fails with `RequestError::Transport`. Every other class keeps admitting independently.
+A CPU class admits each job separately: a job runs on a free worker of its class or waits for one,
+behind the jobs that asked before it. A typed request runs several jobs of its class in turn,
+encoding its payload and envelope and later decoding the response. Busy workers hold each of them
+back until one frees, the request's own jobs as well as its answer's: the executor's pools are
+backpressure on the node's resources, never a reason to refuse a frame. The caller's reset, the
+connection's end and a deadline the caller named end every wait, and a request that fails at one of
+its later stages fails with `RequestError::Transport`. Every other class keeps admitting
+independently.
 
 Every frame between nodes therefore waits for its place and its room, in both directions. What
 differs between protocols is what ends a wait: an answer waits until the exchange it answers ends,

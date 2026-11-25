@@ -389,7 +389,7 @@ async fn end_branch_at_its_grace(window: &PublishedWindow) {
     drop(snapshot_task);
     let executor = window.runtime.executor().clone();
     timeout(REACHED_WITHIN, async {
-        while executor.snapshot().bulk_cpu.pending == 0 {
+        while executor.snapshot().bulk_cpu.waiting == 0 {
             nervix_primitives::task::yield_now().await;
         }
     })

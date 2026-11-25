@@ -119,9 +119,9 @@ impl FullFilesystem {
                     |_charge, _cancellation| (),
                 )
                 .await
-                .assured("the live executor runs the queued infallible closure after release");
+                .assured("the live executor runs the waiting infallible closure after release");
         }));
-        while executor.snapshot().filesystem_storage.pending != 1 {
+        while executor.snapshot().filesystem_storage.waiting != 1 {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
         }

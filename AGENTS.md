@@ -374,16 +374,19 @@ cannot police import paths, so it keeps only genuinely forbidden types and opera
 - **The bounded executor.** Work off the async workers goes through `nervix-execution` with its CPU
   or storage class, a charged memory class and `Cancellation` checks between bounded units; operator
   code the node cannot bound (UDF calls, JAQ transformations, ONNX model runs) takes the extension
-  class and password hashing the credentials class. Its worker queues and memory classes are
-  backpressure on machine resources, never a reason to refuse work, requests included: every job
-  waits for a place in FIFO order and every charge waits for room. Its owner holds back whatever
-  feeds it while it waits, lets its own limit end the wait (a statement's deadline, a request's
-  lifetime, shutdown, a new quiesce) and keeps or re-decides the work. Admission fails only for an
-  operation larger than its whole class, which no wait could hold, and once the executor admits no
-  more work, which its owner treats as its own stop; `try_reserve` serves only an optional extra,
-  such as a cache, that proceeds without its charge. Nothing waits for room while it holds part of
-  the same class, since a queued charge takes every byte its class frees: an operation takes its
-  whole working set while it holds nothing, as one charge or as an allowance
+  class and password hashing the credentials class. Its worker classes and memory classes are
+  backpressure on machine resources, never a reason to refuse work, requests included. A worker
+  class is a semaphore over its workers, with no queue or setting bounding how many jobs wait: every
+  job waits for a worker in FIFO order and every charge waits for room. Its owner holds back
+  whatever feeds it while it waits, lets its own limit end the wait (a statement's deadline, a
+  request's lifetime, shutdown, a new quiesce) and keeps or re-decides the work. Admission fails
+  only for an operation larger than its whole class, which no wait could hold, and once the executor
+  admits no more work, which its owner treats as its own stop; `try_reserve` and
+  `Reservation::try_grow_to` serve only an optional extra, such as a cache or a row after an
+  inspection page's first, that proceeds without its charge, and within an allowance their miss is
+  never a shortfall that runs the operation again. Nothing waits for room while it holds
+  part of the same class, since a queued charge takes every byte its class frees: an operation takes
+  its whole working set while it holds nothing, as one charge or as an allowance
   (`Executor::within_allowance`) it draws every charge of that class from without waiting, and a
   synchronous job that outgrows its charge gives everything back and runs again under the charge it
   needs (`Executor::run_cpu_growing`). An operation that holds several classes takes them in one
@@ -817,7 +820,7 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   Callers never choose blocking, yielding, batching, throttling or similar safety behavior unless it
   is an explicit typed part of the operation's contract.
 - Planned operations cost backpressure, never data. A stop, a shutdown, an ownership move or an
-  alteration waits for the work in motion, a payload an ingestor holds while it waits for a place or
+  alteration waits for the work in motion, a payload an ingestor holds while it waits for a worker or
   for room on the bounded executor included, rather than cutting it, and a full queue or memory
   class holds back what feeds it rather than dropping or refusing what it was handed.
 - Backpressure is the one control of data-plane resources, and the data plane has no magic limits.

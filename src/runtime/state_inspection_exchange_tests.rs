@@ -1222,7 +1222,7 @@ async fn a_page_without_reply_memory_runs_again_within_a_share_that_holds_its_bo
     assert_eq!(bodies.len(), 2, "each section travels in its body");
 }
 
-/// An executor whose bulk class has one worker and one place in its wait queue.
+/// An executor whose bulk class has one worker.
 fn one_place_bulk_executor() -> Executor {
     use std::num::NonZeroUsize;
 
@@ -1232,20 +1232,16 @@ fn one_place_bulk_executor() -> Executor {
     Executor::new(ExecutionConfig {
         workers: WorkerCounts {
             bulk_cpu: NonZeroUsize::MIN,
-            pending_jobs: nervix_execution::PendingJobCounts {
-                bulk_cpu: NonZeroUsize::MIN,
-                ..workers.pending_jobs
-            },
             ..workers
         },
         ..ExecutionConfig::default()
     })
-    .assured("the test changes only the bulk class's worker and queue counts")
+    .assured("the test changes only the bulk class's worker count")
 }
 
-/// The bulk class of a [`one_place_bulk_executor`] held full: its worker runs a job that waits for
-/// the test, and its one place is taken by a job waiting behind it, so a job that refuses on a full
-/// class is refused and one that waits for a place waits until the hold is released.
+/// The bulk class of a [`one_place_bulk_executor`] held busy: its worker runs a job that waits for
+/// the test, and another job waits behind it, so the next job waits for the worker until the hold
+/// is released.
 struct FullBulkClass {
     release: nervix_primitives::sync::oneshot::Sender<()>,
     occupying: nervix_primitives::task::JoinHandle<()>,
@@ -1292,12 +1288,12 @@ impl FullBulkClass {
                     |_charge, _cancellation| (),
                 )
                 .await
-                .assured("the queued job runs once the worker frees");
+                .assured("the waiting job runs once the worker frees");
         });
         while executor
             .snapshot()
             .cpu_class(nervix_execution::CpuClass::Bulk)
-            .pending
+            .waiting
             == 0
         {
             nervix_primitives::task::yield_now().await;

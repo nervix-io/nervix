@@ -4154,7 +4154,7 @@ scenario = "MongoDB emitter inserts over mutual TLS with a mounted client identi
 selections = ["deloxide-stress"]
 
 [[owner]]
-gap = "CPU-worker interruption between simulated callbacks belongs to the mutually exclusive Turmoil mode. Native blocking-task teardown before its first callback is not deterministically reached by these public scenarios. Native workloads reach normal FIFO admission, cancellation and draining; the ordinary interrupted-worker regression covers selected and queued destructor cleanup without claiming tracked-lock interleavings."
+gap = "CPU-worker interruption between simulated callbacks belongs to the mutually exclusive Turmoil mode. Native blocking-task teardown before its first callback is not deterministically reached by these public scenarios, nor is a carrying job withdrawn as a worker frees to take it, whose race the Shuttle check shuttle_a_withdrawn_carrying_job_racing_its_worker_runs_or_hands_its_state_back covers. Native workloads reach normal FIFO admission, cancellation and draining; the ordinary interrupted-worker regression covers selected and waiting destructor cleanup without claiming tracked-lock interleavings."
 path = "crates/execution/src/workers.rs"
 workloads = [
   "scenario.password-credentials",

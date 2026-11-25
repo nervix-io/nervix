@@ -339,7 +339,9 @@ does not apply to them.
 1. Name a representation the format has, and at least one internal type whose every value it
    carries exactly. A type no internal type binds is not declared.
 2. Add the variant to the format's enum in `crates/models/src/schema.rs`, or to `CodecEncoding`, and
-   to the canonical renderer; change `MODEL_ARCHIVE_HEADER` and the consensus keyspace namespace in
+   to the canonical renderer; change `MODEL_ARCHIVE_HEADER` and the consensus keyspace namespace
+   (its [stored-shape
+   marker](./consensus-storage-and-replication.md#keyspace-names-and-the-stored-shape-marker)) in
    the same change, and advance the domain version of every Bolero target whose values hold it,
    with the register and its pins.
 3. Add it to that format's type parser only, as a case-insensitive token of the shared lexer, with

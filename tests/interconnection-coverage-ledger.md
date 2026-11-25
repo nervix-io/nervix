@@ -69,7 +69,7 @@ carries a payload value.
 | Active connections and streams | `nervix_interconnect_connections`, `nervix_interconnect_streams` |
 | Pending operations | `nervix_interconnect_pending_operations`, `nervix_interconnect_relay_channels`, `nervix_interconnect_relay_attempts`, `nervix_interconnect_relay_grants` |
 | Queued and reserved bytes | `nervix_execution_memory_capacity_bytes`, `nervix_execution_memory_reserved_bytes` |
-| Serialization queue and work duration | `nervix_execution_job_queue_seconds_total`, `nervix_execution_job_work_seconds_total`, with `nervix_execution_jobs_running` and `nervix_execution_jobs_pending` |
+| Serialization queue and work duration | `nervix_execution_job_queue_seconds_total`, `nervix_execution_job_work_seconds_total`, with `nervix_execution_jobs_running` and `nervix_execution_jobs_waiting` |
 | Task poll delay | `nervix_node_scheduler_delay_seconds_total`, `nervix_node_scheduler_delay_peak_seconds`, `nervix_node_scheduler_samples_total` |
 | Admission latency | `nervix_interconnect_relay_admission_wait_seconds_total` over `nervix_interconnect_relay_admissions_total` |
 | ACK age | `nervix_interconnect_unresolved_outcome_age_seconds` |

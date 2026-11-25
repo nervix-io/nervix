@@ -683,7 +683,7 @@ restore created stays stopped with what it committed; when the domain was create
 usable on every live node, the create step itself stays applied and is reported as failed.
 
 Client configuration inspection within the accepted apply-models step waits for command-memory
-capacity and a filesystem worker-queue place. Temporary admission pressure does not fail a step
+capacity and a filesystem worker. Temporary admission pressure does not fail a step
 after its earlier effects have committed. The node retains the restore's archive and domain lease
 through this wait; it holds no inspection copy before its memory charge is admitted. The service
 task's shutdown cancellation drops the wait, and a worker already running retains its charge until

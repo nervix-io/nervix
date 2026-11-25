@@ -28,36 +28,6 @@ fn small_executor() -> Executor {
             filesystem_storage: one(),
             connector_storage: crate::ConnectorStorageWorkers::resolve(Some(one()))
                 .expect("one worker fits the primitive permit bound"),
-            pending_jobs: crate::PendingJobCounts::uniform(one()),
-        },
-        budgets: MemoryBudgets::default(),
-        limits: OperationLimits::default(),
-    })
-    .expect("the default budgets hold the default operation limits")
-}
-
-/// One ordered consensus worker with a wait queue deep enough to hold every job a test submits
-/// before the first one is allowed to finish. `small_executor` deliberately allows one waiter, so
-/// it cannot express a queue.
-#[cfg(feature = "shuttle")]
-fn queued_executor(pending_jobs: usize) -> Executor {
-    Executor::new(ExecutionConfig {
-        workers: WorkerCounts {
-            pending_jobs: crate::PendingJobCounts::uniform(
-                NonZeroUsize::new(pending_jobs).expect("a test queue holds at least one"),
-            ),
-            ..WorkerCounts {
-                control_cpu: one(),
-                credentials_cpu: one(),
-                data_cpu: one(),
-                extension_cpu: one(),
-                bulk_cpu: one(),
-                consensus_storage: one(),
-                filesystem_storage: one(),
-                connector_storage: crate::ConnectorStorageWorkers::resolve(Some(one()))
-                    .expect("one worker fits the primitive permit bound"),
-                pending_jobs: crate::PendingJobCounts::uniform(one()),
-            }
         },
         budgets: MemoryBudgets::default(),
         limits: OperationLimits::default(),
@@ -610,66 +580,156 @@ async fn a_reservation_holds_its_class_until_it_is_dropped() {
     assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
 }
 
+/// A job that carries state for its caller hands it back when the caller withdraws it before a
+/// worker takes it, keeping the state and the charge the caller gave it, and hands it back with its
+/// outcome when it runs.
 #[nervix_primitives::test]
-async fn prepared_cpu_places_hold_the_charge_and_return_reusable_capacity_when_run_or_abandoned() {
+async fn a_carrying_job_hands_its_state_back_when_withdrawn_and_when_it_returns() {
     let executor = small_executor();
+    let held = crate::workers::HeldWorker::new(executor.cpu_pool(crate::CpuClass::Data));
+    let mut home: Option<Vec<u8>> = None;
     let charge = executor
         .reserve(MemoryClass::Relay, 1024)
         .await
         .expect("the operation fits");
-    let place = executor
-        .prepare_cpu(crate::CpuClass::Data, charge)
-        .await
-        .expect("a place is available");
-    let later = executor
-        .try_reserve(MemoryClass::Relay, 0)
-        .expect("a zero charge fits");
-    let mut waiting = Box::pin(executor.run_cpu(crate::CpuClass::Data, later, |_, _| 3));
-    let first_poll = std::future::poll_fn(|context| {
-        std::task::Poll::Ready(std::future::Future::poll(waiting.as_mut(), context))
-    })
-    .await;
-    assert!(
-        first_poll.is_pending(),
-        "a later job waits behind a retained place instead of being refused"
-    );
-    drop(place);
+    {
+        let mut waiting = Box::pin(executor.run_cpu_carrying(
+            crate::CpuClass::Data,
+            charge,
+            vec![7_u8],
+            &mut home,
+            |mut state, _charge, _| {
+                state.push(8);
+                (state, 1)
+            },
+        ));
+        let first_poll = std::future::poll_fn(|context| {
+            std::task::Poll::Ready(std::future::Future::poll(waiting.as_mut(), context))
+        })
+        .await;
+        assert!(
+            first_poll.is_pending(),
+            "the carrying job waits for the busy worker instead of being refused"
+        );
+        assert_eq!(executor.snapshot().data_cpu.waiting, 1);
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 1024);
+    }
     assert_eq!(
-        waiting
-            .await
-            .expect("the later job takes the place the prepared one gave back"),
-        3
+        home,
+        Some(vec![7]),
+        "a job withdrawn before a worker took it hands its state back unchanged"
     );
+    assert_eq!(executor.snapshot().data_cpu.waiting, 0);
     assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
-    assert_eq!(executor.snapshot().data_cpu.pending, 0);
+    drop(held);
+
+    let state = home
+        .take()
+        .expect("the withdrawn job handed its state back");
     let charge = executor
         .reserve(MemoryClass::Relay, 1024)
         .await
         .expect("the returned charge is reusable");
-    let result = executor
-        .prepare_cpu(crate::CpuClass::Data, charge)
+    let value = executor
+        .run_cpu_carrying(
+            crate::CpuClass::Data,
+            charge,
+            state,
+            &mut home,
+            |mut state, _charge, _| {
+                state.push(8);
+                (state, 2)
+            },
+        )
         .await
-        .expect("the place is reusable")
-        .run(|_, _| 7)
-        .await
-        .expect("prepared work completes");
-    assert_eq!(result, 7);
-    let charge = executor
-        .reserve(MemoryClass::Relay, 1024)
-        .await
-        .expect("the completed charge is reusable");
+        .expect("the carrying job runs on the free worker");
+    assert_eq!(value, 2);
     assert_eq!(
-        executor
-            .run_cpu(crate::CpuClass::Data, charge, |_, _| 14)
-            .await
-            .expect("the job runs"),
-        14
+        home,
+        Some(vec![7, 8]),
+        "the job hands the state it carried back with its outcome"
     );
     let snapshot = executor.snapshot();
     assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
-    assert_eq!(snapshot.data_cpu.pending, 0);
+    assert_eq!(snapshot.data_cpu.waiting, 0);
     assert_eq!(snapshot.data_cpu.running, 0);
-    assert_eq!(snapshot.data_cpu.admitted, snapshot.data_cpu.completed);
+    assert_eq!(snapshot.data_cpu.admitted, 2);
+    assert_eq!(
+        snapshot.data_cpu.completed, 1,
+        "the withdrawn job never reached a worker"
+    );
+}
+
+/// A carrying job that finds every worker busy waits its turn behind the jobs that asked before it,
+/// holding no worker meanwhile, and the worker that frees takes those jobs first. The pool's owner
+/// hold keeps the worker busy without parking a thread.
+#[nervix_primitives::test]
+async fn a_carrying_job_waits_its_turn_without_holding_a_worker() {
+    let executor = small_executor();
+    let held = crate::workers::HeldWorker::new(executor.cpu_pool(crate::CpuClass::Data));
+    let (completed, mut observed) = nervix_primitives::sync::mpsc::unbounded_channel();
+    let first_charge = executor
+        .try_reserve(MemoryClass::Relay, 1)
+        .expect("the untouched relay class has room for the first job");
+    let first_submitter = executor.clone();
+    let first_completed = completed.clone();
+    let first = nervix_primitives::task::spawn(async move {
+        first_submitter
+            .run_cpu(crate::CpuClass::Data, first_charge, move |_charge, _| {
+                first_completed
+                    .send("job")
+                    .expect("the test holds the completion receiver");
+            })
+            .await
+    });
+    while executor.snapshot().data_cpu.waiting < 1 {
+        nervix_primitives::task::consume_budget().await;
+        nervix_primitives::task::yield_now().await;
+    }
+    let carried_charge = executor
+        .try_reserve(MemoryClass::Relay, 1)
+        .expect("the relay class has room for the carrying job");
+    let mut home: Option<&'static str> = None;
+    let mut carrying = Box::pin(executor.run_cpu_carrying(
+        crate::CpuClass::Data,
+        carried_charge,
+        "session",
+        &mut home,
+        move |state, _charge, _| {
+            completed
+                .send("carried")
+                .expect("the test holds the completion receiver");
+            (state, ())
+        },
+    ));
+    let first_poll = std::future::poll_fn(|context| {
+        std::task::Poll::Ready(std::future::Future::poll(carrying.as_mut(), context))
+    })
+    .await;
+    assert!(
+        first_poll.is_pending(),
+        "a carrying job waits for the busy worker instead of being refused"
+    );
+    let busy = executor.snapshot().data_cpu;
+    assert_eq!(busy.waiting, 2);
+    assert_eq!(busy.running, 1, "a waiting carrying job holds no worker");
+    drop(held);
+
+    carrying
+        .await
+        .expect("the carrying job runs once the job before it ran");
+    first
+        .await
+        .expect("the first job is joined")
+        .expect("the first job ran before the carrying job");
+    assert_eq!(home, Some("session"));
+    assert_eq!(observed.recv().await, Some("job"));
+    assert_eq!(observed.recv().await, Some("carried"));
+    let snapshot = executor.snapshot();
+    assert_eq!(snapshot.data_cpu.waiting, 0);
+    assert_eq!(snapshot.data_cpu.running, 0);
+    assert_eq!(snapshot.data_cpu.completed, 2);
+    assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
 }
 
 #[nervix_primitives::test]
@@ -1049,10 +1109,10 @@ async fn a_growing_charge_counts_its_own_bytes_and_keeps_its_starting_room() {
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
-/// A full wait queue is backpressure: a storage job that finds the class's one worker busy and its
-/// one queue place taken waits for a place, whatever the job does, and runs once one frees.
+/// Busy workers are backpressure: a storage job that finds the class's one worker busy waits for
+/// it, however many jobs already wait, and runs once it frees, whatever the job does.
 #[nervix_primitives::test]
-async fn a_full_storage_queue_holds_every_job_until_a_place_frees() {
+async fn a_storage_job_that_finds_every_worker_busy_waits_for_one_and_runs_once_it_frees() {
     let executor = small_executor();
     let (started, has_started) = nervix_primitives::sync::oneshot::channel();
     let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
@@ -1076,119 +1136,115 @@ async fn a_full_storage_queue_holds_every_job_until_a_place_frees() {
     has_started
         .await
         .expect("the occupying job reports once it holds the one worker");
-    let queued_charge = executor
+    let first_charge = executor
         .try_reserve(MemoryClass::Bulk, 1)
-        .expect("the bulk class has room for the queued job");
-    let queue_holder = executor.clone();
-    let queued = nervix_primitives::task::spawn(async move {
-        queue_holder
-            .run_storage(StorageClass::Filesystem, queued_charge, |_charge, _| ())
+        .expect("the bulk class has room for the first waiting job");
+    let first_submitter = executor.clone();
+    let first = nervix_primitives::task::spawn(async move {
+        first_submitter
+            .run_storage(StorageClass::Filesystem, first_charge, |_charge, _| ())
             .await
     });
-    while executor.snapshot().filesystem_storage.pending < 1 {
+    while executor.snapshot().filesystem_storage.waiting < 1 {
         nervix_primitives::task::consume_budget().await;
         nervix_primitives::task::yield_now().await;
     }
-    assert_eq!(
-        executor.snapshot().filesystem_storage.waiting,
-        0,
-        "a job that found a free place in the queue never counts as waiting"
-    );
 
-    let waiting_charge = executor
+    let second_charge = executor
         .try_reserve(MemoryClass::Bulk, 1)
-        .expect("the bulk class has room for the waiting job");
-    let mut waiting = Box::pin(executor.run_storage(
+        .expect("the bulk class has room for the second waiting job");
+    let mut second = Box::pin(executor.run_storage(
         StorageClass::Filesystem,
-        waiting_charge,
+        second_charge,
         |_charge, _| "waited",
     ));
     let first_poll = std::future::poll_fn(|context| {
-        std::task::Poll::Ready(std::future::Future::poll(waiting.as_mut(), context))
+        std::task::Poll::Ready(std::future::Future::poll(second.as_mut(), context))
     })
     .await;
     assert!(
         first_poll.is_pending(),
-        "a full wait queue holds the job instead of refusing it"
+        "a job behind a waiting job waits too instead of being refused"
     );
     assert_eq!(
         executor.snapshot().filesystem_storage.waiting,
-        1,
-        "a job that found the queue full counts as waiting"
+        2,
+        "every job that found the worker busy counts as waiting"
     );
     release
         .send(())
         .expect("the occupying job holds its worker until the test releases it");
 
     running.await.expect("the occupying job is joined");
-    queued
+    first
         .await
-        .expect("the queued job is joined")
-        .expect("the queued job runs once the worker frees");
-    let waited = waiting
+        .expect("the first waiting job is joined")
+        .expect("the first waiting job runs once the worker frees");
+    let waited = second
         .await
-        .expect("a job that found the queue full runs once a place frees");
+        .expect("the second waiting job runs once the worker takes it");
     assert_eq!(waited, "waited");
     let snapshot = executor.snapshot();
     assert_eq!(
         snapshot.filesystem_storage.waiting, 0,
-        "a job that took its place no longer counts as waiting"
+        "a job a worker took no longer counts as waiting"
     );
     assert_eq!(snapshot.filesystem_storage.completed, 3);
-    assert_eq!(snapshot.filesystem_storage.pending, 0);
+    assert_eq!(snapshot.filesystem_storage.running, 0);
     assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
 }
 
-/// The same for a CPU class: a job that finds the class's one worker busy and its one queue place
-/// taken waits for a place and runs once one frees. The pool's owner hold keeps the worker busy
-/// without parking a thread, so the check also completes on Turmoil's simulated scheduler.
+/// The same for a CPU class: a job that finds the class's one worker busy waits for it, behind
+/// every job that asked before it, and runs once it frees. The pool's owner hold keeps the worker
+/// busy without parking a thread, so the check also completes on Turmoil's simulated scheduler.
 #[nervix_primitives::test]
-async fn a_full_cpu_queue_holds_every_job_until_a_place_frees() {
+async fn a_cpu_job_that_finds_every_worker_busy_waits_for_one_and_runs_once_it_frees() {
     let executor = small_executor();
     let held = crate::workers::HeldWorker::new(executor.cpu_pool(crate::CpuClass::Data));
-    let queued_charge = executor
+    let first_charge = executor
         .try_reserve(MemoryClass::Relay, 1)
-        .expect("the untouched relay class has room for the queued job");
-    let queue_holder = executor.clone();
-    let queued = nervix_primitives::task::spawn(async move {
-        queue_holder
-            .run_cpu(crate::CpuClass::Data, queued_charge, |_charge, _| ())
+        .expect("the untouched relay class has room for the first waiting job");
+    let first_submitter = executor.clone();
+    let first = nervix_primitives::task::spawn(async move {
+        first_submitter
+            .run_cpu(crate::CpuClass::Data, first_charge, |_charge, _| ())
             .await
     });
-    while executor.snapshot().data_cpu.pending < 1 {
+    while executor.snapshot().data_cpu.waiting < 1 {
         nervix_primitives::task::consume_budget().await;
         nervix_primitives::task::yield_now().await;
     }
 
-    let waiting_charge = executor
+    let second_charge = executor
         .try_reserve(MemoryClass::Relay, 1)
-        .expect("the relay class has room for the waiting job");
-    let mut waiting =
-        Box::pin(executor.run_cpu(crate::CpuClass::Data, waiting_charge, |_charge, _| 7));
+        .expect("the relay class has room for the second waiting job");
+    let mut second =
+        Box::pin(executor.run_cpu(crate::CpuClass::Data, second_charge, |_charge, _| 7));
     let first_poll = std::future::poll_fn(|context| {
-        std::task::Poll::Ready(std::future::Future::poll(waiting.as_mut(), context))
+        std::task::Poll::Ready(std::future::Future::poll(second.as_mut(), context))
     })
     .await;
     assert!(
         first_poll.is_pending(),
-        "a full wait queue holds the job instead of refusing it"
+        "a job behind a waiting job waits too instead of being refused"
     );
+    assert_eq!(executor.snapshot().data_cpu.waiting, 2);
     drop(held);
 
-    queued
+    first
         .await
-        .expect("the queued job is joined")
-        .expect("the queued job runs once the worker frees");
-    let value = waiting
+        .expect("the first waiting job is joined")
+        .expect("the first waiting job runs once the worker frees");
+    let value = second
         .await
-        .expect("a job that found the queue full runs once a place frees");
+        .expect("the second waiting job runs once the worker takes it");
     assert_eq!(value, 7);
     let snapshot = executor.snapshot();
     assert_eq!(
         snapshot.data_cpu.completed, 2,
-        "the queued and the waiting job ran; the owner hold is no job"
+        "both waiting jobs ran; the owner hold is no job"
     );
-    assert_eq!(snapshot.data_cpu.pending, 0);
+    assert_eq!(snapshot.data_cpu.waiting, 0);
     assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
 }
 
@@ -1361,10 +1417,9 @@ mod shuttle_checks {
                 workers.running, 0,
                 "{class} must return every worker permit"
             );
-            assert_eq!(workers.pending, 0, "{class} must return every queue permit");
             assert_eq!(
                 workers.waiting, 0,
-                "{class} must count no job as waiting once each one took a place or gave up"
+                "{class} must count no job as waiting once a worker took each one or it gave up"
             );
         }
         for (class, budget) in [
@@ -1395,7 +1450,7 @@ mod shuttle_checks {
         let mut future = std::pin::pin!(future);
         std::future::poll_fn(|context| match future.as_mut().poll(context) {
             Poll::Ready(_) => {
-                panic!("the worker was expected to remain occupied while this job queued")
+                panic!("the worker was expected to remain occupied while this job waited")
             }
             Poll::Pending => Poll::Ready(()),
         })
@@ -1529,7 +1584,7 @@ mod shuttle_checks {
 
             let snapshot = executor.snapshot();
             assert_eq!(snapshot.bulk_cpu.running, 1);
-            assert_eq!(snapshot.bulk_cpu.pending, 0);
+            assert_eq!(snapshot.bulk_cpu.waiting, 0);
             assert_live_reservations_fit(&executor);
 
             let control_reservation = executor
@@ -1564,7 +1619,7 @@ mod shuttle_checks {
         });
     }
 
-    fn queued_job_drop_invariant() {
+    fn waiting_job_drop_invariant() {
         shuttle::future::block_on(async {
             let executor = small_executor();
             let (started, has_started) = nervix_primitives::sync::oneshot::channel();
@@ -1591,29 +1646,29 @@ mod shuttle_checks {
                 .await
                 .assured("the occupying job reports after taking its worker permit");
 
-            let queued_bytes = 4096;
-            let queued = executor
-                .try_reserve(MemoryClass::Relay, queued_bytes)
-                .assured("the relay class has room for the queued job");
+            let waiting_bytes = 4096;
+            let waiting_charge = executor
+                .try_reserve(MemoryClass::Relay, waiting_bytes)
+                .assured("the relay class has room for the waiting job");
             let (admitted, is_admitted) = nervix_primitives::sync::oneshot::channel();
             let waiting = executor.clone();
             let cancelled = nervix_primitives::task::spawn(async move {
                 announce_after_first_pending(
-                    waiting.run_cpu(CpuClass::Data, queued, |_, _| ()),
+                    waiting.run_cpu(CpuClass::Data, waiting_charge, |_, _| ()),
                     admitted,
                 )
                 .await
             });
             is_admitted
                 .await
-                .assured("the queued job reports after taking its queue permit");
+                .assured("the waiting job reports once it waits for the busy worker");
 
-            let queued_snapshot = executor.snapshot();
-            assert_eq!(queued_snapshot.data_cpu.running, 1);
-            assert_eq!(queued_snapshot.data_cpu.pending, 1);
+            let waiting_snapshot = executor.snapshot();
+            assert_eq!(waiting_snapshot.data_cpu.running, 1);
+            assert_eq!(waiting_snapshot.data_cpu.waiting, 1);
             assert_eq!(
-                queued_snapshot.relay_memory.reserved_bytes,
-                occupying_bytes + queued_bytes
+                waiting_snapshot.relay_memory.reserved_bytes,
+                occupying_bytes + waiting_bytes
             );
             assert_live_reservations_fit(&executor);
 
@@ -1621,12 +1676,12 @@ mod shuttle_checks {
             let cancelled_result = cancelled.await;
             assert!(
                 cancelled_result.is_err(),
-                "the queued job must be cancelled before it can take the occupied worker"
+                "the waiting job must be cancelled before it can take the occupied worker"
             );
 
             let cancelled_snapshot = executor.snapshot();
             assert_eq!(cancelled_snapshot.data_cpu.running, 1);
-            assert_eq!(cancelled_snapshot.data_cpu.pending, 0);
+            assert_eq!(cancelled_snapshot.data_cpu.waiting, 0);
             assert_eq!(
                 cancelled_snapshot.relay_memory.reserved_bytes,
                 occupying_bytes
@@ -1635,7 +1690,7 @@ mod shuttle_checks {
 
             release
                 .send(())
-                .assured("the occupying job remains blocked while the queued job is dropped");
+                .assured("the occupying job remains blocked while the waiting job is dropped");
             running
                 .await
                 .assured("the occupying job exits after its release");
@@ -1644,8 +1699,8 @@ mod shuttle_checks {
     }
 
     #[test]
-    fn shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot() {
-        check_random_and_pct(queued_job_drop_invariant);
+    fn shuttle_a_dropped_waiting_job_releases_its_reservation_and_exact_entry() {
+        check_random_and_pct(waiting_job_drop_invariant);
     }
 
     fn running_job_cancellation_invariant() {
@@ -1685,7 +1740,7 @@ mod shuttle_checks {
 
             let running_snapshot = executor.snapshot();
             assert_eq!(running_snapshot.data_cpu.running, 1);
-            assert_eq!(running_snapshot.data_cpu.pending, 0);
+            assert_eq!(running_snapshot.data_cpu.waiting, 0);
             assert_eq!(running_snapshot.relay_memory.reserved_bytes, 8192);
             assert_live_reservations_fit(&executor);
 
@@ -1697,7 +1752,7 @@ mod shuttle_checks {
             );
             let cancelled_snapshot = executor.snapshot();
             assert_eq!(cancelled_snapshot.data_cpu.running, 1);
-            assert_eq!(cancelled_snapshot.data_cpu.pending, 0);
+            assert_eq!(cancelled_snapshot.data_cpu.waiting, 0);
             assert_eq!(cancelled_snapshot.relay_memory.reserved_bytes, 8192);
 
             continue_job
@@ -1729,7 +1784,7 @@ mod shuttle_checks {
         check_random_and_pct(running_job_cancellation_invariant);
     }
 
-    fn full_wait_queue_invariant() {
+    fn busy_worker_invariant() {
         shuttle::future::block_on(async {
             let executor = small_executor();
             let (started, has_started) = nervix_primitives::sync::oneshot::channel();
@@ -1755,30 +1810,30 @@ mod shuttle_checks {
                 .await
                 .assured("the occupying job reports after taking its worker permit");
 
-            let queued = executor
+            let first_charge = executor
                 .try_reserve(MemoryClass::Relay, 1024)
-                .assured("the relay class has room for the queued job");
+                .assured("the relay class has room for the first waiting job");
             let (admitted, is_admitted) = nervix_primitives::sync::oneshot::channel();
             let waiting = executor.clone();
-            let pending = nervix_primitives::task::spawn(async move {
+            let first = nervix_primitives::task::spawn(async move {
                 announce_after_first_pending(
-                    waiting.run_cpu(CpuClass::Data, queued, |_, _| ()),
+                    waiting.run_cpu(CpuClass::Data, first_charge, |_, _| ()),
                     admitted,
                 )
                 .await
             });
             is_admitted
                 .await
-                .assured("the queued job reports after taking the only queue permit");
+                .assured("the first job reports once it waits for the busy worker");
 
-            let full_snapshot = executor.snapshot();
-            assert_eq!(full_snapshot.data_cpu.running, 1);
-            assert_eq!(full_snapshot.data_cpu.pending, 1);
+            let busy_snapshot = executor.snapshot();
+            assert_eq!(busy_snapshot.data_cpu.running, 1);
+            assert_eq!(busy_snapshot.data_cpu.waiting, 1);
             assert_live_reservations_fit(&executor);
 
             let next_charge = executor
                 .try_reserve(MemoryClass::Relay, 1024)
-                .assured("memory remains independent from worker queue admission");
+                .assured("memory admission stays independent of busy workers");
             let (next_registered, is_next_registered) = nervix_primitives::sync::oneshot::channel();
             let next_executor = executor.clone();
             let next = nervix_primitives::task::spawn(async move {
@@ -1790,13 +1845,13 @@ mod shuttle_checks {
             });
             is_next_registered
                 .await
-                .assured("the next job reports once the full queue holds it");
+                .assured("the next job reports once it waits behind the first");
 
             let held_snapshot = executor.snapshot();
             assert_eq!(held_snapshot.data_cpu.running, 1);
             assert_eq!(
-                held_snapshot.data_cpu.pending, 1,
-                "a job held by the full queue takes no place"
+                held_snapshot.data_cpu.waiting, 2,
+                "every job that finds the worker busy waits, however many already do"
             );
             assert_live_reservations_fit(&executor);
 
@@ -1806,33 +1861,31 @@ mod shuttle_checks {
             running
                 .await
                 .assured("the occupying job exits after its release");
-            pending
+            first
                 .await
-                .assured("the queued job is joined")
-                .assured("the queued job runs once the worker permit returns");
+                .assured("the first waiting job is joined")
+                .assured("the first waiting job runs once the worker frees");
             next.await
                 .assured("the next job is joined")
-                .assured("the next job runs once a place frees");
+                .assured("the next job runs once the worker takes it");
             assert_every_permit_returned(&executor);
         });
     }
 
-    /// A full wait queue is backpressure: the next job waits for a place instead of being refused,
-    /// takes no place and no worker while it waits, and runs once one frees.
+    /// Busy workers are backpressure: a job that finds every worker busy waits for one instead of
+    /// being refused, however many jobs already wait, and runs once a worker takes it.
     #[test]
-    fn shuttle_a_full_wait_queue_holds_the_next_job_until_a_place_frees() {
-        check_random_and_pct(full_wait_queue_invariant);
+    fn shuttle_a_job_that_finds_every_worker_busy_waits_until_one_frees() {
+        check_random_and_pct(busy_worker_invariant);
     }
 
-    /// The only data worker and the only place in its wait queue, each held by a job until the
-    /// check lets the worker's job exit.
-    struct FullDataQueue {
+    /// The only data worker, held by a job until the check lets that job exit.
+    struct BusyDataWorker {
         release: nervix_primitives::sync::oneshot::Sender<()>,
         running: nervix_primitives::task::JoinHandle<()>,
-        queued: nervix_primitives::task::JoinHandle<Result<(), Report<ExecutionError>>>,
     }
 
-    impl FullDataQueue {
+    impl BusyDataWorker {
         async fn fill(executor: &Executor) -> Self {
             let (started, has_started) = nervix_primitives::sync::oneshot::channel();
             let (release, released) = nervix_primitives::sync::oneshot::channel();
@@ -1856,31 +1909,11 @@ mod shuttle_checks {
             has_started
                 .await
                 .assured("the occupying job reports after taking its worker permit");
-
-            let queued_charge = executor
-                .try_reserve(MemoryClass::Relay, 1024)
-                .assured("the relay class has room for the queued job");
-            let (admitted, is_admitted) = nervix_primitives::sync::oneshot::channel();
-            let queue_holder = executor.clone();
-            let queued = nervix_primitives::task::spawn(async move {
-                announce_after_first_pending(
-                    queue_holder.run_cpu(crate::CpuClass::Data, queued_charge, |_, _| ()),
-                    admitted,
-                )
-                .await
-            });
-            is_admitted
-                .await
-                .assured("the queued job reports after taking the only queue permit");
-            Self {
-                release,
-                running,
-                queued,
-            }
+            Self { release, running }
         }
 
-        /// Let the worker's job exit, so the queued job takes the worker and frees its place, and
-        /// wait for both.
+        /// Let the worker's job exit, so the worker takes the waiting jobs in the order they asked,
+        /// and wait for that job.
         async fn release(self) {
             self.release
                 .send(())
@@ -1888,21 +1921,17 @@ mod shuttle_checks {
             self.running
                 .await
                 .assured("the occupying job exits after its release");
-            self.queued
-                .await
-                .assured("the queued job is joined")
-                .assured("the queued job runs once the worker permit returns");
         }
     }
 
-    /// A job waiting for a place, and the report its first poll sends once the full queue holds it.
+    /// A job waiting for the busy worker, and the report its first poll sends once it waits.
     struct WaitingJob {
         registered: nervix_primitives::sync::oneshot::Receiver<()>,
         task: nervix_primitives::task::JoinHandle<Result<(), Report<ExecutionError>>>,
     }
 
     impl WaitingJob {
-        /// Spawn a data job that waits for a place and records `label` in `order` when it runs.
+        /// Spawn a data job that waits for the worker and records `label` in `order` when it runs.
         fn spawn(
             executor: &Executor,
             order: &StdArc<nervix_primitives::sync::blocking::Mutex<Vec<&'static str>>>,
@@ -1934,7 +1963,7 @@ mod shuttle_checks {
         shuttle::future::block_on(async {
             let executor = small_executor();
             let order = StdArc::new(nervix_primitives::sync::blocking::Mutex::new(Vec::new()));
-            let full = FullDataQueue::fill(&executor).await;
+            let busy = BusyDataWorker::fill(&executor).await;
 
             let WaitingJob {
                 registered,
@@ -1942,12 +1971,15 @@ mod shuttle_checks {
             } = WaitingJob::spawn(&executor, &order, "waiting");
             registered
                 .await
-                .assured("the waiting job reports once the full queue holds it");
+                .assured("the waiting job reports once it waits for the busy worker");
             let held = executor.snapshot();
-            assert_eq!(held.data_cpu.pending, 1, "a waiting job takes no place");
-            assert_eq!(held.relay_memory.reserved_bytes, 3 * 1024);
+            assert_eq!(
+                held.data_cpu.waiting, 1,
+                "the job waits for the busy worker"
+            );
+            assert_eq!(held.relay_memory.reserved_bytes, 2 * 1024);
 
-            // A later job asks after the waiting one, racing the release that frees a place.
+            // A later job asks after the waiting one, racing the release that frees the worker.
             let late_charge = executor
                 .try_reserve(MemoryClass::Relay, 1024)
                 .assured("the relay class has room for the late job");
@@ -1960,29 +1992,29 @@ mod shuttle_checks {
                     })
                     .await
             });
-            full.release().await;
+            busy.release().await;
             waiting
                 .await
                 .assured("the waiting job is joined")
-                .assured("the waiting job runs once a place frees");
+                .assured("the waiting job runs once the worker frees");
             late.await
                 .assured("the late job is joined")
-                .assured("the late job waits for a place too and runs");
+                .assured("the late job waits for the worker too and runs");
 
             let order = order.lock().clone();
             assert_eq!(
                 order.first(),
                 Some(&"waiting"),
-                "the freed place goes to the job that waited for it: {order:?}"
+                "the freed worker takes the job that waited for it first: {order:?}"
             );
             assert_every_permit_returned(&executor);
         });
     }
 
-    /// A job waiting for a place takes the first place the full queue frees, ahead of a job that
-    /// asks after it, and runs first.
+    /// A job waiting for the busy worker takes it once it frees, ahead of a job that asks after it,
+    /// and runs first.
     #[test]
-    fn shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place() {
+    fn shuttle_a_waiting_job_takes_the_freed_worker_ahead_of_a_later_job() {
         check_random_and_pct(waiting_admission_order_invariant);
     }
 
@@ -1990,7 +2022,7 @@ mod shuttle_checks {
         shuttle::future::block_on(async {
             let executor = small_executor();
             let order = StdArc::new(nervix_primitives::sync::blocking::Mutex::new(Vec::new()));
-            let full = FullDataQueue::fill(&executor).await;
+            let busy = BusyDataWorker::fill(&executor).await;
 
             let WaitingJob {
                 registered,
@@ -1998,52 +2030,51 @@ mod shuttle_checks {
             } = WaitingJob::spawn(&executor, &order, "dropped");
             registered
                 .await
-                .assured("the first waiting job reports once the full queue holds it");
+                .assured("the first waiting job reports once it waits for the busy worker");
             let WaitingJob {
                 registered: successor_registered,
                 task: successor,
             } = WaitingJob::spawn(&executor, &order, "successor");
             successor_registered
                 .await
-                .assured("the second waiting job reports once the full queue holds it");
-            assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 4 * 1024);
+                .assured("the second waiting job reports once it waits for the busy worker");
+            assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 3 * 1024);
             assert_eq!(
                 executor.snapshot().data_cpu.waiting,
                 2,
-                "both jobs that found the queue full count as waiting for a place"
+                "both jobs that found the worker busy count as waiting"
             );
 
             dropped.abort();
             assert!(
                 dropped.await.is_err(),
-                "dropping a waiting job ends it before it takes a place"
+                "dropping a waiting job ends it before a worker takes it"
             );
             let abandoned = executor.snapshot();
             assert_eq!(
                 abandoned.relay_memory.reserved_bytes,
-                3 * 1024,
+                2 * 1024,
                 "a waiting job that is dropped returns its charge"
             );
-            assert_eq!(abandoned.data_cpu.pending, 1);
             assert_eq!(
                 abandoned.data_cpu.waiting, 1,
                 "a dropped wait stops counting while the job after it still waits"
             );
 
-            full.release().await;
+            busy.release().await;
             successor
                 .await
                 .assured("the second waiting job is joined")
-                .assured("the place the dropped job gave up goes to the job after it");
+                .assured("the turn the dropped job gave up goes to the job after it");
             assert_eq!(*order.lock(), vec!["successor"]);
             assert_every_permit_returned(&executor);
         });
     }
 
-    /// A job waiting for a place that its caller drops gives up its place in line and returns its
-    /// charge, and the place freed next goes to the job waiting after it.
+    /// A waiting job that its caller drops gives up its turn and returns its charge, and the worker
+    /// freed next takes the job waiting after it.
     #[test]
-    fn shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge() {
+    fn shuttle_a_dropped_waiting_job_gives_its_turn_to_the_job_after_it() {
         check_random_and_pct(dropped_waiting_admission_invariant);
     }
 
@@ -2126,7 +2157,7 @@ mod shuttle_checks {
     fn reported_wait_invariant() {
         shuttle::future::block_on(async {
             let executor = small_executor();
-            let full = FullDataQueue::fill(&executor).await;
+            let busy = BusyDataWorker::fill(&executor).await;
             let waits = crate::CapacityWaits::new();
             let reporting = executor.reporting_waits_to(&waits);
 
@@ -2151,30 +2182,93 @@ mod shuttle_checks {
             });
             has_begun
                 .await
-                .assured("the owner sees its job begin waiting while the queue is full");
-            assert!(waits.is_waiting(), "the wait lasts until a place frees");
+                .assured("the owner sees its job begin waiting while the worker is busy");
+            assert!(
+                waits.is_waiting(),
+                "the wait lasts until the worker takes the job"
+            );
 
-            // The freed place races the owner's watch for the end of the wait.
-            full.release().await;
+            // The freed worker races the owner's watch for the end of the wait.
+            busy.release().await;
             let ran = submitted
                 .await
                 .assured("the waiting job is joined")
-                .assured("a job waiting for a place runs once one frees");
+                .assured("a waiting job runs once the worker takes it");
             assert_eq!(ran, "ran");
             watcher
                 .await
-                .assured("the owner sees the wait end once its job takes the freed place");
+                .assured("the owner sees the wait end once the freed worker takes its job");
             assert!(!waits.is_waiting());
             assert_every_permit_returned(&executor);
         });
     }
 
-    /// An owner watching its work through `CapacityWaits` sees its job begin waiting for a place in
-    /// a full class and sees the wait end once a place frees, whichever of its watch and the job's
-    /// wait comes first.
+    /// An owner watching its work through `CapacityWaits` sees its job begin waiting for a worker of
+    /// a busy class and sees the wait end once a worker takes it, whichever of its watch and the
+    /// job's wait comes first.
     #[test]
-    fn shuttle_an_owner_sees_its_job_begin_and_end_waiting_for_a_place() {
+    fn shuttle_an_owner_sees_its_job_begin_and_end_waiting_for_a_worker() {
         check_random_and_pct(reported_wait_invariant);
+    }
+
+    fn withdrawn_carrying_job_racing_its_worker_invariant() {
+        shuttle::future::block_on(async {
+            let executor = small_executor();
+            let order = StdArc::new(nervix_primitives::sync::blocking::Mutex::new(Vec::new()));
+            let busy = BusyDataWorker::fill(&executor).await;
+            let charge = executor
+                .try_reserve(MemoryClass::Relay, 1024)
+                .assured("the relay class has room for the carrying job");
+            let mut home: Option<&'static str> = None;
+            {
+                let job_order = StdArc::clone(&order);
+                let mut carrying = Box::pin(executor.run_cpu_carrying(
+                    CpuClass::Data,
+                    charge,
+                    "session",
+                    &mut home,
+                    move |state, _charge, _| {
+                        job_order.lock().push("carried");
+                        (state, ())
+                    },
+                ));
+                assert!(
+                    std::future::poll_fn(|cx| Poll::Ready(carrying.as_mut().poll(cx)))
+                        .await
+                        .is_pending(),
+                    "the carrying job waits for the busy worker"
+                );
+                // The freed worker races the caller withdrawing the waiting job.
+                let release = nervix_primitives::task::spawn(busy.release());
+                nervix_primitives::task::yield_now().await;
+                drop(carrying);
+                release
+                    .await
+                    .assured("the occupying job exits after its release");
+            }
+            while {
+                let data = executor.snapshot().data_cpu;
+                data.running != 0 || data.waiting != 0
+            } {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::task::yield_now().await;
+            }
+            let ran = order.lock().contains(&"carried");
+            assert!(
+                ran != home.is_some(),
+                "the withdrawn job either ran, taking its state with it, or handed the state \
+                 back, never both and never neither: ran {ran}, home {home:?}"
+            );
+            assert_every_permit_returned(&executor);
+        });
+    }
+
+    /// A caller withdrawing a carrying job races the worker that frees to take it: either the
+    /// worker took the job first and it runs, or the withdrawal took the job back first and its
+    /// state is the caller's again. Every charge and worker returns either way.
+    #[test]
+    fn shuttle_a_withdrawn_carrying_job_racing_its_worker_runs_or_hands_its_state_back() {
+        check_random_and_pct(withdrawn_carrying_job_racing_its_worker_invariant);
     }
 
     /// A growing job that runs short gives its charge back before it waits for the larger one, so
@@ -2185,69 +2279,9 @@ mod shuttle_checks {
         check_random_and_pct(growing_job_holds_nothing_while_waiting_invariant);
     }
 
-    #[test]
-    fn shuttle_cpu_preparation_returns_waiting_and_reserved_places_with_their_charges() {
-        check_random_and_pct(|| {
-            shuttle::future::block_on(async {
-                let executor = small_executor();
-                let full = FullDataQueue::fill(&executor).await;
-                let charge = executor
-                    .try_reserve(MemoryClass::Relay, 1024)
-                    .assured("the waiting operation has a bounded charge");
-                let mut waiting = Box::pin(executor.prepare_cpu(CpuClass::Data, charge));
-                assert!(
-                    std::future::poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx)))
-                        .await
-                        .is_pending()
-                );
-                assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 3 * 1024);
-                drop(waiting);
-                assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 2 * 1024);
-                full.release().await;
-                assert_every_permit_returned(&executor);
-
-                let charge = executor
-                    .try_reserve(MemoryClass::Relay, 1024)
-                    .assured("the prepared operation has a bounded charge");
-                let place = executor
-                    .prepare_cpu(CpuClass::Data, charge)
-                    .await
-                    .assured("the prepared operation takes the freed place");
-                assert_eq!(executor.snapshot().data_cpu.pending, 1);
-                let later_charge = executor
-                    .try_reserve(MemoryClass::Relay, 1024)
-                    .assured("the later job's independent charge fits");
-                let mut later = Box::pin(executor.run_cpu(CpuClass::Data, later_charge, |_, _| ()));
-                assert!(
-                    std::future::poll_fn(|cx| Poll::Ready(later.as_mut().poll(cx)))
-                        .await
-                        .is_pending(),
-                    "a later job waits behind the reserved place instead of being refused"
-                );
-                drop(place);
-                later
-                    .await
-                    .assured("the later job takes the place the prepared operation gave back");
-                assert_every_permit_returned(&executor);
-                let charge = executor
-                    .try_reserve(MemoryClass::Relay, 1024)
-                    .assured("returned capacity is reusable");
-                let result = executor
-                    .prepare_cpu(CpuClass::Data, charge)
-                    .await
-                    .assured("a successor gets the returned place")
-                    .run(|_, _| 7)
-                    .await
-                    .assured("the successor executes");
-                assert_eq!(result, 7);
-                assert_every_permit_returned(&executor);
-            })
-        });
-    }
-
     fn consensus_admission_order_invariant() {
         shuttle::future::block_on(async {
-            let executor = queued_executor(16);
+            let executor = small_executor();
             let order = StdArc::new(nervix_primitives::sync::blocking::Mutex::new(Vec::new()));
             let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
             let mut held = Some(released);
@@ -2291,16 +2325,16 @@ mod shuttle_checks {
                     snapshot.consensus_storage.admitted,
                     u64::try_from(submitted_so_far).assured("eight jobs fit in u64")
                 );
-                assert_eq!(snapshot.consensus_storage.pending, index);
+                assert_eq!(snapshot.consensus_storage.waiting, index);
                 assert_live_reservations_fit(&executor);
             }
 
-            let queued_snapshot = executor.snapshot();
-            assert_eq!(queued_snapshot.consensus_storage.running, 1);
-            assert_eq!(queued_snapshot.consensus_storage.pending, 7);
+            let waiting_snapshot = executor.snapshot();
+            assert_eq!(waiting_snapshot.consensus_storage.running, 1);
+            assert_eq!(waiting_snapshot.consensus_storage.waiting, 7);
             release
                 .send(())
-                .assured("the first consensus job remains held while its followers queue");
+                .assured("the first consensus job remains held while its followers wait");
 
             for submission in submissions {
                 nervix_primitives::task::consume_budget().await;

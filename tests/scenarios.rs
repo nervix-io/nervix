@@ -654,7 +654,7 @@ struct ScenarioWorld {
     saved_relocation_plan: Option<String>,
     last_server_error: Option<CapturedServerError>,
     last_auth_attempts_elapsed: Option<Duration>,
-    /// The node whose credentials worker and wait queue a scenario filled, until it releases them.
+    /// The node whose credentials workers a scenario holds, until it releases them.
     saturated_credentials_node: Option<String>,
     /// A client connection a scenario began without waiting for it: what the connection's status
     /// command printed, or the error it ended with.
@@ -716,7 +716,6 @@ struct ScenarioWorld {
     placeholders: BTreeMap<String, String>,
     saved_healthy_placements: Vec<SavedHealthyPlacement>,
     health_fault_started_at: Option<Instant>,
-    runtime_ack_started_at: Option<Instant>,
     /// When the scenario last released a held application progress path: progress reports or
     /// revision replies.
     progress_hold_released_at: Option<Instant>,
@@ -14485,10 +14484,10 @@ async fn when_accepted_work_class_full(world: &mut ScenarioWorld, class: String)
             Duration::from_secs(60),
             world
                 .fault_injection
-                .saturate_execution(&crate::common::cluster::node_name(&node_id), class),
+                .occupy_execution(&crate::common::cluster::node_name(&node_id), class),
         )
         .await
-        .assured("the class fills all workers and waiting places before input is polled");
+        .assured("every worker of the class is held before input is polled");
     }
 }
 
@@ -14506,9 +14505,9 @@ async fn when_accepted_work_class_released(world: &mut ScenarioWorld) {
             if executors.iter().all(|(_, executor)| {
                 let snapshot = executor.snapshot();
                 snapshot.data_cpu.running == 0
-                    && snapshot.data_cpu.pending == 0
+                    && snapshot.data_cpu.waiting == 0
                     && snapshot.extension_cpu.running == 0
-                    && snapshot.extension_cpu.pending == 0
+                    && snapshot.extension_cpu.waiting == 0
             }) {
                 return;
             }
@@ -23099,25 +23098,23 @@ async fn then_within_duration_describe_emitter_reports_metric_total(
     }
 }
 
-/// Fill the credentials worker and every place in its wait queue on the leader, so the next
-/// password the leader is asked to verify waits for a place. The leader is the node the scenario
-/// created its user through, so the user is already visible there.
+/// Hold every credentials worker on the leader, so the next password the leader is asked to verify
+/// waits for one. The leader is the node the scenario created its user through, so the user is
+/// already visible there.
 #[when("credential verification on the leader node is saturated")]
 async fn when_credential_verification_on_the_leader_node_is_saturated(world: &mut ScenarioWorld) {
     let leader = current_leader_node(world).await;
     let fault_injection = world.fault_injection.clone();
     nervix_primitives::time::timeout(
         Duration::from_secs(60),
-        fault_injection.saturate_execution(
+        fault_injection.occupy_execution(
             &crate::common::cluster::node_name(&leader),
             nervix_execution::CpuClass::Credentials,
         ),
     )
     .await
     .unwrap_or_else(|error| {
-        panic!(
-            "credential verification on '{leader}' never filled its worker and wait queue: {error}"
-        )
+        panic!("credential verification on '{leader}' never held all its workers: {error}")
     });
     world.saturated_credentials_node = Some(leader);
 }

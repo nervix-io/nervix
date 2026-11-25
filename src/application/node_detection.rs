@@ -136,8 +136,7 @@ mod tests {
         task::Poll,
     };
 
-    use meticulous::OptionExt as _;
-    use nervix_execution::{ExecutionConfig, PendingJobCounts, WorkerCounts};
+    use nervix_execution::{ExecutionConfig, WorkerCounts};
     use nervix_primitives::sync::blocking::mpsc;
 
     use super::*;
@@ -152,15 +151,12 @@ mod tests {
         }
     }
 
-    /// An executor whose one bulk worker runs a job until the returned sender drops, with room in
-    /// its wait queue for every probe.
+    /// An executor whose one bulk worker runs a job until the returned sender drops, so every probe
+    /// waits for it.
     async fn held_bulk_worker() -> (Executor, mpsc::Sender<()>) {
         let executor = Executor::new(ExecutionConfig {
             workers: WorkerCounts {
                 bulk_cpu: NonZeroUsize::MIN,
-                pending_jobs: PendingJobCounts::uniform(
-                    NonZeroUsize::new(4).assured("four is positive"),
-                ),
                 ..WorkerCounts::default()
             },
             ..ExecutionConfig::default()
@@ -222,13 +218,13 @@ mod tests {
         );
         assert_eq!(properties.architecture.as_str(), std::env::consts::ARCH);
         assert!(!properties.cuda_available());
-        // A probe whose caller stopped waiting leaves the queue without running.
-        assert_eq!(executor.snapshot().cpu_class(CpuClass::Bulk).pending, 0);
+        // A probe whose caller stopped waiting stops waiting for the worker without running.
+        assert_eq!(executor.snapshot().cpu_class(CpuClass::Bulk).waiting, 0);
         drop(release);
     }
 
-    /// A probe is a planned step of the node's start, so a full bulk class holds it back rather
-    /// than refusing it, and it runs once a place frees, within the detection timeout.
+    /// A probe is a planned step of the node's start, so a busy bulk class holds it back rather
+    /// than refusing it, and it runs once the worker frees, within the detection timeout.
     #[nervix_primitives::test]
     async fn probes_the_bulk_workers_cannot_take_now_wait_for_a_place_and_run() {
         let executor = single_worker_executor();
@@ -238,7 +234,7 @@ mod tests {
         let first_poll = poll_fn(|context| Poll::Ready(detection.as_mut().poll(context))).await;
         assert!(
             first_poll.is_pending(),
-            "a full bulk class holds the probes back"
+            "a busy bulk class holds the probes back"
         );
         filled.release().await;
         let properties = detection.await;
@@ -263,7 +259,7 @@ mod tests {
         ] {
             assert!(
                 !failed && !expired,
-                "the {probe} probe runs once a place frees: {properties:?}"
+                "the {probe} probe runs once the worker frees: {properties:?}"
             );
         }
     }

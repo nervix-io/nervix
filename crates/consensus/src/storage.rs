@@ -95,24 +95,27 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_giveup_np_liveness_logs";
-const KEYSPACE_META: &str = "raft_giveup_np_liveness_meta";
-const KEYSPACE_STATE_MACHINE: &str = "raft_giveup_np_liveness_state";
-const KEYSPACE_SNAPSHOT: &str = "raft_giveup_np_liveness_snapshots";
-/// The longest keyspace name the database stores: it keeps a name's length in one byte and refuses
-/// a longer name when the keyspace opens.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "fjall keeps a keyspace name's length in one byte and refuses a longer name"
-    )
-)]
-const MAX_KEYSPACE_NAME_BYTES: usize = 255;
-const _: () = assert!(KEYSPACE_LOGS.len() <= MAX_KEYSPACE_NAME_BYTES);
-const _: () = assert!(KEYSPACE_META.len() <= MAX_KEYSPACE_NAME_BYTES);
-const _: () = assert!(KEYSPACE_STATE_MACHINE.len() <= MAX_KEYSPACE_NAME_BYTES);
-const _: () = assert!(KEYSPACE_SNAPSHOT.len() <= MAX_KEYSPACE_NAME_BYTES);
+
+/// Names one keyspace of the consensus database: `raft_`, the stored-shape marker, then the
+/// keyspace's role.
+///
+/// The marker identifies the shape of everything consensus stores, and opening refuses a keyspace
+/// under any other marker, so a database written in another shape fails to open instead of being
+/// read as the current one. The marker is 16 lowercase hexadecimal digits, a random 64-bit value,
+/// so the names keep their length however many stored-shape changes follow. A change to a stored
+/// consensus shape replaces it with a fresh random value, never an earlier one, and a merge where
+/// both sides replaced it takes another fresh value, never either side's. The Consensus Storage
+/// And Replication chapter states the convention.
+macro_rules! consensus_keyspace_name {
+    ($role:literal) => {
+        concat!("raft_", "bfe352c69af44e98", "_", $role)
+    };
+}
+
+const KEYSPACE_LOGS: &str = consensus_keyspace_name!("logs");
+const KEYSPACE_META: &str = consensus_keyspace_name!("meta");
+const KEYSPACE_STATE_MACHINE: &str = consensus_keyspace_name!("state");
+const KEYSPACE_SNAPSHOT: &str = consensus_keyspace_name!("snapshots");
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
 
@@ -239,6 +242,38 @@ const KEYSPACE_NAMES: [&str; 4] = [
     KEYSPACE_STATE_MACHINE,
     KEYSPACE_SNAPSHOT,
 ];
+
+/// The longest keyspace name fjall accepts.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "fjall's Database::keyspace accepts only a non-empty keyspace name whose length \
+                  in bytes fits a u8, and panics on any other name"
+    )
+)]
+const KEYSPACE_NAME_MAX_BYTES: usize = (1_usize << u8::BITS) - 1;
+
+/// Whether fjall accepts `name` as a keyspace name: it must be non-empty and at most
+/// [`KEYSPACE_NAME_MAX_BYTES`] long. fjall also documents a set of characters a name may use
+/// (alphanumerics, `_`, `-`, `.`, `#` and `$`), which it does not check.
+const fn fjall_accepts_keyspace_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= KEYSPACE_NAME_MAX_BYTES
+}
+
+// Every keyspace name is checked when the crate compiles, so a name fjall would refuse fails the
+// build instead of panicking when the database opens.
+const _: () = {
+    let mut index = 0;
+    while index < KEYSPACE_NAMES.len() {
+        assert!(
+            fjall_accepts_keyspace_name(KEYSPACE_NAMES[index]),
+            "every consensus keyspace name must be non-empty and at most 255 bytes long, the \
+             keyspace name limit fjall's Database::keyspace enforces with a panic"
+        );
+        index += 1;
+    }
+};
 
 /// The options a keyspace of this store is created with. The engine records them on creation
 /// and reuses the recorded memtable size on every later open.

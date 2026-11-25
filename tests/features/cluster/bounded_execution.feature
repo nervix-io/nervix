@@ -104,7 +104,7 @@ Feature: Bounded execution and transient memory
       """
       {"user_id":42}
       """
-    # While every extension worker and wait-queue place is held, the encoding waits for a place:
+    # While every extension worker is held, the encoding waits for a place on them:
     # the emitter keeps its rows, publishes nothing yet and reports no failure.
     Then the observed broker does not receive a payload within "3s"
     And DESCRIBE EMITTER "transformed_notifications" on the leader node reports no transient error for "3s"
@@ -208,7 +208,7 @@ Feature: Bounded execution and transient memory
       START;
       """
     # The mock answers only the first poll with its payload, and nothing can be unfolded while
-    # every extension worker and place in the extension wait queue is held.
+    # every extension worker is held.
     Then the HTTP mock eventually answers a poll with its payload
     And the relay subscription does not receive a payload within "3s"
     When extension execution is released on every node
@@ -241,9 +241,8 @@ Feature: Bounded execution and transient memory
       ready: true
       """
     When the unacknowledged source "<source>" delivers the payload of user 42
-    # Nothing can be unfolded while every extension worker and place in the extension wait queue
-    # is held, so the ingestor holds the payload and takes nothing more from its source, which
-    # keeps the payload sent after it.
+    # Nothing can be unfolded while every extension worker is held, so the ingestor holds the
+    # payload and takes nothing more from its source, which keeps the payload sent after it.
     Then the relay subscription does not receive a payload within "3s"
     When the unacknowledged source "<source>" delivers the payload of user 7
     And extension execution is released on every node
@@ -307,8 +306,8 @@ Feature: Bounded execution and transient memory
       {"seq":2}
       """
     # A frame in MODE NO ACK has no answer its sender waits for, so while every extension worker
-    # and place in the extension wait queue is held the first frame waits, and the connection
-    # reads nothing further, instead of closing with 1013 and losing the frame.
+    # is held the first frame waits, and the connection reads nothing further, instead of closing
+    # with 1013 and losing the frame.
     Then the endpoint websocket stays open and silent for "3s"
     And the relay subscription does not receive a payload within "1s"
     When extension execution is released on every node

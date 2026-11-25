@@ -112,8 +112,6 @@ pub enum RemoteRequestFailure {
     PayloadTooLarge { actual: u64, limit: u64 },
     #[error("the {subquota:?} request subquota is full")]
     AdmissionFull { subquota: RequestSubquota },
-    #[error("the {class:?} memory budget has no room for another {requested} bytes")]
-    MemoryBudgetFull { class: PoolClass, requested: u64 },
     #[error("a {requested}-byte decode exceeds the {capacity}-byte {class:?} memory budget")]
     MemoryBudgetExceeded {
         class: PoolClass,
@@ -132,17 +130,14 @@ pub enum RemoteRequestFailure {
 
 impl RemoteRequestFailure {
     /// Project a decoder report at the fixed remote boundary. Admission judged no input, so it
-    /// retains its class and dimensions instead of claiming malformed bytes.
+    /// retains its class and dimensions instead of claiming malformed bytes. A full class is not
+    /// among the outcomes: every decoder waits for its room, holding nothing of the class, so none
+    /// reports `BudgetExhausted`, and a charge drawn from the wrong budget is a decoder defect. Both
+    /// render as an invalid payload with their whole cause.
     pub(crate) fn decode(error: Report<TransportError>, class: PoolClass) -> Self {
         use nervix_execution::{AdmissionError, ExecutionError};
 
         match error.downcast_ref::<AdmissionError>() {
-            Some(AdmissionError::BudgetExhausted { requested, .. }) => {
-                return Self::MemoryBudgetFull {
-                    class,
-                    requested: *requested,
-                };
-            }
             Some(AdmissionError::ExceedsBudget {
                 requested,
                 capacity,
@@ -157,7 +152,10 @@ impl RemoteRequestFailure {
             Some(AdmissionError::BudgetClosed { .. }) => {
                 return Self::MemoryBudgetClosed { class };
             }
-            Some(AdmissionError::DifferentBudget { .. }) | None => {}
+            Some(
+                AdmissionError::BudgetExhausted { .. } | AdmissionError::DifferentBudget { .. },
+            )
+            | None => {}
         }
         match error.downcast_ref::<ExecutionError>() {
             Some(ExecutionError::PoolClosed { .. }) => return Self::ExecutionPoolClosed { class },
@@ -169,7 +167,6 @@ impl RemoteRequestFailure {
     pub(crate) fn status(&self) -> http::StatusCode {
         match self {
             Self::AdmissionFull { .. }
-            | Self::MemoryBudgetFull { .. }
             | Self::MemoryBudgetClosed { .. }
             | Self::ExecutionPoolClosed { .. } => http::StatusCode::SERVICE_UNAVAILABLE,
             Self::MemoryBudgetExceeded { .. } => http::StatusCode::PAYLOAD_TOO_LARGE,
@@ -977,9 +974,7 @@ impl RequestError {
             Self::AdmissionFull { .. }
             | Self::ConnectionCapacityExhausted { .. }
             | Self::RemoteRejected {
-                failure:
-                    RemoteRequestFailure::AdmissionFull { .. }
-                    | RemoteRequestFailure::MemoryBudgetFull { .. },
+                failure: RemoteRequestFailure::AdmissionFull { .. },
                 ..
             } => true,
             Self::Encode { .. }

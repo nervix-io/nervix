@@ -257,7 +257,7 @@ fn bounded_cpu_job_runs_on_the_simulated_scheduler() {
                             snapshot.bulk_cpu,
                         ] {
                             assert_eq!(workers.running, 0);
-                            assert_eq!(workers.pending, 0);
+                            assert_eq!(workers.waiting, 0);
                         }
                         for budget in [
                             snapshot.management_memory,

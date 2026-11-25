@@ -881,8 +881,8 @@ when a swap or `ALTER` replaces it, or when composing its emitter fails after th
 a flush keeps running on the runtime's blocking pool after its finish's caller stops waiting for it,
 until librdkafka's flush returns. Whichever of them lets the last handle go hands the client to its
 retirement and carries on at once, on an async worker, a connector worker or a blocking-pool thread
-alike. The retirement destroys the client in one connector storage job. A full queue holds that job
-until a place frees instead of refusing it, because nothing could present the client again, and the
+alike. The retirement destroys the client in one connector storage job. Busy workers hold that job
+until one frees instead of refusing it, because nothing could present the client again, and the
 job runs under a commands charge the client took before it was created, so retiring a client asks
 the node for nothing it could refuse. A client that cannot take that charge is not created: the
 ingestor's open or the inspector's start fails with the transient
@@ -904,7 +904,7 @@ A joined consumer whose coordinator does not answer holds a connector worker for
 seconds, and a producer holds one for its polling thread's last poll and up to half a second of
 flushing. A broker that stops answering while its clients retire therefore delays the node's other
 Kafka control calls queued behind them, never its async workers. The `connector_storage` class's
-`nervix_execution_jobs_running` and `nervix_execution_jobs_pending` count retirements with the other
+`nervix_execution_jobs_running` and `nervix_execution_jobs_waiting` count retirements with the other
 Kafka jobs. Node shutdown does not wait for a retirement: the process's runtime finishes or
 performs it as it stops after terminal teardown, as
 [Terminal Teardown](./shutdown.md#terminal-teardown) describes.
@@ -1110,7 +1110,7 @@ not disable verification or silently fall back when unavailable.
 The server composition root extends the existing changed-model binding boundary before standalone
 mutation or transaction commit. It renders mount templates using the resource resolver and checks
 the rendered schema and Nervix-owned file paths on an admitted filesystem worker, charged to command memory.
-A full command memory class or filesystem wait queue holds the inspection back, during request
+A full command memory class or busy filesystem workers hold the inspection back, during request
 preflight exactly as when a model step applies under an accepted transaction or restore; lack of
 room has not judged the configuration. The service task's existing shutdown cancellation ends the
 wait. A charge larger than the whole

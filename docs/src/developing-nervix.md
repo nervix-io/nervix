@@ -1261,7 +1261,7 @@ request without the label still checks the book's structure and its tooling.
 
 ### Credential Storage Release Note
 
-This revision requires the `raft_giveup_np_liveness_*` consensus namespace
+This revision requires the `raft_bfe352c69af44e98_*` consensus namespace
 and `ClusterState` encoding 61. A stored state with a different namespace or encoding fails with
 `invalid consensus record storage; recreate the node's stored state` before user records or log
 entries are decoded. Recreate the node's stored state; no credential conversion is performed.

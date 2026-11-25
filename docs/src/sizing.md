@@ -51,7 +51,6 @@ total the node checks against it and the capabilities it resolved.
 | Control CPU workers | `--execution-control-cpu-workers` | 1 |
 | Credentials CPU workers | `--execution-credentials-cpu-workers` | 1 |
 | Data, extension and bulk CPU workers | `--execution-data-cpu-workers`, `--execution-extension-cpu-workers`, `--execution-bulk-cpu-workers` | The CPUs left after the control and credentials workers, divided among the three |
-| Pending jobs of each class | `--execution-<class>-pending-jobs` | 64 per worker of the class, at most 1,024 |
 | Node and consensus database workers | `--database-workers`, `--raft-database-workers` | The CPU count, at most 4 |
 | Runtime worker threads | `--runtime-worker-threads` | The CPU count |
 | Blocking-thread ceiling | `--runtime-max-blocking-threads` | Every execution worker together, at least 512 |
@@ -66,16 +65,16 @@ least one place`. These counts bound admission; they do not promise an idle core
 
 The three storage classes do not follow the CPU count. Consensus storage has one worker, and
 filesystem and connector storage two each, through `--execution-consensus-storage-workers`,
-`--execution-filesystem-storage-workers` and `--execution-connector-storage-workers`. The
-`<class>` of a pending-jobs option is one of `control-cpu`, `credentials-cpu`, `data-cpu`,
-`extension-cpu`, `bulk-cpu`, `consensus-storage`, `filesystem-storage` and `connector-storage`.
+`--execution-filesystem-storage-workers` and `--execution-connector-storage-workers`. A class's
+workers are all it has: a job that finds every one busy waits for one, behind the jobs that asked
+before it, and nothing bounds how many jobs wait.
 
 An explicit `--runtime-worker-threads` cannot exceed the CPU count, and an explicit
 `--runtime-max-blocking-threads` must hold every execution worker. With an unknown CPU count, every
 CPU class has one worker and the database workers and runtime worker threads are one each.
 
 An 8-CPU node therefore runs one control and one credentials worker, two data, two extension and
-two bulk workers, with 64, 64, 128, 128 and 128 pending jobs; four workers for each database;
+two bulk workers; four workers for each database;
 eight runtime worker threads; and a blocking-thread ceiling of 512. A 16-CPU node runs five data,
 five extension and four bulk workers.
 
@@ -452,7 +451,7 @@ node=node-3 cluster parameters running=not installed
 | `adopted peer receive bounds: node=node-2 incarnation=1763745911204836625` | The receive bounds the answering node's connections use for each peer. A peer's newly committed claim is adopted on the cadence of `--control-plane-runtime-state-retry-interval`, `500ms` by default |
 | `replica-count committed=2 revision=4` | The committed value of each parameter and the revision that committed it |
 | `node=node-3 replica-count running=2 revision=4` | The value each live node has installed and its revision; `node=node-3 cluster parameters running=not installed` while a node has installed none |
-| `local execution capacity:` | The answering node's own workers and pending jobs per class, memory pools, client credit and operation limits, such as `execution workers: class=data_cpu workers=2 pending_jobs=128` |
+| `local execution capacity:` | The answering node's own workers per class, memory pools, client credit and operation limits, such as `execution workers: class=data_cpu workers=2` |
 
 Byte values print as byte counts: `memory-bytes=8589934592` is 8 GiB, and a byte parameter reads
 like `udf-code-bytes committed=65536B revision=4`. The consensus-floor prerequisite lines print in
