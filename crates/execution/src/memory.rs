@@ -153,6 +153,15 @@ pub struct MemoryBudgetSnapshot {
     pub refused: u64,
 }
 
+impl MemoryBudgetSnapshot {
+    /// The bytes of the class that were free when the snapshot was taken.
+    pub fn available_bytes(&self) -> u64 {
+        self.capacity_bytes
+            .checked_sub(self.reserved_bytes)
+            .assured("a budget's snapshot reserves its capacity less the room it found free")
+    }
+}
+
 impl MemoryBudget {
     pub(crate) fn new(class: MemoryClass, capacity: u32) -> Self {
         Self {

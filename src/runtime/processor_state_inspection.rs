@@ -680,19 +680,28 @@ impl PageReply {
         if max_rows == 0 {
             return 1;
         }
-        // Saturating sums: a page bound past `u64` is past the class, which clamps the share.
-        let columns = max_bytes.saturating_mul(2);
+        let free = executor.memory(MemoryClass::Bulk).available_bytes();
+        // A page bound past what `u64` counts is past the class, whose free room alone then bounds
+        // the share.
+        let Some(most) = self.most_bytes(max_bytes) else {
+            return free.max(1);
+        };
+        most.min(free).max(1)
+    }
+
+    /// The most an owner page of at most `max_bytes` bytes takes by the charges its rows take, or
+    /// `None` past what `u64` counts: its rows' columns twice over and, for a reply to another
+    /// node, the bodies that carry them beside what the reply sets aside ahead.
+    fn most_bytes(self, max_bytes: u64) -> Option<u64> {
+        let columns = max_bytes.checked_mul(2)?;
         let (bodies, ahead) = match self {
             Self::Local => (0, 0),
             Self::Remote {
                 descriptor,
                 framing,
-            } => (max_bytes, descriptor.saturating_add(framing)),
+            } => (max_bytes, descriptor.checked_add(framing)?),
         };
-        let most = columns.saturating_add(bodies).saturating_add(ahead);
-        let class = executor.memory(MemoryClass::Bulk);
-        let free = class.capacity_bytes.saturating_sub(class.reserved_bytes);
-        most.min(free).max(1)
+        columns.checked_add(bodies)?.checked_add(ahead)
     }
 }
 

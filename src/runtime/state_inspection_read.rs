@@ -102,11 +102,16 @@ impl MaterializedPageReply {
         if max_rows == 0 {
             return 1;
         }
-        // A bound past what the plan can count is past the class, which clamps the share.
-        let container = ResidentEncodingPlan::bound(executor, max_bytes).unwrap_or(u64::MAX);
-        let most = container.saturating_add(descriptor);
-        let class = executor.memory(MemoryClass::Bulk);
-        let free = class.capacity_bytes.saturating_sub(class.reserved_bytes);
+        let free = executor.memory(MemoryClass::Bulk).available_bytes();
+        // A bound past what the plan can count is past the class, whose free room alone then
+        // bounds the share.
+        let container = match ResidentEncodingPlan::bound(executor, max_bytes) {
+            Ok(container) => container,
+            Err(_past_the_class) => return free.max(1),
+        };
+        let Some(most) = container.checked_add(descriptor) else {
+            return free.max(1);
+        };
         most.min(free).max(1)
     }
 }
