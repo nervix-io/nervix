@@ -426,8 +426,8 @@ impl FullBulkClass {
         }
     }
 
-    /// Let the occupying job exit, so the queued job takes the worker and frees its place, and
-    /// wait for both.
+    /// Let the occupying job exit, so the job waiting behind it takes the worker, and wait for
+    /// both.
     async fn release(self) {
         self.release
             .send(())
@@ -471,7 +471,7 @@ async fn assert_complete_answer(executor: &Executor, encoded: ChargedBytes) {
 
 /// An answer's encoding on a full class waits for a place, keeping only its own charge, and the
 /// end of its exchange ends the wait with that charge given back. The class refuses nothing on the
-/// answer's account, and the answer never takes a place.
+/// answer's account, and the answer never takes a worker.
 #[cfg(not(feature = "shuttle"))]
 async fn an_ended_exchange_ends_its_answers_wait_for_a_place() {
     let executor = one_place_executor();
@@ -511,8 +511,17 @@ async fn an_ended_exchange_ends_its_answers_wait_for_a_place() {
     full.release().await;
     let after = executor.snapshot().cpu_class(CpuClass::Bulk);
     assert_eq!(
-        after.admitted, before.admitted,
-        "an answer whose exchange ended never took a place"
+        after.admitted,
+        before
+            .admitted
+            .checked_add(1)
+            .assured("a test's executor admits few jobs"),
+        "the answer's encoding was handed to the class once"
+    );
+    assert_eq!(
+        after.completed, before.admitted,
+        "an answer whose exchange ended never took a worker: only the jobs handed to the class \
+         before it ran"
     );
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }

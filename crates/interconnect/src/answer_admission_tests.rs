@@ -71,8 +71,8 @@ fn registration(ack_id: u64, registrar: &ClusterNodeName) -> RemoteAckRegistrati
     }
 }
 
-/// Every worker of one CPU class busy with a job the test releases, and one job waiting behind
-/// them. The next job waits for a worker too until the hold is released.
+/// Every worker of one CPU class busy with a job the test releases. The next job the class is handed
+/// waits for a worker until the hold is released, and it is the only job counted as waiting.
 pub(crate) struct HeldCpuClass {
     releases: Vec<nervix_primitives::sync::oneshot::Sender<()>>,
     jobs: Vec<nervix_primitives::task::JoinHandle<()>>,
@@ -108,23 +108,11 @@ impl HeldCpuClass {
                 .await
                 .expect("an occupying job reports once it holds its worker");
         }
-        let charge = executor
-            .try_reserve(MemoryClass::Bulk, 1)
-            .expect("the test's bulk class has room for one byte per held job");
-        let waiter = executor.clone();
-        jobs.push(nervix_primitives::task::spawn(async move {
-            waiter
-                .run_cpu(class, charge, |_charge, _cancellation| ())
-                .await
-                .expect("a job waiting behind the occupied workers runs once they free");
-        }));
-        while executor.snapshot().cpu_class(class).waiting < 1 {
-            nervix_primitives::task::yield_now().await;
-        }
         Self { releases, jobs }
     }
 
-    /// Let every occupying job exit, so the waiting jobs run, and wait for all of them.
+    /// Let every occupying job exit, so the jobs waiting for a worker run, and wait for the
+    /// occupying jobs.
     pub(crate) async fn release(self) {
         for release in self.releases {
             release
