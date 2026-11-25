@@ -4,6 +4,7 @@
 //! - **Must not know.** Transport, persisted records or graph placement.
 
 use super::*;
+use crate::runtime::remote_dispatch::REMOTE_RELAY_TOTAL_TIMEOUT;
 
 #[cfg(not(feature = "shuttle"))]
 #[nervix_primitives::test(start_paused = true)]

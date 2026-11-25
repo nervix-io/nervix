@@ -34907,13 +34907,10 @@ async fn then_node_eventually_forwards_http_traffic_to_observed_broker(
         match next_payload {
             Ok(Some(observed)) if observed.contains(payload.trim()) => {
                 // The copies the endpoint accepted beyond this one are still on their way. Later
-                // steps read what the scenario does next, so the observer passes over them.
-                let later_copies = match accepted.checked_sub(1) {
-                    Some(later_copies) => later_copies,
-                    // The copy came from a post whose answer was lost after the endpoint accepted
-                    // it, and no other post was accepted.
-                    None => 0,
-                };
+                // steps read what the scenario does next, so the observer passes over them. The
+                // count saturates at zero: with no accepted post, the copy came from a post whose
+                // answer was lost after the endpoint accepted it, and no other copy follows.
+                let later_copies = accepted.saturating_sub(1);
                 observer.expect_probe_copies(&payload, later_copies);
                 world.last_broker_payload = Some(observed);
                 return;

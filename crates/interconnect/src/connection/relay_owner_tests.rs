@@ -1196,6 +1196,107 @@ fn shuttle_peer_retirement_racing_runtime_admission_releases_the_exact_intake() 
     });
 }
 
+/// How the receiver run a delivery waits for ends.
+#[cfg(feature = "shuttle")]
+#[derive(Clone, Copy)]
+enum RunEnd {
+    /// A connection binds the receiver's next run, as binding a relay owner does.
+    NextRunBound,
+    /// Membership retires the receiver, as retiring departed owners does.
+    ReceiverRetired,
+}
+
+/// A delivery waits for the end of the receiver run that admitted it. Another connection first
+/// binds that same run, as each pooled connection to a peer does, which republishes the peer runs
+/// and wakes the wait without ending its run; then `end` ends the run and republishes them again.
+/// A republication that lands between the waiter's read of the runs and its registration for the
+/// next one must still end the wait: lost, the waiter would wait forever and Shuttle would report
+/// the deadlock. The wait never ends while the run it waits for is still bound.
+#[cfg(feature = "shuttle")]
+fn a_republication_after_a_waiters_read_ends_its_wait(end: RunEnd) {
+    /// The receiver run that admitted the delivery.
+    const ADMITTING_RUN: u64 = 101;
+    /// The receiver's next run, which a later connection binds.
+    const NEXT_RUN: u64 = 202;
+    const MODEL_TASK_JOINS: &str =
+        "Shuttle fails the whole execution when a model task panics, so no join observes one";
+
+    shuttle::future::block_on(async move {
+        let receiver = ClusterNodeName::parse("node-b")
+            .assured("the test node name follows the public node-name grammar");
+        let owner = StdArc::new(RelayPeerOwner::new(RelayPeerCapacity { attempts: 1 }));
+        assert!(
+            owner.bind_epoch(ADMITTING_RUN, 1, true),
+            "a new owner accepts its first run"
+        );
+        let mut publication = RelayOwnersPublication::default();
+        publication
+            .owners
+            .insert(receiver.clone(), StdArc::clone(&owner));
+        let owners = Arc::new(ArcSwap::from_pointee(publication));
+        let runs = Arc::new(PeerRuns::default());
+        runs.republish(&owners);
+
+        let waiter = nervix_primitives::task::spawn({
+            let runs = Arc::clone(&runs);
+            let receiver = receiver.clone();
+            async move {
+                runs.ended(&receiver, ADMITTING_RUN).await;
+                assert_ne!(
+                    runs.run(&receiver),
+                    Some(ADMITTING_RUN),
+                    "a wait for a run's end ended while that run was still bound"
+                );
+            }
+        });
+        let transport = nervix_primitives::task::spawn(async move {
+            assert!(
+                owner.bind_epoch(ADMITTING_RUN, 2, true),
+                "a second connection binds the same run"
+            );
+            runs.republish(&owners);
+            match end {
+                RunEnd::NextRunBound => {
+                    assert!(
+                        owner.bind_epoch(NEXT_RUN, 3, true),
+                        "a later binding replaces the run"
+                    );
+                }
+                RunEnd::ReceiverRetired => {
+                    owner.end();
+                    owners.rcu(|current| {
+                        let mut next = RelayOwnersPublication::clone(current);
+                        next.owners.remove(&receiver);
+                        next
+                    });
+                }
+            }
+            runs.republish(&owners);
+        });
+
+        transport.await.assured(MODEL_TASK_JOINS);
+        waiter.await.assured(MODEL_TASK_JOINS);
+    });
+}
+
+#[cfg(feature = "shuttle")]
+#[test]
+fn shuttle_a_wait_for_a_runs_end_is_never_missed_when_its_next_run_binds() {
+    use nervix_model_harness::shuttle::check_interleavings;
+    check_interleavings(|| {
+        a_republication_after_a_waiters_read_ends_its_wait(RunEnd::NextRunBound)
+    });
+}
+
+#[cfg(feature = "shuttle")]
+#[test]
+fn shuttle_a_wait_for_a_runs_end_is_never_missed_when_membership_retires_its_peer() {
+    use nervix_model_harness::shuttle::check_interleavings;
+    check_interleavings(|| {
+        a_republication_after_a_waiters_read_ends_its_wait(RunEnd::ReceiverRetired);
+    });
+}
+
 /// The return of an admitted attempt's terminal outcome delivery races the grant for its channel's
 /// next position, which asks for its place, reserves the peer's only capacity and registers as the
 /// receiver's grant path does. In every order the grant takes the next position with the capacity

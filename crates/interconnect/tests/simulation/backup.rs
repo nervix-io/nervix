@@ -11,7 +11,7 @@ use error_stack::Report;
 use futures_util::{StreamExt as _, stream};
 use nervix_execution::ChargedBytes;
 use nervix_interconnect::{
-    InterconnectStreamRequest, StreamHandlerError, StreamingResponse,
+    StreamHandlerError, StreamingResponse,
     backup::{
         CaptureDomainStateRequest, CaptureInventoryRequest, CapturedSectionInventory,
         CapturedStateSectionKind, FetchCapturedSection, InstallRestoredStateAction,
