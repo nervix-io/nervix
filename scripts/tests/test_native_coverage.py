@@ -325,8 +325,8 @@ class InventoryTests(unittest.TestCase):
         workflow = (REPOSITORY / ".github/workflows/check.yaml").read_text(encoding="utf-8")
         job = job_section(workflow, "extra-tests")
         # Each extra-tests step runs only under its own label, and the justfile refuses to install
-        # a toolchain on demand, so a step that builds with the pinned analysis nightly runs after
-        # an installation under its own label, or under none, rather than after another label's.
+        # a toolchain on demand, so a step that builds with the pinned nightly runs after an
+        # installation under its own label, or under none, rather than after another label's.
         pinned_commands = []
         for producer in native_coverage.PRODUCERS:
             if producer.toolchain is None:
@@ -334,7 +334,12 @@ class InventoryTests(unittest.TestCase):
             if producer.toolchain.startswith("nightly-"):
                 pinned_commands.append(f"just coverage-native-extras {producer.name}")
         self.assertIn("just coverage-native-extras test-typed-ratchet", pinned_commands)
-        pinned_commands += ["just qualify-typed-ratchet-cache", "just coverage-typed-ratchet-python"]
+        pinned_commands += [
+            "just qualify-typed-ratchet-cache",
+            "just coverage-typed-ratchet-python",
+            "just test-expiry-map-miri",
+            "just test-relay-channel-miri",
+        ]
         installed: set[str | None] = set()
         for name, condition, text in step_sections(job):
             installation = text.find("just toolchains-install")
@@ -461,6 +466,50 @@ class InstrumentationTests(unittest.TestCase):
             instrumented.describe(workspace)["target_directory"], "target/native-coverage-build"
         )
         self.assertNotIn("CARGO_TARGET_DIR", base)
+
+    def test_a_nightly_build_selects_the_stable_trait_solver_after_the_callers_flags(self) -> None:
+        self.assertEqual(native_coverage.nightly_rustflags(""), "-Znext-solver=coherence")
+        self.assertEqual(
+            native_coverage.nightly_rustflags("--cfg tokio_unstable"),
+            "--cfg tokio_unstable -Znext-solver=coherence",
+        )
+        base = {"RUSTFLAGS": "--cfg tokio_unstable", "PATH": "/usr/bin"}
+        self.assertEqual(
+            native_coverage.nightly_environment(base),
+            {"RUSTFLAGS": "--cfg tokio_unstable -Znext-solver=coherence", "PATH": "/usr/bin"},
+        )
+        self.assertEqual(base, {"RUSTFLAGS": "--cfg tokio_unstable", "PATH": "/usr/bin"})
+        self.assertEqual(
+            native_coverage.nightly_environment({}), {"RUSTFLAGS": "-Znext-solver=coherence"}
+        )
+        # Cargo reads the encoded flags alone when they are set, so the nightly's join them there.
+        encoded = native_coverage.nightly_environment(
+            {"CARGO_ENCODED_RUSTFLAGS": "-C\x1fdebuginfo=1", "RUSTFLAGS": "--cfg unread"}
+        )
+        self.assertEqual(
+            encoded,
+            {
+                "CARGO_ENCODED_RUSTFLAGS": "-C\x1fdebuginfo=1\x1f-Znext-solver=coherence",
+                "RUSTFLAGS": "--cfg unread",
+            },
+        )
+        self.assertEqual(
+            native_coverage.nightly_environment({"CARGO_ENCODED_RUSTFLAGS": ""}),
+            {"CARGO_ENCODED_RUSTFLAGS": "-Znext-solver=coherence"},
+        )
+
+    def test_only_a_producer_on_the_nightly_adds_its_flags_to_the_instrumented_build(self) -> None:
+        base = {"RUSTC_WRAPPER": "kache", "RUSTFLAGS": "--cfg tokio_unstable"}
+        nightly = Producer("check", "ordinary", (), "instrumented", (), native_coverage.NIGHTLY_TOOLCHAIN)
+        self.assertEqual(
+            nightly.instrumented_base(base),
+            {"RUSTC_WRAPPER": "kache", "RUSTFLAGS": "--cfg tokio_unstable -Znext-solver=coherence"},
+        )
+        product = Producer("check", "ordinary", (), "instrumented", ())
+        self.assertEqual(product.instrumented_base(base), base)
+        for producer in native_coverage.PRODUCERS:
+            with self.subTest(producer=producer.name):
+                self.assertIn(producer.toolchain, (None, native_coverage.NIGHTLY_TOOLCHAIN))
 
     def test_an_environment_that_would_lose_the_wrapper_or_the_counters_is_refused(self) -> None:
         cases = {
@@ -1621,7 +1670,27 @@ class CollectTests(unittest.TestCase):
         prepare, instrumented, finish = (streamed.environment for streamed in commands.streamed)
         self.assertEqual(prepare, {"RUSTC_WRAPPER": "kache"})
         self.assertEqual(instrumented["RUSTUP_TOOLCHAIN"], producer.toolchain)
+        # The instrumented build starts from the nightly's flags, which cargo-llvm-cov keeps ahead
+        # of its own. The finish recipes select their own compilers, the product's among them.
+        shown = [
+            captured.environment
+            for captured in commands.captured
+            if captured.arguments[:3] == ["cargo", "llvm-cov", "show-env"]
+        ]
+        self.assertEqual([environment["RUSTFLAGS"] for environment in shown], ["-Znext-solver=coherence"])
         self.assertEqual(finish, {"RUSTC_WRAPPER": "kache", "RUSTUP_TOOLCHAIN": producer.toolchain})
+
+    def test_the_product_compiler_starts_its_instrumented_build_from_the_callers_flags(self) -> None:
+        commands = FakeCommands(self.root)
+        collected = self.collect(commands)
+        self.assertEqual(collected.status, 0)
+        shown = [
+            captured.environment
+            for captured in commands.captured
+            if captured.arguments[:3] == ["cargo", "llvm-cov", "show-env"]
+        ]
+        self.assertEqual(len(shown), 1)
+        self.assertNotIn("RUSTFLAGS", shown[0])
 
     def test_failed_or_interrupted_toolchain_preparation_keeps_its_completion_record(self) -> None:
         producer = Producer(
@@ -1748,6 +1817,19 @@ class BuildTests(unittest.TestCase):
         # The temporary attempt is gone, and no collection was made.
         self.assertFalse(Path(compile_[native_coverage.ATTEMPT_VARIABLE]).exists())
         self.assertFalse((self.root / "target" / "native-coverage").exists())
+        self.assertNotIn("RUSTFLAGS", commands.captured[0].environment)
+
+    def test_a_build_on_the_nightly_starts_from_its_flags(self) -> None:
+        producer = Producer(
+            "check", "ordinary", (), "instrumented", (), native_coverage.NIGHTLY_TOOLCHAIN, build="compile"
+        )
+        commands = FakeCommands(self.root)
+        with mock.patch.object(native_coverage, "load_toolchain", return_value=toolchain()):
+            self.assertEqual(self.build(commands, producer), 0)
+        shown = commands.captured[0]
+        self.assertEqual(shown.arguments[:3], ["cargo", "llvm-cov", "show-env"])
+        self.assertEqual(shown.environment["RUSTUP_TOOLCHAIN"], native_coverage.NIGHTLY_TOOLCHAIN)
+        self.assertEqual(shown.environment["RUSTFLAGS"], "-Znext-solver=coherence")
 
     def test_a_build_that_runs_an_executable_fails(self) -> None:
         commands = FakeCommands(self.root)

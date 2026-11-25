@@ -943,8 +943,12 @@ corpus. `just coverage-bolero <seconds>` runs the command/artifact tests, all li
 failure qualification while collecting the separate Python runner report. It does not rerun the
 randomized producer, which CI runs as a job of its own when `bolero-random` requests it.
 
-The shared build path adds `-C instrument-coverage` to cargo-bolero's sanitizer flags, retaining
-the pinned nightly, assertions, optimization settings, case/input limits and kache wrapper.
+Every cargo-bolero invocation, the failure qualification's included, inherits the caller's
+`RUSTFLAGS` followed by the pinned nightly's own compiler flags
+([Pinned Toolchain](./architecture-enforcement.md#pinned-toolchain)), which cargo-bolero appends to
+its sanitizer flags, and each run's record under `target/bolero/runs` keeps them. The shared build
+path adds `-C instrument-coverage` after them, retaining the pinned nightly, assertions,
+optimization settings, case/input limits and kache wrapper.
 Encoded Cargo flags are rejected because they would override cargo-bolero's sanitizer flags.
 Preparation and the zero-run build probe discard their counters. Ordinary discovery, exact replay
 and deliberate failure qualification also discard counters; they cannot enter a product campaign

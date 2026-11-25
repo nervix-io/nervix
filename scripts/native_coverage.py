@@ -40,6 +40,10 @@ browser builds. Primitive compile checks and Loom weakening qualification run in
 When a producer selects a compiler, its prepare recipes install that toolchain before the
 collector resolves the compiler and validates its LLVM tools. Its attempt directory uses the
 requested toolchain's name, and the record gains the installed compiler identity after preparation.
+The only compiler a producer selects is the pinned nightly, whose instrumented build starts from
+the nightly's compiler flags after the caller's: `cargo llvm-cov show-env` keeps them ahead of its
+own, so the Cargo commands of the instrumented recipe compile with them, and the record's
+instrumentation flags name them.
 
 Each producer collects into a fresh directory,
 `<target>/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`, that no other run reads,
@@ -130,6 +134,14 @@ PREPARED_TARGET_VARIABLE = "NERVIX_PREPARED_TARGET_DIR"
 WORKSPACE_WRAPPER = SCRIPT.with_name("coverage_workspace_wrapper.py")
 WORKSPACE_FLAGS_VARIABLE = "NERVIX_NATIVE_COVERAGE_WORKSPACE_RUSTFLAGS"
 ENCODED_FLAG_SEPARATOR = "\x1f"
+# The one nightly the repository builds with, and the only compiler a producer selects in place of
+# the product's.
+NIGHTLY_TOOLCHAIN = "nightly-2026-11-21"
+# A nightly rustc solves every trait goal with the next-generation solver by default, which a
+# stable rustc uses for coherence alone; under that default the server library's analysis needs
+# about four times the memory. Every compilation on the nightly takes these flags after the
+# caller's own, and so compiles with the stable compiler's solver.
+NIGHTLY_RUSTFLAGS: tuple[str, ...] = ("-Znext-solver=coherence",)
 EXECUTIONS = "executions.jsonl"
 PROFILES = "profiles"
 MERGED_PROFILE = "merged.profdata"
@@ -216,6 +228,8 @@ class Producer:
     prepare: tuple[str, ...]
     instrumented: str
     finish: tuple[str, ...]
+    # The compiler its instrumented recipe builds with in place of the product's: `None`, or
+    # `NIGHTLY_TOOLCHAIN`.
     toolchain: str | None = None
     filterable: bool = False
     # The Deloxide lane selection its instrumented recipe runs, whose complete record export
@@ -237,6 +251,14 @@ class Producer:
     def recipes(self) -> list[str]:
         return [*self.prepare, self.instrumented, *self.finish]
 
+    def instrumented_base(self, environment: Mapping[str, str]) -> dict[str, str]:
+        """The environment its instrumented build starts from. On the nightly, which the whole
+        instrumented recipe then compiles with, the nightly's flags follow the caller's. The finish
+        recipes keep the caller's flags alone, because they select the product compiler too."""
+        if self.toolchain == NIGHTLY_TOOLCHAIN:
+            return nightly_environment(environment)
+        return dict(environment)
+
 
 CI_PRODUCERS: tuple[Producer, ...] = (
     Producer(
@@ -245,7 +267,7 @@ CI_PRODUCERS: tuple[Producer, ...] = (
         prepare=(),
         instrumented="test-typed-ratchet-ordinary",
         finish=("test-typed-ratchet-product-docs", "test-typed-ratchet-modeled"),
-        toolchain="nightly-2026-11-21",
+        toolchain=NIGHTLY_TOOLCHAIN,
     ),
     Producer(
         name="bench-smoke",
@@ -734,6 +756,24 @@ def compiler_flags(exported: Mapping[str, str]) -> list[str]:
     if encoded is not None:
         return [flag for flag in encoded.split(ENCODED_FLAG_SEPARATOR) if flag]
     return exported.get("RUSTFLAGS", "").split()
+
+
+def nightly_rustflags(inherited: str) -> str:
+    """The RUSTFLAGS of a compilation on the nightly: the caller's flags, then the nightly's."""
+    return " ".join([inherited.strip(), *NIGHTLY_RUSTFLAGS]).strip()
+
+
+def nightly_environment(base: Mapping[str, str]) -> dict[str, str]:
+    """A copy of `base` whose compiler flags end with the nightly's, in the variable Cargo reads."""
+    environment = dict(base)
+    encoded = environment.get("CARGO_ENCODED_RUSTFLAGS")
+    if encoded is None:
+        environment["RUSTFLAGS"] = nightly_rustflags(environment.get("RUSTFLAGS", ""))
+        return environment
+    # Cargo reads the encoded flags alone when they are set.
+    flags = [flag for flag in encoded.split(ENCODED_FLAG_SEPARATOR) if flag]
+    environment["CARGO_ENCODED_RUSTFLAGS"] = ENCODED_FLAG_SEPARATOR.join([*flags, *NIGHTLY_RUSTFLAGS])
+    return environment
 
 
 def instruments_coverage(flags: Sequence[str]) -> bool:
@@ -1527,7 +1567,12 @@ def collect(
 
         stage = enter(Stage.INSTRUMENT)
         instrumented = instrumentation(
-            commands, workspace, toolchain, attempt, environment, producer.instrumented_crates
+            commands,
+            workspace,
+            toolchain,
+            attempt,
+            producer.instrumented_base(environment),
+            producer.instrumented_crates,
         )
         if producer.filterable:
             instrumented.environment[MODEL_VARIABLE] = str(attempt / MODEL_REPORT)
@@ -1620,7 +1665,12 @@ def build(
         attempt = Path(directory)
         (attempt / PROFILES).mkdir()
         instrumented = instrumentation(
-            commands, mode_workspace, toolchain, attempt, build_environment, producer.instrumented_crates
+            commands,
+            mode_workspace,
+            toolchain,
+            attempt,
+            producer.instrumented_base(build_environment),
+            producer.instrumented_crates,
         )
         with mode_workspace.build_lock():
             status = commands.stream(["just", producer.build], environment=instrumented.environment)

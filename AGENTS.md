@@ -573,7 +573,9 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   plan-based recovery.
 - [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md): the contract
   matrix, source contracts, analysis toolchain, workaround audit and ratchet summarized in
-  [Architecture Rules and the Debt Ratchet](#architecture-rules-and-the-debt-ratchet).
+  [Architecture Rules and the Debt Ratchet](#architecture-rules-and-the-debt-ratchet), and the
+  pinned nightly: what builds on it, every declaration of it and the compiler flags every
+  compilation on it takes.
 - [Coverage Reports And The Complexity Gate](docs/src/coverage-reports.md): coverage producers and
   exports, source mapping and exclusions, ordinary report ownership, merge records and integrity
   verdicts, patch coverage, the advisory CRAP report, the full workspace union, the mandatory
@@ -1348,15 +1350,15 @@ for primitives, clocks, typed errors and mode dependencies, and the coverage, Bo
 keep their own inputs and evidence; they may invoke the Rust owner as a process without interpreting
 its compiler evidence.
 
-The synchronization driver, its isolated artifacts and Bolero's sanitizer campaigns use
-`nightly-2026-11-21`; product builds stay stable. An upgrade moves every declaration of that nightly
-in one change that keeps every compiler fixture's result. The driver's workspace wrapper composes
-beneath the configured kache. Analysis requires current source, annotations, rule, dependency and
-configuration inputs and complete declared target evidence, zero findings included, and missing
-evidence rebuilds only isolated authored artifacts in a supported cache namespace.
-`just test-typed-ratchet` and `just qualify-typed-ratchet-cache` qualify the diagnostics, the
-current paired API doctests and completion and cache behavior. Tooling Bolero targets use the shared
-inventory and CI policy, and native coverage uses matching LLVM tools.
+The synchronization driver, its isolated artifacts and Bolero's sanitizer campaigns build on the
+[pinned nightly](#commands-and-documentation) with its compiler flags. An upgrade moves every
+declaration of that nightly in one change that keeps every compiler fixture's result. The driver's
+workspace wrapper composes beneath the configured kache. Analysis requires current source,
+annotations, rule, dependency and configuration inputs and complete declared target evidence, zero
+findings included, and missing evidence rebuilds only isolated authored artifacts in a supported
+cache namespace. `just test-typed-ratchet` and `just qualify-typed-ratchet-cache` qualify the
+diagnostics, the current paired API doctests and completion and cache behavior. Tooling Bolero
+targets use the shared inventory and CI policy, and native coverage uses matching LLVM tools.
 
 ### The ratchet
 
@@ -1681,6 +1683,18 @@ text calls CRAP a gate; report integrity is mandatory, and the only complexity v
   disables it), or hide the host's Cargo configuration with another `HOME` or `CARGO_HOME`. If kache
   is unavailable or a build fails under it, stop and report instead of building without it. Coverage
   uses the matching toolchain's declared `llvm-tools`.
+- Product code builds on the stable toolchain `rust-toolchain.toml` declares, and everything that
+  needs a nightly (formatting, Miri, the analysis driver with its tooling workspace, Bolero's
+  sanitizer campaigns) uses the one pinned nightly, `nightly-2026-11-21`, which the justfile names
+  once as `nightly_toolchain`. Never name another nightly, however spelled: the floating channel
+  (`+nightly`, `rustup run nightly`, `RUSTUP_TOOLCHAIN=nightly`, an undated channel in a manifest,
+  script or workflow step) or a second dated one. Every compilation on the nightly passes
+  `-Znext-solver=coherence`, in the justfile through `nightly_rustflags` and
+  `nightly_rustdocflags`: a nightly rustc otherwise solves every trait goal with the
+  next-generation solver, which a stable rustc uses for coherence alone, and the server library's
+  analysis then needs about four times the memory. No stable compiler receives the flag, which it
+  refuses. [Pinned Toolchain](docs/src/architecture-enforcement.md#pinned-toolchain) owns every
+  declaration of the nightly and of its flags, and the upgrade that moves them together.
 - Textual reports that are not stable documentation never enter the repository. Every artifact
   generated while implementing a task, including implementation reports, review and audit findings,
   validation results, logs, benchmark results and screenshots, is recorded or attached on the

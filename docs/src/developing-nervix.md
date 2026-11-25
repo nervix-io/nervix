@@ -373,6 +373,14 @@ For repository-wide validation:
 just validate
 ```
 
+`just validate` formats before it validates. Formatting needs a nightly rustfmt, because
+`rustfmt.toml` enables unstable options, and takes it from the one pinned nightly that also runs
+Miri, the compiler architecture gate's tooling and Bolero's sanitizer campaigns. Install it beside
+the product toolchain with `just toolchains-install`: the recipes never install a toolchain on
+demand and never name the floating `nightly` channel.
+[Pinned Toolchain](./architecture-enforcement.md#pinned-toolchain) lists what builds on the nightly
+and the compiler flags every compilation on it takes.
+
 The `checks` and `scenarios-build` CI jobs install the Go formatters through
 `scripts/install_go_ci_tool.py`: dockerfmt is pinned to v0.5.4 and ghokin to v3.9.0. The installer
 uses Go 1.26 in each job, keeps the public Go checksum database enabled, and disallows an implicit

@@ -747,7 +747,8 @@ def metadata(
         "features": target.features,
         "toolchain": inventory.nightly,
         "sanitizer": inventory.sanitizer,
-        "rustflags": os.environ.get("RUSTFLAGS", ""),
+        # The flags cargo-bolero inherits and appends to its own: the caller's, then the nightly's.
+        "rustflags": sanitizer_environment()["RUSTFLAGS"],
         "rustc_wrapper": os.environ.get("RUSTC_WRAPPER"),
         "command": args,
         "result": result,
@@ -858,6 +859,16 @@ def bolero_args(inventory: Inventory, target: Target) -> list[str]:
     if target.features:
         args.extend(["--features", " ".join(target.features)])
     return args
+
+
+def sanitizer_environment() -> dict[str, str]:
+    """What a cargo-bolero invocation that collects no source coverage adds to its environment.
+
+    cargo-bolero appends the RUSTFLAGS it inherits to its sanitizer flags, and the sanitizer
+    nightly's own flags reach every crate it compiles for its target through them. A build that
+    collects coverage takes them from `coverage.build_environment()` instead.
+    """
+    return {"RUSTFLAGS": coverage.native.nightly_rustflags(os.environ.get("RUSTFLAGS", ""))}
 
 
 def verify_tool(inventory: Inventory) -> None:
@@ -1388,6 +1399,7 @@ def qualify(inventory: Inventory) -> None:
     try:
         result = command(
             args,
+            env=sanitizer_environment(),
             timeout=1800,
             log=path / "assertion.log",
             allowed_status=tuple(range(256)),
@@ -1467,7 +1479,11 @@ def qualify_sanitizer(inventory: Inventory, qualification: Qualification) -> Non
     args = marker_campaign(inventory, target, path, SANITIZER_MARKER)
     started = time.monotonic()
     result = command(
-        args, timeout=1800, log=path / "sanitizer.log", allowed_status=tuple(range(256))
+        args,
+        env=sanitizer_environment(),
+        timeout=1800,
+        log=path / "sanitizer.log",
+        allowed_status=tuple(range(256)),
     )
     saved = saved_crashes(path)
     report = (path / "sanitizer.log").read_text(errors="replace")
@@ -1502,6 +1518,7 @@ def qualify_timeout(inventory: Inventory, fixture: Target, qualification: Qualif
     try:
         timeout_result = command(
             timeout_args,
+            env=sanitizer_environment(),
             timeout=10,
             log=timeout_path / "timeout.log",
             allowed_status=tuple(range(256)),
@@ -1533,6 +1550,7 @@ def qualify_engine(
     ]
     engine_result = command(
         invalid,
+        env=sanitizer_environment(),
         timeout=1800,
         log=path / "engine-failure.log",
         allowed_status=tuple(range(256)),
@@ -1548,6 +1566,7 @@ def qualify_engine(
     ]
     missing_result = command(
         missing,
+        env=sanitizer_environment(),
         timeout=1800,
         log=path / "missing-target.log",
         allowed_status=tuple(range(256)),
