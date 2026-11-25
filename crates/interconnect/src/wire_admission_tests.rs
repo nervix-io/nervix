@@ -166,7 +166,7 @@ async fn nested_decode_cancellation_keeps_its_own_input_charge() {
         bytes,
     ));
     assert!(decoding.as_mut().now_or_never().is_none());
-    assert_eq!(executor.snapshot().bulk_cpu.pending, 1);
+    assert_eq!(executor.snapshot().bulk_cpu.waiting, 1);
     drop(envelope);
     assert_eq!(
         executor.memory(MemoryClass::Bulk).reserved_bytes,
@@ -177,7 +177,7 @@ async fn nested_decode_cancellation_keeps_its_own_input_charge() {
         "the queued decoder owns both input and output after its caller's envelope ends"
     );
     drop(decoding);
-    assert_eq!(executor.snapshot().bulk_cpu.pending, 0);
+    assert_eq!(executor.snapshot().bulk_cpu.waiting, 0);
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 1);
     release
         .send(())
@@ -203,22 +203,21 @@ async fn nested_decode_cancellation_keeps_its_own_input_charge() {
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
-/// A full CPU class is backpressure for every frame: when its one worker is busy and its one queue
-/// place is taken, a request frame's encoding and decoding wait for a place exactly as a response
-/// frame's do, and all of them complete once the class frees.
+/// A busy CPU class is backpressure for every frame: when its one worker is busy and another job
+/// waits behind it, a request frame's encoding and decoding wait for a place on the worker exactly
+/// as a response frame's do, and all of them complete once the class frees.
 #[cfg(not(feature = "shuttle"))]
 #[nervix_primitives::test]
 async fn a_full_class_holds_request_and_response_frames_back_until_a_place_frees() {
     use std::num::NonZeroUsize;
 
-    use nervix_execution::{ExecutionConfig, PendingJobCounts, WorkerCounts};
+    use nervix_execution::{ExecutionConfig, WorkerCounts};
 
     use crate::request::ResponseEnvelope;
 
     let executor = Executor::new(ExecutionConfig {
         workers: WorkerCounts {
             bulk_cpu: NonZeroUsize::MIN,
-            pending_jobs: PendingJobCounts::uniform(NonZeroUsize::MIN),
             ..WorkerCounts::default()
         },
         ..ExecutionConfig::default()
@@ -247,7 +246,7 @@ async fn a_full_class_holds_request_and_response_frames_back_until_a_place_frees
     let queued = nervix_primitives::task::spawn(async move {
         queued.run_cpu(CpuClass::Bulk, charge, |_, _| ()).await
     });
-    while executor.snapshot().cpu_class(CpuClass::Bulk).pending == 0 {
+    while executor.snapshot().cpu_class(CpuClass::Bulk).waiting == 0 {
         nervix_primitives::task::yield_now().await;
     }
     // Each frame is read together with the room its decoding takes.
@@ -356,16 +355,15 @@ async fn a_full_class_holds_request_and_response_frames_back_until_a_place_frees
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
-/// An executor whose bulk class has one worker and one place in its wait queue.
+/// An executor whose bulk class has one worker.
 fn one_place_executor() -> Executor {
     use std::num::NonZeroUsize;
 
-    use nervix_execution::{ExecutionConfig, PendingJobCounts, WorkerCounts};
+    use nervix_execution::{ExecutionConfig, WorkerCounts};
 
     Executor::new(ExecutionConfig {
         workers: WorkerCounts {
             bulk_cpu: NonZeroUsize::MIN,
-            pending_jobs: PendingJobCounts::uniform(NonZeroUsize::MIN),
             ..WorkerCounts::default()
         },
         ..ExecutionConfig::default()
@@ -373,9 +371,9 @@ fn one_place_executor() -> Executor {
     .assured("the test changes only worker counts")
 }
 
-/// The bulk class of a [`one_place_executor`] held full: its worker runs a job that waits for the
-/// test, and its one place is taken by a job waiting behind it. A job that refuses on a full class
-/// is refused, and one that waits for a place waits, until the hold is released.
+/// The bulk class of a [`one_place_executor`] held busy: its worker runs a job that waits for the
+/// test, and another job waits behind it, so the next job waits for the worker until the hold is
+/// released.
 struct FullBulkClass {
     release: nervix_primitives::sync::oneshot::Sender<()>,
     occupying: nervix_primitives::task::JoinHandle<()>,
@@ -418,7 +416,7 @@ impl FullBulkClass {
                 .await
                 .assured("the queued job runs once the worker frees");
         });
-        while executor.snapshot().cpu_class(CpuClass::Bulk).pending == 0 {
+        while executor.snapshot().cpu_class(CpuClass::Bulk).waiting == 0 {
             nervix_primitives::task::yield_now().await;
         }
         Self {
@@ -428,8 +426,8 @@ impl FullBulkClass {
         }
     }
 
-    /// Let the occupying job exit, so the queued job takes the worker and frees its place, and
-    /// wait for both.
+    /// Let the occupying job exit, so the job waiting behind it takes the worker, and wait for
+    /// both.
     async fn release(self) {
         self.release
             .send(())
@@ -473,7 +471,7 @@ async fn assert_complete_answer(executor: &Executor, encoded: ChargedBytes) {
 
 /// An answer's encoding on a full class waits for a place, keeping only its own charge, and the
 /// end of its exchange ends the wait with that charge given back. The class refuses nothing on the
-/// answer's account, and the answer never takes a place.
+/// answer's account, and the answer never takes a worker.
 #[cfg(not(feature = "shuttle"))]
 async fn an_ended_exchange_ends_its_answers_wait_for_a_place() {
     let executor = one_place_executor();
@@ -513,8 +511,17 @@ async fn an_ended_exchange_ends_its_answers_wait_for_a_place() {
     full.release().await;
     let after = executor.snapshot().cpu_class(CpuClass::Bulk);
     assert_eq!(
-        after.admitted, before.admitted,
-        "an answer whose exchange ended never took a place"
+        after.admitted,
+        before
+            .admitted
+            .checked_add(1)
+            .assured("a test's executor admits few jobs"),
+        "the answer's encoding was handed to the class once"
+    );
+    assert_eq!(
+        after.completed, before.admitted,
+        "an answer whose exchange ended never took a worker: only the jobs handed to the class \
+         before it ran"
     );
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
@@ -775,7 +782,6 @@ fn shuttle_an_answer_waiting_for_a_place_ends_with_its_exchange_or_takes_the_fre
             let class = executor.snapshot().cpu_class(CpuClass::Bulk);
             assert_eq!(class.waiting, 0, "no answer still waits for a place");
             assert_eq!(class.running, 0, "every job left its worker");
-            assert_eq!(class.pending, 0, "no job keeps a place");
             assert_eq!(
                 executor.memory(MemoryClass::Bulk).reserved_bytes,
                 0,
@@ -928,7 +934,6 @@ fn shuttle_a_received_body_waiting_for_a_place_ends_with_its_exchange_or_takes_t
             let class = executor.snapshot().cpu_class(CpuClass::Bulk);
             assert_eq!(class.waiting, 0, "no decoding still waits for a place");
             assert_eq!(class.running, 0, "every job left its worker");
-            assert_eq!(class.pending, 0, "no job keeps a place");
             assert_eq!(
                 executor.memory(MemoryClass::Bulk).reserved_bytes,
                 0,

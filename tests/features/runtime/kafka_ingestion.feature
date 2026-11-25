@@ -694,7 +694,7 @@ Feature: Kafka ingestion
       "seq":42
       """
     When the mock Kafka broker releases its answers
-    Then within "60s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_pending" with labels eventually equals 0
+    Then within "60s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_waiting" with labels eventually equals 0
       """
       class="connector_storage"
       """

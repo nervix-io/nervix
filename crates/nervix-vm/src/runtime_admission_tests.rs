@@ -173,7 +173,7 @@ fn increment_batch(program: &CompiledProgram, rows: usize) -> TypedBatch {
     .expect("the batch matches the program's input")
 }
 
-/// An executor with one worker and one waiting place per class, so a test can fill a class.
+/// An executor with one worker per class, so a test can keep a class's only worker busy.
 fn single_worker_executor() -> Executor {
     let one = NonZeroUsize::MIN;
     Executor::new(ExecutionConfig {
@@ -187,7 +187,6 @@ fn single_worker_executor() -> Executor {
             filesystem_storage: one,
             connector_storage: nervix_execution::ConnectorStorageWorkers::resolve(Some(one))
                 .expect("one worker fits the primitive permit bound"),
-            pending_jobs: nervix_execution::PendingJobCounts::uniform(one),
         },
         ..ExecutionConfig::default()
     })
@@ -271,10 +270,11 @@ async fn an_extension_call_runs_on_the_extension_workers_whatever_the_batch_size
     assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
 }
 
-/// A class holding its whole wait queue is backpressure: a further execution waits for a place,
-/// calls none of its functions while it waits, and runs once one frees.
+/// A class whose only worker is busy is backpressure: a further execution waits for the worker,
+/// behind the one that asked before it, calls none of its functions while it waits, and runs once
+/// the worker frees.
 #[nervix_primitives::test]
-async fn a_full_class_holds_the_execution_until_a_place_frees() {
+async fn a_busy_class_holds_the_execution_until_its_worker_frees() {
     let executor = single_worker_executor();
     let program = two_header_program();
     let (held_context, mut held) = scripted_injector(FunctionExecutionPolicy::Extension);
@@ -302,7 +302,7 @@ async fn a_full_class_holds_the_execution_until_a_place_frees() {
                 .await
         }
     });
-    until(|| executor.snapshot().extension_cpu.pending == 1).await;
+    until(|| executor.snapshot().extension_cpu.waiting == 1).await;
 
     let (later_context, later_control) = scripted_injector(FunctionExecutionPolicy::Extension);
     drop(later_control.release);
@@ -319,10 +319,10 @@ async fn a_full_class_holds_the_execution_until_a_place_frees() {
     .await;
     assert!(
         first_poll.is_pending(),
-        "a class holding its whole wait queue holds the execution instead of refusing it"
+        "a busy class holds the execution instead of refusing it"
     );
     assert_eq!(later_control.calls.load(Ordering::Acquire), 0);
-    assert_eq!(executor.snapshot().extension_cpu.pending, 1);
+    assert_eq!(executor.snapshot().extension_cpu.waiting, 2);
     drop(held.release);
     holding
         .await
@@ -330,11 +330,11 @@ async fn a_full_class_holds_the_execution_until_a_place_frees() {
         .expect("the held program executes");
     waiting
         .await
-        .expect("the queued execution completes")
-        .expect("the queued program executes");
+        .expect("the waiting execution completes")
+        .expect("the waiting program executes");
     later
         .await
-        .expect("the execution that found the class full runs once a place frees");
+        .expect("the execution that found the class busy runs once the worker takes it");
     assert_eq!(later_control.calls.load(Ordering::Acquire), 2);
     assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
 }

@@ -627,7 +627,7 @@ impl SessionServiceImpl {
                     model_file = %processor.file,
                     workers = snapshot.bulk_cpu.workers,
                     running = snapshot.bulk_cpu.running,
-                    pending = snapshot.bulk_cpu.pending,
+                    waiting = snapshot.bulk_cpu.waiting,
                     reserved_bytes = snapshot.bulk_memory.reserved_bytes,
                     capacity_bytes = snapshot.bulk_memory.capacity_bytes,
                     "ONNX metadata inspection deadline expired"
@@ -945,7 +945,7 @@ mod tests {
     ))]
     #[test]
     fn deloxide_onnx_metadata_inspection() {
-        run_metadata_inspection(released_bulk_queue_model_preflights());
+        run_metadata_inspection(released_busy_bulk_workers_model_preflights());
         metadata_image_reads_use_a_bounded_buffer_and_leave_load_errors_to_the_loader();
         cancelling_image_preparation_stops_before_the_next_read_and_releases_its_charge();
         image_preparation_preserves_the_external_loaders_path_and_error_ownership();
@@ -1120,7 +1120,7 @@ mod tests {
         .await
         .expect("the cancelled read returns its worker and charge");
         assert_eq!(executor.snapshot().bulk_cpu.running, 0);
-        assert_eq!(executor.snapshot().bulk_cpu.pending, 0);
+        assert_eq!(executor.snapshot().bulk_cpu.waiting, 0);
         assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
     }
 
@@ -1165,7 +1165,7 @@ mod tests {
             executor.snapshot().bulk_cpu.admitted,
             before.bulk_cpu.admitted
         );
-        assert_eq!(executor.snapshot().bulk_cpu.pending, 0);
+        assert_eq!(executor.snapshot().bulk_cpu.waiting, 0);
         assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, capacity);
         drop(held);
         assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
@@ -1307,15 +1307,18 @@ mod tests {
 
     #[cfg(all(feature = "testing", not(any(feature = "shuttle", feature = "loom"))))]
     #[test]
-    fn a_released_full_bulk_queue_admits_concurrent_fresh_model_preflights() {
+    fn released_busy_bulk_workers_take_concurrent_fresh_model_preflights() {
         isolated_metadata_inspection(
-            "application::model_validation::tests::a_released_full_bulk_queue_admits_concurrent_fresh_model_preflights",
-            released_bulk_queue_model_preflights(),
+            "application::model_validation::tests::released_busy_bulk_workers_take_concurrent_fresh_model_preflights",
+            released_busy_bulk_workers_model_preflights(),
         );
     }
 
     #[cfg(all(feature = "testing", not(any(feature = "shuttle", feature = "loom"))))]
-    async fn released_bulk_queue_model_preflights() {
+    async fn released_busy_bulk_workers_model_preflights() {
+        // Jobs already waiting for the busy workers when the held preflight asks; nothing bounds how
+        // many may wait.
+        const WAITING_JOBS: usize = 8;
         let executor = nervix_execution::Executor::default();
         let crate::application::test_fixtures::TestService {
             service,
@@ -1378,20 +1381,20 @@ mod tests {
             releases.push(release);
         }
         let mut empty_jobs = nervix_primitives::task::JoinSet::new();
-        for _ in 0..before.queue_capacity {
+        for _ in 0..WAITING_JOBS {
             nervix_primitives::task::consume_budget().await;
             let worker = executor.clone();
             let reservation = worker
                 .try_reserve(MemoryClass::Bulk, 0)
-                .assured("an empty queued job requires no memory charge");
+                .assured("an empty waiting job requires no memory charge");
             empty_jobs.spawn(async move {
                 worker
                     .run_cpu(CpuClass::Bulk, reservation, |_, _| ())
                     .await
-                    .assured("each empty job has one bounded queue place");
+                    .assured("each empty job runs once a worker takes it");
             });
         }
-        while executor.snapshot().bulk_cpu.pending != before.queue_capacity {
+        while executor.snapshot().bulk_cpu.waiting != WAITING_JOBS {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
         }
@@ -1407,18 +1410,10 @@ mod tests {
         .await;
         assert!(
             first_poll.is_pending(),
-            "a full queue holds an uninspected model's preflight back instead of refusing it"
+            "busy workers hold an uninspected model's preflight back instead of refusing it"
         );
-        assert_eq!(executor.snapshot().bulk_cpu.pending, before.queue_capacity);
+        assert!(executor.snapshot().bulk_cpu.waiting >= WAITING_JOBS);
         drop(releases);
-        let pending_limit = before
-            .queue_capacity
-            .checked_sub(4)
-            .assured("the default queue holds four preflights");
-        while executor.snapshot().bulk_cpu.pending > pending_limit {
-            nervix_primitives::task::consume_budget().await;
-            nervix_primitives::task::yield_now().await;
-        }
         let mut preflights = nervix_primitives::task::JoinSet::new();
         for job in 0..4 {
             let service = service.clone();
@@ -1431,7 +1426,7 @@ mod tests {
                 service
                     .validate_inferencer_model_metadata(&processor, &model)
                     .await
-                    .assured("the released queue admits a matching model within its product bound");
+                    .assured("the released workers take a matching model within its product bound");
             });
         }
         while let Some(preflight) = preflights.join_next().await {
@@ -1439,10 +1434,10 @@ mod tests {
             preflight.assured("the admitted production preflight did not panic");
         }
         held.await
-            .assured("the held preflight inspects its model once a place frees");
+            .assured("the held preflight inspects its model once a worker takes it");
         while let Some(empty) = empty_jobs.join_next().await {
             nervix_primitives::task::consume_budget().await;
-            empty.assured("the queued empty job completed");
+            empty.assured("the waiting empty job completed");
         }
         while let Some(holder) = holders.join_next().await {
             nervix_primitives::task::consume_budget().await;
@@ -1450,16 +1445,16 @@ mod tests {
         }
         let completed = before
             .workers
-            .checked_add(before.queue_capacity)
+            .checked_add(WAITING_JOBS)
             .and_then(|jobs| jobs.checked_add(5))
-            .assured("the bounded default workers, queue and preflights fit usize");
+            .assured("the bounded default workers, waiting jobs and preflights fit usize");
         let completed =
             u64::try_from(completed).assured("the bounded job count fits the execution counters");
         let after = executor.snapshot();
         assert_eq!(after.bulk_cpu.admitted - before.admitted, completed);
         assert_eq!(after.bulk_cpu.completed - before.completed, completed);
         assert_eq!(after.bulk_cpu.running, 0);
-        assert_eq!(after.bulk_cpu.pending, 0);
+        assert_eq!(after.bulk_cpu.waiting, 0);
         assert_eq!(after.bulk_memory.reserved_bytes, 0);
         std::fs::remove_dir_all(path).assured("the completed service fixture can be removed");
     }
@@ -1749,7 +1744,7 @@ mod tests {
         );
         let timed_out = executor.snapshot();
         assert_eq!(timed_out.bulk_cpu.running, 1);
-        assert_eq!(timed_out.bulk_cpu.pending, 0);
+        assert_eq!(timed_out.bulk_cpu.waiting, 0);
         assert_eq!(timed_out.bulk_memory.reserved_bytes, 0);
         release
             .send(())

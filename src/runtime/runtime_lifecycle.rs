@@ -839,6 +839,25 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_ownership_handoff_commit_if_armed(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .pause_ownership_handoff_commit_if_armed(domain)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn record_ownership_handoff_reconciliation(
+        &self,
+        node_id: &ClusterNodeName,
+        discarded: u64,
+    ) {
+        self.inner
+            .fault_injection
+            .record_ownership_handoff_reconciliation(node_id, discarded);
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_ownership_handoff_activation_if_armed(&self, domain: &DomainName) {
         self.inner
             .fault_injection

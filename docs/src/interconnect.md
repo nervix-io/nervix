@@ -371,9 +371,11 @@ It first commits a consensus barrier and sends its log position with the reconci
 the replication pool. Each participant applies through that position before consulting its local
 committed schedule. An exact ownership transition in that schedule preserves its preparation even
 when the original coordinator or destination process has gone. An uncommitted preparation remains
-only while the original coordinator process and both bound participant incarnations are live and
-the exact ownership-handoff gate is still held; every other preparation is discarded durably. A
-second pass after the gate deadline reclaims work that was active during the first pass.
+while the original coordinator process still leads and the domain's committed schedule is still the
+move's base, with the moved unit on its source, because that coordinator can still commit the move.
+A participant's restart or the end of the hold does not remove it, and the coordinator discards the
+preparations of a move it does not commit. Every other preparation is discarded durably. A second
+pass after the gate deadline reclaims work whose move could still commit during the first pass.
 
 An ownership handoff sends engagement, drain status and release only to the hold's participants:
 the live nodes that run part of the moved unit's boundary, as
@@ -838,11 +840,11 @@ still receives grants and admission beside it, and cancelling the held batch ret
 reservation once the application drops the batch. Once the application has decoded a batch, it keeps
 only the batch's body and decoded columns charged while its runtime takes the batch in.
 
-A CPU class admits each job separately: one of its workers runs, a bounded number wait, and no job
-joins an unbounded queue. A typed request runs several jobs of its class in turn, encoding its
-payload and envelope and later decoding the response. A full queue holds each of them back until a
-place frees, the request's own jobs as well as its answer's: the executor's pools are backpressure
-on the node's resources, never a reason to refuse a frame. The caller's reset and the request's own
+A CPU class admits each job separately: a job runs on a free worker of its class or waits for one,
+behind the jobs that asked before it. A typed request runs several jobs of its class in turn,
+encoding its payload and envelope and later decoding the response. Busy workers hold each of them
+back until one frees, the request's own jobs as well as its answer's: the executor's pools are
+backpressure on the node's resources, never a reason to refuse a frame. The caller's reset and the request's own
 deadline end every wait, and a request that fails at one of its later stages fails with
 `RequestError::Transport`. Every other class keeps admitting independently.
 

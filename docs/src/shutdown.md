@@ -807,15 +807,22 @@ The current leader reconciles durable preparations after a leadership or live-in
 first commits a consensus barrier and sends its log position with the reconciliation request; each
 participant applies through that position before consulting its own committed schedule. A
 preparation survives when its exact transition is the committed owner change, regardless of which
-processes have since restarted. An uncommitted preparation survives only while the original
-coordinator process and both bound participant incarnations are live, the base schedule still has
-the source owning the entity, and the exact gate is still held. Every other preparation is discarded
-durably. Discard is exact and idempotent over the operation identity, so a delayed discard for one
-operation cannot remove a replacement prepared by another.
+processes have since restarted. An uncommitted preparation survives while the original coordinator
+process still leads and the base schedule is still committed with the source owning the entity,
+because that coordinator can still commit the move; a participant's restart or the end of the hold
+does not end it, and the coordinator discards the preparations of a move it does not commit. Every
+other preparation is discarded durably. Discard is exact and idempotent over the operation
+identity, so a delayed discard for one operation cannot remove a replacement prepared by another.
 
-A destination that restarts between preparation and activation invalidates the handoff: the
-operation fails with `destination node '<node_id>' changed process incarnation during ownership
-handoff`, the schedule is unchanged, and a later relocation onto that node succeeds normally.
+A destination that restarts before every participant confirmed its preparation invalidates the
+handoff: the operation fails with `destination node '<node_id>' changed process incarnation during
+ownership handoff`, the schedule is unchanged, and a later relocation onto that node succeeds
+normally. A destination that restarts after it confirmed its preparation keeps that copy while the
+move can still commit. When its new run is recorded before the commit, the commit is refused
+because it was planned against the earlier record, and nothing moves. Otherwise the move commits,
+the destination activates the copy it kept, and the operation still reports that it could not
+confirm the activation, because the coordinator's activation request names the destination's
+earlier run.
 
 ### When The Former Owner Is Gone
 
@@ -1519,11 +1526,11 @@ starts the branch tasks only once all of them are built, and releases a transfer
 after that.
 
 Opening a branch's retained state waits for capacity rather than being refused. A window decode
-that finds every bulk worker busy and the bulk wait queue full waits for a place there, ahead of any
-job that asks after it, and a charge or a storage job of an inferencer's carried state waits for
-room or a place the same way. While the restore waits, the task answers its commands as one that
-has not restored its branches, as listed below, and the first place that frees goes to the waiting
-restore, which goes on without a retry. While the restore makes progress instead, the task answers
+that finds every bulk worker busy waits for one, ahead of any job that asks after it, and a charge
+or a storage job of an inferencer's carried state waits for room or a worker the same way. While
+the restore waits, the task answers its commands as one that has not restored its branches, as
+listed below, and the first worker that frees takes the waiting restore, which goes on without a
+retry. While the restore makes progress instead, the task answers
 nothing: a command that arrives as the task starts, such as the lifecycle checkpoint of an
 ownership handoff, is answered once an ordinary restore has installed every branch.
 

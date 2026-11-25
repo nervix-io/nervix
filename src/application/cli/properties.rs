@@ -59,23 +59,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             } else {
                 None
             },
-            control_cpu_pending_jobs: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
             credentials_cpu_workers: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
-            credentials_cpu_pending_jobs: if self.entropy.flag() {
                 std::num::NonZeroUsize::new(
                     usize::try_from(self.entropy.between(1..=8))
                         .verified("generated small counts fit usize"),
@@ -91,23 +75,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             } else {
                 None
             },
-            data_cpu_pending_jobs: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
             extension_cpu_workers: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
-            extension_cpu_pending_jobs: if self.entropy.flag() {
                 std::num::NonZeroUsize::new(
                     usize::try_from(self.entropy.between(1..=8))
                         .verified("generated small counts fit usize"),
@@ -123,23 +91,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             } else {
                 None
             },
-            bulk_cpu_pending_jobs: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
             consensus_storage_workers: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
-            consensus_storage_pending_jobs: if self.entropy.flag() {
                 std::num::NonZeroUsize::new(
                     usize::try_from(self.entropy.between(1..=8))
                         .verified("generated small counts fit usize"),
@@ -155,23 +107,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             } else {
                 None
             },
-            filesystem_storage_pending_jobs: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
             connector_storage_workers: if self.entropy.flag() {
-                std::num::NonZeroUsize::new(
-                    usize::try_from(self.entropy.between(1..=8))
-                        .verified("generated small counts fit usize"),
-                )
-            } else {
-                None
-            },
-            connector_storage_pending_jobs: if self.entropy.flag() {
                 std::num::NonZeroUsize::new(
                     usize::try_from(self.entropy.between(1..=8))
                         .verified("generated small counts fit usize"),

@@ -148,9 +148,9 @@ as `udf-watchdog=` in that node's capability claim; changing it requires restart
 The watchdog detects an overrun after native code returns; Roto provides no in-process
 preemption. A non-terminating UDF occupies one extension worker permanently. The watchdog converts
 a late completion into a whole-batch error, but it cannot reclaim a worker from native code that
-never returns. A node whose extension workers are all held, and whose wait queue for them is full,
-refuses further UDF-bearing executions, which the owning processor's general error policy handles;
-the node's relay, control and bulk work keeps its own workers throughout.
+never returns. A node whose extension workers are all held holds further UDF-bearing executions
+back, waiting for a worker as every job does; the node's relay, control and bulk work keeps its own
+workers throughout.
 
 Treat trusted authorship, code review, and passing Roto `test` blocks as admission policy. The
 extension class runs one job per available CPU but one, shared with JAQ transformations and

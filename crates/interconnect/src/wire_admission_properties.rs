@@ -39,20 +39,6 @@ fn bolero_receive_admission_outcomes_preserve_every_field() {
             let failures = [
                 (
                     TransportError::with_cause(
-                        error_stack::Report::new(AdmissionError::BudgetExhausted {
-                            class: memory,
-                            requested: capacity,
-                        }),
-                        TransportError::Decode,
-                    ),
-                    RemoteRequestFailure::MemoryBudgetFull {
-                        class,
-                        requested: capacity,
-                    },
-                    http::StatusCode::SERVICE_UNAVAILABLE,
-                ),
-                (
-                    TransportError::with_cause(
                         error_stack::Report::new(AdmissionError::ExceedsBudget {
                             class: memory,
                             requested,

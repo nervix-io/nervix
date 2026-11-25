@@ -9,8 +9,7 @@ use thiserror::Error;
 use crate::{
     AdmissionError, Cancellation, CapacityWaits, ChargedBytes, CpuClass, ExecutionConfig,
     ExecutionConfigError, ExecutionError, MemoryBudgetSnapshot, MemoryClass, OperationLimits,
-    PreparedCpu, Reservation, StorageClass, WorkerClassSnapshot, memory::MemoryBudget,
-    workers::WorkerPool,
+    Reservation, StorageClass, WorkerClassSnapshot, memory::MemoryBudget, workers::WorkerPool,
 };
 
 /// The node's execution and memory admission, shared by every owner that runs variable-size work.
@@ -85,7 +84,7 @@ pub struct ExecutorSnapshot {
 }
 
 impl ExecutorSnapshot {
-    /// The configured admission and queue capacity of every independently owned worker class.
+    /// What every independently owned worker class is doing, and its configured workers.
     pub fn worker_classes(&self) -> [(crate::limits::WorkerClassName, WorkerClassSnapshot); 8] {
         [
             (
@@ -179,8 +178,8 @@ impl Default for Executor {
 
 impl Executor {
     /// A handle on the same classes, budgets and allowances that tells `waits` while work submitted
-    /// through it waits for a place in a full wait queue or for room in a memory class. It admits
-    /// and queues exactly as this handle does; only the telling is added.
+    /// through it waits for a worker of a class whose workers are all busy, or for room in a memory
+    /// class. It admits exactly as this handle does; only the telling is added.
     pub fn reporting_waits_to(&self, waits: &CapacityWaits) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -200,42 +199,28 @@ impl Executor {
                 control_cpu: WorkerPool::new(
                     CpuClass::Control.into(),
                     validated.workers.control_cpu,
-                    validated.workers.pending_jobs.control_cpu,
                 ),
                 credentials_cpu: WorkerPool::new(
                     CpuClass::Credentials.into(),
                     validated.workers.credentials_cpu,
-                    validated.workers.pending_jobs.credentials_cpu,
                 ),
-                data_cpu: WorkerPool::new(
-                    CpuClass::Data.into(),
-                    validated.workers.data_cpu,
-                    validated.workers.pending_jobs.data_cpu,
-                ),
+                data_cpu: WorkerPool::new(CpuClass::Data.into(), validated.workers.data_cpu),
                 extension_cpu: WorkerPool::new(
                     CpuClass::Extension.into(),
                     validated.workers.extension_cpu,
-                    validated.workers.pending_jobs.extension_cpu,
                 ),
-                bulk_cpu: WorkerPool::new(
-                    CpuClass::Bulk.into(),
-                    validated.workers.bulk_cpu,
-                    validated.workers.pending_jobs.bulk_cpu,
-                ),
+                bulk_cpu: WorkerPool::new(CpuClass::Bulk.into(), validated.workers.bulk_cpu),
                 consensus_storage: WorkerPool::new(
                     StorageClass::Consensus.into(),
                     validated.workers.consensus_storage,
-                    validated.workers.pending_jobs.consensus_storage,
                 ),
                 filesystem_storage: WorkerPool::new(
                     StorageClass::Filesystem.into(),
                     validated.workers.filesystem_storage,
-                    validated.workers.pending_jobs.filesystem_storage,
                 ),
                 connector_storage: WorkerPool::new(
                     StorageClass::Connector.into(),
                     *validated.workers.connector_storage.value(),
-                    validated.workers.pending_jobs.connector_storage,
                 ),
                 management_memory: MemoryBudget::new(
                     MemoryClass::Management,
@@ -350,9 +335,9 @@ impl Executor {
     /// bounded units: when the caller stops awaiting, the flag is raised, but the charge stays held
     /// until the job returns, because its allocation is still live.
     ///
-    /// A class whose wait queue is full holds the job until a place frees: places go to waiting
-    /// jobs in the order they asked. The caller bounds that wait by dropping the future, which
-    /// gives up its place in line and returns its charge.
+    /// A job that finds every worker of `class` busy waits for one: workers take waiting jobs in
+    /// the order they asked, and nothing bounds how many jobs wait. The caller bounds its job's wait
+    /// by dropping the future, which withdraws the job and returns its charge.
     pub async fn run_cpu<T>(
         &self,
         class: CpuClass,
@@ -367,24 +352,34 @@ impl Executor {
             .await
     }
 
-    /// Wait for a charged place in `class`'s queue before the caller transfers mutable state into
-    /// a job. While this future waits, the caller still owns that state. Dropping the future, or
-    /// the returned place, returns the charge and the place. After this returns,
-    /// [`PreparedCpu::run`] runs like any other admitted job.
-    pub async fn prepare_cpu(
+    /// Run one CPU job that carries `state` for its caller, admitted as [`Self::run_cpu`] admits
+    /// a job. The job hands the state back with its outcome, and the state is the caller's again in
+    /// `home` whenever the job ends without the caller losing it: when the caller drops the future
+    /// before a worker takes the job, and when the job returns. A caller that moves state it must
+    /// keep into a job, such as an inferencer's native session, therefore keeps it however long
+    /// the job waits for a worker, and no worker is held for it meanwhile. Only a job that panicked,
+    /// or one a stopping runtime abandoned, takes the state with it.
+    pub async fn run_cpu_carrying<S, T>(
         &self,
         class: CpuClass,
         reservation: Reservation,
-    ) -> Result<PreparedCpu<'_>, Report<ExecutionError>> {
-        let place = self.cpu_pool(class).prepare(self.waits.as_ref()).await?;
-        Ok(PreparedCpu { place, reservation })
+        state: S,
+        home: &mut Option<S>,
+        job: impl FnOnce(S, Reservation, &Cancellation) -> (S, T) + Send + 'static,
+    ) -> Result<T, Report<ExecutionError>>
+    where
+        S: Send + 'static,
+        T: Send + 'static,
+    {
+        self.cpu_pool(class)
+            .run_carrying(self.waits.as_ref(), reservation, state, home, job)
+            .await
     }
 
     /// Run one storage job on `class`'s workers. The consensus class has a single worker, so its
     /// jobs execute in the order they were admitted.
     ///
-    /// A class whose wait queue is full holds the job until a place frees, as [`Self::run_cpu`]
-    /// does.
+    /// A job that finds every worker of `class` busy waits for one, as with [`Self::run_cpu`].
     pub async fn run_storage<T>(
         &self,
         class: StorageClass,
@@ -401,7 +396,7 @@ impl Executor {
 
     /// Submit one storage job and return once it is running off the async workers.
     ///
-    /// The job waits for a place in the class's queue like every job. Unlike
+    /// The job waits for a worker when every worker of `class` is busy, like every job. Unlike
     /// [`Self::run_storage`], dropping the async caller after this returns does not cancel the job.
     /// The job owns its reservation until it exits.
     pub async fn submit_storage(

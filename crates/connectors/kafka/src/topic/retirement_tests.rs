@@ -26,13 +26,12 @@ pub(crate) const WORKER_DEADLINE: Duration = Duration::from_secs(60);
 /// How often a test reads the connector workers' counters while it waits for a retirement.
 const COUNTER_POLL: Duration = Duration::from_millis(10);
 
-/// An executor with one connector worker and one place in the connector queue.
+/// An executor with one connector worker.
 pub(crate) fn single_connector_worker() -> Executor {
     Executor::new(ExecutionConfig {
         workers: WorkerCounts {
             connector_storage: ConnectorStorageWorkers::resolve(Some(NonZeroUsize::MIN))
                 .assured("one worker fits the primitive permit bound"),
-            pending_jobs: nervix_execution::PendingJobCounts::uniform(NonZeroUsize::MIN),
             ..WorkerCounts::default()
         },
         ..ExecutionConfig::default()
@@ -75,15 +74,15 @@ pub(crate) async fn connector_workers_reached(
 
 type ConnectorJob = JoinHandle<Result<(), Report<ExecutionError>>>;
 
-/// The only connector worker, held by a job the test releases, and the only place in the queue,
-/// taken by a job waiting behind it.
-pub(crate) struct FullConnectorQueue {
+/// The only connector worker, held by a job the test releases, with another job waiting behind it,
+/// so the next connector job waits for the worker too.
+pub(crate) struct BusyConnectorWorker {
     release: oneshot::Sender<()>,
     occupying: ConnectorJob,
     queued: ConnectorJob,
 }
 
-impl FullConnectorQueue {
+impl BusyConnectorWorker {
     pub(crate) async fn fill(executor: &Executor) -> Self {
         let (started, has_started) = oneshot::channel();
         let (release, released) = oneshot::channel::<()>();
@@ -107,7 +106,7 @@ impl FullConnectorQueue {
         let waiter = executor.clone();
         let charge = executor
             .try_reserve(MemoryClass::Commands, 1)
-            .assured("the queued job's envelope fits");
+            .assured("the waiting job's envelope fits");
         let queued = nervix_primitives::task::spawn(async move {
             waiter
                 .run_storage(StorageClass::Connector, charge, |_, _| ())
@@ -115,8 +114,8 @@ impl FullConnectorQueue {
         });
         connector_workers_reach(
             executor,
-            "the second job takes the only queue place",
-            |workers| workers.pending == 1,
+            "the second job waits for the only connector worker",
+            |workers| workers.waiting == 1,
         )
         .await;
         Self {

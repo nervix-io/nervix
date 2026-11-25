@@ -1,11 +1,16 @@
 Feature: Durable consensus storage
 
-  Scenario: A restarted node reopens its dedicated consensus database
-    Given a 1 node nervix cluster is started
+  Scenario Outline: Every node of a restarted <cluster_size>-node cluster reopens its dedicated consensus database
+    Given a <cluster_size> node nervix cluster is started
     When 1 domains named "dedicated_restart" are created on the leader node
-    Then within "10s" node "node-1" has applied 1 domains named "dedicated_restart"
+    Then within "60s" every node has applied 1 domains named "dedicated_restart"
     When the cluster is restarted
-    Then within "10s" node "node-1" has applied 1 domains named "dedicated_restart"
+    Then within "60s" every node has applied 1 domains named "dedicated_restart"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario Outline: Committed administrative changes recover atomically after storage failure
     Given a <cluster_size> node nervix cluster is started

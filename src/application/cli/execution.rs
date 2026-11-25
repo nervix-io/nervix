@@ -13,14 +13,12 @@
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use nervix_execution::{
-    BulkChunkBytes, BulkCpuPendingJobs, BulkCpuWorkers, BulkMemory, BulkWindowMemory,
-    CommandsMemory, ConnectorStoragePendingJobs, ConnectorStorageWorkers,
-    ConsensusStoragePendingJobs, ConsensusStorageWorkers, ControlCpuPendingJobs, ControlCpuWorkers,
-    CredentialsCpuPendingJobs, CredentialsCpuWorkers, CredentialsMemory, DataCpuPendingJobs,
-    DataCpuWorkers, ExecutionOverrides, ExtensionCpuPendingJobs, ExtensionCpuWorkers,
-    FilesystemStoragePendingJobs, FilesystemStorageWorkers, IntakeMemory, ManagementMemory,
-    RelayDecodedBytes, RelayEncodedBytes, RelayMemory, RelayScratchBytes,
-    ResidentReplicationBatches, RestoreMetadataMemory, StateReadCacheMemory, StateReadMemory,
+    BulkChunkBytes, BulkCpuWorkers, BulkMemory, BulkWindowMemory, CommandsMemory,
+    ConnectorStorageWorkers, ConsensusStorageWorkers, ControlCpuWorkers, CredentialsCpuWorkers,
+    CredentialsMemory, DataCpuWorkers, ExecutionOverrides, ExtensionCpuWorkers,
+    FilesystemStorageWorkers, IntakeMemory, ManagementMemory, RelayDecodedBytes, RelayEncodedBytes,
+    RelayMemory, RelayScratchBytes, ResidentReplicationBatches, RestoreMetadataMemory,
+    StateReadCacheMemory, StateReadMemory,
 };
 use nervix_models::SettingDefinition;
 
@@ -51,36 +49,20 @@ pub struct ExecutionArgs {
     pub client_consumer_node_bytes: Option<HumanBytes>,
     #[arg(id = ControlCpuWorkers::NAME, long = ControlCpuWorkers::NAME, env = "NERVIX_EXECUTION_CONTROL_CPU_WORKERS", help = "Maximum admitted workers for the control cpu class; omitted values derive from resolved node capacity")]
     pub control_cpu_workers: Option<NonZeroUsize>,
-    #[arg(id = ControlCpuPendingJobs::NAME, long = ControlCpuPendingJobs::NAME, env = "NERVIX_EXECUTION_CONTROL_CPU_PENDING_JOBS", help = "Maximum pending jobs for the control cpu class; omitted values derive from resolved node capacity")]
-    pub control_cpu_pending_jobs: Option<NonZeroUsize>,
     #[arg(id = CredentialsCpuWorkers::NAME, long = CredentialsCpuWorkers::NAME, env = "NERVIX_EXECUTION_CREDENTIALS_CPU_WORKERS", help = "Maximum admitted workers for the credentials cpu class; omitted values derive from resolved node capacity")]
     pub credentials_cpu_workers: Option<NonZeroUsize>,
-    #[arg(id = CredentialsCpuPendingJobs::NAME, long = CredentialsCpuPendingJobs::NAME, env = "NERVIX_EXECUTION_CREDENTIALS_CPU_PENDING_JOBS", help = "Maximum pending jobs for the credentials cpu class; omitted values derive from resolved node capacity")]
-    pub credentials_cpu_pending_jobs: Option<NonZeroUsize>,
     #[arg(id = DataCpuWorkers::NAME, long = DataCpuWorkers::NAME, env = "NERVIX_EXECUTION_DATA_CPU_WORKERS", help = "Maximum admitted workers for the data cpu class; omitted values derive from resolved node capacity")]
     pub data_cpu_workers: Option<NonZeroUsize>,
-    #[arg(id = DataCpuPendingJobs::NAME, long = DataCpuPendingJobs::NAME, env = "NERVIX_EXECUTION_DATA_CPU_PENDING_JOBS", help = "Maximum pending jobs for the data cpu class; omitted values derive from resolved node capacity")]
-    pub data_cpu_pending_jobs: Option<NonZeroUsize>,
     #[arg(id = ExtensionCpuWorkers::NAME, long = ExtensionCpuWorkers::NAME, env = "NERVIX_EXECUTION_EXTENSION_CPU_WORKERS", help = "Maximum admitted workers for the extension cpu class; omitted values derive from resolved node capacity")]
     pub extension_cpu_workers: Option<NonZeroUsize>,
-    #[arg(id = ExtensionCpuPendingJobs::NAME, long = ExtensionCpuPendingJobs::NAME, env = "NERVIX_EXECUTION_EXTENSION_CPU_PENDING_JOBS", help = "Maximum pending jobs for the extension cpu class; omitted values derive from resolved node capacity")]
-    pub extension_cpu_pending_jobs: Option<NonZeroUsize>,
     #[arg(id = BulkCpuWorkers::NAME, long = BulkCpuWorkers::NAME, env = "NERVIX_EXECUTION_BULK_CPU_WORKERS", help = "Maximum admitted workers for the bulk cpu class; omitted values derive from resolved node capacity")]
     pub bulk_cpu_workers: Option<NonZeroUsize>,
-    #[arg(id = BulkCpuPendingJobs::NAME, long = BulkCpuPendingJobs::NAME, env = "NERVIX_EXECUTION_BULK_CPU_PENDING_JOBS", help = "Maximum pending jobs for the bulk cpu class; omitted values derive from resolved node capacity")]
-    pub bulk_cpu_pending_jobs: Option<NonZeroUsize>,
     #[arg(id = ConsensusStorageWorkers::NAME, long = ConsensusStorageWorkers::NAME, env = "NERVIX_EXECUTION_CONSENSUS_STORAGE_WORKERS", help = "Maximum admitted workers for the consensus storage class; omitted values derive from resolved node capacity")]
     pub consensus_storage_workers: Option<NonZeroUsize>,
-    #[arg(id = ConsensusStoragePendingJobs::NAME, long = ConsensusStoragePendingJobs::NAME, env = "NERVIX_EXECUTION_CONSENSUS_STORAGE_PENDING_JOBS", help = "Maximum pending jobs for the consensus storage class; omitted values derive from resolved node capacity")]
-    pub consensus_storage_pending_jobs: Option<NonZeroUsize>,
     #[arg(id = FilesystemStorageWorkers::NAME, long = FilesystemStorageWorkers::NAME, env = "NERVIX_EXECUTION_FILESYSTEM_STORAGE_WORKERS", help = "Maximum admitted workers for the filesystem storage class; omitted values derive from resolved node capacity")]
     pub filesystem_storage_workers: Option<NonZeroUsize>,
-    #[arg(id = FilesystemStoragePendingJobs::NAME, long = FilesystemStoragePendingJobs::NAME, env = "NERVIX_EXECUTION_FILESYSTEM_STORAGE_PENDING_JOBS", help = "Maximum pending jobs for the filesystem storage class; omitted values derive from resolved node capacity")]
-    pub filesystem_storage_pending_jobs: Option<NonZeroUsize>,
     #[arg(id = ConnectorStorageWorkers::NAME, long = ConnectorStorageWorkers::NAME, env = "NERVIX_EXECUTION_CONNECTOR_STORAGE_WORKERS", help = "Maximum admitted workers for the connector storage class; omitted values derive from resolved node capacity")]
     pub connector_storage_workers: Option<NonZeroUsize>,
-    #[arg(id = ConnectorStoragePendingJobs::NAME, long = ConnectorStoragePendingJobs::NAME, env = "NERVIX_EXECUTION_CONNECTOR_STORAGE_PENDING_JOBS", help = "Maximum pending jobs for the connector storage class; omitted values derive from resolved node capacity")]
-    pub connector_storage_pending_jobs: Option<NonZeroUsize>,
     #[arg(id = ManagementMemory::NAME, long = ManagementMemory::NAME, env = "NERVIX_EXECUTION_MANAGEMENT_MEMORY_BYTES", help = "Reserved management capacity; omitted values derive from node memory")]
     pub management_memory_bytes: Option<HumanBytes>,
     #[arg(id = CommandsMemory::NAME, long = CommandsMemory::NAME, env = "NERVIX_EXECUTION_COMMANDS_MEMORY_BYTES", help = "Reserved commands capacity; omitted values derive from node memory")]
@@ -134,21 +116,13 @@ impl ExecutionArgs {
     pub(super) fn overrides(&self) -> ExecutionOverrides {
         ExecutionOverrides {
             control_cpu_workers: self.control_cpu_workers,
-            control_cpu_pending_jobs: self.control_cpu_pending_jobs,
             credentials_cpu_workers: self.credentials_cpu_workers,
-            credentials_cpu_pending_jobs: self.credentials_cpu_pending_jobs,
             data_cpu_workers: self.data_cpu_workers,
-            data_cpu_pending_jobs: self.data_cpu_pending_jobs,
             extension_cpu_workers: self.extension_cpu_workers,
-            extension_cpu_pending_jobs: self.extension_cpu_pending_jobs,
             bulk_cpu_workers: self.bulk_cpu_workers,
-            bulk_cpu_pending_jobs: self.bulk_cpu_pending_jobs,
             consensus_storage_workers: self.consensus_storage_workers,
-            consensus_storage_pending_jobs: self.consensus_storage_pending_jobs,
             filesystem_storage_workers: self.filesystem_storage_workers,
-            filesystem_storage_pending_jobs: self.filesystem_storage_pending_jobs,
             connector_storage_workers: self.connector_storage_workers,
-            connector_storage_pending_jobs: self.connector_storage_pending_jobs,
             management_memory_bytes: self.management_memory_bytes.map(|bytes| bytes.0),
             commands_memory_bytes: self.commands_memory_bytes.map(|bytes| bytes.0),
             relay_memory_bytes: self.relay_memory_bytes.map(|bytes| bytes.0),
@@ -179,21 +153,13 @@ impl ExecutionArgs {
             client_producer_node_bytes: clients.producer_node_bytes.map(HumanBytes),
             client_consumer_node_bytes: clients.consumer_node_bytes.map(HumanBytes),
             control_cpu_workers: settings.control_cpu_workers,
-            control_cpu_pending_jobs: settings.control_cpu_pending_jobs,
             credentials_cpu_workers: settings.credentials_cpu_workers,
-            credentials_cpu_pending_jobs: settings.credentials_cpu_pending_jobs,
             data_cpu_workers: settings.data_cpu_workers,
-            data_cpu_pending_jobs: settings.data_cpu_pending_jobs,
             extension_cpu_workers: settings.extension_cpu_workers,
-            extension_cpu_pending_jobs: settings.extension_cpu_pending_jobs,
             bulk_cpu_workers: settings.bulk_cpu_workers,
-            bulk_cpu_pending_jobs: settings.bulk_cpu_pending_jobs,
             consensus_storage_workers: settings.consensus_storage_workers,
-            consensus_storage_pending_jobs: settings.consensus_storage_pending_jobs,
             filesystem_storage_workers: settings.filesystem_storage_workers,
-            filesystem_storage_pending_jobs: settings.filesystem_storage_pending_jobs,
             connector_storage_workers: settings.connector_storage_workers,
-            connector_storage_pending_jobs: settings.connector_storage_pending_jobs,
             management_memory_bytes: settings.management_memory_bytes.map(HumanBytes),
             commands_memory_bytes: settings.commands_memory_bytes.map(HumanBytes),
             relay_memory_bytes: settings.relay_memory_bytes.map(HumanBytes),
@@ -228,44 +194,21 @@ impl ExecutionArgs {
             self.client_consumer_node_bytes,
         );
         command_line.optional(ControlCpuWorkers::NAME, self.control_cpu_workers);
-        command_line.optional(ControlCpuPendingJobs::NAME, self.control_cpu_pending_jobs);
         command_line.optional(CredentialsCpuWorkers::NAME, self.credentials_cpu_workers);
-        command_line.optional(
-            CredentialsCpuPendingJobs::NAME,
-            self.credentials_cpu_pending_jobs,
-        );
         command_line.optional(DataCpuWorkers::NAME, self.data_cpu_workers);
-        command_line.optional(DataCpuPendingJobs::NAME, self.data_cpu_pending_jobs);
         command_line.optional(ExtensionCpuWorkers::NAME, self.extension_cpu_workers);
-        command_line.optional(
-            ExtensionCpuPendingJobs::NAME,
-            self.extension_cpu_pending_jobs,
-        );
         command_line.optional(BulkCpuWorkers::NAME, self.bulk_cpu_workers);
-        command_line.optional(BulkCpuPendingJobs::NAME, self.bulk_cpu_pending_jobs);
         command_line.optional(
             ConsensusStorageWorkers::NAME,
             self.consensus_storage_workers,
-        );
-        command_line.optional(
-            ConsensusStoragePendingJobs::NAME,
-            self.consensus_storage_pending_jobs,
         );
         command_line.optional(
             FilesystemStorageWorkers::NAME,
             self.filesystem_storage_workers,
         );
         command_line.optional(
-            FilesystemStoragePendingJobs::NAME,
-            self.filesystem_storage_pending_jobs,
-        );
-        command_line.optional(
             ConnectorStorageWorkers::NAME,
             self.connector_storage_workers,
-        );
-        command_line.optional(
-            ConnectorStoragePendingJobs::NAME,
-            self.connector_storage_pending_jobs,
         );
         command_line.optional(ManagementMemory::NAME, self.management_memory_bytes);
         command_line.optional(CommandsMemory::NAME, self.commands_memory_bytes);

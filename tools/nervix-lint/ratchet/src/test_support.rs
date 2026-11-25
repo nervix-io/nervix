@@ -122,7 +122,7 @@ name = os.environ['NERVIX_LINT_CONFIGURATION']
 count_path = state / (name + '.count')
 count = int(count_path.read_text()) + 1 if count_path.exists() else 1
 count_path.write_text(str(count))
-captured = {key:value for key,value in os.environ.items() if key in ['RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','KACHE_KEY_SALT','NERVIX_LINT_ADMISSION','LLVM_PROFILE_FILE']}
+captured = {key:value for key,value in os.environ.items() if key in ['RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','KACHE_KEY_SALT','NERVIX_LINT_ADMISSION','LLVM_PROFILE_FILE','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS']}
 (state / (name + '.environment.json')).write_text(json.dumps(captured))
 (state / (name + '.started')).write_text('started')
 time.sleep(float(os.environ.get('NERVIX_TEST_DELAY', '0')))

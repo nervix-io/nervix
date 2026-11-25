@@ -49,8 +49,12 @@ pub(super) async fn announce(
     consensus: &Proposer,
     cluster: &crate::cluster::ClusterHandle,
     facts: &LocalNodeFacts,
+    fault_injection: &crate::ConfiguredFaultInjection,
 ) -> bool {
     let identity = cluster.local_node_identity().await;
+    if fault_injection.holds_node_record_announcement(identity.node_id()) {
+        return false;
+    }
     let record = NodeRecord {
         claim: NodeCapabilityRecord {
             identity,
@@ -87,6 +91,7 @@ pub(super) fn spawn(
     cluster: nervix_primitives::sync::Arc<crate::cluster::ClusterHandle>,
     interconnect: nervix_interconnect::Transport,
     facts: LocalNodeFacts,
+    fault_injection: crate::ConfiguredFaultInjection,
     shutdown: nervix_primitives::sync::CancellationToken,
 ) -> nervix_primitives::task::JoinHandle<()> {
     let retry_interval = facts
@@ -105,7 +110,7 @@ pub(super) fn spawn(
             interconnect.publish_peer_capabilities(&consensus.node_capability_claims());
             if !announced {
                 let Some(committed) = shutdown
-                    .run_until_cancelled(announce(&consensus, &cluster, &facts))
+                    .run_until_cancelled(announce(&consensus, &cluster, &facts, &fault_injection))
                     .await
                 else {
                     return;

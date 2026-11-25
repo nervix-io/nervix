@@ -19,6 +19,11 @@ use crate::{
 };
 
 pub const TOOLCHAIN: &str = "nightly-2026-11-21";
+/// The compiler flags of every crate Cargo compiles on [`TOOLCHAIN`]. A nightly rustc solves every
+/// trait goal with the next-generation solver by default, which the stable product compiler uses
+/// for coherence alone; under that default the server library's analysis needs about four times
+/// the memory.
+pub const TOOLCHAIN_RUSTFLAGS: &str = "-Znext-solver=coherence";
 pub const TOOLING: &str = "tools/nervix-lint";
 
 #[derive(Debug, thiserror::Error)]

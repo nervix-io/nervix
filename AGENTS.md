@@ -373,16 +373,17 @@ cannot police import paths, so it keeps only genuinely forbidden types and opera
 - **The bounded executor.** Work off the async workers goes through `nervix-execution` with its CPU
   or storage class, a charged memory class and `Cancellation` checks between bounded units; operator
   code the node cannot bound (UDF calls, JAQ transformations, ONNX model runs) takes the extension
-  class and password hashing the credentials class. Its worker queues and memory classes are
-  backpressure on machine resources, never a reason to refuse work, requests included: every job
-  waits for a place in FIFO order and every charge waits for room. Its owner holds back whatever
-  feeds it while it waits, lets its own limit end the wait (a statement's deadline, a request's
-  lifetime, shutdown, a new quiesce) and keeps or re-decides the work. Admission fails only for an
-  operation larger than its whole class, which no wait could hold, and once the executor admits no
-  more work, which its owner treats as its own stop; `try_reserve` serves only an optional extra,
-  such as a cache, that proceeds without its charge. Nothing waits for room while it holds part of
-  the same class, since a queued charge takes every byte its class frees: an operation takes its
-  whole working set while it holds nothing, as one charge or as an allowance
+  class and password hashing the credentials class. Its worker classes and memory classes are
+  backpressure on machine resources, never a reason to refuse work, requests included. A worker
+  class is a semaphore over its workers, with no queue or setting bounding how many jobs wait: every
+  job waits for a worker in FIFO order and every charge waits for room. Its owner holds back
+  whatever feeds it while it waits, lets its own limit end the wait (a statement's deadline, a
+  request's lifetime, shutdown, a new quiesce) and keeps or re-decides the work. Admission fails
+  only for an operation larger than its whole class, which no wait could hold, and once the executor
+  admits no more work, which its owner treats as its own stop; `try_reserve` serves only an optional
+  extra, such as a cache, that proceeds without its charge. Nothing waits for room while it holds
+  part of the same class, since a queued charge takes every byte its class frees: an operation takes
+  its whole working set while it holds nothing, as one charge or as an allowance
   (`Executor::within_allowance`) it draws every charge of that class from without waiting, and a
   synchronous job that outgrows its charge gives everything back and runs again under the charge it
   needs (`Executor::run_cpu_growing`). An operation that holds several classes takes them in one
@@ -572,7 +573,9 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   plan-based recovery.
 - [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md): the contract
   matrix, source contracts, analysis toolchain, workaround audit and ratchet summarized in
-  [Architecture Rules and the Debt Ratchet](#architecture-rules-and-the-debt-ratchet).
+  [Architecture Rules and the Debt Ratchet](#architecture-rules-and-the-debt-ratchet), and the
+  pinned nightly: what builds on it, every declaration of it and the compiler flags every
+  compilation on it takes.
 - [Coverage Reports And The Complexity Gate](docs/src/coverage-reports.md): coverage producers and
   exports, source mapping and exclusions, ordinary report ownership, merge records and integrity
   verdicts, patch coverage, the advisory CRAP report, the full workspace union, the mandatory
@@ -800,7 +803,7 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   Callers never choose blocking, yielding, batching, throttling or similar safety behavior unless it
   is an explicit typed part of the operation's contract.
 - Planned operations cost backpressure, never data. A stop, a shutdown, an ownership move or an
-  alteration waits for the work in motion, a payload an ingestor holds while it waits for a place or
+  alteration waits for the work in motion, a payload an ingestor holds while it waits for a worker or
   for room on the bounded executor included, rather than cutting it, and a full queue or memory
   class holds back what feeds it rather than dropping or refusing what it was handed.
 - Backpressure is the one control of data-plane resources, and the data plane has no magic limits.
@@ -1369,15 +1372,15 @@ for primitives, clocks, typed errors and mode dependencies, and the coverage, Bo
 keep their own inputs and evidence; they may invoke the Rust owner as a process without interpreting
 its compiler evidence.
 
-The synchronization driver, its isolated artifacts and Bolero's sanitizer campaigns use
-`nightly-2026-11-21`; product builds stay stable. An upgrade moves every declaration of that nightly
-in one change that keeps every compiler fixture's result. The driver's workspace wrapper composes
-beneath the configured kache. Analysis requires current source, annotations, rule, dependency and
-configuration inputs and complete declared target evidence, zero findings included, and missing
-evidence rebuilds only isolated authored artifacts in a supported cache namespace.
-`just test-typed-ratchet` and `just qualify-typed-ratchet-cache` qualify the diagnostics, the
-current paired API doctests and completion and cache behavior. Tooling Bolero targets use the shared
-inventory and CI policy, and native coverage uses matching LLVM tools.
+The synchronization driver, its isolated artifacts and Bolero's sanitizer campaigns build on the
+[pinned nightly](#commands-and-documentation) with its compiler flags. An upgrade moves every
+declaration of that nightly in one change that keeps every compiler fixture's result. The driver's
+workspace wrapper composes beneath the configured kache. Analysis requires current source,
+annotations, rule, dependency and configuration inputs and complete declared target evidence, zero
+findings included, and missing evidence rebuilds only isolated authored artifacts in a supported
+cache namespace. `just test-typed-ratchet` and `just qualify-typed-ratchet-cache` qualify the
+diagnostics, the current paired API doctests and completion and cache behavior. Tooling Bolero
+targets use the shared inventory and CI policy, and native coverage uses matching LLVM tools.
 
 ### The ratchet
 
@@ -1702,6 +1705,18 @@ text calls CRAP a gate; report integrity is mandatory, and the only complexity v
   disables it), or hide the host's Cargo configuration with another `HOME` or `CARGO_HOME`. If kache
   is unavailable or a build fails under it, stop and report instead of building without it. Coverage
   uses the matching toolchain's declared `llvm-tools`.
+- Product code builds on the stable toolchain `rust-toolchain.toml` declares, and everything that
+  needs a nightly (formatting, Miri, the analysis driver with its tooling workspace, Bolero's
+  sanitizer campaigns) uses the one pinned nightly, `nightly-2026-11-21`, which the justfile names
+  once as `nightly_toolchain`. Never name another nightly, however spelled: the floating channel
+  (`+nightly`, `rustup run nightly`, `RUSTUP_TOOLCHAIN=nightly`, an undated channel in a manifest,
+  script or workflow step) or a second dated one. Every compilation on the nightly passes
+  `-Znext-solver=coherence`, in the justfile through `nightly_rustflags` and
+  `nightly_rustdocflags`: a nightly rustc otherwise solves every trait goal with the
+  next-generation solver, which a stable rustc uses for coherence alone, and the server library's
+  analysis then needs about four times the memory. No stable compiler receives the flag, which it
+  refuses. [Pinned Toolchain](docs/src/architecture-enforcement.md#pinned-toolchain) owns every
+  declaration of the nightly and of its flags, and the upgrade that moves them together.
 - Textual reports that are not stable documentation never enter the repository. Every artifact
   generated while implementing a task, including implementation reports, review and audit findings,
   validation results, logs, benchmark results and screenshots, is recorded or attached on the
