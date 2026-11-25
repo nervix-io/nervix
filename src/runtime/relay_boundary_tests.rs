@@ -235,7 +235,10 @@ async fn an_owner_delivery_after_a_drop_stopped_the_owner_counts_as_done() {
     let refused = services
         .enqueue_owner_batch(&refused_batch(acks), Unit::SINGLE)
         .await;
-    assert!(refused.is_err(), "a relay with no owner here refuses the batch");
+    assert!(
+        refused.is_err(),
+        "a relay with no owner here refuses the batch"
+    );
     assert!(matches!(
         timeout(Duration::from_secs(1), completion.wait())
             .await

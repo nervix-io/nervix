@@ -393,6 +393,163 @@ Feature: DROP removes an entity at once, discards what it holds and reports it
       | 1            |
       | 3            |
 
+  @drop_entity_reingestor_buffers
+  Scenario Outline: DROP REINGESTOR discards the messages its route buffers hold at once and the source hears them acknowledged on <cluster_size> nodes
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And Kafka topic "drop_reingest_{{test_id}}" exists with 1 partitions
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( tenant STRING, id STRING );
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 1h;
+      CREATE RELAY incoming SCHEMA event UNBRANCHED;
+      CREATE RELAY regrouped SCHEMA event BRANCHED BY by_tenant;
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC INGESTOR ingestor
+        FROM kafka_main TOPIC 'drop_reingest_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'drop_reingest_group_{{test_id}}' START AT EARLIEST
+          MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING ingest_codec
+        TO incoming INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE REINGESTOR regroup FROM incoming
+        TO regrouped INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH EACH 1h MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION regrouped_events TO regrouped;
+      START;
+      """
+    Then Kafka consumer group "drop_reingest_group_{{test_id}}" eventually has 1 consumers
+    When Kafka message is published to topic "drop_reingest_{{test_id}}"
+      """
+      [{"tenant":"acme","id":"1"},{"tenant":"globex","id":"2"}]
+      """
+    Then within "30s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "incoming" across physical nodes totals 2
+    # The reingestor's route holds both messages for an hour, so the source's acknowledgement waits.
+    And within "2s" Kafka consumer group "drop_reingest_group_{{test_id}}" next offset for topic "drop_reingest_{{test_id}}" partition 0 is "below 1"
+    # A second session runs the drop, so the subscription stays open across it.
+    Given client "operator" is connected to the leader node
+    When client "operator" selects domain "{{domain}}"
+    And within "15s" client "operator" executes these Plexus commands
+      """
+      DROP REINGESTOR regroup;
+      """
+    Then the last command output contains
+      """
+      reingestor 'regroup' discarded
+      """
+    And the last command output contains
+      """
+      unprocessed messages (2)
+      """
+    And within "15s" Kafka consumer group "drop_reingest_group_{{test_id}}" next offset for topic "drop_reingest_{{test_id}}" partition 0 is "at least 1"
+    # The held messages are destroyed, not flushed: the subscription receives neither of them.
+    And the relay subscription does not receive a payload within "3s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @drop_entity_generator
+  Scenario Outline: DROP GENERATOR ends a running generator at once on <cluster_size> nodes
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA amount ( tenant STRING, amount I64 );
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 1h;
+      CREATE RELAY amounts SCHEMA amount BRANCHED BY by_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE RELAY totals SCHEMA amount BRANCHED BY by_tenant;
+      CREATE GENERATOR tenant_totals
+        USING MATERIALIZED STATE amounts
+        EACH 100ms
+        BRANCHED BY by_tenant
+        TO totals
+          SET tenant = relay_state.amounts.tenant,
+              amount = relay_state.amounts.amount
+          FLUSH EACH 1h MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG;
+      START;
+      """
+    Given client "operator" is connected to the leader node
+    When client "operator" selects domain "{{domain}}"
+    And within "15s" client "operator" executes these Plexus commands
+      """
+      DROP GENERATOR tenant_totals;
+      """
+    Then the last command output contains
+      """
+      quiesce level: DYNAMIC
+      """
+    And the last command output contains
+      """
+      generator 'tenant_totals' discarded nothing, state removed
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @drop_entity_configuration
+  Scenario: A parametrizer and a signaling protocol are refused while something names them and dropped once nothing does
+    Given a 1 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( tenant STRING );
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 1h;
+      CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
+      CREATE VHOST edge drop-config-{{test_id}}.example.com;
+      CREATE SIGNALING PROTOCOL subscribe_first
+        FORMAT JSON
+        ON CONNECT
+        SEND JAQ '{method: "SUBSCRIBE", id: 1}'
+        WAIT JAQ '.id == 1 and .result == null' FAIL JAQ '.error'
+        TIMEOUT 5s;
+      CREATE WEBSOCKETS ENDPOINT stream_endpoint
+        ON edge
+        PATH '/ws' WITH SIGNALING PROTOCOL subscribe_first;
+      """
+    When these Plexus commands fail with "cannot delete model 'by_tenant'"
+      """
+      DROP PARAMETRIZER by_tenant;
+      """
+    And these Plexus commands fail with "cannot delete model 'subscribe_first'"
+      """
+      DROP SIGNALING PROTOCOL subscribe_first;
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      DROP RELAY events;
+      DROP PARAMETRIZER by_tenant;
+      DROP ENDPOINT stream_endpoint;
+      DROP SIGNALING PROTOCOL subscribe_first;
+      """
+    Then the last command output contains
+      """
+      dropped model 'subscribe_first'
+      """
+
   @drop_entity_relay_batches
   Scenario Outline: A transaction that drops an ingestor, its relay and the emitter reading it discards the batches the relay holds at once on <cluster_size> nodes
     Given Kafka is running
