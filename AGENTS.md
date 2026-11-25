@@ -609,6 +609,16 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - Models preserve every semantically significant order, including routes, assignments, invocations
   and materialized-state dependencies.
 
+### Graphs without loops
+
+- A domain's graph has no loops: data never comes back to a relay it already passed, whether it
+  travels along a route, an `ON MESSAGE ERROR SEND TO` route or an `ON CORRELATION TIMEOUT SEND
+  TO` action, or reaches a node as a relay's materialized state. The registry refuses a change that
+  would close one before any of it applies, and names the loop.
+- Every order that follows the data may rely on it, such as the order in which a change stops the
+  parts it replaces. No placement, scheduling, runtime or rendering path keeps a case for a loop in
+  one domain graph; a view that overlays a graph before and after a change still meets cycles.
+
 ### Types and sensitivity
 
 - All schemaful operations are exact-type operations. Implicit casts, parsing, stringification,

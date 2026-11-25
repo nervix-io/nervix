@@ -337,6 +337,7 @@ Feature: Web console visual window processor and correlator creation
       CREATE RELAY visual_check_orders SCHEMA visual_check_order UNBRANCHED;
       CREATE RELAY visual_check_payments SCHEMA visual_check_payment UNBRANCHED;
       CREATE RELAY visual_check_refunds SCHEMA visual_check_payment UNBRANCHED;
+      CREATE RELAY visual_check_unmatched SCHEMA visual_check_payment UNBRANCHED;
       CREATE RELAY visual_check_paid_orders SCHEMA visual_check_paid UNBRANCHED;
       """
     And the web console is opened on the leader node
@@ -378,10 +379,12 @@ Feature: Web console visual window processor and correlator creation
     And selector ".create-correlator-right-timeout [data-timeout='send']" is clicked
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "right timeout relay"
+    # A timed-out right row goes to a relay of the right side's schema. Sending it back to a relay the
+    # correlator reads would close a loop, which Nervix refuses, so it goes to a relay of its own.
     When selector ".create-correlator-right-timeout-relay .create-choice-search" is filled with "visual_check_"
-    Then selector ".create-correlator-right-timeout-relay [data-value='visual_check_refunds']" exists
+    Then selector ".create-correlator-right-timeout-relay [data-value='visual_check_unmatched']" exists
     And selector ".create-correlator-right-timeout-relay [data-value='visual_check_orders']" does not exist
-    When selector ".create-correlator-right-timeout-relay [data-value='visual_check_refunds']" is clicked
+    When selector ".create-correlator-right-timeout-relay [data-value='visual_check_unmatched']" is clicked
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "SET assignment"
     When selector ".create-processor-output-fields .create-choice-search" is filled with "order_id"
@@ -402,13 +405,13 @@ Feature: Web console visual window processor and correlator creation
     Then selector ".create-status" contains "Failed"
     And selector ".create-error" contains "visual_check_correlator"
     When selector ".create-processor-output-assignments .create-processor-assignment-row:first-of-type .create-processor-assignment-expression" is filled with "left.order_id"
-    Then selector ".create-preview" contains "RIGHT FROM visual_check_payments, visual_check_refunds ATTACHED CORRELATE WHERE left.order_id = right.order_id MATCH LATEST MAX TIME 30s ON CORRELATION TIMEOUT DROP, SEND TO visual_check_refunds UNBRANCHED"
+    Then selector ".create-preview" contains "RIGHT FROM visual_check_payments, visual_check_refunds ATTACHED CORRELATE WHERE left.order_id = right.order_id MATCH LATEST MAX TIME 30s ON CORRELATION TIMEOUT DROP, SEND TO visual_check_unmatched UNBRANCHED"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
     And selector ".prompt-row input" is filled with "SHOW CREATE CORRELATOR visual_check_correlator;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "ON CORRELATION TIMEOUT DROP, SEND TO visual_check_refunds"
+    Then selector ".terminal" contains "ON CORRELATION TIMEOUT DROP, SEND TO visual_check_unmatched"
     And selector ".terminal" contains "FLUSH EACH 100ms MAX BATCH SIZE 1MiB"
 
   @visual_window_transaction
