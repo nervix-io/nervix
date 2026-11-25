@@ -597,6 +597,274 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     And the relay subscription does not receive a payload within "5s"
 
+  # The destination restarts after it confirmed its copy of the deduplicator's state and before
+  # the move is committed. Its new run's record is not committed yet, so the move's commit can
+  # still pass, as when a restarted node's announcement is slow to commit. The leader reconciles
+  # preparations when it sees the destination's new run, and only then does the held commit go
+  # ahead.
+  @ownership-state-handoff @shutdown_qualification
+  Scenario: A destination that restarts between confirming a move and its commit starts the moved deduplicator with its state
+    Given runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then node "node-1" eventually observes a stable leader
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA transaction ( tenant STRING, transaction_id STRING, amount I64 );
+      CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
+        tenant string,
+        transaction_id string,
+        amount integer
+      );
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
+        TO SCHEMA transaction;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
+      CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/relocate';
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
+        TO inbound INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE DEDUPLICATOR dedup_txns FROM inbound
+        DEDUPLICATE ON input.transaction_id MAX TIME 10m
+        BRANCHED BY by_tenant
+        TO deduped INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    And these Plexus commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION deduped_seen TO deduped;
+      """
+    Then node "node-1" eventually accepts http traffic for host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"acme","transaction_id":"txn-warmup","amount":1}
+      """
+    And within "20s" the relay subscription receives a payload
+      """
+      "transaction_id":"txn-warmup"
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"acme","transaction_id":"txn-1","amount":10}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"beta","transaction_id":"txn-1","amount":20}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      {"amount":10,"tenant":"acme","transaction_id":"txn-1"} | key={"tenant":"acme"}
+      {"amount":20,"tenant":"beta","transaction_id":"txn-1"} | key={"tenant":"beta"}
+      """
+    Given ownership handoff for domain "{{domain}}" pauses before its schedule commit
+    When these Plexus commands begin executing in the background
+      """
+      RELOCATE DEDUPLICATOR dedup_txns ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then the ownership handoff commit pause for domain "{{domain}}" is reached
+    When node "node-2" is stopped
+    And node "node-2" holds back the announcement of its node record
+    And ownership handoff preparation reconciliations of node "node-2" are observed
+    And node "node-2" is started
+    Then node "node-1" eventually reports interconnect to "node-2" as "connected"
+    And node "node-2" eventually reports interconnect to "node-1" as "connected"
+    And node "node-2" eventually reconciles its ownership handoff preparations
+    When the ownership handoff commit pause for domain "{{domain}}" is released
+    Then within "30s" node "node-1" eventually reports status containing "- domain={{domain}} kind=deduplicator name=dedup_txns owner=node-2"
+    When node "node-2" announces its node record again
+    Then the background Plexus execution fails with "ownership state activation did not complete"
+    # The refused activation leaves the move's hold to end at its lease, so fresh transactions
+    # show when records reach the moved deduplicator again before repeats are checked.
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"acme","transaction_id":"txn-probe","amount":3}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"beta","transaction_id":"txn-probe","amount":4}
+      """
+    Then within "120s" the relay subscription receives payloads
+      """
+      {"amount":3,"tenant":"acme","transaction_id":"txn-probe"}
+      {"amount":4,"tenant":"beta","transaction_id":"txn-probe"}
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"acme","transaction_id":"txn-1","amount":10}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"beta","transaction_id":"txn-1","amount":20}
+      """
+    Then the relay subscription does not receive a payload within "5s"
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"acme","transaction_id":"txn-2","amount":11}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"beta","transaction_id":"txn-2","amount":21}
+      """
+    Then within "15s" the relay subscription receives payloads
+      """
+      {"amount":11,"tenant":"acme","transaction_id":"txn-2"}
+      {"amount":21,"tenant":"beta","transaction_id":"txn-2"}
+      """
+
+  # The other ordering: the restarted destination's new run is recorded before the held commit, so
+  # the move was planned against a record the cluster no longer holds and its commit is refused.
+  # The deduplicator stays on its owner with every key it has seen.
+  @ownership-state-handoff @shutdown_qualification
+  Scenario: A destination that restarts between confirming a move and its commit and is recorded again first leaves the deduplicator on its owner with its state
+    Given runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then node "node-1" eventually observes a stable leader
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA transaction ( tenant STRING, transaction_id STRING, amount I64 );
+      CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
+        tenant string,
+        transaction_id string,
+        amount integer
+      );
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
+        TO SCHEMA transaction;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
+      CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/relocate';
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
+        TO inbound INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE DEDUPLICATOR dedup_txns FROM inbound
+        DEDUPLICATE ON input.transaction_id MAX TIME 10m
+        BRANCHED BY by_tenant
+        TO deduped INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    And these Plexus commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION deduped_seen TO deduped;
+      """
+    Then node "node-1" eventually accepts http traffic for host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"acme","transaction_id":"txn-warmup","amount":1}
+      """
+    And within "20s" the relay subscription receives a payload
+      """
+      "transaction_id":"txn-warmup"
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"acme","transaction_id":"txn-1","amount":10}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"beta","transaction_id":"txn-1","amount":20}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      {"amount":10,"tenant":"acme","transaction_id":"txn-1"} | key={"tenant":"acme"}
+      {"amount":20,"tenant":"beta","transaction_id":"txn-1"} | key={"tenant":"beta"}
+      """
+    Given ownership handoff for domain "{{domain}}" pauses before its schedule commit
+    When these Plexus commands begin executing in the background
+      """
+      RELOCATE DEDUPLICATOR dedup_txns ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then the ownership handoff commit pause for domain "{{domain}}" is reached
+    When node "node-2" is stopped
+    And node "node-2" is started
+    Then node "node-1" eventually reports interconnect to "node-2" as "connected"
+    And node "node-2" eventually reports interconnect to "node-1" as "connected"
+    And within "30s" node "node-1" eventually describes the current run of node "node-2" as recorded
+    When the ownership handoff commit pause for domain "{{domain}}" is released
+    Then the background Plexus execution fails with "node eligibility changed"
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=deduplicator name=dedup_txns owner=node-1
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"acme","transaction_id":"txn-probe","amount":3}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"beta","transaction_id":"txn-probe","amount":4}
+      """
+    Then within "120s" the relay subscription receives payloads
+      """
+      {"amount":3,"tenant":"acme","transaction_id":"txn-probe"}
+      {"amount":4,"tenant":"beta","transaction_id":"txn-probe"}
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"acme","transaction_id":"txn-1","amount":10}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"beta","transaction_id":"txn-1","amount":20}
+      """
+    Then the relay subscription does not receive a payload within "5s"
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"acme","transaction_id":"txn-2","amount":11}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
+      """
+      {"tenant":"beta","transaction_id":"txn-2","amount":21}
+      """
+    Then within "15s" the relay subscription receives payloads
+      """
+      {"amount":11,"tenant":"acme","transaction_id":"txn-2"}
+      {"amount":21,"tenant":"beta","transaction_id":"txn-2"}
+      """
+
   @ownership-state-handoff @shutdown_qualification @slots_2
   Scenario: A lost prepare response is reconciled before a later relocation
     Given runtime replication is configured with replica count 0 and snapshot interval "1h"

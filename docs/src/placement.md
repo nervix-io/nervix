@@ -139,15 +139,15 @@ three listener kinds. Member names are unqualified; a name shared by more than o
 eligible entity kind is ambiguous and must be changed before it can be used in a placement.
 
 Duplicate names on one side collapse. Both sides must contain at least one member after duplicate
-removal. The same runtime node may appear in `FROM` and `TO`, but it contributes coverage only when
-the graph contains a directed cycle back to that runtime node.
+removal. The same runtime node may appear in `FROM` and `TO`, but that pair covers nothing: a
+domain's graph has no loops ([Runtime Nodes](processors.md#shared-input-and-branch-contracts)), so
+no path leads from a runtime node back to itself.
 
 ## Understanding Path-Gated Coverage
 
 For each connected `FROM`/`TO` pair, the rule captures both endpoints and every runtime node that
 can carry traffic from the source to the destination. If the graph contains alternate paths, all
-runtime nodes on those paths are part of the corridor. A cycle within a corridor is captured in
-full.
+runtime nodes on those paths are part of the corridor.
 
 For this graph:
 

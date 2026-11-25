@@ -16681,6 +16681,187 @@ async fn when_ownership_handoff_preparation_pause_is_released(
         .release_ownership_handoff_preparation_pause(&domain);
 }
 
+#[given(expr = "ownership handoff for domain {string} pauses before its schedule commit")]
+async fn given_ownership_handoff_commit_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    world.fault_injection.pause_ownership_handoff_commit(domain);
+}
+
+/// The handoff reaches its commit pause once every participant confirmed its prepared moves, which
+/// takes a gate engagement, a drain, a capture, a preparation and the confirmations. The wait also
+/// ends the moment the background command finishes, so a handoff that failed before its commit
+/// reports its own outcome rather than this deadline.
+#[then(expr = "the ownership handoff commit pause for domain {string} is reached")]
+async fn then_ownership_handoff_commit_pause_is_reached(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    let fault_injection = world.fault_injection.clone();
+    let deadline = Instant::now() + ENTITY_GATE_PAUSE_TIMEOUT;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        if nervix_primitives::time::timeout(
+            Duration::from_millis(50),
+            fault_injection.wait_for_ownership_handoff_commit_pause(&domain),
+        )
+        .await
+        .is_ok()
+        {
+            return;
+        }
+        if let Some(background) = world.background_plexus.as_ref()
+            && background.is_finished()
+        {
+            let outcome = world
+                .background_plexus
+                .take()
+                .verified("the branch above already observed the background execution")
+                .await
+                .expect("background Plexus task must not panic");
+            panic!(
+                "ownership handoff did not reach the armed commit pause for domain '{domain}': \
+                 the command finished first with {outcome:?}"
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ownership handoff did not reach the armed commit pause for domain '{domain}' within \
+             {ENTITY_GATE_PAUSE_TIMEOUT:?}; the command is still running"
+        );
+    }
+}
+
+#[when(expr = "the ownership handoff commit pause for domain {string} is released")]
+async fn when_ownership_handoff_commit_pause_is_released(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    world
+        .fault_injection
+        .release_ownership_handoff_commit_pause(&domain);
+}
+
+/// Counts the ownership-handoff preparation reconciliations a node completes from now on. A
+/// scenario observes a node while it is stopped, so the next reconciliation the node completes
+/// belongs to its new run.
+#[when(expr = "ownership handoff preparation reconciliations of node {string} are observed")]
+async fn when_ownership_handoff_reconciliations_are_observed(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .observe_ownership_handoff_reconciliations(crate::common::cluster::node_name(&node_id));
+}
+
+/// Holds back the announcement of a node's record until a later step lets it announce. Armed
+/// while the node is stopped, its next run keeps the record of its previous run committed, as a
+/// restarted node whose announcement is slow to commit does.
+#[when(expr = "node {string} holds back the announcement of its node record")]
+async fn when_node_holds_back_its_record_announcement(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .hold_node_record_announcement(crate::common::cluster::node_name(&node_id));
+}
+
+#[when(expr = "node {string} announces its node record again")]
+async fn when_node_announces_its_record_again(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_node_record_announcement(&crate::common::cluster::node_name(&node_id));
+}
+
+/// The leader asks every node to reconcile its preparations after it observes a change of
+/// leadership or of a node's run, such as a restart. A restarted node first rejoins, and the
+/// leader then reaches it on its next poll, which takes a while on a loaded machine.
+#[then(expr = "node {string} eventually reconciles its ownership handoff preparations")]
+async fn then_node_reconciles_ownership_handoff_preparations(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node = crate::common::cluster::node_name(&node_id);
+    let reconciled = nervix_primitives::time::timeout(
+        Duration::from_secs(120),
+        world
+            .fault_injection
+            .wait_for_ownership_handoff_reconciliation(&node),
+    )
+    .await;
+    let Ok(observed) = reconciled else {
+        panic!("node '{node_id}' did not reconcile its ownership handoff preparations within 120s");
+    };
+    append_cucumber_log_line(&format!(
+        "node '{node_id}' completed {} ownership handoff preparation reconciliation(s), \
+         discarding {} preparation(s)",
+        observed.completed, observed.discarded
+    ));
+}
+
+/// A restarted node announces the record of its new run in the background. Until that record is
+/// committed, `DESCRIBE CLUSTER` shows the node's live run as awaiting its capabilities.
+#[then(
+    expr = "within {string} node {string} eventually describes the current run of node {string} \
+            as recorded"
+)]
+async fn then_node_describes_current_run_as_recorded(
+    world: &mut ScenarioWorld,
+    duration: String,
+    observer: String,
+    node_id: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let observer = expand_placeholders(world, &observer);
+    let node_id = expand_placeholders(world, &node_id);
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        match run_plexus_commands_on_node(world, &observer, "DESCRIBE CLUSTER;").await {
+            Ok(output) => {
+                let recorded = describe_cluster_node_run_is_recorded(&output, &node_id);
+                world.last_command_output = Some(output);
+                if recorded {
+                    return;
+                }
+            }
+            Err(error) => world.last_command_error = Some(error),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node '{observer}' did not describe the current run of node '{node_id}' as recorded \
+             within {duration:?}. last output: {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Whether `DESCRIBE CLUSTER` lists `node_id` as live with the record of its current run
+/// committed: its block names capabilities rather than awaiting them.
+fn describe_cluster_node_run_is_recorded(output: &str, node_id: &str) -> bool {
+    let heading = format!("node: {node_id}");
+    let leader_heading = format!("node: {node_id} (leader)");
+    let mut lines = output.lines();
+    let found = lines
+        .by_ref()
+        .any(|line| line == heading || line == leader_heading);
+    if !found {
+        return false;
+    }
+    let mut block = lines.take_while(|line| line.starts_with("  "));
+    let capabilities = block.find(|line| line.starts_with("  capabilities:"));
+    match capabilities {
+        Some(line) => !line.contains("awaiting"),
+        None => false,
+    }
+}
+
 #[then(expr = "the ownership handoff prepare response pause for domain {string} is reached")]
 async fn then_ownership_handoff_prepare_response_pause_is_reached(
     world: &mut ScenarioWorld,
@@ -25032,33 +25213,6 @@ async fn then_parallel_graph_edges_are_drawn_apart(
         "two relations between one pair of items to leave and arrive through their own ports",
     )
     .await;
-}
-
-#[then(expr = "graph edge from {string} to {string} is a return path")]
-async fn then_graph_edge_is_a_return_path(
-    world: &mut ScenarioWorld,
-    source: String,
-    target: String,
-) {
-    let page = world
-        .browser_page
-        .as_ref()
-        .expect("a browser page must be opened before graph assertions");
-    let source = expand_placeholders(world, &source);
-    let target = expand_placeholders(world, &target);
-    let script = format!(
-        r#"
-        () => {{
-            {GRAPH_GEOMETRY_HELPERS}
-            const path = edgePath({source:?}, {target:?});
-            if (!path) {{
-                return "edge is not drawn";
-            }}
-            return path.dataset.feedback === "true" ? "OK" : "edge is not marked as a return path";
-        }}
-        "#
-    );
-    assert_graph_probe(page, &script, "a backwards edge must be marked").await;
 }
 
 #[then(expr = "branch group {string} header shows key fields {string}")]

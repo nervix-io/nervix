@@ -82,9 +82,9 @@ pub(crate) mod task_shutdown;
 #[cfg(feature = "testing")]
 pub use fault_injection::{
     BackupCutBoundary, DomainResumeBoundary, FaultInjection, ForeignExecutionObservation,
-    ModelPublicationRefusalKind, RelayCapabilityRefusal, RestoreStagingKind,
-    StandaloneTransactionBoundary, StartPlacementBoundary, WasmCheckpointWindow,
-    WasmStatePageOverflow, WasmStateResetRequestError,
+    ModelPublicationRefusalKind, ObservedOwnershipHandoffReconciliations, RelayCapabilityRefusal,
+    RestoreStagingKind, StandaloneTransactionBoundary, StartPlacementBoundary,
+    WasmCheckpointWindow, WasmStatePageOverflow, WasmStateResetRequestError,
 };
 #[cfg(feature = "testing")]
 pub use registry::SchedulerMode;
@@ -126,6 +126,14 @@ impl ConfiguredFaultInjection {
     /// A node built without the test harness always drains its admitted work when it shuts down.
     pub(crate) const fn runs_shutdown_drain(&self) -> bool {
         true
+    }
+
+    /// A node built without the test harness never holds back the announcement of its record.
+    pub(crate) const fn holds_node_record_announcement(
+        &self,
+        _node: &nervix_models::ClusterNodeName,
+    ) -> bool {
+        false
     }
 
     pub(crate) const fn overflows_wasm_state_page_reply(
