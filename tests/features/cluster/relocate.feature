@@ -357,12 +357,22 @@ Feature: Relocating runtime nodes onto a named cluster node
       RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
       """
     Then the ownership handoff preparation pause for domain "{{domain}}" is reached
-    When node "node-2" is stopped
+    # Only the move this handoff prepared may still reach node-2. A leader that cannot record the
+    # first run's outcome, because leadership moved or its lease went unconfirmed, runs the command
+    # again under its reference, and that later run plans a new move, which the cordon refuses.
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      """
+    And node "node-2" is stopped
     And node "node-2" is started
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-2" eventually reports interconnect to "node-1" as "connected"
+    # Every node now plans against node-2's new run: the coordinator finds its incarnation changed,
+    # and a later run finds node-2 cordoned rather than terminating.
+    And every other node's gossip eventually lists a run of node "node-2" that is not terminating
     When the ownership handoff preparation pause for domain "{{domain}}" is released
-    Then the background Plexus execution fails with "destination node 'node-2' changed process incarnation during ownership handoff"
+    Then the background Plexus execution fails because either "destination node 'node-2' changed process incarnation during ownership handoff" or "node 'node-2' is cordoned"
     When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
@@ -373,6 +383,77 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     When these Plexus commands are executed on the leader node
       """
+      UNCORDON NODE node-2;
+      RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=junction name=moving_route owner=node-2
+      """
+
+  # The leader that ran the aborted handoff loses leadership before it records the outcome, so the
+  # next leader runs the relocation again. That run plans a new move onto node-2's new run, which
+  # would succeed without the cordon.
+  @ownership-state-handoff @shutdown_qualification
+  Scenario: A destination restart after preparation aborts the ownership handoff when leadership moves before its outcome is recorded
+    Given runtime replication is configured with replica count 0 and snapshot interval "1h"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then node "node-1" eventually observes a stable leader
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( id I64 );
+      CREATE RELAY inbound SCHEMA event UNBRANCHED;
+      CREATE RELAY outbound SCHEMA event UNBRANCHED;
+      CREATE JUNCTION moving_route FROM inbound UNBRANCHED
+        TO outbound INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    And these Plexus commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    Given ownership handoff for domain "{{domain}}" pauses after preparation
+    When these Plexus commands begin executing in the background
+      """
+      RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then the ownership handoff preparation pause for domain "{{domain}}" is reached
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      """
+    And node "node-2" is stopped
+    And node "node-2" is started
+    Then node "node-1" eventually reports interconnect to "node-2" as "connected"
+    And node "node-2" eventually reports interconnect to "node-1" as "connected"
+    And every other node's gossip eventually lists a run of node "node-2" that is not terminating
+    Given leadership moves from node "node-1" to node "node-3" before its next command outcome is recorded
+    When the ownership handoff preparation pause for domain "{{domain}}" is released
+    Then the leadership move before the command outcome record completed
+    And the background Plexus execution fails with "node 'node-2' is cordoned"
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=junction name=moving_route owner=node-1
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      UNCORDON NODE node-2;
       RELOCATE JUNCTION moving_route ONTO NODE node-2 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
       """
@@ -477,9 +558,14 @@ Feature: Relocating runtime nodes onto a named cluster node
     And node "node-2" is started
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-2" eventually reports interconnect to "node-1" as "connected"
+    And every other node's gossip eventually lists a run of node "node-2" that is not terminating
     When the ownership handoff activation pause for domain "{{domain}}" is released
-    Then the background Plexus execution fails with "ownership state activation did not complete"
-    When these Plexus commands are executed on the leader node
+    # A leader that cannot record the coordinator's outcome runs the relocation again, and that
+    # later run finds the deduplicator already on node-2's new run.
+    Then the background Plexus execution either fails with "ownership state activation did not complete" or succeeds with "relocated 0 of 1 execution unit(s) onto node 'node-2'"
+    # Read the status apart from the session that holds both subscriptions, which stays open
+    # wherever leadership has gone.
+    When this Plexus command request is executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """

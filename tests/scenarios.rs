@@ -15085,8 +15085,28 @@ async fn given_leadership_moves_before_next_admission_proposal(
     world.leadership_move = Some(moved);
 }
 
+#[given(
+    expr = "leadership moves from node {string} to node {string} before its next command outcome \
+            is recorded"
+)]
+async fn given_leadership_moves_before_next_outcome_record(
+    world: &mut ScenarioWorld,
+    from_node_id: String,
+    to_node_id: String,
+) {
+    let from_node_id = expand_placeholders(world, &from_node_id);
+    let to_node_id = expand_placeholders(world, &to_node_id);
+    let moved = world.cluster().move_leadership_under_next_command(
+        CommandHold::BeforeOutcomeRecord,
+        &from_node_id,
+        &to_node_id,
+    );
+    world.leadership_move = Some(moved);
+}
+
 #[then("the leadership move under the durably admitted command completed")]
 #[then("the leadership move before the admission proposal completed")]
+#[then("the leadership move before the command outcome record completed")]
 async fn then_leadership_move_completed(world: &mut ScenarioWorld) {
     let moved = world
         .leadership_move
@@ -19545,6 +19565,43 @@ async fn then_the_background_plexus_execution_fails_because_either(
         "background Plexus error must contain '{first}' or '{second}', got: {error}"
     );
     world.last_command_error = Some(error);
+}
+
+/// A durable command whose first run failed may be run again under its execution reference by the
+/// leader that records its outcome, when leadership moved or the lease went unconfirmed before the
+/// first run's outcome was recorded. The later run finds the effects the first run committed and
+/// can succeed, so either outcome is the command's.
+#[then(
+    expr = "the background Plexus execution either fails with {string} or succeeds with {string}"
+)]
+async fn then_the_background_plexus_execution_either_fails_or_succeeds(
+    world: &mut ScenarioWorld,
+    failure: String,
+    success: String,
+) {
+    let failure = expand_placeholders(world, &failure);
+    let success = expand_placeholders(world, &success);
+    let task = world
+        .background_plexus
+        .take()
+        .expect("a background Plexus execution must be active");
+    let outcome = task.await.expect("background Plexus task must not panic");
+    match outcome {
+        Ok(output) => {
+            assert!(
+                output.contains(&success),
+                "a successful background Plexus execution must report '{success}', got: {output}"
+            );
+            world.last_command_output = Some(output);
+        }
+        Err(error) => {
+            assert!(
+                error.contains(&failure),
+                "a failed background Plexus execution must report '{failure}', got: {error}"
+            );
+            world.last_command_error = Some(error);
+        }
+    }
 }
 
 async fn take_background_plexus_failure(world: &mut ScenarioWorld) -> String {
@@ -39579,6 +39636,36 @@ async fn then_node_eventually_reports_interconnect_status(
         .wait_for_interconnect_status(&node_id, &peer_node_id, &expected_status)
         .await
         .expect("interconnect status did not converge");
+}
+
+/// Every other node of the cluster plans against the run `node_id` started last: its gossip calls
+/// that run live and not terminating, so a plan no longer reads an earlier run of `node_id` that
+/// announced its stop. Each other node must be running.
+#[then(
+    expr = "every other node's gossip eventually lists a run of node {string} that is not \
+            terminating"
+)]
+async fn then_every_other_node_lists_a_running_gossip_node(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    for observer in world.cluster().node_ids() {
+        nervix_primitives::task::consume_budget().await;
+        if observer == node_id {
+            continue;
+        }
+        world
+            .cluster()
+            .wait_for_running_gossip_node(&observer, &node_id)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "node '{observer}' did not list a run of node '{node_id}' that is not \
+                     terminating: {error}"
+                )
+            });
+    }
 }
 
 #[then(expr = "node {string} eventually stops probing {string}")]

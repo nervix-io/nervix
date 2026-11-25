@@ -20,6 +20,10 @@ pub(super) struct ClusterStatus {
     pub(super) interconnect: BTreeMap<String, String>,
     /// The other nodes this node's gossip calls live, once the status lists them.
     pub(super) live_gossip_nodes: Option<BTreeSet<String>>,
+    /// The other nodes of which this node's gossip calls a run live that has not announced its
+    /// stop. A node that restarted is listed by its new run beside its terminating earlier run
+    /// until the earlier one leaves, so it is here once the gossip knows the new run.
+    pub(super) running_gossip_nodes: BTreeSet<String>,
 }
 
 impl ClusterStatus {
@@ -33,6 +37,9 @@ impl ClusterStatus {
         let mut membership_committed = None;
         let mut interconnect = BTreeMap::new();
         let mut live_gossip_nodes = BTreeSet::new();
+        let mut running_gossip_nodes = BTreeSet::new();
+        // The node whose listed run the indented advertisements below describe.
+        let mut listed_gossip_node: Option<String> = None;
         let mut lists_live_gossip = false;
         let mut in_membership = false;
         let mut in_interconnect = false;
@@ -46,14 +53,22 @@ impl ClusterStatus {
             }
             if in_live_gossip {
                 if let Some(node_id) = line.strip_prefix("- node_id: ") {
-                    live_gossip_nodes.insert(node_id.trim().to_string());
+                    let node_id = node_id.trim().to_string();
+                    live_gossip_nodes.insert(node_id.clone());
+                    listed_gossip_node = Some(node_id);
                     continue;
                 }
                 // A listed node's other advertisements are indented beneath its name.
                 if line.starts_with("  ") {
+                    if line.trim() == "terminating: false"
+                        && let Some(node_id) = &listed_gossip_node
+                    {
+                        running_gossip_nodes.insert(node_id.clone());
+                    }
                     continue;
                 }
                 in_live_gossip = false;
+                listed_gossip_node = None;
             }
 
             if let Some(value) = line.strip_prefix("raft.current_leader: ") {
@@ -125,6 +140,7 @@ impl ClusterStatus {
             membership_committed,
             interconnect,
             live_gossip_nodes: lists_live_gossip.then_some(live_gossip_nodes),
+            running_gossip_nodes,
         }
     }
 }
@@ -165,6 +181,13 @@ impl ClusterStatus {
             Some(live) => !live.contains(node_id),
             None => false,
         }
+    }
+
+    /// Whether this node's gossip, as the status lists it, calls a run of `node_id` live that has
+    /// not announced its stop. Planning reads a node's newest live run, so once this holds, this
+    /// node no longer plans against an earlier run of `node_id` that is terminating.
+    pub(super) fn lists_running_gossip_node(&self, node_id: &str) -> bool {
+        self.running_gossip_nodes.contains(node_id)
     }
 }
 
@@ -241,6 +264,27 @@ mod membership_status_tests {
         assert_eq!(
             status.membership.get("node-2").map(String::as_str),
             Some("learner")
+        );
+    }
+
+    #[test]
+    fn a_restarted_node_runs_once_gossip_lists_its_new_run_beside_the_terminating_one() {
+        let raw = "[chitchat]\ncluster_id: cucumber\nseed_nodes: (none)\nself:\n- node_id: \
+                   node-1\n  gossip_addr: 127.0.0.1:41001\n  terminating: false\nlive_nodes:\n- \
+                   node_id: node-2\n  gossip_addr: 127.0.0.1:41002\n  terminating: true\n- \
+                   node_id: node-3\n  gossip_addr: 127.0.0.1:41003\n  terminating: true\n- \
+                   node_id: node-2\n  gossip_addr: 127.0.0.1:41002\n  terminating: \
+                   false\n\n[raft]\nraft.state: Leader"
+            .to_string();
+        let status = ClusterStatus::parse(raw);
+
+        assert!(status.lists_running_gossip_node("node-2"));
+        assert!(!status.lists_running_gossip_node("node-3"));
+        // Its own run is listed apart from the live nodes, as `self`.
+        assert!(!status.lists_running_gossip_node("node-1"));
+        assert_eq!(
+            status.live_gossip_nodes,
+            Some(BTreeSet::from(["node-2".to_string(), "node-3".to_string()]))
         );
     }
 
