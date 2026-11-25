@@ -1,7 +1,7 @@
 @full_queue_waits
 Feature: Work no caller waits on waits for a place in a full worker class
-  A worker class whose workers are all busy and whose wait queue is full refuses no job. Work the
-  node or a peer already accepted, which no caller waits to be answered about, waits for a place
+  A worker class whose workers are all busy refuses no job. Work the node or a peer already
+  accepted, which no caller waits to be answered about, waits for a place on its class's workers
   like every other job: relay slices and subscription deliveries on the data workers, checkpoints,
   state captures, partition moves and the compilation of a committed change on the bulk workers,
   and checkpoint and resource files on the filesystem workers. Each scenario brings that work up

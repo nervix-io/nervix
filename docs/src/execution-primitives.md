@@ -408,7 +408,7 @@ storage workers are the one built-in owner of the runtime's blocking pool, and n
 `task::block_in_place`, which blocks the runtime worker thread that calls it.
 
 Connector network control calls use a storage class of their own, with two admitted workers by
-default and the same bounded queue policy as other classes. Kafka ingestor metadata, watermarks,
+default and the same admission as other classes. Kafka ingestor metadata, watermarks,
 timestamp queries, seeks, assignments and consumer-group commits use it, and so does the destruction
 of a Kafka consumer or producer whose last handle is gone. A synchronous commit may
 outlive its caller's thirty-second wait, so sharing filesystem or consensus worker permits would
@@ -492,64 +492,73 @@ ordinary and Shuttle builds the boundary drains those callbacks on one blocking-
 Turmoil it yields on the simulated host between callbacks, preserving one bounded body per
 simulation step. Storage workers drain through `task::spawn_blocking` in every mode.
 
-Submission, exact queued cancellation, selection and the empty-to-idle transition share one
-class-local mutex fence. Each acquisition performs one insert, keyed removal or FIFO selection;
-callbacks, destruction, result delivery and semaphore release happen outside it. A submitter either
-finds an active worker that will observe its job or claims a worker itself, so submission racing the
-last worker's exit cannot strand an admitted job. No idle worker retains a blocking-pool thread.
-The queue semaphore bounds pending work and hands a freed place to the job that asked for one
-first. A full queue is backpressure, never a refusal: every job waits for a place, requests
+A worker class is a fixed number of workers, like the permits of a semaphore, and nothing else: it
+has no queue of its own with places to fill. A job that finds a free worker takes it at once; one
+that finds every worker busy waits for one, and workers take waiting jobs in the order they asked.
+Nothing bounds how many jobs wait, and busy workers are backpressure, never a refusal, requests
 included. Client batch decoding, statement constants, subscription predicates, state inspection, an
 HTTP endpoint body and the frames of a request one node sends another wait exactly as the unfolding
 of a payload an ingestor handed over, relay and subscription carriage, the answer of an interconnect
 request whose handler already ran, checkpoints and state captures, compilation for a committed
 change, lifecycle steps and the consensus storage worker's jobs, which `submit_storage` admits in
 order. The caller's own limit bounds the wait (a statement's deadline, a request's lifetime, a
-source's quiesce, shutdown), and dropping the future gives the place up. A wait ends in a refusal
+source's quiesce, shutdown), and dropping the future gives up its turn. A wait ends in a refusal
 only once the executor admits no more work. VM execution still owns its class and charge decisions.
+
+Submission, exact cancellation of a waiting job, selection and the empty-to-idle transition share
+one class-local mutex fence. Each acquisition performs one insert, keyed removal or FIFO selection;
+callbacks, destruction, result delivery and notifications happen outside it. A submitter either
+finds an active worker that will take its job or claims a free worker itself, so submission racing
+the last worker's exit cannot strand an admitted job. A worker that finishes a job takes the next
+waiting job itself, retaining one blocking-pool dispatch until nothing waits, so a freed worker
+never waits for an async wake-up to hand on its place; no idle worker retains a blocking-pool
+thread.
 
 [Traffic And Resource Isolation](./interconnect.md#traffic-and-resource-isolation) says, for each
 interconnect protocol, which charges its frames take and what ends their waits.
 
 An owner that must keep serving others while its own work waits submits that work through
-`Executor::reporting_waits_to`, a handle on the same classes, budgets and allowances that admits and
-queues exactly as the node's handle does and also tells the owner's `CapacityWaits` while a
-submission waits for capacity: a job that finds its class's wait queue full, which the class also
-counts among its waiting jobs, or a memory charge its class cannot grant yet. The wait ends when the
-submission takes its place or room, or when its future is dropped. A job admitted at once and a job
-that has its place and waits for a worker never count, because every job passes through that last
-wait however idle the node is. A processor task restores its branches this way: it runs the restore
-alone while the restore makes progress, and answers its commands as unrestored beside it only while
-`CapacityWaits` reports a wait, so a command never overtakes an ordinary restore. The count is a
-watch value: an owner subscribes before it reads, so a wait that begins or ends in between still
-wakes it, and Shuttle checks that the owner sees its job begin and end waiting for a place whichever
-of its watch and the job's wait comes first.
+`Executor::reporting_waits_to`, a handle on the same classes, budgets and allowances that admits
+exactly as the node's handle does and also tells the owner's `CapacityWaits` while a submission
+waits for capacity: a job that finds every worker of its class busy, which the class also counts
+among its waiting jobs, or a memory charge its class cannot grant yet. The wait ends when a worker
+takes the job or the charge takes its room, or when its future is dropped. A job a free worker
+takes at once never counts, although that worker still has to start it, because every job passes
+through that however idle the node is. A processor task restores its branches this way: it runs
+the restore alone while the restore makes progress, and answers its commands as unrestored beside
+it only while `CapacityWaits` reports a wait, so a command never overtakes an ordinary restore. The
+count is a watch value: an owner subscribes before it reads, so a wait that begins or ends in
+between still wakes it, and Shuttle checks that the owner sees its job begin and end waiting for a
+worker whichever of its watch and the job's wait comes first.
 
-An owner can acquire a charged CPU queue place before transferring mutable state into a job
-(`Executor::prepare_cpu`). Every inferencer does this before moving its branch's native session into the job that runs
-its model on the extension workers; the job hands the session back with its outcome. Dropping the
-full-queue wait leaves that session installed and returns the charge. After submission,
-cancellation follows the same queued and running job rules as every other admitted run.
+A job can carry state its owner must keep (`Executor::run_cpu_carrying`). The job hands the state
+back with its outcome, and a job its caller withdraws before a worker takes it hands the state back
+from its entry among the waiting jobs, so the owner keeps it however long the job waits, and no
+worker is held for the job meanwhile. Every inferencer moves its branch's native session into the
+job that runs its model on the extension workers this way; dropping the wait leaves the session
+installed and returns the charge. Shuttle checks a withdrawal racing the worker that frees to take
+the job: either the job runs, taking its state with it, or its state is the owner's again. Only a
+job that panicked, or one a stopping runtime abandoned, takes its state with it.
 
 The storage submission adapter and each job's invocation carry explicit dispatch contracts for
 the caller-owned synchronous callback. Its effects remain the caller's responsibility; the
-executor's bounded contract covers admission and queue transitions outside that callback.
+executor's bounded contract covers admission and the transitions of its waiting jobs outside that
+callback.
 
-A caller withdrawing while its job remains queued removes that exact entry and immediately returns
-its memory charge and queue place. Once selected by a worker, the job owns its charge until its
-callback exits and observes the caller's cancellation between bounded units. A detached storage
-submission returns only after its job has been selected. Each callback catches its own panic,
-returns `JobPanicked` to its caller, records its completed service and leaves successors runnable.
-The worker publishes its next selection or its idle transition before delivering the completed
-result. Per-class admission, completion, queue-time and work-time counters retain their meanings;
-work time measures callbacks, excluding dispatch and queue waits. A class also reports how many
-jobs wait for a place in its full queue: a job takes a free place at once, counts as waiting only
-once it finds the queue full, and stops counting when it takes a place, the pool closes or its
-caller drops the wait.
+A caller withdrawing while its job still waits removes that exact entry and immediately returns its
+memory charge. Once a worker takes the job, the job owns its charge until its callback exits and
+observes the caller's cancellation between bounded units. A detached storage submission returns
+only after a worker has taken its job. Each callback catches its own panic, returns `JobPanicked` to
+its caller, records its completed service and leaves successors runnable. The worker publishes its
+next selection or its idle transition before delivering the completed result. Per-class admission,
+completion, wait-time and work-time counters retain their meanings; work time measures callbacks,
+excluding dispatch and the wait for a worker. A class also reports how many jobs wait for a worker:
+a job a free worker takes at once never counts, one that finds every worker busy counts from then,
+and it stops counting once a worker takes it, the pool closes or its caller drops the wait.
 
 Worker state distinguishes a selected callback, a callback executing and an idle worker. Runtime
 teardown that drops a worker between callbacks, or before its blocking task starts, returns its
-active place and closes the retained queue with `PoolClosed`. Selected and queued charges are
+active place and closes every waiting job with `PoolClosed`. Selected and waiting jobs' charges are
 released outside the fence; callbacks already running on other workers keep theirs until they
 exit. A subsequently reused class can claim a replacement worker.
 

@@ -71,9 +71,8 @@ fn registration(ack_id: u64, registrar: &ClusterNodeName) -> RemoteAckRegistrati
     }
 }
 
-/// Every worker of one CPU class busy with a job the test releases, and every place in its wait
-/// queue taken by a job waiting behind them. The next job waits for a place until the hold is
-/// released.
+/// Every worker of one CPU class busy with a job the test releases, and one job waiting behind
+/// them. The next job waits for a worker too until the hold is released.
 pub(crate) struct HeldCpuClass {
     releases: Vec<nervix_primitives::sync::oneshot::Sender<()>>,
     jobs: Vec<nervix_primitives::task::JoinHandle<()>>,
@@ -109,26 +108,23 @@ impl HeldCpuClass {
                 .await
                 .expect("an occupying job reports once it holds its worker");
         }
-        for _ in 0..capacity.queue_capacity {
-            let charge = executor
-                .try_reserve(MemoryClass::Bulk, 1)
-                .expect("the test's bulk class has room for one byte per held job");
-            let queuer = executor.clone();
-            jobs.push(nervix_primitives::task::spawn(async move {
-                queuer
-                    .run_cpu(class, charge, |_charge, _cancellation| ())
-                    .await
-                    .expect("a queued job takes a place behind the occupied workers");
-            }));
-        }
-        while executor.snapshot().cpu_class(class).pending < capacity.queue_capacity {
+        let charge = executor
+            .try_reserve(MemoryClass::Bulk, 1)
+            .expect("the test's bulk class has room for one byte per held job");
+        let waiter = executor.clone();
+        jobs.push(nervix_primitives::task::spawn(async move {
+            waiter
+                .run_cpu(class, charge, |_charge, _cancellation| ())
+                .await
+                .expect("a job waiting behind the occupied workers runs once they free");
+        }));
+        while executor.snapshot().cpu_class(class).waiting < 1 {
             nervix_primitives::task::yield_now().await;
         }
         Self { releases, jobs }
     }
 
-    /// Let every occupying job exit, so the queued jobs run and free their places, and wait for
-    /// all of them.
+    /// Let every occupying job exit, so the waiting jobs run, and wait for all of them.
     pub(crate) async fn release(self) {
         for release in self.releases {
             release
@@ -161,8 +157,8 @@ async fn announce_after_first_poll<F: Future>(
     future.await
 }
 
-/// Every worker of one CPU class busy with a job the test releases, with its wait queue left to
-/// whatever arrives next.
+/// Every worker of one CPU class busy with a job the test releases, the jobs that arrive next left
+/// waiting for them.
 pub(crate) struct OccupiedWorkers {
     executor: Executor,
     class: CpuClass,
@@ -214,17 +210,11 @@ impl OccupiedWorkers {
         has_started
     }
 
-    /// Keep the class full past the job now at the head of its queue. A job that will hold a worker
-    /// and one waiting job per place join the line behind the head job, then one worker frees: the
-    /// head job runs, the holding job takes the worker after it, and the waiting jobs take every
-    /// place that frees. The next job the class is handed finds every worker busy and every place
-    /// taken, and it stays so until the test releases the class.
+    /// Keep every worker of the class busy past the job now waiting first for one. A job that will
+    /// hold a worker joins the line behind that job, then one worker frees: the first job runs, and
+    /// the holding job takes the worker after it. The next job the class is handed finds every
+    /// worker busy, and it stays so until the test releases the class.
     pub(crate) async fn keep_full_after_head(mut self) -> Self {
-        let capacity = self
-            .executor
-            .snapshot()
-            .cpu_class(self.class)
-            .queue_capacity;
         let (started, has_started) = nervix_primitives::sync::oneshot::channel();
         let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
         let charge = self
@@ -250,23 +240,6 @@ impl OccupiedWorkers {
         has_joined
             .await
             .expect("the job that keeps the class full joins its line");
-        for _ in 0..capacity {
-            let charge = self
-                .executor
-                .try_reserve(MemoryClass::Bulk, 1)
-                .expect("the test's bulk class has room for one byte per held job");
-            let waiter = self.executor.clone();
-            let (joined, has_joined) = nervix_primitives::sync::oneshot::channel();
-            self.jobs.push(nervix_primitives::task::spawn(async move {
-                let job = waiter.run_cpu(class, charge, |_charge, _cancellation| ());
-                announce_after_first_poll(job, joined)
-                    .await
-                    .expect("a job that keeps a place runs once the class is released");
-            }));
-            has_joined
-                .await
-                .expect("a job that keeps a place joins its line");
-        }
         let freed = self.releases.remove(0);
         freed
             .send(())
@@ -551,8 +524,8 @@ async fn a_connection_answer_waits_for_a_place_on_its_acceptors_full_control_cla
         });
         eventually(
             &executor_b,
-            "the hello waiting at the head of the control queue",
-            |executor| executor.snapshot().cpu_class(CpuClass::Control).pending == 1,
+            "the hello waiting first for the busy control workers",
+            |executor| executor.snapshot().cpu_class(CpuClass::Control).waiting == 1,
         )
         .await;
         // The queued hello holds its own small charges, which it gives back once decoded; the
@@ -721,8 +694,8 @@ async fn a_connection_refusal_waits_for_a_place_on_its_acceptors_full_control_cl
         transports.dial();
         eventually(
             &executor_b,
-            "every preconnected hello waiting in the control queue",
-            |executor| executor.snapshot().cpu_class(CpuClass::Control).pending == hellos,
+            "every preconnected hello waiting for the busy control workers",
+            |executor| executor.snapshot().cpu_class(CpuClass::Control).waiting == hellos,
         )
         .await;
         // The queued hellos hold their own small charges, which each gives back once decoded; a
@@ -904,8 +877,8 @@ async fn a_relay_status_answer_waits_for_a_place_on_its_receivers_full_control_c
         });
         eventually(
             &executor_b,
-            "the query waiting at the head of the control queue",
-            |executor| executor.snapshot().cpu_class(CpuClass::Control).pending == 1,
+            "the query waiting first for the busy control workers",
+            |executor| executor.snapshot().cpu_class(CpuClass::Control).waiting == 1,
         )
         .await;
         // The queued query holds its own small charges, which it gives back once decoded; the

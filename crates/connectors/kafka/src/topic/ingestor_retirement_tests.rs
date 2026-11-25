@@ -3,8 +3,8 @@
 //! Outside the layer order: a harness.
 //! - **Owns.** Causal regressions for each owner that can hold a consumer's last handle (the ingestor
 //!   its host drops, a partition inspector, a control job that outlives its caller, a commit
-//!   refused or answered after its ingestor is gone), for a retirement that meets a full connector
-//!   queue, and for the charge a consumer holds for its own retirement.
+//!   refused or answered after its ingestor is gone), for a retirement that meets a busy connector
+//!   worker, and for the charge a consumer holds for its own retirement.
 //! - **Depends on.** The connector contract, the bounded executor and librdkafka's mock broker.
 //! - **Must not know.** Runtime graph ownership, registry Models or cluster placement.
 
@@ -27,7 +27,7 @@ use super::{
     commit_tests::{GROUP, HELD_ROUND_TRIP, cluster, plan, publish, read_positions},
 };
 use crate::topic::retirement_tests::{
-    FullConnectorQueue, connector_workers_reach, single_connector_worker,
+    BusyConnectorWorker, connector_workers_reach, single_connector_worker,
 };
 
 /// The plan of an ingestor in the test group that runs its driver jobs on `executor`.
@@ -118,16 +118,15 @@ async fn a_dropped_partition_inspector_destroys_its_consumer_on_a_connector_work
 }
 
 /// A consumer whose last handle is gone is work the node already holds, which nothing can present
-/// again, so a full connector queue keeps its destruction waiting for a place instead of refusing
-/// it.
+/// again, so a busy connector worker keeps its destruction waiting instead of refusing it.
 #[nervix_primitives::test]
-async fn a_destruction_waits_for_a_place_in_a_full_connector_queue() {
+async fn a_destruction_waits_for_the_busy_connector_worker() {
     let broker = cluster();
     let executor = single_connector_worker();
     let ingestor = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
         .await
         .assured("the ingestor accepts its group and broker configuration");
-    let full = FullConnectorQueue::fill(&executor).await;
+    let full = BusyConnectorWorker::fill(&executor).await;
     let before = executor.snapshot().connector_storage;
 
     drop(ingestor);
@@ -135,7 +134,7 @@ async fn a_destruction_waits_for_a_place_in_a_full_connector_queue() {
 
     connector_workers_reach(
         &executor,
-        "the consumer is destroyed by a connector job once a queue place frees",
+        "the consumer is destroyed by a connector job once the worker frees",
         |workers| {
             workers.admitted == before.admitted + 1 && workers.completed == before.completed + 3
         },
@@ -143,9 +142,9 @@ async fn a_destruction_waits_for_a_place_in_a_full_connector_queue() {
     .await;
 }
 
-/// A commit's job carries a handle of its own. When the full connector queue holds that job back
-/// after the commit's caller and its ingestor are gone, the job waits for a place rather than being
-/// refused, runs once one frees, and then lets the last handle go, which a connector job destroys.
+/// A commit's job carries a handle of its own. When the busy connector worker holds that job back
+/// after the commit's caller and its ingestor are gone, the job waits for it rather than being
+/// refused, runs once it frees, and then lets the last handle go, which a connector job destroys.
 #[nervix_primitives::test]
 async fn a_commit_waiting_for_a_place_after_its_ingestor_was_dropped_runs_and_then_destroys_the_consumer()
  {
@@ -154,7 +153,7 @@ async fn a_commit_waiting_for_a_place_after_its_ingestor_was_dropped_runs_and_th
     let mut ingestor = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
         .await
         .assured("the ingestor accepts its group and broker configuration");
-    let full = FullConnectorQueue::fill(&executor).await;
+    let full = BusyConnectorWorker::fill(&executor).await;
     let before = executor.snapshot().connector_storage;
     let request = GroupCommitRequest::positions(&[KafkaOffsetPosition {
         topic: "orders".to_string(),
@@ -171,7 +170,7 @@ async fn a_commit_waiting_for_a_place_after_its_ingestor_was_dropped_runs_and_th
     let first_poll = poll_fn(|context| Poll::Ready(commit.as_mut().poll(context))).await;
     assert!(
         first_poll.is_pending(),
-        "the commit waits for its job, which waits for a place in the full queue"
+        "the commit waits for its job, which waits for the busy connector worker"
     );
     drop(commit);
 

@@ -1,7 +1,7 @@
 //! Ordinary executor drain regressions over the production pool.
 //!
 //! Layer: test harness.
-//! - **Owns.** Backlog dispatch, callback panic isolation and interrupted-worker assertions.
+//! - **Owns.** Dispatch of waiting jobs, callback panic isolation and interrupted-worker assertions.
 //! - **Depends on.** The production execution owner and its deterministic worker hold.
 //! - **Must not know.** Graph, transport or domain behavior.
 
@@ -20,20 +20,16 @@ use super::*;
 use crate::{CpuClass, Executor, MemoryClass};
 
 #[nervix_primitives::test]
-async fn an_interrupted_worker_closes_its_queued_jobs_and_returns_the_class() {
-    let pool = WorkerPool::new(
-        WorkerClassName::Cpu(CpuClass::Control),
-        NonZeroUsize::MIN,
-        NonZeroUsize::new(2).assured("two queue slots are nonzero"),
-    );
+async fn an_interrupted_worker_closes_its_waiting_jobs_and_returns_the_class() {
+    let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Control), NonZeroUsize::MIN);
     let executor = Executor::default();
     let mut held = HeldWorker::new(&pool);
     let charge = executor
         .try_reserve(MemoryClass::Management, 1)
         .assured("one byte fits in the management budget");
-    let mut queued = Box::pin(pool.run(None, charge, |_, _| ()));
+    let mut first = Box::pin(pool.run(None, charge, |_, _| ()));
     assert!(
-        std::future::poll_fn(|cx| Poll::Ready(queued.as_mut().poll(cx)))
+        std::future::poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx)))
             .await
             .is_pending()
     );
@@ -47,17 +43,17 @@ async fn an_interrupted_worker_closes_its_queued_jobs_and_returns_the_class() {
             .is_pending()
     );
     held.0.advance();
-    assert_eq!(pool.snapshot().pending, 1);
+    assert_eq!(pool.snapshot().waiting, 1);
     // Transfer the selected callback into its production destructor without executing it. This
     // is the transition when a runtime drops a worker before its next callback. Its successor
-    // remains queued and must lose its start channel as the selected job loses its result.
+    // still waits and must lose its start channel as the selected job loses its result.
     let interrupted = Worker {
         pool: Arc::clone(&held.0.pool),
         state: std::mem::replace(&mut held.0.state, WorkerState::Idle),
     };
     drop(held);
     drop(interrupted);
-    let error = queued
+    let error = first
         .await
         .expect_err("the interrupted worker closes its selected result channel");
     assert!(matches!(
@@ -68,7 +64,7 @@ async fn an_interrupted_worker_closes_its_queued_jobs_and_returns_the_class() {
     ));
     let error = successor
         .await
-        .expect_err("the interrupted worker closes its queued start channel");
+        .expect_err("the interrupted worker closes its waiting job's start channel");
     assert!(matches!(
         error.current_context(),
         ExecutionError::PoolClosed {
@@ -76,7 +72,7 @@ async fn an_interrupted_worker_closes_its_queued_jobs_and_returns_the_class() {
         }
     ));
     assert_eq!(pool.snapshot().running, 0);
-    assert_eq!(pool.snapshot().pending, 0);
+    assert_eq!(pool.snapshot().waiting, 0);
     assert_eq!(executor.snapshot().management_memory.reserved_bytes, 0);
     let charge = executor
         .try_reserve(MemoryClass::Management, 1)
@@ -84,18 +80,14 @@ async fn an_interrupted_worker_closes_its_queued_jobs_and_returns_the_class() {
     assert_eq!(
         pool.run(None, charge, |_, _| 7)
             .await
-            .assured("the returned active place admits a replacement"),
+            .assured("the returned worker takes a replacement"),
         7
     );
 }
 
 #[nervix_primitives::test]
 async fn a_panicking_job_reports_its_own_failure_and_the_worker_drains_its_successor() {
-    let pool = WorkerPool::new(
-        WorkerClassName::Cpu(CpuClass::Control),
-        NonZeroUsize::MIN,
-        NonZeroUsize::new(2).assured("two queue slots are nonzero"),
-    );
+    let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Control), NonZeroUsize::MIN);
     let executor = Executor::default();
     let held = HeldWorker::new(&pool);
     let charge = executor
@@ -137,17 +129,13 @@ async fn a_panicking_job_reports_its_own_failure_and_the_worker_drains_its_succe
     let drained = pool.snapshot();
     assert_eq!(drained.completed, 2);
     assert_eq!(drained.running, 0);
-    assert_eq!(drained.pending, 0);
+    assert_eq!(drained.waiting, 0);
     assert_eq!(executor.snapshot().management_memory.reserved_bytes, 0);
 }
 
 #[nervix_primitives::test]
 async fn a_single_worker_drains_its_backlog_without_polling_submitters_again() {
-    let pool = WorkerPool::new(
-        WorkerClassName::Cpu(CpuClass::Control),
-        NonZeroUsize::MIN,
-        NonZeroUsize::new(8).assured("eight queue slots are nonzero"),
-    );
+    let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Control), NonZeroUsize::MIN);
     let executor = Executor::default();
     let (release, released) = nervix_primitives::sync::oneshot::channel();
     let mut gate = Some(released);
@@ -195,6 +183,6 @@ async fn a_single_worker_drains_its_backlog_without_polling_submitters_again() {
     }
     assert_eq!(pool.snapshot().completed, 8);
     assert_eq!(pool.inner.dispatches.load(Ordering::Relaxed), 1);
-    assert_eq!(pool.snapshot().pending, 0);
+    assert_eq!(pool.snapshot().waiting, 0);
     assert_eq!(executor.snapshot().management_memory.reserved_bytes, 0);
 }

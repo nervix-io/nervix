@@ -37,10 +37,8 @@ const HEALTHY: &str = "healthy";
 
 /// Shared management streams one connection leases, from the documented management partition.
 const MANAGEMENT_SHARED_STREAMS: usize = 32;
-/// Jobs one hub worker class may hold waiting, small enough for one burst to fill it.
-const HUB_PENDING_JOBS: usize = 8;
-/// Burst requests beyond what one worker and its full wait queue hold, which wait for a place.
-const WAITING_JOBS: usize = 2;
+/// Burst requests beyond the one the hub's bulk worker runs, which wait for that worker.
+const WAITING_JOBS: usize = 10;
 const STREAM_CHUNK_BYTES: usize = 16 * 1024;
 /// Twice the default bulk receive window, so an unread stream stops at its window with as much
 /// again left to send.
@@ -151,7 +149,7 @@ impl InterconnectStreamRequest for ResourceStream {
 }
 
 /// Worker counts fixed independently of the machine, so every replay admits the same jobs.
-fn executor(pending_jobs: usize) -> Executor {
+fn executor() -> Executor {
     Executor::new(ExecutionConfig {
         workers: WorkerCounts {
             control_cpu: NonZeroUsize::MIN,
@@ -165,9 +163,6 @@ fn executor(pending_jobs: usize) -> Executor {
                 NonZeroUsize::MIN,
             ))
             .expect("one worker fits the primitive permit bound"),
-            pending_jobs: nervix_execution::PendingJobCounts::uniform(
-                NonZeroUsize::new(pending_jobs).assured("fixture queues are nonzero"),
-            ),
         },
         ..ExecutionConfig::default()
     })
@@ -222,7 +217,6 @@ async fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
 #[derive(Debug, Clone, Copy)]
 struct HostBounds {
     peers: usize,
-    pending_jobs: usize,
 }
 
 impl HostBounds {
@@ -233,8 +227,8 @@ impl HostBounds {
         TransportOptions::default().incoming_queue_capacity
     }
 
-    /// No pool, stream partition, shared admission queue, worker queue or memory budget exceeds its
-    /// configured bound.
+    /// No pool, stream partition, shared admission queue or memory budget exceeds its configured
+    /// bound, and no worker class runs more jobs than it has workers.
     fn check(self, host: &str, observation: &Observation) {
         for class in PoolClass::ALL {
             let connection_limit = self
@@ -278,10 +272,6 @@ impl HostBounds {
         ] {
             assert!(
                 workers.running <= workers.workers,
-                "{host}: {observation:?}"
-            );
-            assert!(
-                workers.pending <= self.pending_jobs,
                 "{host}: {observation:?}"
             );
         }
@@ -350,7 +340,7 @@ impl Observation {
         self.transport.counters.bulk_bytes[PoolClass::Bulk.index()][TransferDirection::Sent.index()]
     }
 
-    /// Nothing is leased, admitted, queued, running or charged.
+    /// Nothing is leased, admitted, waiting, running or charged.
     fn assert_released(&self, host: &str) {
         assert!(
             self.transport
@@ -378,7 +368,7 @@ impl Observation {
             executor.bulk_cpu,
         ] {
             assert_eq!(workers.running, 0, "{host}: {self:?}");
-            assert_eq!(workers.pending, 0, "{host}: {self:?}");
+            assert_eq!(workers.waiting, 0, "{host}: {self:?}");
         }
         for budget in [
             executor.management_memory,
@@ -475,10 +465,7 @@ struct PeerHost {
 }
 
 impl PeerHost {
-    const BOUNDS: HostBounds = HostBounds {
-        peers: 1,
-        pending_jobs: 1024,
-    };
+    const BOUNDS: HostBounds = HostBounds { peers: 1 };
 
     async fn serve(mut self, mut commands: mpsc::Receiver<PeerCommand>) -> Result<(), io::Error> {
         while let Some(command) = commands.recv().await {
@@ -892,10 +879,7 @@ struct HubHost {
 }
 
 impl HubHost {
-    const BOUNDS: HostBounds = HostBounds {
-        peers: 2,
-        pending_jobs: HUB_PENDING_JOBS,
-    };
+    const BOUNDS: HostBounds = HostBounds { peers: 2 };
 
     async fn run(mut self) -> Result<(), io::Error> {
         self.connect().await;
@@ -1091,16 +1075,16 @@ impl HubHost {
             .record(HUB, "the healthy peer's pools served the hub and the peer");
     }
 
-    /// One burst fills the bulk worker's wait queue. The burst beyond it waits for a place, each
-    /// request holding only its own charge, while a control job in the same pass starts at once;
-    /// every request of the burst is answered once the class drains.
+    /// One burst finds the bulk worker busy with the first of its requests, and the rest wait for
+    /// that worker, each holding only its own charge, while a control job in the same pass starts
+    /// at once; every request of the burst is answered once the class drains.
     async fn saturate_bulk_execution(&mut self) {
         let before = self.observe();
         let mut single = Box::pin(self.transport.request(&self.healthy.node, BulkProbe));
         assert!(poll_once(single.as_mut()).await.is_pending());
         let one = self.observe();
         assert_eq!(one.executor.bulk_cpu.running, 1);
-        assert_eq!(one.executor.bulk_cpu.pending, 0);
+        assert_eq!(one.executor.bulk_cpu.waiting, 0);
         let charge = one
             .executor
             .bulk_memory
@@ -1112,12 +1096,7 @@ impl HubHost {
             .await
             .assured("an uncontended bulk request completes");
 
-        let admitted = HUB_PENDING_JOBS
-            .checked_add(1)
-            .assured("one worker beside the queue");
-        let burst_size = admitted
-            .checked_add(WAITING_JOBS)
-            .assured("the burst is small");
+        let burst_size = WAITING_JOBS.checked_add(1).assured("the burst is small");
         let requests =
             (0..burst_size).map(|_| self.transport.request(&self.healthy.node, BulkProbe));
         let mut burst = Box::pin(join_all(requests));
@@ -1127,10 +1106,9 @@ impl HubHost {
         let saturated = self.observe();
         let bulk = saturated.executor.bulk_cpu;
         assert_eq!(bulk.running, 1, "{saturated:?}");
-        assert_eq!(bulk.pending, HUB_PENDING_JOBS, "{saturated:?}");
         assert_eq!(
             bulk.waiting, WAITING_JOBS,
-            "the burst beyond the full queue waits for a place: {saturated:?}"
+            "the burst beyond the running request waits for the worker: {saturated:?}"
         );
         let burst_charge = charge
             .checked_mul(u64::try_from(burst_size).assured("the burst is small"))
@@ -1140,13 +1118,10 @@ impl HubHost {
             "each request of the burst holds only its own charge: {saturated:?}"
         );
         assert_eq!(saturated.executor.control_cpu.running, 1, "{saturated:?}");
-        assert_eq!(saturated.executor.control_cpu.pending, 0, "{saturated:?}");
+        assert_eq!(saturated.executor.control_cpu.waiting, 0, "{saturated:?}");
         self.trace.record(
             HUB,
-            format!(
-                "bulk worker busy with {HUB_PENDING_JOBS} queued and {WAITING_JOBS} waiting; \
-                 control job started"
-            ),
+            format!("bulk worker busy with {WAITING_JOBS} waiting; control job started"),
         );
 
         let (results, liveness) = tokio::join!(burst, control);
@@ -1155,7 +1130,8 @@ impl HubHost {
         for (index, result) in results.iter().enumerate() {
             if let Err(error) = result {
                 panic!(
-                    "bulk request {index} of the burst is answered once a place frees: {error:?}"
+                    "bulk request {index} of the burst is answered once the worker frees: \
+                     {error:?}"
                 );
             }
         }
@@ -1163,7 +1139,6 @@ impl HubHost {
         self.wait_until("the bulk class drained", |observation| {
             let bulk = observation.executor.bulk_cpu;
             bulk.running == 0
-                && bulk.pending == 0
                 && bulk.waiting == 0
                 && observation.executor.bulk_memory.reserved_bytes == bulk_before
         })
@@ -1583,7 +1558,7 @@ struct PeerPlan {
 
 impl PeerPlan {
     async fn start(self) -> Result<(), io::Error> {
-        let executor = executor(PeerHost::BOUNDS.pending_jobs);
+        let executor = executor();
         let (transport, incoming) =
             bind_host(self.name, self.credentials, self.seed, executor.clone()).await;
         transport
@@ -1658,7 +1633,7 @@ struct HubPlan {
 
 impl HubPlan {
     async fn start(self) -> Result<(), io::Error> {
-        let executor = executor(HUB_PENDING_JOBS);
+        let executor = executor();
         let (transport, incoming) =
             bind_host(HUB, self.credentials, self.seed, executor.clone()).await;
         transport

@@ -2097,7 +2097,7 @@ impl RuntimeStateStore {
     }
 
     /// Keep the caller's complete snapshot reservation until its owned payload and storage write
-    /// finish. This periodic/final work may wait for a storage queue place; dropping the caller
+    /// finish. This periodic/final work may wait for a storage worker; dropping the caller
     /// cancels admission or the next bounded unit of an admitted job.
     pub(in crate::runtime) async fn persist_owned_snapshot(
         &self,

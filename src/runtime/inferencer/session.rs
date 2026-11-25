@@ -527,10 +527,10 @@ impl InferenceSession {
         chunks
     }
 
-    /// One admitted job over `chunk`, starting from the carried state `carried`. The branch keeps
-    /// its session while the job waits for a place; once admitted, the session moves into the job
-    /// and returns with its outcome. A job that panicked loses the session, and the next batch
-    /// loads it again.
+    /// One admitted job over `chunk`, starting from the carried state `carried`. The session moves
+    /// into the job and returns with its outcome; a job withdrawn before an extension worker takes
+    /// it hands the session straight back, so the branch keeps it however long the job waits. A job
+    /// that panicked loses the session, and the next batch loads it again.
     async fn run_chunk(
         &mut self,
         executor: &Executor,
@@ -544,38 +544,38 @@ impl InferenceSession {
             .reserve(MemoryClass::Relay, chunk.charge.max(1))
             .await
             .change_context(InferencerError::RunExecution)?;
-        let admitted = executor
-            .prepare_cpu(CpuClass::Extension, charge)
-            .await
-            .change_context(InferencerError::RunExecution)?;
-        let mut bound = self
+        let bound = self
             .bound
             .take()
             .ok_or_else(|| Report::new(InferencerError::SessionUnavailable))?;
         let definition = prepared.clone();
         let mapped = mapped.clone();
         let rows = chunk.rows.clone();
-        let (bound, outcome) = admitted
-            .run(move |_charge, cancellation| {
-                let outcome = match definition.mode {
-                    InferencerExecutionMode::PerMessage => bound.run_messages(
-                        &definition,
-                        carried.as_deref(),
-                        &mapped,
-                        &rows,
-                        limit,
-                        cancellation,
-                    ),
-                    InferencerExecutionMode::Batched => {
-                        bound.run_groups(&definition, &mapped, &rows, cancellation)
-                    }
-                };
-                (bound, outcome)
-            })
+        executor
+            .run_cpu_carrying(
+                CpuClass::Extension,
+                charge,
+                bound,
+                &mut self.bound,
+                move |mut bound, _charge, cancellation| {
+                    let outcome = match definition.mode {
+                        InferencerExecutionMode::PerMessage => bound.run_messages(
+                            &definition,
+                            carried.as_deref(),
+                            &mapped,
+                            &rows,
+                            limit,
+                            cancellation,
+                        ),
+                        InferencerExecutionMode::Batched => {
+                            bound.run_groups(&definition, &mapped, &rows, cancellation)
+                        }
+                    };
+                    (bound, outcome)
+                },
+            )
             .await
-            .change_context(InferencerError::RunExecution)?;
-        self.bound = Some(bound);
-        Ok(outcome)
+            .change_context(InferencerError::RunExecution)
     }
 
     /// The public outputs of every accepted message, in arrival order, as one batch.

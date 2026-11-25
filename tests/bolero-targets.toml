@@ -4408,7 +4408,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/application/cli/__fuzz__/application__cli__properties__bolero_node_settings_survive_their_command_line/corpus"
-domain_version = 29
+domain_version = 30
 features = []
 id = "node-settings-command-line"
 invariant = "Current node settings, complete positive listener bounds and optional capability requests of every group, with scalar validation, Raft timings ordered in whole milliseconds and explicit watermarks paired and ordered, render as the server's options and read back unchanged without losing omission; detected-capacity relationships are checked by their owners after detection. Generated node tags render as `--node-tags` and read back as the same tags. Every duration and byte quantity help prints reads back as the same value."

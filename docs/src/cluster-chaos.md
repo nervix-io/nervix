@@ -1363,7 +1363,7 @@ quiesced backup, the archive holds three such saves. The run then:
    - `nervix_restore_staging_sweeps_total` and `nervix_restore_staging_reclaimed_bytes_total`
    - `nervix_restore_keyspaces_disk_bytes`
    - the `filesystem_storage` class of `nervix_execution_jobs_running` and
-     `nervix_execution_jobs_pending`
+     `nervix_execution_jobs_waiting`
    - the `bulk` and `restore_metadata` classes of `nervix_execution_memory_reserved_bytes`
    - `nervix_jemalloc_resident_bytes`
 

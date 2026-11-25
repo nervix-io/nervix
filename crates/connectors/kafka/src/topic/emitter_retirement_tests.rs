@@ -4,7 +4,7 @@
 //! - **Owns.** Causal regressions for each owner that can hold a producer's last handle (an emitter its
 //!   host drops before it publishes or once it finished it, an emitter dropped while its broker holds
 //!   the answers to the records it sent, a flush that outlives the finish that started it), for a
-//!   destruction that waits for the producer's polling thread or meets a full connector queue, and
+//!   destruction that waits for the producer's polling thread or meets a busy connector worker, and
 //!   for the charge a producer holds for its own retirement.
 //! - **Depends on.** The connector contract, the bounded executor and librdkafka's mock broker.
 //! - **Must not know.** Runtime graph ownership, registry Models or cluster placement.
@@ -36,7 +36,8 @@ use super::{
     },
 };
 use crate::topic::retirement_tests::{
-    FullConnectorQueue, connector_workers_reach, connector_workers_reached, single_connector_worker,
+    BusyConnectorWorker, connector_workers_reach, connector_workers_reached,
+    single_connector_worker,
 };
 
 /// A broker round trip no test outlives, so a broker given it holds every answer.
@@ -307,14 +308,13 @@ async fn a_destruction_that_waits_for_the_polling_thread_waits_on_a_connector_wo
 }
 
 /// A producer whose last handle is gone is work the node already holds, which nothing can present
-/// again, so a full connector queue keeps its destruction waiting for a place instead of refusing
-/// it.
+/// again, so a busy connector worker keeps its destruction waiting instead of refusing it.
 #[nervix_primitives::test]
-async fn a_producer_destruction_waits_for_a_place_in_a_full_connector_queue() {
+async fn a_producer_destruction_waits_for_the_busy_connector_worker() {
     let cluster = cluster(1, 1);
     let executor = single_connector_worker();
     let emitter = emitter_on(&cluster, &[], BrokerPublishingMode::NoAck, executor.clone()).await;
-    let full = FullConnectorQueue::fill(&executor).await;
+    let full = BusyConnectorWorker::fill(&executor).await;
     let before = executor.snapshot().connector_storage;
 
     drop(emitter);
@@ -322,7 +322,7 @@ async fn a_producer_destruction_waits_for_a_place_in_a_full_connector_queue() {
 
     connector_workers_reach(
         &executor,
-        "the producer is destroyed by a connector job once a queue place frees",
+        "the producer is destroyed by a connector job once the worker frees",
         |workers| {
             workers.admitted == before.admitted + 1 && workers.completed == before.completed + 3
         },

@@ -2476,8 +2476,8 @@ mod tests {
             job.await
         }
 
-        /// The only extension worker of a [`single_worker_executor`] and the only place in its
-        /// wait queue, each held by a job until [`Self::release`]. Shuttle's semaphores refuse a
+        /// The only extension worker of a [`single_worker_executor`], held by a job until
+        /// [`Self::release`], with another job waiting behind it. Shuttle's semaphores refuse a
         /// charge of no bytes, so each job is charged one.
         struct HeldExtensionQueue {
             release: nervix_primitives::sync::oneshot::Sender<()>,
@@ -2510,8 +2510,7 @@ mod tests {
                         .await
                         .assured("the holding job takes the class's only worker");
                 });
-                // The job runs only after it gave up its place in the queue, so the queue is free
-                // for the next job once it reports.
+                // The job holds the class's only worker once it reports.
                 has_started
                     .await
                     .assured("the holding job reports once it holds the worker");
@@ -2535,7 +2534,7 @@ mod tests {
                 });
                 is_queued
                     .await
-                    .assured("the queued job reports once it holds the queue's only place");
+                    .assured("the queued job reports once it waits behind the held worker");
                 Self {
                     release,
                     running,

@@ -252,7 +252,7 @@ async fn accepted_work_stop_bounds_a_full_command_queue_while_the_branch_waits()
         stopped.is_ok(),
         "the existing shutdown grace must include waiting to send STOP"
     );
-    assert_eq!(executor.snapshot().data_cpu.pending, 0);
+    assert_eq!(executor.snapshot().data_cpu.waiting, 0);
 }
 
 #[cfg(feature = "shuttle")]
@@ -328,13 +328,13 @@ mod accepted_work_shuttle {
                     executor
                         .run_cpu(nervix_execution::CpuClass::Data, probe, |_, _| ())
                         .await
-                        .assured("ending the branch returns the actual queue place");
+                        .assured("ending the branch withdraws its actual waiting job");
                     let snapshot = executor.snapshot();
                     assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
                     assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
                     assert_eq!(snapshot.data_cpu.running, 0);
-                    assert_eq!(snapshot.data_cpu.pending, 0);
-                    // The branch may be withdrawn after queue admission but before it runs.
+                    assert_eq!(snapshot.data_cpu.waiting, 0);
+                    // The branch may be withdrawn after admission but before a worker takes it.
                     assert!((3..=4).contains(&snapshot.data_cpu.admitted));
                     assert!((3..=4).contains(&snapshot.data_cpu.completed));
                     assert!(snapshot.data_cpu.completed <= snapshot.data_cpu.admitted);

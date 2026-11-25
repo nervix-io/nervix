@@ -2047,9 +2047,9 @@ The harness keeps these boundaries explicit.
   removes that node from the retained set. These are harness bounds for class-isolation evidence,
   not additional product deadlines.
 - **Worker class saturation.** `<class> execution is saturated on every node`, and its form for
-  one node, hold every worker and every wait-queue place of one CPU class (`control`,
-  `credentials`, `data`, `extension`, `bulk`) or storage class (`consensus storage`,
-  `filesystem storage`, `connector storage`), so the next job of that class waits for a place.
+  one node, hold every worker of one CPU class (`control`, `credentials`, `data`, `extension`,
+  `bulk`) or storage class (`consensus storage`, `filesystem storage`, `connector storage`), so the
+  next job of that class waits for a worker.
   Filling one node's class has a 60-second harness bound: it waits only for the jobs already
   running there to leave their workers. `a <class> job waits for a place on node …` (or
   `on some node`) reads the public waiting gauge, `nervix_execution_jobs_waiting`. A node's own maintenance can already wait

@@ -1,18 +1,24 @@
-//! One class's bounded FIFO, worker drain, and cancellation at the queued-to-running boundary.
+//! One class's workers, the jobs waiting for them in the order they asked, and cancellation at the
+//! waiting-to-running boundary.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** A class-local admission fence, queued work and workers that drain it in order.
+//! - **Owns.** A class's fixed workers, like the permits of a semaphore; the jobs waiting for one;
+//!   workers that take the next waiting job themselves, in the order the jobs asked; and the state a
+//!   job carries for its caller, handed back when the job never runs.
 //! - **Depends on.** Execution charges and cancellation, and the primitive boundary's mechanisms.
 //! - **Must not know.** What a job computes or which graph, domain or peer submitted it.
 
-use std::{collections::BTreeMap, fmt, num::NonZeroUsize, panic::AssertUnwindSafe, time::Duration};
+use std::{
+    any::Any, collections::BTreeMap, fmt, num::NonZeroUsize, panic::AssertUnwindSafe,
+    time::Duration,
+};
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
     sync::{
-        Arc, OwnedSemaphorePermit, Semaphore, StdArc, TryAcquireError,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc,
+        atomic::{AtomicU64, Ordering},
         blocking::Mutex,
         oneshot,
     },
@@ -24,18 +30,16 @@ use thiserror::Error;
 use crate::{
     CapacityWaits,
     cancellation::{ArmedCancellation, CancelOnDrop, Cancellation},
-    capacity_waits::CapacityWait,
-    executor::SemaphoreRef,
     limits::WorkerClassName,
     memory::Reservation,
 };
 
 /// Why a job did not produce a value.
 ///
-/// A full wait queue is not among the reasons. The queue bounds how much work a class holds in
-/// front of its workers, and a job that finds it full waits for a place: places go to waiting jobs
-/// in the order they asked. The caller bounds that wait by dropping the future, which gives up its
-/// place in line and returns its charge.
+/// Busy workers are not among the reasons. A class is a fixed number of workers, like the permits
+/// of a semaphore: a job that finds every worker busy waits for one, workers take waiting jobs in
+/// the order they asked, and nothing bounds how many jobs wait. The caller bounds its job's wait
+/// by dropping the future, which withdraws the job and returns its charge.
 #[derive(Debug, Error)]
 pub enum ExecutionError {
     #[error("the {class} pool was shut down")]
@@ -49,12 +53,9 @@ pub enum ExecutionError {
 pub struct WorkerClassSnapshot {
     pub workers: usize,
     pub running: usize,
-    pub pending: usize,
-    /// How many jobs the class may hold waiting for a worker. A job submitted while `pending` is
-    /// at this capacity waits for a place.
-    pub queue_capacity: usize,
-    /// Jobs whose callers found the wait queue full and wait for a place in it. A job stops
-    /// counting here once it takes a place or its caller stops waiting.
+    /// Jobs waiting for a worker: each was handed to the class while every worker was busy, and no
+    /// worker has taken it yet. A job stops counting here once a worker takes it or its caller stops
+    /// waiting.
     pub waiting: usize,
     /// Jobs this class has admitted since the node started. A caller that must prove it submitted
     /// one job rather than several reads the difference across its own operation.
@@ -62,49 +63,28 @@ pub struct WorkerClassSnapshot {
     /// Jobs that have left a worker, whether they produced a value or the caller stopped waiting.
     pub completed: u64,
     /// Time admitted jobs spent waiting for a worker of this class. Divided by `admitted` it is
-    /// the queueing an operation of this class currently pays before it starts.
-    pub queued: Duration,
+    /// the wait an operation of this class currently pays before it starts.
+    pub waited: Duration,
     /// Time completed jobs spent holding a worker of this class.
     pub worked: Duration,
 }
 
-/// A fixed number of workers sharing one bounded FIFO. Cloning a worker or cancellation guard
+/// A fixed number of workers and the jobs waiting for them. Cloning a worker or cancellation guard
 /// retains the complete class with one reference count.
 #[derive(Debug)]
 #[cfg_attr(
     nervix_lint,
     nervix::context(
         bounded,
-        reason = "one class retains a finite FIFO and cancels its exact queued entries",
+        reason = "one class retains the jobs waiting for its workers and cancels its exact \
+                  waiting entries",
         key = "one executor worker class",
-        bound = "configured worker and queue counts; one insert, removal or selection per fence; \
-                 no callback or await under the fence"
+        bound = "configured worker count; one insert, removal or selection per fence; no callback \
+                 or await under the fence"
     )
 )]
 pub(crate) struct WorkerPool {
     inner: Arc<PoolShared>,
-}
-
-/// One queue place, borrowed from its pool until the caller submits or gives it back.
-pub(crate) struct PreparedWork<'a> {
-    pool: &'a WorkerPool,
-    slot: QueueSlot,
-}
-
-impl PreparedWork<'_> {
-    pub(crate) async fn run<T>(
-        self,
-        reservation: Reservation,
-        job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
-    ) -> Result<T, Report<ExecutionError>>
-    where
-        T: Send + 'static,
-    {
-        let StartingJob { running, started } = self.pool.enqueue(self.slot, reservation, job);
-        started.await.map_err(|cause| self.pool.closed(cause))?;
-        let RunningJob { handle, obligation } = running;
-        self.pool.finish(handle.await, obligation)
-    }
 }
 
 #[derive(Debug)]
@@ -114,54 +94,43 @@ impl PreparedWork<'_> {
         bounded,
         reason = "a class serializes submission with its workers' empty-to-idle transition",
         key = "one executor worker class",
-        bound = "configured worker and queue counts; one synchronous queue transition without \
+        bound = "configured worker count; one synchronous transition of the waiting jobs without \
                  callbacks"
     )
 )]
 struct PoolShared {
     class: WorkerClassName,
     workers: usize,
-    queue_capacity: usize,
-    queue_permits: SemaphoreRef,
-    // This bounded admission fence only inserts, removes or selects one job. No callback, result
-    // destruction, semaphore release or notification runs while it is held. It also makes choosing
-    // the next job and relinquishing the last worker one transition with respect to submission.
-    queue: Mutex<WorkQueue>,
-    pending: AtomicUsize,
-    waiting: AtomicUsize,
+    // This fence only inserts, removes or selects one job. No callback, result destruction or
+    // notification runs while it is held. It also makes choosing the next job and relinquishing the
+    // last worker one transition with respect to submission.
+    state: Mutex<Workers>,
     admitted: AtomicU64,
     completed: AtomicU64,
-    queued_nanos: AtomicU64,
+    waited_nanos: AtomicU64,
     worked_nanos: AtomicU64,
     #[cfg(test)]
     dispatches: AtomicU64,
 }
 
+/// How many of a class's workers are taken, and the jobs waiting for one in the order they asked.
 #[derive(Debug, Default)]
-struct WorkQueue {
+struct Workers {
     next_id: u64,
     running: usize,
-    jobs: BTreeMap<u64, QueuedJob>,
+    waiting: BTreeMap<u64, WaitingJob>,
 }
 
 impl WorkerPool {
-    pub(crate) fn new(
-        class: WorkerClassName,
-        workers: NonZeroUsize,
-        pending_jobs: NonZeroUsize,
-    ) -> Self {
+    pub(crate) fn new(class: WorkerClassName, workers: NonZeroUsize) -> Self {
         Self {
             inner: Arc::new(PoolShared {
                 class,
                 workers: workers.get(),
-                queue_capacity: pending_jobs.get(),
-                queue_permits: StdArc::new(Semaphore::new(pending_jobs.get())),
-                queue: Mutex::new(WorkQueue::default()),
-                pending: AtomicUsize::new(0),
-                waiting: AtomicUsize::new(0),
+                state: Mutex::new(Workers::default()),
                 admitted: AtomicU64::new(0),
                 completed: AtomicU64::new(0),
-                queued_nanos: AtomicU64::new(0),
+                waited_nanos: AtomicU64::new(0),
                 worked_nanos: AtomicU64::new(0),
                 #[cfg(test)]
                 dispatches: AtomicU64::new(0),
@@ -170,16 +139,17 @@ impl WorkerPool {
     }
 
     pub(crate) fn snapshot(&self) -> WorkerClassSnapshot {
-        let running = self.inner.queue.lock().running;
+        let (running, waiting) = {
+            let state = self.inner.state.lock();
+            (state.running, state.waiting.len())
+        };
         WorkerClassSnapshot {
             workers: self.inner.workers,
             running,
-            pending: self.inner.pending.load(Ordering::Acquire),
-            queue_capacity: self.inner.queue_capacity,
-            waiting: self.inner.waiting.load(Ordering::Acquire),
+            waiting,
             admitted: self.inner.admitted.load(Ordering::Acquire),
             completed: self.inner.completed.load(Ordering::Acquire),
-            queued: Duration::from_nanos(self.inner.queued_nanos.load(Ordering::Acquire)),
+            waited: Duration::from_nanos(self.inner.waited_nanos.load(Ordering::Acquire)),
             worked: Duration::from_nanos(self.inner.worked_nanos.load(Ordering::Acquire)),
         }
     }
@@ -200,7 +170,7 @@ impl WorkerPool {
     fn finish<T>(
         &self,
         result: Result<Result<T, Report<ExecutionError>>, oneshot::error::RecvError>,
-        obligation: QueueCancellation,
+        obligation: WaitingCancellation,
     ) -> Result<T, Report<ExecutionError>> {
         let outcome = result.map_err(|cause| self.closed(cause))?;
         obligation.disarm();
@@ -213,14 +183,14 @@ impl WorkerPool {
         })
     }
 
-    /// Return once the job has been handed to a worker, waiting for a place in the class's queue
-    /// like every job. Until then the submitting future still owns queued cancellation; afterwards
-    /// the job runs independently of its submitter.
+    /// Return once the job has been handed to a worker, waiting for one like every job when every
+    /// worker is busy. Until then the submitting future still owns the waiting job's cancellation;
+    /// afterwards the job runs independently of its submitter.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "adapts the caller's synchronous callback for its admitted \
                                    worker; callback effects belong to the caller and execute \
-                                   outside the FIFO fence")
+                                   outside the waiting jobs' fence")
     )]
     pub(crate) async fn submit(
         &self,
@@ -236,6 +206,11 @@ impl WorkerPool {
         Ok(())
     }
 
+    /// Hand the job to a free worker, or, when every worker is busy, wait until a worker takes it:
+    /// workers take waiting jobs in the order they asked. Only a job that finds every worker busy
+    /// counts as waiting, to the owner its caller reports waits to, from then until a worker takes
+    /// it or its caller drops the wait. A job a free worker takes at once does not wait for
+    /// capacity, although its worker still has to start it, however idle the node is.
     async fn start<T>(
         &self,
         waits: Option<&CapacityWaits>,
@@ -245,25 +220,80 @@ impl WorkerPool {
     where
         T: Send + 'static,
     {
-        let slot = self.enter_queue(waits).await?;
-        let StartingJob { running, started } = self.enqueue(slot, reservation, job);
+        let StartingJob {
+            running,
+            started,
+            admission,
+        } = self.enqueue(reservation, job);
+        let told = match (admission, waits) {
+            (Admission::Waiting, Some(waits)) => Some(waits.begin_wait()),
+            (Admission::Waiting, None) | (Admission::Taken, _) => None,
+        };
         started.await.map_err(|cause| self.closed(cause))?;
+        drop(told);
         Ok(running)
     }
 
-    pub(crate) async fn prepare(
+    /// Run `job` with `state`, which the job hands back with its outcome, waiting for a worker like
+    /// every job when every worker is busy. The state is the caller's again in `home` whenever the
+    /// job ends without the caller losing it: when the caller withdraws the job before a worker
+    /// takes it, and when the job returns. Only a job that panicked, or one a stopping runtime
+    /// abandoned, takes the state with it.
+    pub(crate) async fn run_carrying<S, T>(
         &self,
         waits: Option<&CapacityWaits>,
-    ) -> Result<PreparedWork<'_>, Report<ExecutionError>> {
-        Ok(PreparedWork {
-            pool: self,
-            slot: self.enter_queue(waits).await?,
-        })
+        reservation: Reservation,
+        state: S,
+        home: &mut Option<S>,
+        job: impl FnOnce(S, Reservation, &Cancellation) -> (S, T) + Send + 'static,
+    ) -> Result<T, Report<ExecutionError>>
+    where
+        S: Send + 'static,
+        T: Send + 'static,
+    {
+        let ArmedCancellation { obligation, signal } = Cancellation::armed();
+        let (result, handle) = oneshot::channel();
+        let (started, has_started) = oneshot::channel();
+        let work = WaitingJob {
+            requested_at: Instant::now(),
+            started,
+            work: Box::new(CarryingJob {
+                state,
+                job,
+                reservation,
+                cancellation: signal,
+                result,
+            }),
+        };
+        let Admitted { id, admission } = self.admit(work);
+        // The withdrawal below removes the waiting job and takes its state back, so this guard only
+        // raises the job's cancellation once a worker has it.
+        let obligation = WaitingCancellation {
+            pool: Arc::clone(&self.inner),
+            id: None,
+            cancellation: Some(obligation),
+        };
+        let withdrawal = CarriedWithdrawal {
+            pool: &self.inner,
+            id,
+            home: Some(home),
+        };
+        let told = match (admission, waits) {
+            (Admission::Waiting, Some(waits)) => Some(waits.begin_wait()),
+            (Admission::Waiting, None) | (Admission::Taken, _) => None,
+        };
+        has_started.await.map_err(|cause| self.closed(cause))?;
+        drop(told);
+        let home = withdrawal.disarm();
+        let outcome = handle.await.map_err(|cause| self.closed(cause))?;
+        obligation.disarm();
+        let (state, value) = outcome?;
+        *home = Some(state);
+        Ok(value)
     }
 
     fn enqueue<T>(
         &self,
-        slot: QueueSlot,
         reservation: Reservation,
         job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
     ) -> StartingJob<T>
@@ -273,9 +303,8 @@ impl WorkerPool {
         let ArmedCancellation { obligation, signal } = Cancellation::armed();
         let (result, handle) = oneshot::channel();
         let (started, has_started) = oneshot::channel();
-        let work = QueuedJob {
+        let work = WaitingJob {
             requested_at: Instant::now(),
-            slot,
             started,
             work: Box::new(Job {
                 job,
@@ -284,80 +313,58 @@ impl WorkerPool {
                 result,
             }),
         };
-        let id;
-        let selected;
-        {
-            let mut queue = self.inner.queue.lock();
-            id = queue.next_id;
-            queue.next_id = id
-                .checked_add(1)
-                .assured("a class cannot submit 2^64 jobs during one node lifetime");
-            assert!(
-                queue.jobs.insert(id, work).is_none(),
-                "monotonic job identities are unique"
-            );
-            self.inner.admitted.fetch_add(1, Ordering::AcqRel);
-            if queue.running < self.inner.workers {
-                queue.running = queue
-                    .running
-                    .checked_add(1)
-                    .verified("the configured worker count bounds the active count");
-                selected = queue.jobs.pop_first();
-            } else {
-                selected = None;
-            }
-        }
-        let obligation = QueueCancellation {
+        let Admitted { id, admission } = self.admit(work);
+        let obligation = WaitingCancellation {
             pool: Arc::clone(&self.inner),
-            id,
+            id: Some(id),
             cancellation: Some(obligation),
         };
-        if let Some((_, first)) = selected {
-            let worker = Worker {
-                pool: Arc::clone(&self.inner),
-                state: WorkerState::Selected(first.start()),
-            };
-            self.inner.dispatch(worker);
-        }
         StartingJob {
             running: RunningJob { handle, obligation },
             started: has_started,
+            admission,
         }
     }
 
-    /// Take a place in the class's queue, waiting for one while the queue is full. Places go to
-    /// waiting jobs in the order they asked; the wait ends with a place, or with `PoolClosed` once
-    /// the class admits no more work. A free place is taken at once; only a job that finds the
-    /// queue full counts as waiting, in its class and to the owner its caller reports waits to,
-    /// and it waits behind every job that asked before it.
-    async fn enter_queue(
-        &self,
-        waits: Option<&CapacityWaits>,
-    ) -> Result<QueueSlot, Report<ExecutionError>> {
-        let permit = match StdArc::clone(&self.inner.queue_permits).try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(TryAcquireError::Closed) => {
-                return Err(Report::new(ExecutionError::PoolClosed {
-                    class: self.inner.class.as_str(),
-                }));
+    /// Hand `work` to a free worker, or enter it among the jobs waiting for one.
+    fn admit(&self, work: WaitingJob) -> Admitted {
+        let id;
+        let selected;
+        {
+            let mut state = self.inner.state.lock();
+            id = state.next_id;
+            state.next_id = id
+                .checked_add(1)
+                .assured("a class cannot submit 2^64 jobs during one node lifetime");
+            self.inner.admitted.fetch_add(1, Ordering::AcqRel);
+            // A worker goes idle only once nothing waits, so a free worker means nothing waits
+            // ahead of this job and it takes that worker at once.
+            if state.running < self.inner.workers {
+                state.running = state
+                    .running
+                    .checked_add(1)
+                    .verified("the configured worker count bounds the active count");
+                selected = Some(work);
+            } else {
+                assert!(
+                    state.waiting.insert(id, work).is_none(),
+                    "monotonic job identities are unique"
+                );
+                selected = None;
             }
-            Err(TryAcquireError::NoPermits) => {
-                let _waiting = WaitingForPlace::enter(&self.inner, waits);
-                StdArc::clone(&self.inner.queue_permits)
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| {
-                        Report::new(ExecutionError::PoolClosed {
-                            class: self.inner.class.as_str(),
-                        })
-                    })?
+        }
+        let admission = match selected {
+            Some(first) => {
+                let worker = Worker {
+                    pool: Arc::clone(&self.inner),
+                    state: WorkerState::Selected(first.start(&self.inner)),
+                };
+                self.inner.dispatch(worker);
+                Admission::Taken
             }
+            None => Admission::Waiting,
         };
-        self.inner.pending.fetch_add(1, Ordering::AcqRel);
-        Ok(QueueSlot {
-            pool: Arc::clone(&self.inner),
-            _permit: permit,
-        })
+        Admitted { id, admission }
     }
 }
 
@@ -378,26 +385,36 @@ impl PoolShared {
     }
 }
 
-struct QueuedJob {
+/// Whether a submitted job took a free worker at once or waits for one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    Taken,
+    Waiting,
+}
+
+/// A submitted job's entry among those waiting, and whether a free worker took it at once.
+struct Admitted {
+    id: u64,
+    admission: Admission,
+}
+
+struct WaitingJob {
     requested_at: Instant,
-    slot: QueueSlot,
     started: oneshot::Sender<()>,
     work: Box<dyn Work>,
 }
 
-impl fmt::Debug for QueuedJob {
+impl fmt::Debug for WaitingJob {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("QueuedJob").finish_non_exhaustive()
+        f.debug_struct("WaitingJob").finish_non_exhaustive()
     }
 }
 
-impl QueuedJob {
-    fn start(self) -> Box<dyn Work> {
-        self.slot
-            .pool
-            .queued_nanos
+impl WaitingJob {
+    /// Hand the job to the worker of `pool` that took it, counting how long it waited.
+    fn start(self, pool: &PoolShared) -> Box<dyn Work> {
+        pool.waited_nanos
             .fetch_add(elapsed_nanos(self.requested_at), Ordering::AcqRel);
-        drop(self.slot);
         self.started
             .send(())
             .means_peer_left("the caller awaiting execution admission");
@@ -411,11 +428,14 @@ impl QueuedJob {
         bounded,
         reason = "the class worker invokes exactly its selected synchronous callback",
         key = "one admitted executor job",
-        bound = "one callback outside the FIFO fence, followed by one queue transition"
+        bound = "one callback outside the waiting jobs' fence, followed by one selection"
     )
 )]
 trait Work: Send {
     fn execute(self: Box<Self>, worker: &mut Worker);
+
+    /// The state the job carries for its caller, handed back because the job will never run.
+    fn into_carried(self: Box<Self>) -> Option<Box<dyn Any + Send>>;
 }
 
 struct Job<T, F> {
@@ -433,8 +453,8 @@ where
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "invokes one caller-owned synchronous callback outside the \
-                                   FIFO fence; the worker owns admission, cancellation and \
-                                   completion, not callback effects")
+                                   waiting jobs' fence; the worker owns admission, cancellation \
+                                   and completion, not callback effects")
     )]
     fn execute(self: Box<Self>, worker: &mut Worker) {
         let Self {
@@ -457,11 +477,72 @@ where
             .fetch_add(elapsed_nanos(started_at), Ordering::AcqRel);
         worker.pool.completed.fetch_add(1, Ordering::AcqRel);
         // Publish the next selected job or the idle transition before the completed result. An
-        // observer of completion therefore sees the worker returned when no backlog remains.
+        // observer of completion therefore sees the worker returned when no job waits.
         worker.advance();
         result
             .send(outcome)
             .means_peer_left("the caller awaiting an execution result");
+    }
+
+    fn into_carried(self: Box<Self>) -> Option<Box<dyn Any + Send>> {
+        None
+    }
+}
+
+/// A job that carries state for its caller: the job hands it back with its outcome, and a job that
+/// never runs hands it back from its entry among those waiting.
+struct CarryingJob<S, T, F> {
+    state: S,
+    job: F,
+    reservation: Reservation,
+    cancellation: Cancellation,
+    result: oneshot::Sender<Result<(S, T), Report<ExecutionError>>>,
+}
+
+impl<S, T, F> Work for CarryingJob<S, T, F>
+where
+    S: Send + 'static,
+    T: Send + 'static,
+    F: FnOnce(S, Reservation, &Cancellation) -> (S, T) + Send + 'static,
+{
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "invokes one caller-owned synchronous callback outside the \
+                                   waiting jobs' fence; the worker owns admission, cancellation \
+                                   and completion, not callback effects")
+    )]
+    fn execute(self: Box<Self>, worker: &mut Worker) {
+        let Self {
+            state,
+            job,
+            reservation,
+            cancellation,
+            result,
+        } = *self;
+        let started_at = Instant::now();
+        let outcome = match std::panic::catch_unwind(AssertUnwindSafe(|| {
+            job(state, reservation, &cancellation)
+        })) {
+            Ok(carried) => Ok(carried),
+            Err(_panic) => Err(Report::new(ExecutionError::JobPanicked {
+                class: worker.pool.class.as_str(),
+            })),
+        };
+        worker
+            .pool
+            .worked_nanos
+            .fetch_add(elapsed_nanos(started_at), Ordering::AcqRel);
+        worker.pool.completed.fetch_add(1, Ordering::AcqRel);
+        // Publish the next selected job or the idle transition before the completed result. An
+        // observer of completion therefore sees the worker returned when no job waits.
+        worker.advance();
+        result
+            .send(outcome)
+            .means_peer_left("the caller awaiting an execution result");
+    }
+
+    fn into_carried(self: Box<Self>) -> Option<Box<dyn Any + Send>> {
+        Some(Box::new(self.state))
     }
 }
 
@@ -469,9 +550,9 @@ where
     nervix_lint,
     nervix::context(
         bounded,
-        reason = "each worker takes the next retained job or returns its active place atomically",
+        reason = "each worker takes the next waiting job or returns its active place atomically",
         key = "one executor worker class",
-        bound = "one FIFO selection per bounded callback; no callback under the queue fence"
+        bound = "one selection per bounded callback; no callback under the waiting jobs' fence"
     )
 )]
 struct Worker {
@@ -499,13 +580,14 @@ impl Worker {
         matches!(self.state, WorkerState::Selected(_))
     }
 
+    /// Take the next waiting job, or go idle.
     fn advance(&mut self) {
         let next;
         {
-            let mut queue = self.pool.queue.lock();
-            next = queue.jobs.pop_first();
+            let mut state = self.pool.state.lock();
+            next = state.waiting.pop_first();
             if next.is_none() {
-                queue.running = queue
+                state.running = state
                     .running
                     .checked_sub(1)
                     .verified("this worker relinquishes its one active place exactly once");
@@ -513,7 +595,7 @@ impl Worker {
             }
         }
         if let Some((_, next)) = next {
-            self.state = WorkerState::Selected(next.start());
+            self.state = WorkerState::Selected(next.start(&self.pool));
         }
     }
 }
@@ -526,16 +608,17 @@ impl Drop for Worker {
         }
         let abandoned;
         {
-            let mut queue = self.pool.queue.lock();
-            queue.running = queue
+            let mut state = self.pool.state.lock();
+            state.running = state
                 .running
                 .checked_sub(1)
                 .verified("an interrupted worker still owns its active place");
-            abandoned = std::mem::take(&mut queue.jobs);
+            abandoned = std::mem::take(&mut state.waiting);
         }
         // Runtime teardown can drop a simulated worker between callbacks, or a blocking task
-        // before it starts. Release every queued charge and close its start/result channels rather
-        // than retaining an unreachable FIFO. Other active callbacks keep their own charges.
+        // before it starts. Release every waiting job's charge and close its start/result channels
+        // rather than retaining jobs no worker will take. Other active callbacks keep their own
+        // charges.
         drop(interrupted);
         drop(abandoned);
     }
@@ -543,31 +626,33 @@ impl Drop for Worker {
 
 struct RunningJob<T> {
     handle: oneshot::Receiver<Result<T, Report<ExecutionError>>>,
-    obligation: QueueCancellation,
+    obligation: WaitingCancellation,
 }
 
-/// An enqueued job still owns cancellation until its worker reports that it started.
+/// A submitted job still owns cancellation until its worker reports that it started.
 struct StartingJob<T> {
     running: RunningJob<T>,
     started: oneshot::Receiver<()>,
+    admission: Admission,
 }
 
 #[cfg_attr(
     nervix_lint,
     nervix::context(
         bounded,
-        reason = "a caller removes only its exact retained queued job when it withdraws",
+        reason = "a caller removes only its exact waiting job when it withdraws",
         key = "one admitted executor job",
         bound = "one keyed removal; destruction and charge release happen after the fence"
     )
 )]
-struct QueueCancellation {
+struct WaitingCancellation {
     pool: Arc<PoolShared>,
-    id: u64,
+    /// The job's entry among those waiting, absent for a job handed straight to a taken worker.
+    id: Option<u64>,
     cancellation: Option<CancelOnDrop>,
 }
 
-impl QueueCancellation {
+impl WaitingCancellation {
     fn disarm(mut self) {
         self.cancellation
             .take()
@@ -576,12 +661,51 @@ impl QueueCancellation {
     }
 }
 
-impl Drop for QueueCancellation {
+impl Drop for WaitingCancellation {
     fn drop(&mut self) {
-        if self.cancellation.is_some() {
-            let cancelled = self.pool.queue.lock().jobs.remove(&self.id);
-            // Destroy callbacks and release their charges and slots outside the queue fence.
+        if self.cancellation.is_some()
+            && let Some(id) = self.id
+        {
+            let cancelled = self.pool.state.lock().waiting.remove(&id);
+            // Destroy callbacks and release their charges outside the waiting jobs' fence.
             drop(cancelled);
+        }
+    }
+}
+
+/// A carrying job's entry among those waiting, removed when its caller stops waiting before a
+/// worker takes it; the state the job carried then goes back to the caller's `home`. Once a worker
+/// has the job, the state travels with it.
+struct CarriedWithdrawal<'a, S: 'static> {
+    pool: &'a Arc<PoolShared>,
+    id: u64,
+    /// The caller's home for the state, held until a worker has the job.
+    home: Option<&'a mut Option<S>>,
+}
+
+impl<'a, S: 'static> CarriedWithdrawal<'a, S> {
+    /// The worker has the job: nothing waits to be withdrawn, and `home` is the caller's again.
+    fn disarm(mut self) -> &'a mut Option<S> {
+        self.home
+            .take()
+            .verified("a withdrawal holds the caller's home until it is disarmed, once")
+    }
+}
+
+impl<S: 'static> Drop for CarriedWithdrawal<'_, S> {
+    fn drop(&mut self) {
+        let Some(home) = self.home.take() else {
+            return;
+        };
+        let withdrawn = self.pool.state.lock().waiting.remove(&self.id);
+        // Destroy the entry, and take back the state it carried, outside the fence.
+        if let Some(withdrawn) = withdrawn
+            && let Some(carried) = withdrawn.work.into_carried()
+        {
+            let state = carried
+                .downcast::<S>()
+                .verified("the withdrawn entry is the carrying job this guard admitted");
+            *home = Some(*state);
         }
     }
 }
@@ -591,42 +715,6 @@ fn elapsed_nanos(started_at: Instant) -> u64 {
         "a node would have to run for 584 years for one wait or job to overflow nanosecond \
          counting",
     )
-}
-
-/// One job counted in its class's `waiting`, and told to the owner its caller reports waits to,
-/// from the moment it found the wait queue full until it takes a place, its pool closes or its
-/// caller drops the wait.
-struct WaitingForPlace<'pool> {
-    pool: &'pool PoolShared,
-    _told: Option<CapacityWait<'pool>>,
-}
-
-impl<'pool> WaitingForPlace<'pool> {
-    fn enter(pool: &'pool PoolShared, waits: Option<&'pool CapacityWaits>) -> Self {
-        pool.waiting.fetch_add(1, Ordering::AcqRel);
-        Self {
-            pool,
-            _told: waits.map(CapacityWaits::begin_wait),
-        }
-    }
-}
-
-impl Drop for WaitingForPlace<'_> {
-    fn drop(&mut self) {
-        self.pool.waiting.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-struct QueueSlot {
-    pool: Arc<PoolShared>,
-    _permit: OwnedSemaphorePermit,
-}
-
-impl Drop for QueueSlot {
-    fn drop(&mut self) {
-        self.pool.pending.fetch_sub(1, Ordering::AcqRel);
-        // The permit is returned after pending decreases, so a woken waiter sees the freed slot.
-    }
 }
 
 // Owner checks can retain an active worker without parking a thread, including under Turmoil, where
@@ -639,10 +727,10 @@ pub(crate) struct HeldWorker(Worker);
 #[cfg(all(test, not(feature = "loom")))]
 impl HeldWorker {
     pub(crate) fn new(pool: &WorkerPool) -> Self {
-        let mut queue = pool.inner.queue.lock();
-        assert_eq!(queue.running, 0);
+        let mut state = pool.inner.state.lock();
+        assert_eq!(state.running, 0);
         assert_eq!(pool.inner.workers, 1);
-        queue.running = 1;
+        state.running = 1;
         Self(Worker {
             pool: Arc::clone(&pool.inner),
             state: WorkerState::Executing,
@@ -677,7 +765,7 @@ mod dispatch_checks;
 // The owner hold keeps a worker active without blocking a thread, so these admission checks also
 // run under Turmoil's single-threaded simulated CPU strategy.
 #[cfg(all(test, not(feature = "loom")))]
-mod queue_admission_checks {
+mod worker_admission_checks {
     use std::{
         future::{Future as _, poll_fn},
         num::NonZeroUsize,
@@ -687,71 +775,98 @@ mod queue_admission_checks {
     use super::*;
     use crate::{CpuClass, Executor, MemoryClass};
 
-    /// A class whose wait queue is full holds the next job until a place frees, then runs it like
-    /// any other admitted job. The job keeps its charge while it waits and takes no place.
+    /// A job that finds every worker busy waits for one, however many jobs already wait, and runs
+    /// once a worker takes it. It keeps its charge while it waits, and its owner is told it waits
+    /// for exactly as long as it does.
     #[nervix_primitives::test]
-    async fn a_full_wait_queue_holds_the_next_job_until_a_place_frees() {
-        let pool = WorkerPool::new(
-            WorkerClassName::Cpu(CpuClass::Extension),
-            NonZeroUsize::MIN,
-            NonZeroUsize::MIN,
-        );
+    async fn a_job_that_finds_every_worker_busy_waits_for_one_and_its_owner_is_told() {
+        let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Extension), NonZeroUsize::MIN);
         let executor = Executor::default();
+        let waits = CapacityWaits::new();
         let occupied = HeldWorker::new(&pool);
 
-        let queued_charge = executor
+        let first_charge = executor
             .try_reserve(MemoryClass::Relay, 1024)
             .assured("the untouched relay budget has room");
-        let mut queued = Box::pin(pool.start(None, queued_charge, |_, _| ()));
-        let queued_state = poll_fn(|context| Poll::Ready(queued.as_mut().poll(context))).await;
+        let mut first = Box::pin(pool.start(Some(&waits), first_charge, |_, _| ()));
+        let first_state = poll_fn(|context| Poll::Ready(first.as_mut().poll(context))).await;
         assert!(
-            queued_state.is_pending(),
-            "the queued job waits for the held worker"
+            first_state.is_pending(),
+            "the first job waits for the held worker"
         );
-        assert_eq!(pool.snapshot().pending, 1);
+        assert!(waits.is_waiting(), "the first job's owner is told it waits");
 
-        let waiting_charge = executor
+        let second_charge = executor
             .try_reserve(MemoryClass::Relay, 4096)
-            .assured("the relay budget has room for the waiting job");
-        let mut waiting = Box::pin(pool.start(None, waiting_charge, |_, _| 7));
-        let waiting_state = poll_fn(|context| Poll::Ready(waiting.as_mut().poll(context))).await;
+            .assured("the relay budget has room for the second job");
+        let mut second = Box::pin(pool.start(Some(&waits), second_charge, |_, _| 7));
+        let second_state = poll_fn(|context| Poll::Ready(second.as_mut().poll(context))).await;
         assert!(
-            waiting_state.is_pending(),
-            "a full wait queue holds the next job instead of refusing it"
+            second_state.is_pending(),
+            "a job behind a waiting job waits too, and is never refused"
         );
         let held = pool.snapshot();
-        assert_eq!(
-            held.pending, 1,
-            "a waiting job takes no place until one frees"
-        );
+        assert_eq!(held.waiting, 2, "both jobs wait for the one worker");
+        assert_eq!(held.running, 1);
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 1024 + 4096);
 
         drop(occupied);
-        let queued_job = queued
+        let first_job = first
             .await
-            .assured("the queued job takes the returned worker permit");
-        queued_job
+            .assured("the first job takes the returned worker");
+        first_job
             .handle
             .await
-            .assured("the queued job reports its outcome")
-            .assured("the queued job runs once it holds the worker");
-        queued_job.obligation.disarm();
-        let waiting_job = waiting
+            .assured("the first job reports its outcome")
+            .assured("the first job runs once it holds the worker");
+        first_job.obligation.disarm();
+        let second_job = second
             .await
-            .assured("the waiting job takes the place the queued job gave up");
-        let value = waiting_job
+            .assured("the second job takes the worker after the first");
+        let value = second_job
             .handle
             .await
-            .assured("the waiting job reports its outcome")
-            .assured("the waiting job runs once it holds the worker");
-        waiting_job.obligation.disarm();
+            .assured("the second job reports its outcome")
+            .assured("the second job runs once it holds the worker");
+        second_job.obligation.disarm();
         assert_eq!(value, 7);
+        assert!(
+            !waits.is_waiting(),
+            "the owner is told the wait ended once a worker took each job"
+        );
 
         let drained = pool.snapshot();
         assert_eq!(drained.admitted, 2);
-        assert_eq!(drained.pending, 0);
+        assert_eq!(drained.waiting, 0);
         assert_eq!(drained.running, 0);
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
+    }
+
+    /// A job a free worker takes at once is not a wait for capacity: its owner is never told.
+    #[nervix_primitives::test]
+    async fn a_job_a_free_worker_takes_at_once_is_not_counted_as_waiting() {
+        let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Extension), NonZeroUsize::MIN);
+        let executor = Executor::default();
+        let waits = CapacityWaits::new();
+        let charge = executor
+            .try_reserve(MemoryClass::Relay, 1024)
+            .assured("the untouched relay budget has room");
+        let mut job = Box::pin(pool.run(Some(&waits), charge, |_, _| 3));
+        let state = poll_fn(|context| Poll::Ready(job.as_mut().poll(context))).await;
+        if state.is_pending() {
+            assert!(
+                !waits.is_waiting(),
+                "a job its free worker has yet to start does not wait for capacity"
+            );
+        }
+        let value = match state {
+            Poll::Ready(outcome) => outcome,
+            Poll::Pending => job.await,
+        }
+        .assured("the job runs on its free worker");
+        assert_eq!(value, 3);
+        assert!(!waits.is_waiting());
+        assert_eq!(pool.snapshot().waiting, 0);
     }
 }
 
@@ -771,60 +886,60 @@ mod simulation_checks {
     }
 
     #[nervix_primitives::test]
-    async fn saturation_and_dropped_waiters_restore_the_queue_and_charge() {
-        let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Data), one(), one());
+    async fn dropped_waiting_jobs_return_their_charges_and_leave_no_waiting_job() {
+        let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Data), one());
         let executor = Executor::default();
         let occupied = HeldWorker::new(&pool);
 
-        let queued_charge = executor
+        let first_charge = executor
             .try_reserve(MemoryClass::Relay, 1024)
             .assured("the untouched relay budget has room");
-        let mut queued = Box::pin(pool.start(None, queued_charge, |_, _| ()));
-        let state = poll_fn(|context| Poll::Ready(queued.as_mut().poll(context))).await;
+        let mut first = Box::pin(pool.start(None, first_charge, |_, _| ()));
+        let state = poll_fn(|context| Poll::Ready(first.as_mut().poll(context))).await;
         assert!(matches!(state, Poll::Pending));
-        assert_eq!(pool.snapshot().pending, 1);
+        assert_eq!(pool.snapshot().waiting, 1);
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 1024);
 
-        let waiting_charge = executor
+        let second_charge = executor
             .try_reserve(MemoryClass::Relay, 2048)
-            .assured("worker queue pressure does not consume memory admission");
-        let mut waiting = Box::pin(pool.start(None, waiting_charge, |_, _| ()));
-        let state = poll_fn(|context| Poll::Ready(waiting.as_mut().poll(context))).await;
+            .assured("busy workers do not consume memory admission");
+        let mut second = Box::pin(pool.start(None, second_charge, |_, _| ()));
+        let state = poll_fn(|context| Poll::Ready(second.as_mut().poll(context))).await;
         assert!(
             matches!(state, Poll::Pending),
-            "a full wait queue holds the next job"
+            "the next job waits for the busy worker"
         );
-        assert_eq!(pool.snapshot().pending, 1);
+        assert_eq!(pool.snapshot().waiting, 2);
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 1024 + 2048);
 
-        drop(waiting);
+        drop(second);
+        assert_eq!(pool.snapshot().waiting, 1);
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 1024);
-        drop(queued);
-        assert_eq!(pool.snapshot().pending, 0);
+        drop(first);
+        assert_eq!(pool.snapshot().waiting, 0);
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
         drop(occupied);
 
         let next_charge = executor
             .try_reserve(MemoryClass::Relay, 4096)
-            .assured("the dropped waiter returned its charge");
+            .assured("the dropped jobs returned their charges");
         let next = pool
             .start(None, next_charge, |_, _| ())
             .await
-            .assured("the dropped waiter returned its queue place");
+            .assured("the returned worker takes the next job");
         next.handle
             .await
-            .assured("the replacement job reports")
-            .assured("the replacement job completes");
+            .assured("the next job reports")
+            .assured("the next job completes");
         assert_eq!(pool.snapshot().running, 0);
-        assert_eq!(pool.snapshot().pending, 0);
+        assert_eq!(pool.snapshot().waiting, 0);
         assert_eq!(pool.snapshot().completed, 1);
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
     }
 
     #[nervix_primitives::test]
-    async fn queued_jobs_take_the_worker_in_admission_order() {
-        let two = NonZeroUsize::new(2).assured("2 is nonzero");
-        let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Data), one(), two);
+    async fn waiting_jobs_take_the_worker_in_the_order_they_asked() {
+        let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Data), one());
         let executor = Executor::default();
         let occupied = HeldWorker::new(&pool);
         let (completed, mut observed) = nervix_primitives::sync::mpsc::unbounded_channel();
@@ -851,14 +966,14 @@ mod simulation_checks {
         }));
         let second_state = poll_fn(|context| Poll::Ready(second.as_mut().poll(context))).await;
         assert!(matches!(second_state, Poll::Pending));
-        assert_eq!(pool.snapshot().pending, 2);
+        assert_eq!(pool.snapshot().waiting, 2);
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 2048);
 
         drop(occupied);
         let first_job = first
             .await
-            .assured("the first waiter holds the next permit");
-        assert_eq!(pool.snapshot().pending, 1);
+            .assured("the first waiting job takes the returned worker");
+        assert_eq!(pool.snapshot().waiting, 1);
         first_job
             .handle
             .await
@@ -866,7 +981,7 @@ mod simulation_checks {
             .assured("the first job completes");
         let second_job = second
             .await
-            .assured("the second waiter holds the returned permit");
+            .assured("the second waiting job takes the worker next");
         second_job
             .handle
             .await
@@ -875,14 +990,14 @@ mod simulation_checks {
         assert_eq!(observed.recv().await, Some(1));
         assert_eq!(observed.recv().await, Some(2));
         assert_eq!(pool.snapshot().running, 0);
-        assert_eq!(pool.snapshot().pending, 0);
+        assert_eq!(pool.snapshot().waiting, 0);
         assert_eq!(pool.snapshot().completed, 2);
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
     }
 
     #[nervix_primitives::test]
     async fn cancelled_running_job_keeps_its_charge_until_exit() {
-        let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Control), one(), one());
+        let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Control), one());
         let executor = Executor::default();
         let charge = executor
             .try_reserve(MemoryClass::Management, 8192)
@@ -896,7 +1011,7 @@ mod simulation_checks {
                 )
             })
             .await
-            .assured("the running job took its worker permit");
+            .assured("the running job took the free worker");
         assert_eq!(pool.snapshot().running, 1);
         assert_eq!(executor.snapshot().management_memory.reserved_bytes, 8192);
 
