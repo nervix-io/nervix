@@ -109,17 +109,14 @@ jobs:
         with:
           ruby-version: "3.3"
 
+      # `just toolchains-install` installs the pinned nightly, whose rustfmt formats the workspace,
+      # before `just validate-ci` runs.
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.100"
           components: clippy
           targets: wasm32-unknown-unknown
-
-      - name: Setup Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
 
       # `just validate-dns-dependencies` needs ripgrep, which a runner image need not provide.
       # install-action has no package of its own for ripgrep, so cargo-binstall installs it.
@@ -1858,11 +1855,6 @@ jobs:
           targets: wasm32-unknown-unknown
           components: clippy, llvm-tools
 
-      - name: Setup Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: miri
-
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
@@ -1980,9 +1972,13 @@ jobs:
         with:
           label: expiry-map-miri
 
+      # Miri is a component of the pinned nightly, which no other label's step is guaranteed to
+      # have installed and the justfile never installs on demand.
       - name: Expiry map Miri
         if: contains(github.event.pull_request.labels.*.name, 'extra-miri')
-        run: just test-expiry-map-miri
+        run: |
+          just toolchains-install
+          just test-expiry-map-miri
 
       - name: Relay channel Miri
         if: contains(github.event.pull_request.labels.*.name, 'extra-miri')
