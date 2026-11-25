@@ -559,6 +559,7 @@ Feature: Relocating runtime nodes onto a named cluster node
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-2" eventually reports interconnect to "node-1" as "connected"
     And every other node's gossip eventually lists a run of node "node-2" that is not terminating
+    And within "60s" node "node-1" eventually describes the current run of node "node-2" as recorded
     When the ownership handoff activation pause for domain "{{domain}}" is released
     # A leader that cannot record the coordinator's outcome runs the relocation again, and that
     # later run finds the deduplicator already on node-2's new run.
@@ -689,10 +690,17 @@ Feature: Relocating runtime nodes onto a named cluster node
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-2" eventually reports interconnect to "node-1" as "connected"
     And node "node-2" eventually reconciles its ownership handoff preparations
+    Given command finalization on node "node-1" pauses before its outcome is recorded
     When the ownership handoff commit pause for domain "{{domain}}" is released
     Then within "30s" node "node-1" eventually reports status containing "- domain={{domain}} kind=deduplicator name=dedup_txns owner=node-2"
     When node "node-2" announces its node record again
-    Then the background Plexus execution fails with "ownership state activation did not complete"
+    # A leader that cannot record the coordinator's outcome runs the relocation again. The outcome
+    # waits until node-2's new run is recorded, so a later run finds the deduplicator on node-2
+    # rather than node-2 without a committed record.
+    Then the command finalization pause on node "node-1" is reached
+    And within "60s" node "node-1" eventually describes the current run of node "node-2" as recorded
+    When the command finalization pause on node "node-1" is released
+    Then the background Plexus execution either fails with "ownership state activation did not complete" or succeeds with "relocated 0 of 1 execution unit(s) onto node 'node-2'"
     # The refused activation leaves the move's hold to end at its lease, so fresh transactions
     # show when records reach the moved deduplicator again before repeats are checked.
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"
@@ -819,9 +827,22 @@ Feature: Relocating runtime nodes onto a named cluster node
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-2" eventually reports interconnect to "node-1" as "connected"
     And within "30s" node "node-1" eventually describes the current run of node "node-2" as recorded
+    Given command finalization on node "node-1" pauses before its outcome is recorded
     When the ownership handoff commit pause for domain "{{domain}}" is released
-    Then the background Plexus execution fails with "node eligibility changed"
-    When these Plexus commands are executed on the leader node
+    Then the command finalization pause on node "node-1" is reached
+    # The commit has been refused for node-2's new record. A leader that cannot record that outcome
+    # runs the relocation again and plans a new move onto node-2's recorded run, which the cordon
+    # refuses; applied only now, the cordon leaves the refusal to the new record alone. Both
+    # commands go apart from the session that holds the subscription, which stays open wherever
+    # leadership has gone.
+    When this Plexus command request is executed on the leader node
+      """
+      CORDON NODE node-2;
+      """
+    Then the last command request succeeded
+    When the command finalization pause on node "node-1" is released
+    Then the background Plexus execution fails because either "node eligibility changed" or "node 'node-2' is cordoned"
+    When this Plexus command request is executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """

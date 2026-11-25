@@ -2523,9 +2523,13 @@ moment, so a scenario that asserts how a disruption made such a command fail, su
 whose destination restarted, asserts only what every run can answer. It gives a later run a refusal
 of its own, as a cordon of the destination that a later plan refuses, or accepts the later run's
 answer, as `relocated 0 of 1` for a move the first run had already committed, and keeps every
-assertion about what moved. `A destination restart after preparation aborts the ownership handoff
-when leadership moves before its outcome is recorded` makes the later run happen on purpose, with
-the move held before its outcome is recorded.
+assertion about what moved. Where a cordon would change what the first run decides, as for a commit
+its planning inputs refuse, the scenario holds the outcome with `command finalization on node …
+pauses before its outcome is recorded` and cordons only once the first run has decided; it holds
+the outcome the same way until a restarted node's new run is recorded, so that a later run finds
+that node recorded. `A destination restart after preparation aborts the ownership handoff when
+leadership moves before its outcome is recorded` makes the later run happen on purpose, with the
+move held before its outcome is recorded.
 
 ## Node Tasks And Readiness
 

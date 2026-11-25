@@ -1358,6 +1358,7 @@ Feature: Graceful shutdown
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-2" eventually reports interconnect to "node-1" as "connected"
     And every other node's gossip eventually lists a run of node "node-2" that is not terminating
+    And within "60s" node "node-1" eventually describes the current run of node "node-2" as recorded
     When the ownership handoff activation pause for domain "{{domain}}" is released
     # A leader that cannot record the coordinator's outcome runs the relocation again, and that
     # later run finds the ingestor already on node-2's new run.
