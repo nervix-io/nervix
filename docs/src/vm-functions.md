@@ -803,12 +803,13 @@ runs operator-supplied native code the node cannot bound, so its executions take
 class: one that never returns holds an extension worker and leaves the data workers, which relay
 bodies are encoded and decoded on, their whole capacity.
 
-Programs for accepted data wait when their class's queue is full. This includes processor keys,
-filters, routes and window programs; ingestor, emitter, reingestor and generator programs; inference
-inputs; WASM output routes; and error-record assignments. A full queue produces no runtime error,
-error-policy outcome or retry. The branch keeps its input and state, takes no more input while
-waiting, and passes backpressure towards its source. The owner ends the wait on teardown under its
-existing lifecycle deadline. Logical timers due meanwhile are applied in order afterwards.
+Programs for accepted data wait when every worker of their class is busy. This includes processor
+keys, filters, routes and window programs; ingestor, emitter, reingestor and generator programs;
+inference inputs; WASM output routes; and error-record assignments. Busy workers produce no
+runtime error, error-policy outcome or retry. The branch keeps its input and state, takes no more
+input while waiting, and passes backpressure towards its source. The owner ends the wait on
+teardown under its existing lifecycle deadline. Logical timers due meanwhile are applied in order
+afterwards.
 
 Request programs, including statement constants and session subscription predicates, retain
 immediate typed `RuntimeError::ExecutionNotAdmitted` refusal when they need a worker and its queue

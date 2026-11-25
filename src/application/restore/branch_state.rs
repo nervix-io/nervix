@@ -363,7 +363,7 @@ async fn convert_keyspace(
             .await
             .change_context(BranchStateRestoreError::Admission)?;
         // The keys admitted so far cannot be presented again short of converting the keyspace
-        // from its first group, so this job waits for a place in a full queue.
+        // from its first group, so this job waits for a busy bulk worker rather than giving up.
         keys = executor
             .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
                 {

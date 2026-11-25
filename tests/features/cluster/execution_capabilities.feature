@@ -38,11 +38,7 @@ Feature: Capability-derived execution capacity
       """
     Then the last command output contains
       """
-      execution workers: class=data_cpu workers=3 pending_jobs=192
-      """
-    And node "node-1" observability metric "nervix_execution_queue_capacity" with labels eventually equals 192
-      """
-      nervix_execution_queue_capacity{class="data_cpu"}
+      execution workers: class=data_cpu workers=3
       """
 
     Examples:

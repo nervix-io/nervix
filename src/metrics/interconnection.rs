@@ -403,21 +403,9 @@ const SERIES: &[SeriesSpec] = &[
         labels: CLASS,
     },
     SeriesSpec {
-        name: "nervix_execution_jobs_pending",
-        help: "Jobs waiting in one execution class's bounded queue.",
-        kind: SeriesKind::Gauge,
-        labels: CLASS,
-    },
-    SeriesSpec {
-        name: "nervix_execution_queue_capacity",
-        help: "Jobs one execution class may hold waiting for a worker.",
-        kind: SeriesKind::Gauge,
-        labels: CLASS,
-    },
-    SeriesSpec {
         name: "nervix_execution_jobs_waiting",
-        help: "Jobs waiting for a place in one execution class's full wait queue rather than \
-               being refused.",
+        help: "Jobs waiting for a worker of one execution class whose workers are all busy, \
+               rather than being refused.",
         kind: SeriesKind::Gauge,
         labels: CLASS,
     },
@@ -964,20 +952,6 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
             entry.workers.running.approx_into(),
         );
     }
-    let mut pending = families.open("nervix_execution_jobs_pending");
-    for entry in &workers {
-        pending.sample(
-            &[("class", entry.class)],
-            entry.workers.pending.approx_into(),
-        );
-    }
-    let mut queue_capacity = families.open("nervix_execution_queue_capacity");
-    for entry in &workers {
-        queue_capacity.sample(
-            &[("class", entry.class)],
-            entry.workers.queue_capacity.approx_into(),
-        );
-    }
     let mut waiting = families.open("nervix_execution_jobs_waiting");
     for entry in &workers {
         waiting.sample(
@@ -999,11 +973,11 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
             entry.workers.completed.approx_into(),
         );
     }
-    let mut queued = families.open("nervix_execution_job_queue_seconds_total");
+    let mut waited = families.open("nervix_execution_job_queue_seconds_total");
     for entry in &workers {
-        queued.sample(
+        waited.sample(
             &[("class", entry.class)],
-            entry.workers.queued.as_secs_f64(),
+            entry.workers.waited.as_secs_f64(),
         );
     }
     let mut worked = families.open("nervix_execution_job_work_seconds_total");

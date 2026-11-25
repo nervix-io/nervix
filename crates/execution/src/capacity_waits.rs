@@ -1,8 +1,8 @@
 //! Telling the owner of some work whether that work waits for capacity.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** The count of one owner's submissions that wait for a place in a full worker queue or
-//!   for room in a memory class, and waking the owner when that count changes.
+//! - **Owns.** The count of one owner's submissions that wait for a worker of a class whose workers
+//!   are all busy or for room in a memory class, and waking the owner when that count changes.
 //! - **Depends on.** The primitive boundary's watch channel and shared ownership.
 //! - **Must not know.** What the work computes, which classes it runs in, or what its owner does
 //!   while it waits.
@@ -12,15 +12,15 @@ use std::{future::Future, pin::pin};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::sync::{Arc, watch};
 
-/// Tells the owner of some work whether any of it waits for capacity: a place in a worker class
-/// whose wait queue is full, or room in a memory class that cannot grant its charge yet.
+/// Tells the owner of some work whether any of it waits for capacity: a worker of a class whose
+/// workers are all busy, or room in a memory class that cannot grant its charge yet.
 ///
 /// The owner submits the work through the executor handle [`crate::Executor::reporting_waits_to`]
-/// returns, keeps this value, and reads or awaits it. A wait begins when a submission finds its
-/// class full and has to wait, and ends when the submission takes its place or its room, or when
-/// its future is dropped. A job that already has its place and waits for a worker is not waiting
-/// for capacity: every job passes through that, however idle the node is. Cloning shares one
-/// count.
+/// returns, keeps this value, and reads or awaits it. A wait begins when a submission finds every
+/// worker of its class busy or its memory class without room, and ends when a worker takes the job
+/// or the charge takes its room, or when its future is dropped. A job a free worker takes at once
+/// is not waiting for capacity, although that worker still has to start it: every job passes
+/// through that, however idle the node is. Cloning shares one count.
 #[derive(Clone, Debug)]
 pub struct CapacityWaits {
     waiting: Arc<watch::Sender<usize>>,

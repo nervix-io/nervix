@@ -1,7 +1,7 @@
 @full_queue_waits
 Feature: Work no caller waits on waits for a place in a full worker class
-  A worker class whose workers are all busy and whose wait queue is full refuses no job. Work the
-  node or a peer already accepted, which no caller waits to be answered about, waits for a place
+  A worker class whose workers are all busy refuses no job. Work the node or a peer already
+  accepted, which no caller waits to be answered about, waits for a place on its class's workers
   like every other job: relay slices and subscription deliveries on the data workers, checkpoints,
   state captures, partition moves and the compilation of a committed change on the bulk workers,
   and checkpoint and resource files on the filesystem workers. Each scenario brings that work up
@@ -609,13 +609,15 @@ Feature: Work no caller waits on waits for a place in a full worker class
       | 3            |
 
   # A junction on node-3 reads the profile row of a materialized relay whose state node-2 owns, so it
-  # asks node-2 to describe and send the row, which node-2 serves on its bulk workers. With every
-  # bulk place taken, the fetch waits for one instead of being refused, so the event is held back
-  # rather than dropped as an internal error. The class frees within the fetch's request deadline,
-  # and the event is enriched and delivered once.
+  # asks node-2 to describe and send the row, which node-2 seals for it on its bulk workers. With
+  # every bulk worker busy, the fetch waits for one instead of being refused, so the event is held
+  # back rather than dropped as an internal error. The class frees within the fetch's request
+  # deadline, and the event is enriched and delivered once. The periodic snapshot is ten minutes
+  # away: node-2 would answer the fetch from a generation its checkpoint writer had already sealed,
+  # with no bulk job left to wait.
   @full_queue_remote_materialized_fetch
   Scenario: A junction's remote materialized fetch waits for a bulk place on the state's owner and delivers its event once
-    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the leader node is configured with these Plexus commands

@@ -94,7 +94,7 @@ restore_sampler_start() {
     : >"${restore_sampler_dir}/samples.txt"
     chmod 0666 "${restore_sampler_dir}/samples.txt"
     restore_sampler_name="${project_name}-restore-sampler"
-    local series='^(nervix_restore_[a-z_]+|nervix_execution_jobs_(running|pending)[{]class="filesystem_storage"[}]|nervix_execution_memory_reserved_bytes[{]class="(bulk|restore_metadata)"[}]|nervix_jemalloc_resident_bytes) '
+    local series='^(nervix_restore_[a-z_]+|nervix_execution_jobs_(running|waiting)[{]class="filesystem_storage"[}]|nervix_execution_memory_reserved_bytes[{]class="(bulk|restore_metadata)"[}]|nervix_jemalloc_resident_bytes) '
     compose run --detach --no-deps --name "${restore_sampler_name}" \
         -v "${restore_sampler_dir}:/samples" probe sh -c "
             ordinal=0

@@ -1516,11 +1516,11 @@ starts the branch tasks only once all of them are built, and releases a transfer
 after that.
 
 Opening a branch's retained state waits for capacity rather than being refused. A window decode
-that finds every bulk worker busy and the bulk wait queue full waits for a place there, ahead of any
-job that asks after it, and a charge or a storage job of an inferencer's carried state waits for
-room or a place the same way. While the restore waits, the task answers its commands as one that
-has not restored its branches, as listed below, and the first place that frees goes to the waiting
-restore, which goes on without a retry. While the restore makes progress instead, the task answers
+that finds every bulk worker busy waits for one, ahead of any job that asks after it, and a charge
+or a storage job of an inferencer's carried state waits for room or a worker the same way. While
+the restore waits, the task answers its commands as one that has not restored its branches, as
+listed below, and the first worker that frees takes the waiting restore, which goes on without a
+retry. While the restore makes progress instead, the task answers
 nothing: a command that arrives as the task starts, such as the lifecycle checkpoint of an
 ownership handoff, is answered once an ordinary restore has installed every branch.
 

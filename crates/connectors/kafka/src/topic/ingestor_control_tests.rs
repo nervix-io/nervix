@@ -28,7 +28,7 @@ use super::{
         READ_DEADLINE, cluster, plan as group_plan, publish, read_positions, subscribed_ingestor,
     },
 };
-use crate::topic::retirement_tests::{FullConnectorQueue, single_connector_worker};
+use crate::topic::retirement_tests::{BusyConnectorWorker, single_connector_worker};
 
 struct UnreachedOffsets;
 
@@ -274,9 +274,9 @@ async fn a_full_command_budget_holds_the_control_job_back_until_its_deadline() {
     assert_eq!(executor.snapshot().connector_storage.admitted, 0);
 }
 
-/// A control job the full connector queue cannot take now waits for a place rather than being
-/// refused, and runs once one frees. The client deadline still bounds the whole wait: a job whose
-/// worker stays held past it ends without starting its native operation.
+/// A control job that finds the only connector worker busy waits for it rather than being refused,
+/// and runs once it frees. The client deadline still bounds the whole wait: a job whose worker stays
+/// held past it ends without starting its native operation.
 #[nervix_primitives::test]
 async fn control_admission_waits_for_a_place_and_spends_the_client_deadline_on_it() {
     let broker = cluster();
@@ -285,20 +285,20 @@ async fn control_admission_waits_for_a_place_and_spends_the_client_deadline_on_i
     // The charge of its consumer's retirement, which the open ingestor holds throughout.
     let opened = executor.snapshot().commands_memory.reserved_bytes;
 
-    let full = FullConnectorQueue::fill(&executor).await;
+    let full = BusyConnectorWorker::fill(&executor).await;
     let mut waiting = Box::pin(ingestor.control.run(&ingestor.consumer, |_, _| Ok(())));
     let first_poll = poll_fn(|context| Poll::Ready(waiting.as_mut().poll(context))).await;
     assert!(
         first_poll.is_pending(),
-        "a full connector queue holds the control job back"
+        "the busy connector worker holds the control job back"
     );
     full.release().await;
     waiting
         .await
-        .assured("the control job runs once a place frees, within the client deadline");
+        .assured("the control job runs once the worker frees, within the client deadline");
 
-    // The queue has room, but the only worker stays held. This wait must spend the effective
-    // client deadline on admission without starting the native operation afterwards.
+    // Now the only worker stays held past the deadline. This wait must spend the effective client
+    // deadline on admission without starting the native operation afterwards.
     let (started, has_started) = oneshot::channel();
     let (release, released) = oneshot::channel();
     let occupied = executor.clone();

@@ -170,7 +170,7 @@ render_description() {
              else (($spec.running_values // {})[$name] // $spec.parameters) | to_entries[]
                   | "node=\($name) \(.key) running=\(.value) revision=\($running)" end),
           "local execution capacity:",
-          "  execution workers: class=control-cpu workers=1 pending_jobs=64",
+          "  execution workers: class=control-cpu workers=1",
           "  execution memory: class=relay bytes=1073741824"
     '
 }
