@@ -168,7 +168,9 @@ impl NewOwner {
 
     async fn stop(self) {
         self.task
-            .stop(Duration::from_secs(1))
+            .stop(crate::runtime::TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("the relay owner stops");
     }
@@ -297,12 +299,21 @@ async fn a_producer_that_ends_during_the_failover_fails_its_forwarded_rows() {
     new_owner.stop().await;
 }
 
-/// A delivery that cannot reach its owner, and whose route does not change, ends at its
-/// no-progress bound. Nothing of it reached the owner, so it fails at once there, without first
+/// A delivery whose owner membership no longer lists ends as soon as membership says so, with no
+/// timer of its own. Nothing of it reached the owner, so it fails at once there, without first
 /// waiting to ask an owner that is gone to cancel it.
 #[nervix_primitives::test(start_paused = true)]
-async fn a_delivery_that_never_reached_its_owner_fails_without_asking_that_owner() {
+async fn a_delivery_whose_owner_left_fails_without_asking_that_owner() {
     let (runtime, services) = runtime_forwarding_to_a_departed_owner().await;
+    runtime
+        .inner
+        .remote_dispatcher
+        .load_full()
+        .assured("attaching the loopback cluster attaches the dispatcher")
+        .interconnect
+        .replace_live_nodes(&std::collections::BTreeSet::from([
+            named::<ClusterNodeName>("node-1"),
+        ]));
     let domain = domain("default");
     let relay = named::<RelayName>("orders");
     let (batch, _acks, completion) = acknowledged_batch();
@@ -316,9 +327,9 @@ async fn a_delivery_that_never_reached_its_owner_fails_without_asking_that_owner
 
     assert_eq!(unadmitted.batch.batch().num_rows(), 1);
     assert!(
-        waited < RemoteDispatcher::DISPATCH_TIMEOUT + Duration::from_secs(1),
-        "the delivery ended at its no-progress bound, after {waited:?}, with no cancellation \
-         request to the owner it never reached"
+        waited < Duration::from_secs(1),
+        "the delivery ended when membership showed its owner gone, after {waited:?}, with no \
+         cancellation request to the owner it never reached"
     );
     let AckOutcome::NoAck(reason) = completion.wait().await else {
         panic!("a delivery that never reached its owner fails its record");
@@ -329,8 +340,6 @@ async fn a_delivery_that_never_reached_its_owner_fails_without_asking_that_owner
     );
 }
 
-/// The same failover, when the route change retires the delivery's channel while the delivery is
-/// held before its first grant request: it has sent nothing, so it follows the new route as well.
 #[nervix_primitives::test(start_paused = true)]
 async fn a_batch_held_before_its_grant_follows_the_route_that_replaces_its_departed_owner() {
     let (runtime, services) = runtime_forwarding_to_a_departed_owner().await;

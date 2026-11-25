@@ -30,9 +30,8 @@ use nervix_primitives::sync::blocking::Mutex;
 
 use super::*;
 
-/// Due reports retain weak attempt handles and each attempt's captured send budget.
-type RelayProgressReports =
-    BTreeMap<RemoteAckRegistration, (StdWeak<RelayAdmissionRecord>, Duration)>;
+/// Due reports retain weak attempt handles.
+type RelayProgressReports = BTreeMap<RemoteAckRegistration, StdWeak<RelayAdmissionRecord>>;
 
 impl TransportState {
     pub(super) fn bind_relay_owner(
@@ -52,6 +51,7 @@ impl TransportState {
                 .is_none_or(|live| live.contains(node));
             if let Some(owner) = current.owners.get(node) {
                 owner.bind_epoch(epoch, binding_sequence, member);
+                self.republish_peer_runs();
                 return Ok(owner.clone());
             }
             if self.admission_closed.is_cancelled()
@@ -70,8 +70,56 @@ impl TransportState {
                 .relay_owners
                 .compare_and_swap(&current, StdArc::new(next));
             if StdArc::ptr_eq(&current, &observed) {
+                self.republish_peer_runs();
                 return Ok(owner);
             }
+        }
+    }
+
+    /// Republishes the run each peer's relay protocol is bound to, and wakes whoever waits for a
+    /// peer's run to end. Connection binding and membership retirement call it, never a
+    /// recurring path.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a connection binding or a membership retirement republishes peer runs"
+        )
+    )]
+    fn republish_peer_runs(&self) {
+        // A republication that raced another one computes again from the owners it then finds,
+        // so the last publication always reflects the latest bindings.
+        self.peer_runs.rcu(|_| {
+            let owners = self.relay_owners.load();
+            let mut runs = BTreeMap::new();
+            for (node, owner) in owners.owners.iter() {
+                if let Some(epoch) = owner.bound_epoch() {
+                    runs.insert(node.clone(), epoch);
+                }
+            }
+            runs
+        });
+        self.relay_runs_changed.notify_waiters();
+    }
+
+    /// The process epoch of `node`'s run that this transport's relay protocol is bound to, or
+    /// `None` before any connection bound one and once membership removed the node.
+    pub(crate) fn peer_run(&self, node: &ClusterNodeName) -> Option<u64> {
+        self.peer_runs.load().get(node).copied()
+    }
+
+    /// Resolves once `node`'s run is no longer the one with process epoch `epoch`: a connection
+    /// bound a newer run of the node, or membership removed the node.
+    pub(crate) async fn peer_run_ended(&self, node: &ClusterNodeName, epoch: u64) {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let changed = self.relay_runs_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.peer_run(node) != Some(epoch) {
+                return;
+            }
+            changed.await;
         }
     }
 
@@ -92,6 +140,7 @@ impl TransportState {
                 .relay_owners
                 .compare_and_swap(&current, StdArc::new(next));
             if StdArc::ptr_eq(&current, &observed) {
+                self.republish_peer_runs();
                 return;
             }
         }
@@ -305,6 +354,17 @@ impl RelayPeerOwner {
         )
     }
 
+    /// The process epoch of the peer run this owner is bound to, or `None` before any connection
+    /// bound one and once membership ended the owner.
+    pub(super) fn bound_epoch(&self) -> Option<u64> {
+        match self.state.lock().run {
+            RelayPeerRun::AwaitingMembership { epoch, .. } | RelayPeerRun::Bound { epoch, .. } => {
+                Some(epoch)
+            }
+            RelayPeerRun::Starting | RelayPeerRun::Ended => None,
+        }
+    }
+
     pub(super) fn end(&self) {
         let mut state = self.state.lock();
         state.run = RelayPeerRun::Ended;
@@ -378,8 +438,8 @@ impl RelayPeerOwner {
         let mut next: Option<Instant> = None;
         for record in state.attempts.values() {
             let (report, deadline) = record.take_progress_report(now);
-            if let Some((registration, timeout)) = report {
-                due.insert(registration, (StdArc::downgrade(record), timeout));
+            if let Some(registration) = report {
+                due.insert(registration, StdArc::downgrade(record));
             }
             if let Some(deadline) = deadline {
                 next = Some(match next {

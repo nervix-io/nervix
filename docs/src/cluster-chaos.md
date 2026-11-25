@@ -2009,13 +2009,13 @@ run commits two changes under load through the leader:
 
 ```plexus
 ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 20s, REMOTE_ACK_ALIVE_INTERVAL = 200ms,
-  REMOTE_ACK_SILENCE_TIMEOUT = 20s;
+  REMOTE_RELAY_TOTAL_TIMEOUT = 10m;
 ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 10s, REMOTE_ACK_ALIVE_INTERVAL = 100ms,
-  REMOTE_ACK_SILENCE_TIMEOUT = 15s;
+  REMOTE_RELAY_TOTAL_TIMEOUT = 5m;
 ```
 
-The first raises the budget the liveness of every established connection derives from, and widens
-the reporting window of every remote delivery. The second restores the deployment's values, which
+The first raises the budget the liveness of every established connection derives from, and extends
+the admission bound of every remote delivery. The second restores the deployment's values, which
 the record must hold before the first change.
 
 [Node Settings](./node-settings.md#committed-parameter-changes) applies a committed change live:
@@ -4057,7 +4057,7 @@ and requalified with the scenario that found it:
 | [Cluster Chaos 22](https://app.clickup.com/t/86bc947an) | A resolution addressed to an earlier incarnation of a node could resolve an unrelated pending acknowledgement or admission of its new process. The IDs are now bound to the registering incarnation |
 | [Cluster Chaos 23](https://app.clickup.com/t/86bc947b1) | In consumer-group mode, a rewind could stall on a partition that a rebalance had moved away, which left the ingestor stalled after the rejection that triggered the rewind |
 | [Cluster Chaos 24](https://app.clickup.com/t/86bc947bp) | The leader re-added a restarted voter at its new interconnect address on every one-second pass, instead of recording the address once |
-| [Cluster Chaos 32](https://app.clickup.com/t/86bc95vz6) | A forwarded record acknowledgement lost during burst loss stalled an `ACK SEQUENTIAL` ingestor. A node now fails a forwarded acknowledgement its receiver stops reporting, as [Cluster Interconnect](./interconnect.md#record-acknowledgements-the-receiver-stops-reporting) describes |
+| [Cluster Chaos 32](https://app.clickup.com/t/86bc95vz6) | A forwarded record acknowledgement lost during burst loss stalled an `ACK SEQUENTIAL` ingestor. A receiver now sends a forwarded acknowledgement until it is delivered, and a node fails one only when its receiver leaves the cluster or the receiver run that admitted it ends, as [Cluster Interconnect](./interconnect.md#record-acknowledgements-follow-the-receiver-run) describes |
 | [Cluster Chaos 39](https://app.clickup.com/t/86bcd4hzv) | A restarted voter lost its work when gossip heard of it before observing it live |
 | [Cluster Chaos 40](https://app.clickup.com/t/86bcd8q49) | A stopping follower's drain needed a user password. It now uses the node's own certificate |
 | [Cluster Chaos 43](https://app.clickup.com/t/86bcdg30p) and [58](https://app.clickup.com/t/86bcdknqt) | A restarted window owner discarded its open windows. The restore was then requalified on an official image |

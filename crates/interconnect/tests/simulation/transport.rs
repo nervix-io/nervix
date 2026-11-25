@@ -75,6 +75,21 @@ const CLUSTER: &str = "simulated";
 const PORT: u16 = 7443;
 const HOST_DEADLINE: Duration = Duration::from_secs(20);
 
+/// The longest liveness takes to end a connection whose peer stopped answering: one ping interval
+/// until the next ping, and that ping's timeout.
+fn liveness_bound(transport: &Transport) -> Duration {
+    let liveness = transport.liveness();
+    liveness.ping_interval() + liveness.ping_timeout()
+}
+
+/// The ceiling a simulated host gives its transport's teardown: the host deadline from now, so a
+/// stream a check still holds is cut instead of holding the run past its bound.
+fn teardown_ceiling() -> Option<nervix_interconnect::ExchangeDeadline> {
+    Some(nervix_interconnect::ExchangeDeadline::OperationCeiling(
+        nervix_primitives::time::Instant::now() + HOST_DEADLINE,
+    ))
+}
+
 /// The join terms every fixture host brings unless a scenario gives it others, so their
 /// handshakes accept each other.
 fn fixture_join_terms() -> JoinTerms {
@@ -178,8 +193,6 @@ impl InterconnectRequest for BatchRequest {
     type Response = BatchResponse;
 
     const NAME: &'static str = "simulation_arrow_batch";
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Request;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -196,8 +209,6 @@ impl InterconnectRequest for LivenessRequest {
     const NAME: &'static str = "simulation_liveness";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Control;
 }
 
 #[derive(Clone, Copy, Debug, Archive, Serialize, Deserialize)]
@@ -229,8 +240,6 @@ impl InterconnectRequest for RemoteFailureProbe {
 
     const NAME: &'static str = "simulation_remote_failure_class";
     const CLASS: PoolClass = PoolClass::Management;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Request;
 }
 
 /// The admission `registrar` hands out under `ack_id`. Fixtures choose their acknowledgement
@@ -417,7 +426,7 @@ fn exchange_typed_arrow_batch(run: ScenarioRun) -> Result<(), SimulationError> {
             async move {
                 let result = HostSupervisor::run(async move {
                     let first = bind("server", server_credentials.clone(), seed).await;
-                    first.shutdown().await;
+                    first.shutdown(teardown_ceiling()).await;
                     let (server, mut incoming) =
                         bind_with_incoming("server", server_credentials, seed).await;
                     server
@@ -507,7 +516,7 @@ fn exchange_typed_arrow_batch(run: ScenarioRun) -> Result<(), SimulationError> {
 
                     let mut done = done_rx;
                     wait_for(&mut done).await;
-                    server.shutdown().await;
+                    server.shutdown(teardown_ceiling()).await;
                     Ok::<(), std::io::Error>(())
                 })
                 .await;
@@ -617,7 +626,7 @@ fn exchange_typed_arrow_batch(run: ScenarioRun) -> Result<(), SimulationError> {
                     trace.record("client", "typed state requests and frames transferred");
 
                     done_tx.send_replace(true);
-                    client.shutdown().await;
+                    client.shutdown(teardown_ceiling()).await;
                     Ok::<(), std::io::Error>(())
                 })
                 .await;
@@ -671,7 +680,7 @@ async fn serve_peer(
             .assured("only two fixture peers signal readiness");
     });
     wait_for(&mut done).await;
-    server.shutdown().await;
+    server.shutdown(teardown_ceiling()).await;
     Ok(())
 }
 
@@ -827,7 +836,7 @@ fn exchange_with_multiple_peers(run: ScenarioRun) -> Result<(), SimulationError>
                     );
                     trace.record("client", "certificate rejected an unrelated DNS identity");
                     done.send_replace(true);
-                    client.shutdown().await;
+                    client.shutdown(teardown_ceiling()).await;
                     Ok::<(), std::io::Error>(())
                 })
                 .await;
@@ -981,7 +990,10 @@ async fn wait_for_liveness_recovery(transport: &Transport, peer: &ClusterNodeNam
     let recovered = nervix_primitives::time::timeout(Duration::from_secs(55), async {
         loop {
             nervix_primitives::task::consume_budget().await;
-            match transport.request(peer, LivenessRequest).await {
+            match transport
+                .request_by(peer, LivenessRequest, probe_deadline(transport))
+                .await
+            {
                 Ok(response) => {
                     assert_eq!(response.peer, *transport.node_id());
                     break;
@@ -998,17 +1010,35 @@ async fn wait_for_liveness_recovery(transport: &Transport, peer: &ClusterNodeNam
     );
 }
 
+/// The deadline of one application-health probe that starts now: the probe timeout the
+/// transport's liveness policy sets, the protocol timer production probes carry.
+fn probe_deadline(transport: &Transport) -> nervix_interconnect::ExchangeDeadline {
+    nervix_interconnect::ExchangeDeadline::Protocol(
+        nervix_primitives::time::Instant::now() + transport.liveness().probe_timeout(),
+    )
+}
+
 async fn assert_liveness_timeout(transport: &Transport, peer: &ClusterNodeName) {
     let started = turmoil::elapsed();
-    let error = match transport.request(peer, LivenessRequest).await {
+    let probe_timeout = transport.liveness().probe_timeout();
+    let error = match transport
+        .request_by(peer, LivenessRequest, probe_deadline(transport))
+        .await
+    {
         Ok(_) => panic!("disrupted liveness traffic must expire"),
         Err(error) => error,
     };
     assert!(
-        matches!(error.current_context(), RequestError::Timeout { timeout, .. } if *timeout == Duration::from_secs(1)),
+        matches!(
+            error.current_context(),
+            RequestError::DeadlinePassed {
+                deadline: nervix_interconnect::ExchangeDeadlineKind::Protocol,
+                ..
+            }
+        ),
         "{error:?}"
     );
-    assert!(turmoil::elapsed() >= started + Duration::from_secs(1));
+    assert!(turmoil::elapsed() >= started + probe_timeout);
 }
 
 async fn assert_stopped(transport: &Transport) {
@@ -1095,12 +1125,15 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
                         .await
                         .assured("the client completes before the server budget expires");
                     assert_bounded(&server);
-                    server.shutdown().await;
+                    server.shutdown(teardown_ceiling()).await;
                     assert_stopped(&server).await;
                     Ok::<(), io::Error>(())
-                }).await;
+                })
+                .await;
                 finished.send_modify(|count| {
-                    *count = count.checked_add(1).assured("only two fixture hosts finish");
+                    *count = count
+                        .checked_add(1)
+                        .assured("only two fixture hosts finish");
                 });
                 result
             }
@@ -1119,14 +1152,16 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
                         .checked_add(1)
                         .assured("fixture seeds are below u64::MAX");
                     let client = bind("client", credentials, client_seed).await;
-                    let peer = ClusterNodeName::parse("server").assured("fixture node name is valid");
+                    let peer =
+                        ClusterNodeName::parse("server").assured("fixture node name is valid");
                     let live = BTreeSet::from([client.node_id().clone(), peer.clone()]);
                     client.replace_live_nodes(&live);
                     wait_for(&mut ready).await;
                     register_peer(&client, "server").await;
                     trace.record("client", format!("{fault:?} installed; peer registered"));
                     match fault {
-                        NetworkFault::PartitionBeforeConnect | NetworkFault::AsymmetricBeforeConnect => {
+                        NetworkFault::PartitionBeforeConnect
+                        | NetworkFault::AsymmetricBeforeConnect => {
                             let setup_failed = async {
                                 loop {
                                     nervix_primitives::task::consume_budget().await;
@@ -1167,27 +1202,49 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
                             trace.record("client", "authenticated exchange completed");
                             match fault {
                                 NetworkFault::HeldExchange => turmoil::hold("client", "server"),
-                                NetworkFault::PartitionedExchange => turmoil::partition("client", "server"),
-                                NetworkFault::AsymmetricEstablished => turmoil::partition_oneway("client", "server"),
-                                NetworkFault::PartitionBeforeConnect | NetworkFault::AsymmetricBeforeConnect => {
+                                NetworkFault::PartitionedExchange => {
+                                    turmoil::partition("client", "server")
+                                }
+                                NetworkFault::AsymmetricEstablished => {
+                                    turmoil::partition_oneway("client", "server")
+                                }
+                                NetworkFault::PartitionBeforeConnect
+                                | NetworkFault::AsymmetricBeforeConnect => {
                                     unreachable!("the initial-connect cases take the other arm")
                                 }
                             }
                             let started = turmoil::elapsed();
                             assert_liveness_timeout(&client, &peer).await;
                             let request = BatchRequest { ipc: arrow_batch() };
-                            let deadline = Duration::from_secs(2);
-                            let error = match client.request_with_timeout(&peer, request, deadline).await {
-                                Ok(_) => panic!("disrupted traffic must hit its physical request deadline"),
+                            let wait = Duration::from_secs(2);
+                            let deadline = nervix_interconnect::ExchangeDeadline::Caller(
+                                nervix_primitives::time::Instant::now() + wait,
+                            );
+                            let error = match client.request_by(&peer, request, deadline).await {
+                                Ok(_) => {
+                                    panic!("disrupted traffic must reach its caller's deadline")
+                                }
                                 Err(error) => error,
                             };
                             assert!(
-                                matches!(error.current_context(), RequestError::Timeout { timeout, .. } if *timeout == deadline),
+                                matches!(
+                                    error.current_context(),
+                                    RequestError::DeadlinePassed {
+                                        deadline: nervix_interconnect::ExchangeDeadlineKind::Caller,
+                                        ..
+                                    }
+                                ),
                                 "{error:?}"
                             );
-                            assert!(turmoil::elapsed() >= started + Duration::from_secs(3));
+                            assert!(
+                                turmoil::elapsed()
+                                    >= started + client.liveness().probe_timeout() + wait
+                            );
                             assert_bounded(&client);
-                            trace.record("client", "request reached its two-second deadline");
+                            trace.record(
+                                "client",
+                                "request reached its caller's two-second deadline",
+                            );
                             fault.repair();
                             trace.record("client", "link repaired");
                         }
@@ -1203,12 +1260,15 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
                     assert_bounded(&client);
                     trace.record("client", "authenticated exchange recovered");
                     done.send_replace(true);
-                    client.shutdown().await;
+                    client.shutdown(teardown_ceiling()).await;
                     assert_stopped(&client).await;
                     Ok::<(), io::Error>(())
-                }).await;
+                })
+                .await;
                 finished.send_modify(|count| {
-                    *count = count.checked_add(1).assured("only two fixture hosts finish");
+                    *count = count
+                        .checked_add(1)
+                        .assured("only two fixture hosts finish");
                 });
                 result
             }
@@ -1218,9 +1278,14 @@ fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), Simulatio
             nervix_primitives::time::timeout(Duration::from_secs(80), async {
                 while *finished.borrow() < 2 {
                     nervix_primitives::task::consume_budget().await;
-                    finished.changed().await.assured("the fixture hosts remain alive");
+                    finished
+                        .changed()
+                        .await
+                        .assured("the fixture hosts remain alive");
                 }
-            }).await.assured("the fault scenario hosts finish within their simulated budget");
+            })
+            .await
+            .assured("the fault scenario hosts finish within their simulated budget");
             Ok(())
         });
         fault.install(simulation);

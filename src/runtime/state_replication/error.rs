@@ -14,12 +14,6 @@ use super::*;
 
 #[derive(Debug, Error)]
 pub(crate) enum StateReplicationError {
-    #[error("Kafka start for ingestor '{ingestor}' in domain '{domain}'{suffix} exceeded its coordination deadline", suffix = .unit.label_suffix())]
-    KafkaStartDeadline {
-        domain: DomainName,
-        ingestor: ModelName,
-        unit: Unit,
-    },
     #[error("Kafka start for {placement} is paused by ownership capture")]
     KafkaStartFrozen { placement: RuntimeStatePlacement },
     #[error("failed to coordinate Kafka start for ingestor '{ingestor}' in domain '{domain}'{suffix}", suffix = .unit.label_suffix())]
@@ -53,15 +47,6 @@ pub(crate) enum StateReplicationError {
         placement: RuntimeStatePlacement,
         failure: nervix_interconnect::RemoteOperationFailure,
     },
-    #[error(
-        "timed out waiting for {required_acks} replica acknowledgements for {placement} at lsm \
-         {lsm}"
-    )]
-    ReplicaQuorum {
-        placement: RuntimeStatePlacement,
-        lsm: u64,
-        required_acks: usize,
-    },
     #[error("failed to persist {placement} at lsm {lsm}")]
     Persist {
         placement: RuntimeStatePlacement,
@@ -82,15 +67,6 @@ pub(crate) enum StateReplicationError {
     #[error("this node no longer holds the lifetime or ownership of {placement}")]
     Superseded { placement: RuntimeStatePlacement },
     #[error(
-        "timed out waiting for replicas {awaiting} to hold {placement} at lsm {lsm} on their \
-         stable storage"
-    )]
-    ReplicaConfirmation {
-        placement: RuntimeStatePlacement,
-        lsm: u64,
-        awaiting: AwaitedReplicas,
-    },
-    #[error(
         "the schedule assigns {assigned} replicas to {placement}, but lsm {lsm} was captured for \
          {required}"
     )]
@@ -100,21 +76,6 @@ pub(crate) enum StateReplicationError {
         required: usize,
         assigned: usize,
     },
-}
-
-/// The replicas a checkpoint was still waiting for, as a diagnostic names them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AwaitedReplicas(pub(crate) BTreeSet<ClusterNodeName>);
-
-impl std::fmt::Display for AwaitedReplicas {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut separator = "";
-        for replica in &self.0 {
-            write!(formatter, "{separator}'{replica}'")?;
-            separator = ", ";
-        }
-        Ok(())
-    }
 }
 
 impl StateReplicationError {

@@ -18,8 +18,6 @@ impl InterconnectRequest for CurrentReceiveBound {
     type Response = u64;
     const NAME: &'static str = "simulation_current_receive_bound";
     const CLASS: PoolClass = PoolClass::Management;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Control;
 }
 
 fn receive(bytes: u64) -> PeerReceiveSettings {
@@ -129,7 +127,7 @@ fn capability_roll(run: ScenarioRun) -> Result<(), SimulationError> {
                     .await;
                     phase.send_replace(1);
                     wait_for(&mut roll).await;
-                    initial.shutdown().await;
+                    initial.shutdown(super::teardown_ceiling()).await;
                     drop(initial_incoming);
                     let next_seed = seed.checked_add(1).assured("fixture seed fits");
                     let (server, mut incoming) = bind_with_incoming_options(
@@ -183,7 +181,7 @@ fn capability_roll(run: ScenarioRun) -> Result<(), SimulationError> {
                         incoming.try_recv().is_err(),
                         "no duplicate piece reaches the receiver"
                     );
-                    server.shutdown().await;
+                    server.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -311,7 +309,7 @@ fn capability_roll(run: ScenarioRun) -> Result<(), SimulationError> {
                          piece arrived once",
                     );
                     done.send_replace(true);
-                    client.shutdown().await;
+                    client.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;

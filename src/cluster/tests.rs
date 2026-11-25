@@ -30,10 +30,9 @@ fn gossip_errors_keep_their_typed_interconnect_report() {
 
     let node = ClusterNodeName::parse("node-2").assured("the fixture node name is valid");
     let request = anyhow::Error::new(GossipExchangeFailure::Request(Report::new(
-        RequestError::Timeout {
+        RequestError::TargetLeft {
             node: node.clone(),
             request: GossipExchange::NAME,
-            timeout: GossipExchange::DEADLINE.declared_default(),
         },
     )));
     let GossipExchangeFailure::Request(report) = request
@@ -44,12 +43,12 @@ fn gossip_errors_keep_their_typed_interconnect_report() {
     };
     assert!(matches!(
         report.current_context(),
-        RequestError::Timeout { node: target, request, .. }
+        RequestError::TargetLeft { node: target, request }
             if target == &node && *request == GossipExchange::NAME
     ));
     assert!(request.to_string().contains("node-2"));
     assert!(request.to_string().contains(GossipExchange::NAME));
-    assert!(request.to_string().contains("timed out"));
+    assert!(request.to_string().contains("left the cluster"));
 }
 
 #[nervix_primitives::test]
@@ -82,7 +81,9 @@ async fn gossip_reconnects_a_known_route_after_its_outbound_target_is_retired() 
         .await
         .assured("a retained gossip route reconnects after its peer left the live set");
 
-    interconnect.shutdown().await;
+    interconnect
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+        .await;
 }
 
 #[nervix_primitives::test]
@@ -114,7 +115,9 @@ async fn the_configured_receive_queue_capacity_bounds_incoming_gossip() {
         "a node given no capacity keeps the queue it ran with"
     );
 
-    interconnect.shutdown().await;
+    interconnect
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+        .await;
 }
 
 #[test]
@@ -173,7 +176,9 @@ async fn the_largest_gossip_exchange_fits_one_management_request_and_a_wider_one
         "an archive that fits can still need a control body above the bound"
     );
 
-    interconnect.shutdown().await;
+    interconnect
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+        .await;
 }
 
 #[test]

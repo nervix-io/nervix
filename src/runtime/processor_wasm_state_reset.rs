@@ -199,7 +199,7 @@ impl ProcessorWasmStateResetContext<'_> {
                             .live()
                             .verified("the loop skipped every released key before removing it"),
                         ProcessorBranchStopMode::Handoff(response),
-                        runtime.task_stop_grace()
+                        runtime.planned_task_stop()
                     )
                 )
                 .await;
@@ -412,18 +412,11 @@ impl ProcessorWasmStateResetContext<'_> {
                     processor: processor.clone(),
                 }
             })?;
-        let branch_lru_deadline = Instant::now()
-            .checked_add(runtime.inner.data_plane.wasm_checkpoint_timeout())
-            .assured("the configured WASM checkpoint deadline stays within Instant");
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
             "the state-generation reset confirms its exact branch lifecycle before publishing the \
              replacement save",
-            runtime.confirm_branch_lru_checkpoint(
-                &branch_lru,
-                instances.version(),
-                branch_lru_deadline
-            )
+            runtime.confirm_branch_lru_checkpoint(&branch_lru, instances.version())
         )
         .await
         .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {

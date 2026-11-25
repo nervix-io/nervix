@@ -727,3 +727,65 @@ Feature: Interconnect relay admission
       | delivery                        | relay_owner |
       | to the relay's owner            | node-2      |
       | to the relay's attached emitter | node-1      |
+
+  # The relay's owner stays live while every data worker it has is busy for longer than a send
+  # attempt ever took before, so it decodes no grant until they are given back. A delivery to it
+  # waits that long: the owner's connection answers pings throughout, so nothing has ended the
+  # peer, and its slowness costs latency, never a row.
+  Scenario: A relay owner whose data workers stay busy keeps every row a NO ACK ingestor sent it
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN slow_owner_{{test_id}};
+      """
+    Given the active domain is "slow_owner_{{test_id}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY input SCHEMA event UNBRANCHED;
+      CREATE ZEROMQ CLIENT emitter CONFIG {
+        'addr' = '{{zeromq_emit_addr}}',
+        'bind' = 'false'
+      };
+      CREATE VHOST edge slow-owner-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
+        TO input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE ZEROMQ PUSH EMITTER emitter_output FROM input
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
+        ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    Then node "node-3" eventually forwards http traffic for host "slow-owner-{{test_id}}.example.com" path "/events" to the observed broker
+      """
+      {"seq":0}
+      """
+    When data execution on node "node-1" is occupied for "12s"
+    And http payload is posted to node "node-3" with host "slow-owner-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":1}
+      """
+    And http payload is posted to node "node-3" with host "slow-owner-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":2}
+      """
+    Then within "90s" the observed broker receives payloads
+      """
+      {"seq":1}
+      {"seq":2}
+      """

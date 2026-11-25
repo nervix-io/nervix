@@ -47,7 +47,7 @@ const DELIMITER_NAMES: [&str; 12] = [
 /// Every keyword Plexus reads, statement and expression keywords alike, spelled as a name spells it:
 /// in lower case. `nervix-plexus` checks this list against the one lexer's keyword set, so a keyword
 /// the language adds is generated as a name as soon as it exists.
-pub const KEYWORDS: [&str; 462] = [
+pub const KEYWORDS: [&str; 459] = [
     "headers",
     "secret",
     "create",
@@ -505,10 +505,7 @@ pub const KEYWORDS: [&str; 462] = [
     "licensing_stream_idle_timeout",
     "payload_unfold_limit",
     "remote_ack_alive_interval",
-    "remote_ack_dispatch_timeout",
-    "remote_ack_silence_timeout",
     "remote_ack_sweep_interval",
-    "remote_relay_instantiation_wait",
     "remote_relay_total_timeout",
 ];
 

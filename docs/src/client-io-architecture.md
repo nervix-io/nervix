@@ -614,8 +614,9 @@ The cluster prerequisites for this delivery are resolved: recovered Raft-member 
 seed authenticated gossip contact for a restarted former bootstrap leader ([Interconnect](./interconnect.md#listener-and-peer-topology),
 [Shutdown](./shutdown.md#recovered-ownership-is-fenced)); a routed record reaching no runtime
 consumer fails its ACK ([PR #504](https://github.com/nervix-io/nervix/pull/504)); and forwarded
-record acknowledgements whose receiver stops reporting resolve negatively rather than appearing
-successful ([Interconnect](./interconnect.md#record-acknowledgements-the-receiver-stops-reporting)).
+record acknowledgements whose receiver leaves the cluster, or whose admitting receiver run ends,
+resolve negatively rather than appearing successful
+([Interconnect](./interconnect.md#record-acknowledgements-follow-the-receiver-run)).
 These fixes underpin the completed cluster recovery prerequisites. They do not make client payloads
 durable. Native owner-kill, owner-freeze and forwarding-node-kill scenarios separately verify the
 client clearance, unknown-outcome and restoration boundaries.

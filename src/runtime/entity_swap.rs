@@ -267,7 +267,7 @@ impl Runtime {
         let mut stop_failure = None;
         for task in previous_state_task {
             let unit = task.unit;
-            let stopped = task.stop(self.task_stop_grace()).await;
+            let stopped = task.stop(self.planned_task_stop()).await;
             let withdrawn = registrations.counts(&relay, entity, Some(unit));
             if withdrawn {
                 services.remove_local_unit_runtime_consumer(AckMode::Detached, unit);
@@ -517,7 +517,7 @@ impl Runtime {
         }
         for runtime in old_entrypoints {
             nervix_primitives::task::consume_budget().await;
-            runtime.shutdown(self.task_stop_grace()).await;
+            runtime.shutdown(self.planned_task_stop()).await;
         }
         #[cfg(feature = "testing")]
         self.hold_or_fail_entity_swap(domain, entity, local_node_id)

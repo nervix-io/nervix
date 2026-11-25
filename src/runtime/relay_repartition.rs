@@ -33,7 +33,7 @@ use nervix_primitives::sync::Arc;
 
 use super::{
     ExecutionBuildError, ExecutionRevision, ExecutionStep, RelayPartitioning,
-    RelaySubscriptionDefinition, RelayUnitRef, Runtime, RuntimeError,
+    RelaySubscriptionDefinition, RelayUnitRef, Runtime, RuntimeError, TaskStopWait,
     domain_rebuild::branch_relays_from_plans,
     entity_swap_restore::{EntitySwapJournal, RelayRepartitionSwap},
 };
@@ -161,7 +161,11 @@ impl Runtime {
             let mut drain_failure = None;
             for (unit, task) in owner_tasks {
                 nervix_primitives::task::consume_budget().await;
-                let stopped = task.stop(self.branch_task_stop_timeout()).await;
+                let stopped = task
+                    .stop(TaskStopWait::UntilStopped {
+                        report_after: self.branch_task_stop_timeout(),
+                    })
+                    .await;
                 journal.step(step).record_owner_stopped(unit);
                 if let Err(error) = stopped
                     && drain_failure.is_none()

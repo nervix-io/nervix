@@ -213,6 +213,50 @@ async fn waiting_branch_task_for_test(
     )
 }
 
+/// A planned stop, an eviction here, waits for the accepted work its branch holds, however long the
+/// branch waits for a worker: it costs the stop latency and never cuts the work.
+#[nervix_primitives::test]
+async fn a_planned_stop_waits_for_the_accepted_work_its_branch_holds() {
+    let executor = single_worker_executor();
+    let filled = FilledCpuClass::fill(&executor, nervix_execution::CpuClass::Data).await;
+    let (entry, ended) = waiting_branch_task_for_test(&executor).await;
+    let (response, _answer) = oneshot::channel();
+    entry
+        .commands
+        .try_send(ProcessorBranchCommand::Checkpoint {
+            purpose: ProcessorCheckpointPurpose::BackupCut,
+            response,
+        })
+        .assured("one pending checkpoint fills the branch's command queue");
+    let accepted = domain("accepted");
+    let stopping = stop_processor_branch_task(
+        &accepted,
+        named::<ModelName>("node"),
+        &None,
+        &entry,
+        ProcessorBranchStopMode::Evict,
+        TaskStopWait::UntilStopped {
+            report_after: Duration::from_millis(50),
+        },
+    );
+    tokio::pin!(stopping);
+    assert!(
+        timeout(Duration::from_millis(500), &mut stopping)
+            .await
+            .is_err(),
+        "a planned stop waits past its report threshold for the work its branch holds"
+    );
+    filled.release().await;
+    timeout(Duration::from_secs(5), stopping)
+        .await
+        .expect("the stop ends once its branch finished the accepted work");
+    ended
+        .await
+        .expect_err("the branch ended on its own, dropping its completion guard");
+    assert_eq!(executor.snapshot().data_cpu.pending, 0);
+    assert_eq!(executor.snapshot().data_cpu.refused, 0);
+}
+
 #[nervix_primitives::test]
 async fn accepted_work_stop_bounds_a_full_command_queue_while_the_branch_waits() {
     let grace = Duration::from_secs(2);
@@ -235,7 +279,7 @@ async fn accepted_work_stop_bounds_a_full_command_queue_while_the_branch_waits()
             &None,
             &entry,
             ProcessorBranchStopMode::Evict,
-            grace,
+            TaskStopWait::Teardown { grace },
         ),
     )
     .await;
@@ -253,7 +297,7 @@ async fn accepted_work_stop_bounds_a_full_command_queue_while_the_branch_waits()
     filled.release().await;
     assert!(
         stopped.is_ok(),
-        "the existing shutdown grace must include waiting to send STOP"
+        "a teardown grace must include waiting to send STOP"
     );
     assert_eq!(executor.snapshot().data_cpu.pending, 0);
     assert_eq!(executor.snapshot().data_cpu.refused, 0);
@@ -789,7 +833,9 @@ async fn detached_branch_publishes_buffered_route_output_before_it_stops() {
         .expect("the live relay owner keeps the output relay open");
     assert_eq!(published.message_count(), 1);
     owner
-        .stop(Duration::from_secs(1))
+        .stop(TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("the fixture relay owner stops");
 }
@@ -940,7 +986,9 @@ async fn a_drained_branch_ends_without_its_clock_and_reports_nothing() {
         "a drained branch reported an error as it ended"
     );
     owner
-        .stop(Duration::from_secs(1))
+        .stop(TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("the fixture relay owner stops");
 }
@@ -970,7 +1018,9 @@ async fn a_branch_holding_output_reports_what_it_cannot_publish_without_its_cloc
         "unexpected report: {message}"
     );
     owner
-        .stop(Duration::from_secs(1))
+        .stop(TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("the fixture relay owner stops");
 }

@@ -81,7 +81,16 @@ impl Cluster {
             ended
                 .await
                 .discarded("ending the probe's owner releases its transport");
-            closing.shutdown().await;
+            // The probe's streams end with the scenario that holds them, so a ceiling only guards
+            // the harness against a connection that never ends.
+            closing
+                .shutdown(Some(
+                    nervix_interconnect::ExchangeDeadline::OperationCeiling(
+                        nervix_primitives::time::Instant::now()
+                            + std::time::Duration::from_secs(10),
+                    ),
+                ))
+                .await;
             drop(directory);
             drop(port);
         });

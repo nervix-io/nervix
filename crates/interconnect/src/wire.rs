@@ -14,7 +14,7 @@
     )
 )]
 
-use std::{num::NonZeroUsize, time::Duration};
+use std::num::NonZeroUsize;
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
@@ -25,7 +25,6 @@ use nervix_execution::{
 use nervix_models::{
     ClusterNodeName, NodePrerequisites, PrerequisiteMismatch, WireContractFingerprint,
 };
-use nervix_primitives::time::Instant;
 use rkyv::{
     Archive, Deserialize, Serialize,
     api::{access_with_context, deserialize_using, high::HighSerializer},
@@ -61,8 +60,8 @@ const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
     )
 )]
 pub const WIRE_CONTRACT: WireContractFingerprint = WireContractFingerprint::from_digest([
-    0x5a, 0xc2, 0x41, 0x82, 0x0f, 0x96, 0x64, 0xe1, 0xa9, 0xaa, 0xc4, 0xb7, 0x23, 0x17, 0x0e, 0x41,
-    0x69, 0x8b, 0x00, 0x03, 0xb7, 0x30, 0x40, 0x3d, 0xcf, 0x66, 0x59, 0x52, 0x1a, 0x4f, 0x64, 0x95,
+    0x0e, 0xfc, 0x3a, 0xbd, 0x8b, 0xd2, 0xaa, 0xa6, 0xec, 0x03, 0xda, 0xe4, 0x18, 0x99, 0x5a, 0xb0,
+    0x2e, 0xf3, 0x3b, 0xb5, 0xe4, 0xb0, 0x87, 0x31, 0x07, 0x04, 0x66, 0x82, 0x1f, 0xbb, 0x2d, 0xf2,
 ]);
 
 /// The first message of every connection: who dials, for which pool, and everything the dialing
@@ -443,45 +442,6 @@ where
             ended?;
             Ok(AnswerEncoding::Ended)
         }
-    }
-}
-
-/// When the request whose answer [`decode_answer`] decodes stops waiting for it.
-pub(crate) struct AnswerDeadline<'a> {
-    /// The node that answered.
-    pub(crate) peer: &'a ClusterNodeName,
-    /// The request's own deadline.
-    pub(crate) at: Instant,
-    /// The whole time the request was given, which a timeout reports.
-    pub(crate) timeout: Duration,
-}
-
-/// Validate and deserialize the answer to a request this node sent, as [`decode_rkyv_with`] does.
-///
-/// The answer carries work its peer already did, so a class whose queue is full holds the decoding
-/// back until a place frees rather than throwing that work away, but no longer than the request's
-/// own deadline. Once the deadline passes the decoding is dropped with its place and its charge,
-/// and the request fails with [`TransportError::RequestTimeout`], as it would had the answer
-/// arrived late.
-pub(crate) async fn decode_answer<T>(
-    executor: &Executor,
-    class: MemoryClass,
-    cpu: CpuClass,
-    bytes: ChargedBytes,
-    deadline: AnswerDeadline<'_>,
-) -> Result<Decoded<T>, Report<TransportError>>
-where
-    T: Archive + Send + 'static,
-    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
-        + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
-{
-    let decoding = decode_rkyv_with(executor, class, cpu, QueueAdmission::WaitForPlace, bytes);
-    match nervix_primitives::time::timeout_at(deadline.at, decoding).await {
-        Ok(decoded) => decoded,
-        Err(_) => Err(Report::new(TransportError::RequestTimeout {
-            peer: deadline.peer.clone(),
-            timeout: deadline.timeout,
-        })),
     }
 }
 

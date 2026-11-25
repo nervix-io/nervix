@@ -76,7 +76,6 @@ impl Runtime {
         settings: RuntimeSettings,
     ) -> error_stack::Result<Self, RuntimePersistenceError> {
         let RuntimeEnvironment {
-            interconnect_request_timeout,
             executor,
             client_endpoints,
             outward_tls,
@@ -141,7 +140,6 @@ impl Runtime {
         Ok(Self {
             inner: Arc::new(RuntimeInner {
                 data_plane: settings.data_plane,
-                interconnect_request_timeout,
                 connector_host: settings.connector_host,
                 vm_settings: settings.vm,
                 udf_settings: settings.udf,
@@ -341,6 +339,22 @@ impl Runtime {
 
     pub(super) fn task_stop_grace(&self) -> Duration {
         super::entity_gate::task_stop_grace(self.domain_drain_timeout())
+    }
+
+    /// How a planned operation waits for a task it stops: until the task ends, reporting a stop
+    /// still under way after the task stop grace.
+    pub(super) fn planned_task_stop(&self) -> super::entity_gate::TaskStopWait {
+        super::entity_gate::TaskStopWait::UntilStopped {
+            report_after: self.task_stop_grace(),
+        }
+    }
+
+    /// How terminal teardown of a domain's execution, or the cleanup of a task that already stopped
+    /// taking its input, waits for a task: the task stop grace, and an abort afterwards.
+    pub(super) fn teardown_task_stop(&self) -> super::entity_gate::TaskStopWait {
+        super::entity_gate::TaskStopWait::Teardown {
+            grace: self.task_stop_grace(),
+        }
     }
 
     /// How long a branch task is given to stop: the configured drain timeout plus the grace it
@@ -892,7 +906,12 @@ impl Runtime {
         execution.shutdown.send_replace(true);
         for (owned, task) in execution.relay_owner_tasks {
             nervix_primitives::task::consume_budget().await;
-            if let Err(reason) = task.stop(self.branch_task_stop_timeout()).await {
+            if let Err(reason) = task
+                .stop(TaskStopWait::Teardown {
+                    grace: self.branch_task_stop_timeout(),
+                })
+                .await
+            {
                 warn!(
                     domain = domain.as_str(),
                     relay = owned.relay.as_str(),
@@ -904,7 +923,7 @@ impl Runtime {
         }
         for (owned, task) in execution.relay_state_tasks {
             nervix_primitives::task::consume_budget().await;
-            if let Err(reason) = task.stop(self.task_stop_grace()).await {
+            if let Err(reason) = task.stop(self.teardown_task_stop()).await {
                 warn!(
                     domain = domain.as_str(),
                     relay = owned.relay.as_str(),
@@ -1008,7 +1027,7 @@ impl Runtime {
         }
         for (identifier, runtimes) in execution.branched_entrypoints {
             for runtime in runtimes {
-                runtime.shutdown(self.task_stop_grace()).await;
+                runtime.shutdown(self.teardown_task_stop()).await;
                 info!(
                     domain = domain.as_str(),
                     entrypoint = identifier.as_str(),

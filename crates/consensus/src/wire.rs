@@ -83,8 +83,6 @@ impl InterconnectRequest for RuntimeAdmissionRead {
     const NAME: &'static str = "raft_runtime_admission_read";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Setup;
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -171,9 +169,7 @@ impl InterconnectDuplexRequest for OpenAppendStream {
     const CLASS: PoolClass = PoolClass::Replication;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Append;
     const SETUP_DEADLINE: nervix_interconnect::DuplexSetupDeadline =
-        nervix_interconnect::DuplexSetupDeadline::Request(
-            nervix_interconnect::RequestDeadline::Setup,
-        );
+        nervix_interconnect::DuplexSetupDeadline::Liveness;
 }
 
 /// What the follower's Raft made of one submitted batch.
@@ -211,8 +207,6 @@ impl InterconnectRequest for HeartbeatRequest {
     type Response = Result<AppendEntriesResponseRecord, ConsensusRequestError>;
     const NAME: &'static str = "raft_heartbeat";
     const CLASS: PoolClass = PoolClass::Management;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Control;
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -278,8 +272,6 @@ impl InterconnectRequest for RequestVote {
     type Response = Result<VoteResponseRecord, ConsensusRequestError>;
     const NAME: &'static str = "raft_vote";
     const CLASS: PoolClass = PoolClass::Management;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Setup;
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -289,8 +281,6 @@ impl InterconnectRequest for RequestPreVote {
     type Response = Result<VoteResponseRecord, ConsensusRequestError>;
     const NAME: &'static str = "raft_pre_vote";
     const CLASS: PoolClass = PoolClass::Management;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Setup;
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -369,8 +359,6 @@ impl InterconnectRequest for BeginSnapshotTransfer {
     const NAME: &'static str = "raft_begin_snapshot";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Snapshot;
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -387,8 +375,6 @@ impl InterconnectRequest for SnapshotChunk {
     const NAME: &'static str = "raft_snapshot_chunk";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Snapshot;
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -416,8 +402,6 @@ impl InterconnectRequest for FinishSnapshotTransfer {
     const NAME: &'static str = "raft_finish_snapshot";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Snapshot;
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -510,8 +494,6 @@ impl InterconnectRequest for TransferLeadership {
     type Response = Result<TransferLeadershipResponse, ConsensusRequestError>;
     const NAME: &'static str = "raft_transfer_leadership";
     const CLASS: PoolClass = PoolClass::Management;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Setup;
 }
 
 #[cfg(test)]

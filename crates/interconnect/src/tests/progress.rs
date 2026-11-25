@@ -108,8 +108,8 @@ async fn progress_work_cannot_consume_liveness_streams() {
             "blocking progress request should finish after release: {response:?}"
         );
     }
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 
     assert!(
         liveness.is_ok(),

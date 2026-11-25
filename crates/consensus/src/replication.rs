@@ -255,11 +255,10 @@ where
                     wire::HeartbeatRequest(wire::AppendEntriesRecord::from_request(prefix));
                 let response = self
                     .interconnect
-                    .request_with_timeout(
+                    .request_by(
                         &self.target,
                         prefix,
-                        self.interconnect
-                            .duplex_setup_deadline::<wire::OpenAppendStream>(),
+                        crate::raft_deadline(*self.operations.append_idle_bound.value()),
                     )
                     .await
                     .map_err(|error| unreachable_err(error.into_error()))?;
@@ -304,15 +303,10 @@ where
                 .record_append_stream_open(&self.target);
             Ok(answers)
         };
-        // One setup deadline covers prefix verification, local admission and stream headers.
-        // Data setup has no dependency on the caller's heartbeat-derived soft TTL.
-        match timeout(
-            self.interconnect
-                .duplex_setup_deadline::<wire::OpenAppendStream>(),
-            setup,
-        )
-        .await
-        {
+        // The append stream's own idle bound, a Raft replication timer, covers prefix
+        // verification, local admission and stream headers. Data setup has no dependency on the
+        // caller's heartbeat-derived soft TTL.
+        match timeout(*self.operations.append_idle_bound.value(), setup).await {
             Ok(result) => result,
             Err(_) => Err(stream_failed(
                 &self.target,

@@ -249,7 +249,7 @@ The first data request remains charged during prefix verification and stream set
 prefix matches, its complete original vote, entries, previous-log identity and commit position
 join the remaining requests exactly once on the ordered stream. Subsequent empty commit updates
 stay on that stream alongside data batches. A data request's prefix check and stream admission
-share its one five-second setup deadline. The caller's leading empty probes retain their
+share its one setup deadline, `--raft-append-idle-bound`. The caller's leading empty probes retain their
 heartbeat-derived deadline; their soft TTL does not constrain a data request's prefix check.
 Waiting for the caller's next request belongs to the caller's lifecycle, rather than to connection
 setup. Prefix confirmation is local to one input; it is not cached across stream generations.
@@ -295,9 +295,10 @@ memory budget separately bounds the aggregate encoded and decoded copies across 
 
 ### Progress-Based Liveness
 
-Opening an append stream has a five-second deadline. Once open, the stream has no age limit. With a
-batch outstanding, it is considered stalled only after five continuous seconds in which both of
-these are true:
+Opening an append stream has the `--raft-append-idle-bound` deadline, five seconds by default, a
+Raft replication timer rather than a transport deadline. Once open, the stream has no age limit.
+With a batch outstanding, it is considered stalled only after that same bound passes continuously
+while both of these are true:
 
 - no answer arrived;
 - the follower accepted none of the leader's bytes.
@@ -305,9 +306,10 @@ these are true:
 An answer or transport flow-control progress restarts the idle window. A stream with no outstanding
 batch can remain idle indefinitely. The time required for a follower to synchronize one batch is
 therefore not treated as a failure while the transfer is still moving.
-The interconnect frame writer uses the same progress contract: every nonzero flow-control grant
-restarts its write idle bound, including grants within one large append frame. Catch-up at a
-limited byte rate can therefore preserve its append stream across many five-second intervals.
+The interconnect frame writer records every nonzero flow-control grant as the follower accepting
+bytes, including grants within one large append frame, and the append stream's idle window
+restarts on it; the transport itself applies no read or write deadline to the stream. Catch-up at a
+limited byte rate can therefore preserve its append stream across many idle-bound intervals.
 The native writer checks both a moving and a stalled receiver. The public rate-limited follower
 scenario sends opaque TLS bytes through a bounded test proxy at 32768 bytes per second and checks
 the applied domain backlog within its assertion bound and the bytes carried by the paced path.
@@ -327,8 +329,8 @@ the leader lease, the maximum election timeout (twelve heartbeat intervals, thre
 default 250 ms heartbeat). An acknowledgement received inside that bound renews the lease by the
 request's sending time. An answer that exceeds that request's lease-sized deadline is discarded;
 the lease check still uses the acknowledged request's sending time. Initial empty replication
-probes retain the shorter soft request deadline, capped at five seconds; they do not maintain the
-heartbeat worker's lease. Replication answers also prove leader contact, so sustained writes
+probes retain the shorter soft request deadline, capped at `--raft-append-idle-bound`, five seconds
+by default; they do not maintain the heartbeat worker's lease. Replication answers also prove leader contact, so sustained writes
 suppress redundant heartbeats for an automatically derived window. The window is no longer than the
 heartbeat interval or half the gap between that interval and the minimum election timeout, which,
 with the election timeouts derived at six heartbeats, is one heartbeat interval. This keeps the
@@ -343,7 +345,7 @@ and macro support crates.
 
 The independent paths matter when a follower has slow storage: its append answer may take much
 longer than a heartbeat deadline, while management traffic still prevents an election. Changing the
-heartbeat interval does not change the append stream's five-second progress bound.
+heartbeat interval does not change the append stream's progress bound, `--raft-append-idle-bound`.
 
 ### A Quorum Over A Lossy Link
 
@@ -352,7 +354,7 @@ commit needs all of them and the leader's link to each. When such a link loses p
 TCP recovers them by retransmission under the host kernel's retransmission timeout, which grows
 exponentially while the losses continue; Nervix does not tune it. An exchange whose deadline passes
 before its retransmission arrives fails and is retried: a heartbeat at the leader lease, and an
-append stream at its five-second setup or progress bound. Commits can therefore stall, leadership
+append stream at its `--raft-append-idle-bound` setup or progress bound, five seconds by default. Commits can therefore stall, leadership
 can move between the reachable voters, and a control command, which needs several commits in
 sequence, can time out.
 
@@ -568,10 +570,10 @@ Transaction commit plans and step effects hold no lifecycle step.
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_logs`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_meta`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_state`, and
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_snapshots`. Opening it validates the complete
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_liveness_logs`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_liveness_meta`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_liveness_state`, and
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_liveness_snapshots`. Opening it validates the complete
 keyspace namespace before reading any records. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement
@@ -729,7 +731,8 @@ boundary, first and last entry, and entry count at `debug`. A generation also lo
 follower conflict or a transport or liveness failure ended it. Compare those boundaries with the
 follower's applied log and the public catch-up samples to distinguish repeated conflict search
 from a stream that stalled. Invalid or foreign batches appear at `debug`; a stalled generation
-reports that the stream neither answered nor accepted bytes for five seconds. Snapshot requests
+reports that the stream neither answered nor accepted bytes for its idle bound, five seconds by
+default. Snapshot requests
 caused by the byte threshold appear at `info`, and byte-retention purge requests appear at `debug`.
 
 ## Tuning
@@ -770,7 +773,7 @@ validation and derivations, and the rest are fixed by the encoded operation and 
 | Applied command storage | 8 MiB normalized payload in a 16 MiB working reservation | fixed |
 | Vote or metadata storage | 256 KiB working reservation from the Management class | fixed: four 64 KiB management events, which `--execution-management-memory-bytes` must hold |
 | Storage working sets held at once | 1 per class, as many as each Commands or Bulk budget holds with room beside them | fixed |
-| Append stream setup / progress idle bound | 5 seconds / 5 seconds | half of `--interconnect-request-timeout` / `--raft-append-idle-bound` |
+| Append stream setup / progress idle bound | 5 seconds / 5 seconds | `--raft-append-idle-bound` for both |
 | Snapshot section / transport chunk | 8 MiB / 64 KiB | fixed |
 | Complete snapshot transfer | 30 seconds | `--raft-snapshot-transfer-timeout` |
 

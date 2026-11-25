@@ -44,7 +44,7 @@ use nervix_primitives::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Instant, timeout},
+    time::Instant,
 };
 
 use super::{
@@ -234,7 +234,6 @@ impl FrameReader {
 /// Writes whole frames into one direction of a duplex stream.
 struct FrameWriter {
     stream: SendStream<Bytes>,
-    progress_timeout: Duration,
     send_progress: DuplexSendProgress,
 }
 
@@ -245,10 +244,9 @@ struct OpenedDuplexStream {
 }
 
 impl FrameWriter {
-    fn new(stream: SendStream<Bytes>, progress_timeout: Duration) -> Self {
+    fn new(stream: SendStream<Bytes>) -> Self {
         Self {
             stream,
-            progress_timeout,
             send_progress: DuplexSendProgress::new(),
         }
     }
@@ -284,32 +282,21 @@ impl FrameWriter {
         while !body.is_empty() {
             nervix_primitives::task::consume_budget().await;
             self.stream.reserve_capacity(body.len());
-            // Only a nonzero grant restarts the idle bound. A large frame may span many such
-            // bounds while its receiver keeps reading; zero-capacity notifications do not help it.
-            let capacity = async {
-                loop {
-                    let assigned = poll_fn(|context| self.stream.poll_capacity(context))
-                        .await
-                        .ok_or_else(|| {
-                            Report::new(TransportError::Decode(
-                                "HTTP/2 stream closed while assigning send capacity".to_string(),
-                            ))
-                        })?
-                        .map_err(TransportError::from)?;
-                    if assigned > 0 {
-                        break Ok::<_, Report<TransportError>>(assigned);
-                    }
-                    nervix_primitives::task::consume_budget().await;
+            // A receiver that grants no capacity is applying backpressure: the frame waits for it
+            // for as long as the connection lives. Zero-capacity notifications are no grant.
+            let assigned = loop {
+                let assigned = poll_fn(|context| self.stream.poll_capacity(context))
+                    .await
+                    .ok_or_else(|| {
+                        Report::new(TransportError::Decode(
+                            "HTTP/2 stream closed while assigning send capacity".to_string(),
+                        ))
+                    })?
+                    .map_err(TransportError::from)?;
+                if assigned > 0 {
+                    break assigned;
                 }
-            };
-            let assigned = match timeout(self.progress_timeout, capacity).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    self.stream.send_reset(Reason::CANCEL);
-                    return Err(Report::new(TransportError::ProgressTimeout {
-                        timeout: self.progress_timeout,
-                    }));
-                }
+                nervix_primitives::task::consume_budget().await;
             };
             let ready = assigned.min(body.len());
             self.stream
@@ -702,7 +689,7 @@ impl ClientConnection {
         path: &str,
         class: PoolClass,
         opening: ChargedBytes,
-        setup_timeout: Duration,
+        deadline: Option<crate::ExchangeDeadline>,
     ) -> Result<OpenedDuplexStream, Report<TransportError>> {
         if self.closed.is_cancelled() {
             return Err(Report::new(TransportError::Closed(
@@ -740,7 +727,7 @@ impl ClientConnection {
                     .send_request(request, false)
                     .map_err(TransportError::from)?
             };
-            let mut writer = FrameWriter::new(stream, state.options.progress_timeout);
+            let mut writer = FrameWriter::new(stream);
             writer.send_frame(opening).await?;
             let response = response.await.map_err(TransportError::from)?;
             let status = response.status();
@@ -749,7 +736,6 @@ impl ClientConnection {
                     &state.executor,
                     class.memory_class(),
                     class.control_body_limit(&state.executor),
-                    state.options.progress_timeout,
                     response.into_body(),
                 )
                 .await?;
@@ -763,11 +749,11 @@ impl ClientConnection {
                 body: response.into_body(),
             })
         };
-        match timeout(setup_timeout, operation).await {
+        match crate::settings::within(deadline, operation).await {
             Ok(result) => result,
-            Err(_) => Err(Report::new(TransportError::RequestTimeout {
+            Err(deadline) => Err(Report::new(TransportError::DeadlinePassed {
                 peer: self.key.node_id.clone(),
-                timeout: setup_timeout,
+                deadline,
             })),
         }
     }
@@ -783,19 +769,26 @@ impl TransportState {
             class,
             subquota,
             body,
-            timeout: setup_timeout,
+            setup,
             admission,
         } = request;
-        let deadline = Instant::now().checked_add(setup_timeout).ok_or_else(|| {
-            TransportError::InvalidOptions {
-                reason: "duplex setup deadline exceeds the monotonic clock range".to_string(),
-            }
-        })?;
+        // A link bound to dialing opens within the connection-setup budget, the liveness of
+        // dialing; any other waits for its peer while the peer lives.
+        let deadline = match setup {
+            Some(setup) => Some(crate::ExchangeDeadline::Protocol(
+                Instant::now().checked_add(setup).ok_or_else(|| {
+                    TransportError::InvalidOptions {
+                        reason: "duplex setup deadline exceeds the monotonic clock range"
+                            .to_string(),
+                    }
+                })?,
+            )),
+            None => None,
+        };
         let lease = self.lease(node_id, class, subquota, deadline).await?;
-        let remaining = deadline.saturating_duration_since(Instant::now());
         let OpenedDuplexStream { writer, body } = lease
             .connection
-            .open_duplex_raw(self, DUPLEX_PATH, class, body, remaining)
+            .open_duplex_raw(self, DUPLEX_PATH, class, body, deadline)
             .await?;
         let frame_limit = class.payload_limit(&self.executor);
         let reader =
@@ -841,7 +834,6 @@ impl TransportState {
                 &mut respond,
                 StatusCode::BAD_REQUEST,
                 "duplex stream ended before its opening frame",
-                self.options.progress_timeout,
             )
             .await?;
             return Ok(());
@@ -856,20 +848,13 @@ impl TransportState {
         let opening = match opening {
             Ok(opening) => opening,
             Err(error) => {
-                send_decode_refusal(&mut respond, class, error, self.options.progress_timeout)
-                    .await?;
+                send_decode_refusal(&mut respond, class, error).await?;
                 return Ok(());
             }
         };
         let (opening, _opening_reservation) = opening.into_parts();
         if opening.class != class {
-            send_static_error(
-                &mut respond,
-                StatusCode::FORBIDDEN,
-                "wrong pool class",
-                self.options.progress_timeout,
-            )
-            .await?;
+            send_static_error(&mut respond, StatusCode::FORBIDDEN, "wrong pool class").await?;
             return Ok(());
         }
         let handled = nervix_primitives::select! {
@@ -889,13 +874,7 @@ impl TransportState {
         let handled = match handled {
             Ok(handled) => handled,
             Err(error) => {
-                send_static_error(
-                    &mut respond,
-                    error.status(),
-                    &error.to_string(),
-                    self.options.progress_timeout,
-                )
-                .await?;
+                send_static_error(&mut respond, error.status(), &error.to_string()).await?;
                 return Ok(());
             }
         };
@@ -911,7 +890,6 @@ impl TransportState {
             respond
                 .send_response(headers, false)
                 .map_err(TransportError::from)?,
-            self.options.progress_timeout,
         );
         loop {
             nervix_primitives::task::consume_budget().await;

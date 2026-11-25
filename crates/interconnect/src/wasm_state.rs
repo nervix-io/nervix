@@ -46,7 +46,6 @@ pub struct DescribeInheritedWasmStateResponse {
 impl InterconnectRequest for DescribeInheritedWasmStateRequest {
     type Response = DescribeInheritedWasmStateResponse;
     const NAME: &'static str = "describe_inherited_wasm_state";
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 /// The owner-side stage of one coordinated WASM guest-state reset.
@@ -136,7 +135,6 @@ impl InterconnectRequest for WasmStateResetRuntimeRequest {
     const NAME: &'static str = "wasm_state_reset_runtime";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -149,7 +147,6 @@ impl InterconnectRequest for CoordinateWasmStateResetRequest {
     const NAME: &'static str = "coordinate_wasm_state_reset";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Recovery;
 }
 
 #[cfg(all(
@@ -231,5 +228,4 @@ impl InterconnectRequest for RecoverWasmProcessorStateRequest {
     const NAME: &'static str = "recover_wasm_processor_state";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Recovery;
 }

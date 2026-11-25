@@ -581,7 +581,10 @@ impl SessionServiceImpl {
             let mut all_drained = true;
             for node in &nodes {
                 nervix_primitives::task::consume_budget().await;
-                match self.domain_drain_status_on_node(node, domain).await {
+                match self
+                    .domain_drain_status_on_node(node, domain, deadline)
+                    .await
+                {
                     Ok(status)
                         if status.active_ingestors == 0
                             && status.active_generators == 0

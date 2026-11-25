@@ -110,40 +110,6 @@ impl SettingDefinition for ConnectionSetupTimeout {
     }
 }
 
-/// The node's `interconnect-request-timeout` budget.
-pub struct RequestTimeout;
-impl SettingDefinition for RequestTimeout {
-    type Class = NodeCapabilities;
-    type Value = Duration;
-    type Context = ();
-    type Error = TransportSettingsError;
-    const NAME: &'static str = "interconnect-request-timeout";
-    const DERIVATION: Option<&'static str> = None;
-    fn default_value(_: &()) -> Duration {
-        Duration::from_secs(10)
-    }
-    fn validate(value: &Duration, _: &()) -> Result<(), Report<Self::Error>> {
-        TransportSettings::validate_deadline(Self::NAME, *value)
-    }
-}
-
-/// The node's `interconnect-progress-timeout` budget.
-pub struct ProgressTimeout;
-impl SettingDefinition for ProgressTimeout {
-    type Class = NodeCapabilities;
-    type Value = Duration;
-    type Context = ();
-    type Error = TransportSettingsError;
-    const NAME: &'static str = "interconnect-progress-timeout";
-    const DERIVATION: Option<&'static str> = None;
-    fn default_value(_: &()) -> Duration {
-        Duration::from_secs(5)
-    }
-    fn validate(value: &Duration, _: &()) -> Result<(), Report<Self::Error>> {
-        TransportSettings::validate_deadline(Self::NAME, *value)
-    }
-}
-
 /// The node's `interconnect-reconnect-backoff` budget.
 pub struct ReconnectBackoff;
 impl SettingDefinition for ReconnectBackoff {
@@ -290,8 +256,6 @@ pub struct TransportSettingValues {
     pub stream_receive_window: Option<ByteUnit>,
     pub connection_receive_window: Option<ByteUnit>,
     pub connection_setup_timeout: Option<Duration>,
-    pub request_timeout: Option<Duration>,
-    pub progress_timeout: Option<Duration>,
     pub reconnect_backoff: Option<Duration>,
     pub max_reconnect_backoff: Option<Duration>,
 }
@@ -307,8 +271,6 @@ pub struct TransportSettings {
     stream_receive_window: Setting<StreamReceiveWindow>,
     connection_receive_window: Setting<ConnectionReceiveWindow>,
     connection_setup_timeout: Setting<ConnectionSetupTimeout>,
-    request_timeout: Setting<RequestTimeout>,
-    progress_timeout: Setting<ProgressTimeout>,
     reconnect_backoff: Setting<ReconnectBackoff>,
     max_reconnect_backoff: Setting<MaxReconnectBackoff>,
 }
@@ -332,8 +294,6 @@ impl TransportSettings {
             stream_receive_window: Setting::resolve(values.stream_receive_window, &())?,
             connection_receive_window: Setting::resolve(values.connection_receive_window, &())?,
             connection_setup_timeout: Setting::resolve(values.connection_setup_timeout, &())?,
-            request_timeout: Setting::resolve(values.request_timeout, &())?,
-            progress_timeout: Setting::resolve(values.progress_timeout, &())?,
             reconnect_backoff: Setting::resolve(values.reconnect_backoff, &())?,
             max_reconnect_backoff: Setting::resolve(values.max_reconnect_backoff, &())?,
         };
@@ -447,10 +407,6 @@ impl TransportSettings {
         *self.max_peers.value()
     }
 
-    pub fn request_timeout(&self) -> Duration {
-        *self.request_timeout.value()
-    }
-
     pub fn max_peers(&self) -> usize {
         *self.max_peers.value()
     }
@@ -473,8 +429,6 @@ impl TransportSettings {
             stream_receive_window: Some(*self.stream_receive_window.value()),
             connection_receive_window: Some(*self.connection_receive_window.value()),
             connection_setup_timeout: Some(*self.connection_setup_timeout.value()),
-            request_timeout: Some(*self.request_timeout.value()),
-            progress_timeout: Some(*self.progress_timeout.value()),
             reconnect_backoff: Some(*self.reconnect_backoff.value()),
             max_reconnect_backoff: Some(*self.max_reconnect_backoff.value()),
         }
@@ -519,18 +473,13 @@ impl TransportSettings {
             connection_window_bytes: u32::try_from(self.connection_receive_window.value().as_u64())
                 .verified("validated HTTP/2 window"),
             connection_setup_timeout: *self.connection_setup_timeout.value(),
-            request_timeout: *self.request_timeout.value(),
-            progress_timeout: *self.progress_timeout.value(),
             reconnect_backoff: *self.reconnect_backoff.value(),
             max_reconnect_backoff: *self.max_reconnect_backoff.value(),
         }
     }
 
-    /// The transport's options. Its drain at shutdown waits for the requests still in flight for
-    /// at most the request timeout, the bound each of those requests already has.
+    /// The transport's options.
     pub fn options(&self, peer_receive: Option<super::PeerReceiveSettings>) -> TransportOptions {
-        let request_timeout = *self.request_timeout.value();
-        let shutdown_drain_timeout = request_timeout;
         TransportOptions {
             accept_retry_delay: Setting::<crate::AcceptRetryDelay>::resolve(None, &())
                 .assured("the declared accept-retry default is positive and clock-representable"),
@@ -552,11 +501,8 @@ impl TransportSettings {
             .verified("the receive window fits HTTP/2"),
             max_header_bytes: crate::DEFAULT_MAX_HEADER_BYTES,
             connection_setup_timeout: *self.connection_setup_timeout.value(),
-            request_timeout,
-            progress_timeout: *self.progress_timeout.value(),
             reconnect_backoff: *self.reconnect_backoff.value(),
             max_reconnect_backoff: *self.max_reconnect_backoff.value(),
-            shutdown_drain_timeout,
             entropy: TransportEntropy::operating_system(),
         }
     }
@@ -648,7 +594,7 @@ mod tests {
                 ..Default::default()
             },
             TransportSettingValues {
-                request_timeout: Some(Duration::ZERO),
+                connection_setup_timeout: Some(Duration::ZERO),
                 ..Default::default()
             },
             TransportSettingValues {

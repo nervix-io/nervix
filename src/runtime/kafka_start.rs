@@ -330,27 +330,9 @@ impl Runtime {
             reason = "one bounded start request admits a driver before its recurring polls"
         )
     )]
+    /// Answer a Kafka start once its admission, freeze and durable record are done: the requester
+    /// waits for the answer for as long as this node lives.
     pub(crate) async fn answer_kafka_start(
-        &self,
-        request: KafkaStartRequest,
-    ) -> error_stack::Result<KafkaStartResponse, StateReplicationError> {
-        let timeout = StateReplicationError::KafkaStartDeadline {
-            domain: request.placement.domain.clone(),
-            ingestor: request.placement.identifier.clone(),
-            unit: request.placement.unit,
-        };
-        nervix_primitives::time::timeout(
-            <KafkaStartRequest as nervix_interconnect::InterconnectRequest>::DEADLINE.resolve(
-                self.inner.interconnect_request_timeout,
-                nervix_interconnect::InterconnectLiveness::default(),
-            ),
-            self.answer_kafka_start_within_deadline(request),
-        )
-        .await
-        .change_context(timeout)?
-    }
-
-    async fn answer_kafka_start_within_deadline(
         &self,
         request: KafkaStartRequest,
     ) -> error_stack::Result<KafkaStartResponse, StateReplicationError> {
@@ -590,11 +572,7 @@ impl Runtime {
             self.answer_kafka_start(request).await?
         } else {
             dispatcher
-                .request_with_timeout(
-                    &coordinator,
-                    request,
-                    dispatcher.request_deadline::<KafkaStartRequest>(),
-                )
+                .request(&coordinator, request)
                 .await
                 .change_context(StateReplicationError::Request {
                     target: coordinator.clone(),

@@ -226,7 +226,6 @@ impl RelayBoundaryServices {
                 &batch.batch,
                 channel,
                 deadline,
-                GrantCapacityRefusals::Hold,
                 Some(&mut remote_acks),
             )
             .await;

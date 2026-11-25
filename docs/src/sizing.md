@@ -246,7 +246,7 @@ node-unavailability-timeout (1s) must exceed node 'node-1' control-plane-health-
 | `DOMAIN_DRAIN_POLL_INTERVAL` | `50ms` | | How often a domain drain observes the work it waits for |
 | `ENTITY_GATE_POLL_INTERVAL` | `25ms` | | How often an entity gate observes the drain it waits for |
 | `OWNERSHIP_HANDOFF_POLL_INTERVAL` | `250ms` | | How often planned ownership handoffs are reconciled |
-| `FORCED_RECOVERY_BUDGET` | `5s` | | How long a forced ownership recovery gives its destination to prepare |
+| `FORCED_RECOVERY_BUDGET` | `5s` | | How long a forced ownership recovery gives its destination to prepare; an attempt that passes it is not published, every replica keeps its state, and the next scheduling pass prepares the recovery again |
 | `RUNTIME_READINESS_PROPAGATION_BOUND` | `30s` | | How long a live node has to report an applied revision ready; a completion barrier waits at most the node-unavailability timeout plus this bound |
 
 A stopping node moves its units through holds these two parameters bound, within its
@@ -259,18 +259,16 @@ its claim until `DROP NODE` removes it, so it counts too.
 
 | Parameter | Default | What the cluster promises |
 | --- | --- | --- |
-| `REMOTE_ACK_ALIVE_INTERVAL` | `100ms` | How often a receiver reports on a remote delivery it retains, and held local work reports the acknowledgements it holds alive |
-| `REMOTE_ACK_DISPATCH_TIMEOUT` | `5s` | How long a remote admission attempt may make no progress |
-| `REMOTE_ACK_SILENCE_TIMEOUT` | `15s` | How long a sender waits without a report after admission |
-| `REMOTE_ACK_SWEEP_INTERVAL` | `1s` | How often a sender counts silence and admission time |
-| `REMOTE_RELAY_TOTAL_TIMEOUT` | `5m` | The whole budget of one remote admission |
-| `REMOTE_RELAY_INSTANTIATION_WAIT` | `5s` | How long a delivery waits for its route to become available |
+| `REMOTE_ACK_ALIVE_INTERVAL` | `100ms` | How often a receiver reports on a remote delivery it retains, and held local work reports the acknowledgements it holds alive; a delivery's retries start at a quarter of it and back off to twenty-five of it |
+| `REMOTE_ACK_SWEEP_INTERVAL` | `1s` | How often a sender applies membership and the admission bound to the remote deliveries and acknowledgements it waits for |
+| `REMOTE_RELAY_TOTAL_TIMEOUT` | `5m` | The whole budget of one remote admission, from storing its records to its admission |
 
-The silence timeout exceeds twice the sum of the dispatch timeout and the alive interval, the sweep interval
-divides both the silence timeout and the total timeout exactly, and the dispatch timeout and the
-instantiation wait each fit the total timeout. Change related values in one statement. Each remote
-delivery keeps the values it started with for its lifetime, and held local work reads the alive
-interval when it starts waiting, so a change reaches it at its next keepalive without a restart.
+The sweep interval divides the total timeout exactly. None of the three ends a wait for a live
+receiver: a delivery and an acknowledgement wait for as long as membership and the transport keep
+the receiver run, and a slow receiver costs latency, not the records. Change related values in one
+statement. Each remote delivery keeps the values it started with for its lifetime, and held local
+work reads the alive interval when it starts waiting, so a change reaches it at its next keepalive
+without a restart.
 
 ### Transactions And Commands
 

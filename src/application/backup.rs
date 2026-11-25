@@ -63,7 +63,7 @@ use nervix_models::{
 };
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
-use tracing::info;
+use tracing::{debug, info};
 
 use self::{
     assembly::{PlannedContent, PlannedScope, PlannedSection, plan_sections},
@@ -71,7 +71,7 @@ use self::{
     cut_reach::{CutReach, RequiredNode},
     interconnect::{
         CaptureDomainStateRequest, CaptureInventoryRequest, CapturedSectionInventory,
-        FetchCapturedSection,
+        FetchCapturedSection, ReleaseCapturedSections,
     },
     retained::{ArchiveBytes, ArchiveReadFailure, RetainedArtifact, RetainedBackups},
 };
@@ -426,11 +426,11 @@ impl SessionServiceImpl {
                 domain_captured_at,
             )?;
             sections.extend(self.measure_sections(planned).await?);
-            for inventory in inventories {
-                for section in &inventory.sections {
-                    sections.push(self.fetch_captured_section(&inventory, section).await?);
-                }
-            }
+            let fetched = self.fetch_captured_sections(&inventories).await;
+            // Whatever the fetch came to, its owners release what this coordination still has
+            // staged there, so a backup that ends early gives their staging room back at once.
+            self.release_captured_sections(&inventories).await;
+            sections.extend(fetched?);
             let Some(parameters) = capture.parameters.as_ref() else {
                 return Err(Report::new(BackupError::ClusterParametersUnseeded));
             };
@@ -956,15 +956,13 @@ impl SessionServiceImpl {
                     self.handle_backup_capture_request(&node, capture_request)
                         .await
                 } else {
-                    let now = nervix_primitives::time::Instant::now();
-                    let remaining = if deadline > now {
-                        deadline - now
-                    } else {
-                        Duration::ZERO
-                    };
                     self.inner
                         .interconnect
-                        .request_with_timeout(&node, capture_request, remaining)
+                        .request_by(
+                            &node,
+                            capture_request,
+                            nervix_interconnect::ExchangeDeadline::OperationCeiling(deadline),
+                        )
                         .await
                         .change_context_lazy(|| failed("capture request failed"))?
                 };
@@ -980,7 +978,11 @@ impl SessionServiceImpl {
                 } else {
                     self.inner
                         .interconnect
-                        .request(&node, inventory_request)
+                        .request_by(
+                            &node,
+                            inventory_request,
+                            nervix_interconnect::ExchangeDeadline::OperationCeiling(deadline),
+                        )
                         .await
                         .change_context_lazy(|| failed("inventory request failed"))?
                 };
@@ -1002,6 +1004,51 @@ impl SessionServiceImpl {
 
     /// Fetches one owner-staged section over the bulk pool, staging and verifying it before its
     /// bytes become part of the assembled archive.
+    /// Fetches every section of `inventories`, in order, until one fails.
+    async fn fetch_captured_sections(
+        &self,
+        inventories: &[StateInventory],
+    ) -> error_stack::Result<Vec<MeasuredSection>, BackupError> {
+        let mut sections = Vec::new();
+        for inventory in inventories {
+            for section in &inventory.sections {
+                nervix_primitives::task::consume_budget().await;
+                sections.push(self.fetch_captured_section(inventory, section).await?);
+            }
+        }
+        Ok(sections)
+    }
+
+    /// Asks each owner of `inventories` to release the sections their coordination still has
+    /// staged there. The request waits for its owner for as long as the owner lives; an owner that
+    /// left releases them with its run, and a release that fails leaves them to the owner's sweep.
+    async fn release_captured_sections(&self, inventories: &[StateInventory]) {
+        for inventory in inventories {
+            nervix_primitives::task::consume_budget().await;
+            let request = ReleaseCapturedSections {
+                coordination: inventory.coordination.clone(),
+                domain: inventory.domain.clone(),
+            };
+            if &inventory.node == self.inner.consensus.local_node_id() {
+                self.release_staged_backup_sections(&request);
+                continue;
+            }
+            if let Err(error) = self
+                .inner
+                .interconnect
+                .request(&inventory.node, request)
+                .await
+            {
+                debug!(
+                    domain = inventory.domain.as_str(),
+                    owner = %inventory.node,
+                    error = %format_args!("{error:#}"),
+                    "an owner keeps the staged backup sections it could not be asked to release"
+                );
+            }
+        }
+    }
+
     async fn fetch_captured_section(
         &self,
         inventory: &StateInventory,
@@ -1047,11 +1094,13 @@ impl SessionServiceImpl {
             });
         }
         // The immutable owner stage has not been consumed when admission refuses the opening, so
-        // a refusal for capacity alone waits within the opening's one deadline rather than losing
-        // a completed cut. The fetch takes the bulk pool's shared stream and admission, apart
-        // from the Snapshot subquota that the replica catch-up this cut started fills.
+        // a refusal for capacity alone waits and asks again rather than losing a completed cut.
+        // The cut has ended, so the opening has no ceiling of its own: it waits for the owner for
+        // as long as the owner lives. The fetch takes the bulk pool's shared stream and admission,
+        // apart from the Snapshot subquota that the replica catch-up this cut started fills.
         let opening = async {
             loop {
+                nervix_primitives::task::consume_budget().await;
                 match self
                     .inner
                     .interconnect
@@ -1076,15 +1125,7 @@ impl SessionServiceImpl {
                 }
             }
         };
-        let mut body = nervix_primitives::time::timeout(
-            self.inner
-                .interconnect
-                .stream_request_deadline::<FetchCapturedSection>(),
-            opening,
-        )
-        .await
-        .map_err(|_| error("captured section opening exceeded its deadline".to_string()))?
-        .change_context_lazy(failure_context)?;
+        let mut body = opening.await.change_context_lazy(failure_context)?;
         if body.content_length() != section.length {
             return Err(error(
                 "captured section length differs from its inventory".to_string(),

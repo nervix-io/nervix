@@ -38,7 +38,7 @@ const LATE_MOTION: u64 = 23;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum OwnerRequest {
     Nothing,
-    /// The held view reached its deadline; the late node releases its views.
+    /// The held view has kept the round waiting; the late node releases its views.
     ReleaseViews,
     /// The partitioned report request ended and the link is repaired; the late node's teardown
     /// is still running.
@@ -152,13 +152,25 @@ fn ended_within(started: Instant, deadline: Duration) -> bool {
     started.elapsed() <= deadline + deadline / 4
 }
 
-/// Whether `outcome` is the failure a request meets when its peer cannot answer in time.
+/// How long the owner's request waits on the live link while the late node holds its view.
+const HELD_VIEW_WAIT: Duration = Duration::from_secs(5);
+
+/// How long the owner waits for a report across a partition before it stops waiting, as the
+/// stop's own ceiling stops it: longer than liveness takes to end an established connection.
+const PARTITIONED_WAIT: Duration = Duration::from_secs(10);
+
+/// Whether `outcome` is the failure an exchange across a partition meets: liveness ended the
+/// connection it was sent on, or its caller stopped waiting before a connection could be made.
 fn unanswered<T: std::fmt::Debug>(outcome: &Result<T, error_stack::Report<RequestError>>) -> bool {
     match outcome {
         Ok(_) => false,
         Err(error) => matches!(
             error.current_context(),
-            RequestError::Timeout { .. } | RequestError::Transport { .. }
+            RequestError::Transport { .. }
+                | RequestError::DeadlinePassed {
+                    deadline: nervix_interconnect::ExchangeDeadlineKind::Caller,
+                    ..
+                }
         ),
     }
 }
@@ -196,10 +208,11 @@ async fn view(
 fn a_stop_waits_for_a_node_that_answers_late_and_collects_its_report_after_repair() {
     Scenario {
         name: "a stop waits for a node that answers late and collects its report after repair",
-        fault_plan: "hold the late node's drain view until the owner's request reaches its \
-                     deadline while the prompt node answers, release it for the confirming \
-                     rounds, then partition the late node from the owner across a report request \
-                     and repair; the late node reports pending until its teardown ends",
+        fault_plan: "hold the late node's drain view while the owner's request keeps waiting on \
+                     the live link and the prompt node answers, release it, which answers that \
+                     request, for the confirming rounds, then partition the late node from the \
+                     owner across a report request and repair; the late node reports pending \
+                     until its teardown ends",
         seeds: &[151, 153],
     }
     .check(fault_config, stop_with_a_late_node);
@@ -294,20 +307,28 @@ fn stop_with_a_late_node(run: ScenarioRun) -> Result<(), SimulationError> {
                     .await;
                     assert!(releasing_view.moving());
                     let started = Instant::now();
-                    let held = transport
-                        .request(
-                            &late,
-                            drain(&coordination, StopDrainAction::FlushMovingWork),
-                        )
-                        .await;
-                    assert!(unanswered(&held), "held view outcome: {held:?}");
-                    assert!(
-                        ended_within(started, StopDrainRequest::DEADLINE.declared_default()),
-                        "the held view ended after {:?}",
-                        started.elapsed()
+                    let held = transport.request(
+                        &late,
+                        drain(&coordination, StopDrainAction::FlushMovingWork),
                     );
-                    trace.record(OWNER, "a held view ends unanswered within its deadline");
+                    let mut held = std::pin::pin!(held);
+                    // A late node on a live link costs the round latency, never its view.
+                    let early = nervix_primitives::time::timeout(HELD_VIEW_WAIT, &mut held).await;
+                    assert!(
+                        early.is_err(),
+                        "the held view ended while it was held: {early:?}"
+                    );
+                    trace.record(
+                        OWNER,
+                        "a held view keeps the round waiting on the live link",
+                    );
                     request.send_replace(OwnerRequest::ReleaseViews);
+                    let released = held
+                        .await
+                        .assured("the late node answers the view it held")
+                        .assured("the late node reports its view");
+                    assert!(!released.moving(), "the released view is at rest");
+                    assert!(started.elapsed() >= HELD_VIEW_WAIT);
 
                     // The confirming round and the round that compares it: every node answers at
                     // rest, the late node's view arrives intact, and nothing moved between them.
@@ -347,13 +368,21 @@ fn stop_with_a_late_node(run: ScenarioRun) -> Result<(), SimulationError> {
                     // node, which the owner retries until it reports.
                     turmoil::partition(OWNER, LATE);
                     let started = Instant::now();
-                    let partitioned = transport.request(&late, report(&coordination)).await;
+                    let partitioned = transport
+                        .request_by(
+                            &late,
+                            report(&coordination),
+                            nervix_interconnect::ExchangeDeadline::Caller(
+                                started + PARTITIONED_WAIT,
+                            ),
+                        )
+                        .await;
                     assert!(
                         unanswered(&partitioned),
                         "partitioned report outcome: {partitioned:?}"
                     );
                     assert!(
-                        ended_within(started, StopReportRequest::DEADLINE.declared_default()),
+                        ended_within(started, PARTITIONED_WAIT),
                         "the partitioned report ended after {:?}",
                         started.elapsed()
                     );
@@ -396,7 +425,7 @@ fn stop_with_a_late_node(run: ScenarioRun) -> Result<(), SimulationError> {
                     assert_eq!(prompt_report, StopReportAnswer::Reported(prompt_cuts()));
                     trace.record(OWNER, "every node's report is collected after the repair");
                     done.send_replace(true);
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -435,7 +464,7 @@ fn stop_with_a_late_node(run: ScenarioRun) -> Result<(), SimulationError> {
                     ready.send_replace(true);
                     wait_for(&mut owner_ready).await;
                     wait_until(&mut done, true).await;
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -487,7 +516,7 @@ fn stop_with_a_late_node(run: ScenarioRun) -> Result<(), SimulationError> {
                     teardown_ended.send_replace(true);
                     trace.record(LATE, "teardown ended");
                     wait_until(&mut done, true).await;
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;

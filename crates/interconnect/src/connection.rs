@@ -56,7 +56,7 @@ use nervix_primitives::{
         mpsc, watch,
     },
     task::TaskTracker,
-    time::{Instant, sleep, sleep_until, timeout, timeout_at},
+    time::{Instant, sleep, sleep_until, timeout},
 };
 use strum::EnumCount as _;
 use tracing::{debug, warn};
@@ -82,7 +82,7 @@ use crate::{
     peer_resolver::PeerResolver,
     request::RequestAdmission,
     wire::{
-        AnswerDeadline, AnswerEncoding, ConnectionAccepted, ConnectionAnswer, ConnectionHello,
+        AnswerEncoding, ConnectionAccepted, ConnectionAnswer, ConnectionHello,
         RelayAdmissionRequest, RelayAdmissionResponse, RelayGrantDisposition, RelayGrantRequest,
         RelayGrantResponse,
     },
@@ -463,7 +463,9 @@ struct RawRequest<'a> {
     body: Option<ChargedBytes>,
     response_class: PoolClass,
     response_limit: u64,
-    timeout: Duration,
+    /// What may end the exchange besides its connection's liveness: only a deadline its caller
+    /// named.
+    deadline: Option<crate::ExchangeDeadline>,
     headers: &'a [(&'a str, &'a str)],
 }
 
@@ -471,7 +473,9 @@ pub(crate) struct RawDuplexRequest {
     pub(crate) class: PoolClass,
     pub(crate) subquota: RequestSubquota,
     pub(crate) body: ChargedBytes,
-    pub(crate) timeout: Duration,
+    /// The connection-setup budget that bounds opening the stream, when its link is bound to
+    /// dialing; none when only the liveness of its peer bounds it.
+    pub(crate) setup: Option<Duration>,
     pub(crate) admission: RequestAdmission,
 }
 
@@ -818,12 +822,12 @@ impl RelayAdmissionRecord {
         self.choice.current() == ChosenAdmission::Pending
     }
 
-    /// Reserve one progress report under this delivery's captured policy. An in-flight send
-    /// retains its own timeout and never delays another delivery's report.
+    /// Reserve one progress report under this delivery's captured policy. A report in flight never
+    /// delays another delivery's report.
     fn take_progress_report(
         &self,
         now: Instant,
-    ) -> (Option<(RemoteAckRegistration, Duration)>, Option<Instant>) {
+    ) -> (Option<RemoteAckRegistration>, Option<Instant>) {
         if !self.is_unadmitted() {
             return (None, None);
         }
@@ -838,13 +842,7 @@ impl RelayAdmissionRecord {
             return (None, Some(state.next_progress_at));
         }
         state.progress_reporting = true;
-        (
-            Some((
-                registration.clone(),
-                self.metadata.ack_timing.remote_ack_dispatch_timeout,
-            )),
-            None,
-        )
+        (Some(registration.clone()), None)
     }
 
     fn finish_progress_report(&self, now: Instant) -> Option<Instant> {
@@ -983,6 +981,11 @@ pub(crate) struct TransportStateInner {
     /// Immutable routing only. Connections and attempts retain their peer owner before recurring
     /// protocol work, and only peer installation and withdrawal replace this publication.
     relay_owners: ArcSwap<RelayOwnersPublication>,
+    /// The process epoch of the run each peer's relay protocol is bound to, republished whole when
+    /// a connection binds a run or membership retires a peer, so a reader takes no owner's lock.
+    peer_runs: ArcSwap<BTreeMap<ClusterNodeName, u64>>,
+    /// Wakes whoever waits for a peer's run to end, when `peer_runs` is republished.
+    relay_runs_changed: Notify,
     relay_progress_changed: Notify,
     /// The relay channel retention the installed committed parameters give a delivery that starts
     /// now: an owner still awaiting membership ends after it, and the sweep passes at least once a
@@ -1103,6 +1106,8 @@ impl TransportState {
                 handshake_permits: StdArc::new(Semaphore::new(options.max_concurrent_handshakes)),
                 requests: super::RequestState::new(&options, Arc::clone(&observations)),
                 relay_owners: ArcSwap::from_pointee(RelayOwnersPublication::default()),
+                peer_runs: ArcSwap::from_pointee(BTreeMap::new()),
+                relay_runs_changed: Notify::new(),
                 relay_progress_changed: Notify::new(),
                 relay_retention: watch::channel(RelayChannelRetention::default()).0,
                 relay_retention_changed: Notify::new(),
@@ -1138,10 +1143,6 @@ impl TransportState {
 
     pub(crate) fn resolver(&self) -> &PeerResolver {
         &self.resolver
-    }
-
-    pub(crate) fn request_timeout(&self) -> Duration {
-        self.options.request_timeout
     }
 
     pub(crate) fn connection_setup_timeout(&self) -> Duration {
@@ -1628,6 +1629,9 @@ impl TransportState {
         self.connection_changed.notify_waiters();
     }
 
+    /// Wait until every stream a retired connection still carries has ended: its retirement, a
+    /// rotation or a departure, costs those streams nothing. Only a forced close, at the end of
+    /// the shutdown budget, cuts them.
     async fn drain_outbound_connection(&self, connection: &ClientConnection) {
         if connection.closed.is_cancelled() {
             return;
@@ -1635,7 +1639,6 @@ impl TransportState {
         let drained = connection.stream_slots.drain();
         nervix_primitives::select! {
             _ = self.force_close.cancelled() => {}
-            _ = sleep(self.options.shutdown_drain_timeout) => {}
             _ = drained => {}
         }
     }
@@ -1752,7 +1755,13 @@ impl TransportState {
                         body: Some(body),
                         response_class: PoolClass::Management,
                         response_limit: self.executor.limits().management_event_bytes.as_u64(),
-                        timeout: self.options.connection_setup_timeout,
+                        // Binding a new connection is part of dialing it: the connection-setup
+                        // budget, the liveness of dialing, bounds it.
+                        deadline: Some(crate::ExchangeDeadline::Protocol(
+                            Instant::now()
+                                .checked_add(self.options.connection_setup_timeout)
+                                .assured("a validated connection-setup budget fits the clock"),
+                        )),
                         headers: &[],
                     },
                 )
@@ -1820,12 +1829,14 @@ impl TransportState {
                       request"
         )
     )]
+    /// Lease a stream of `class` to `node_id`, waiting for one while the peer lives: only the
+    /// shutdown of this transport or `deadline`, when its caller named one, ends the wait.
     pub(crate) async fn lease(
         &self,
         node_id: &ClusterNodeName,
         class: PoolClass,
         subquota: RequestSubquota,
-        deadline: Instant,
+        deadline: Option<crate::ExchangeDeadline>,
     ) -> Result<StreamLease, Report<TransportError>> {
         let mut lease = self.lease_slot(node_id, class, subquota, deadline).await?;
         if class.grants_bulk_receive_window() {
@@ -1848,7 +1859,7 @@ impl TransportState {
         node_id: &ClusterNodeName,
         class: PoolClass,
         subquota: RequestSubquota,
-        deadline: Instant,
+        deadline: Option<crate::ExchangeDeadline>,
     ) -> Result<StreamLease, Report<TransportError>> {
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -1886,10 +1897,10 @@ impl TransportState {
                 _ = self.admission_closed.cancelled() => {
                     return Err(Report::new(TransportError::ShuttingDown));
                 }
-                _ = sleep_until(deadline) => {
-                    return Err(Report::new(TransportError::RequestTimeout {
+                deadline = crate::settings::passed(deadline) => {
+                    return Err(Report::new(TransportError::DeadlinePassed {
                         peer: node_id.clone(),
-                        timeout: self.options.request_timeout,
+                        deadline,
                     }));
                 }
                 _ = &mut changed => {}
@@ -1978,13 +1989,9 @@ impl TransportState {
                 Envelope::Control(_) => RequestSubquota::Shared,
                 Envelope::RelayPayload(_) => RequestSubquota::Admission,
             };
-            let timeout_duration = self.options.request_timeout;
-            let deadline = Instant::now()
-                .checked_add(timeout_duration)
-                .ok_or_else(|| TransportError::InvalidOptions {
-                    reason: "request deadline exceeds the monotonic clock range".to_string(),
-                })?;
-            let lease = self.lease(node_id, class, subquota, deadline).await?;
+            // An envelope waits for its stream, its encoding and its answer for as long as its peer
+            // and connection live: their liveness, or this transport's shutdown, ends it.
+            let lease = self.lease(node_id, class, subquota, None).await?;
             match envelope {
                 Envelope::Ack(ack) => {
                     {
@@ -2003,24 +2010,16 @@ impl TransportState {
                     }
                     // An ack carries the outcome of a delivery this node already resolved, which
                     // nothing presents again if it is lost. A full data queue therefore holds the
-                    // encoding back, within the send's own deadline.
-                    let encoding = wire::encode_rkyv_with(
+                    // encoding back.
+                    let bytes = wire::encode_rkyv_with(
                         &self.executor,
                         class.memory_class(),
                         CpuClass::Data,
                         class.control_body_limit(&self.executor),
                         QueueAdmission::WaitForPlace,
                         ack,
-                    );
-                    let bytes = match timeout_at(deadline, encoding).await {
-                        Ok(bytes) => bytes?,
-                        Err(_) => {
-                            return Err(Report::new(TransportError::RequestTimeout {
-                                peer: node_id.clone(),
-                                timeout: timeout_duration,
-                            }));
-                        }
-                    };
+                    )
+                    .await?;
                     lease
                         .request_raw(
                             self,
@@ -2029,7 +2028,7 @@ impl TransportState {
                                 body: Some(bytes),
                                 response_class: class,
                                 response_limit: RESPONSE_LIMIT,
-                                timeout: deadline.saturating_duration_since(Instant::now()),
+                                deadline: None,
                                 headers: &[],
                             },
                         )
@@ -2058,7 +2057,7 @@ impl TransportState {
                                 body: Some(bytes),
                                 response_class: class,
                                 response_limit: class.control_body_limit(&self.executor),
-                                timeout: deadline.saturating_duration_since(Instant::now()),
+                                deadline: None,
                                 headers: &[],
                             },
                         )
@@ -2288,7 +2287,6 @@ impl TransportState {
                 &self.executor,
                 MemoryClass::Management,
                 self.executor.limits().management_event_bytes.as_u64(),
-                self.options.progress_timeout,
                 request.into_body(),
             )
             .await?;
@@ -2364,13 +2362,7 @@ impl TransportState {
             };
             let relay_owner =
                 self.bind_relay_owner(&hello.node_id, hello.process_epoch, binding_sequence)?;
-            send_response(
-                respond,
-                StatusCode::OK,
-                Some(accepted),
-                self.options.progress_timeout,
-            )
-            .await?;
+            send_response(respond, StatusCode::OK, Some(accepted)).await?;
             Ok(InboundBindingAnswer::Bound(BoundInboundConnection {
                 peer: InboundPeer {
                     addr: peer_addr,
@@ -2429,18 +2421,17 @@ impl TransportState {
         tokio::pin!(health_probe);
         let connection_force_close = CancellationToken::new();
         let _connection_force_close_guard = CancelOnDrop::new(connection_force_close.clone());
+        // A draining connection takes no new stream and keeps the ones it carries until they end:
+        // a rotation, an expired certificate or this node's shutdown costs them nothing. Only the
+        // peer's liveness or a forced close at the end of the shutdown ceiling cuts them.
         let mut draining = false;
-        let mut drain_deadline = None;
         loop {
             nervix_primitives::task::consume_budget().await;
             let accepted = if draining {
-                let deadline = drain_deadline
-                    .verified("entering drain always records its force-close deadline");
                 nervix_primitives::select! {
                     _ = peer.relay_owner.closed.cancelled() => break,
                     _ = self.force_close.cancelled() => break,
                     () = &mut health_probe => break,
-                    _ = sleep_until(deadline) => break,
                     accepted = connection.accept() => accepted,
                 }
             } else {
@@ -2450,24 +2441,12 @@ impl TransportState {
                 if self.tls.generation() != generation {
                     connection.graceful_shutdown();
                     draining = true;
-                    drain_deadline = Some(
-                        Instant::now()
-                            .checked_add(self.options.shutdown_drain_timeout)
-                            .assured(
-                                "a configured transport drain timeout fits the monotonic clock",
-                            ),
-                    );
                     continue;
                 }
                 nervix_primitives::select! {
                     _ = self.admission_closed.cancelled() => {
                         connection.graceful_shutdown();
                         draining = true;
-                        drain_deadline = Some(
-                            Instant::now()
-                                .checked_add(self.options.shutdown_drain_timeout)
-                                .assured("a configured transport drain timeout fits the monotonic clock"),
-                        );
                         continue;
                     }
                     _ = peer.relay_owner.closed.cancelled() => break,
@@ -2476,22 +2455,12 @@ impl TransportState {
                     _ = sleep_until(certificate_expires_at) => {
                         connection.graceful_shutdown();
                         draining = true;
-                        drain_deadline = Some(
-                            Instant::now()
-                                .checked_add(self.options.shutdown_drain_timeout)
-                                .assured("a configured transport drain timeout fits the monotonic clock"),
-                        );
                         continue;
                     }
                     _ = &mut changed => {
                         if self.tls.generation() != generation {
                             connection.graceful_shutdown();
                             draining = true;
-                            drain_deadline = Some(
-                                Instant::now()
-                                    .checked_add(self.options.shutdown_drain_timeout)
-                                    .assured("a configured transport drain timeout fits the monotonic clock"),
-                            );
                         }
                         continue;
                     }
@@ -2541,7 +2510,6 @@ impl TransportState {
                 &mut respond,
                 StatusCode::METHOD_NOT_ALLOWED,
                 "POST required",
-                self.options.progress_timeout,
             )
             .await?;
             return Ok(());
@@ -2578,20 +2546,13 @@ impl TransportState {
         }
         if path == ACK_PATH {
             if peer.class != PoolClass::Management {
-                send_static_error(
-                    &mut respond,
-                    StatusCode::FORBIDDEN,
-                    "wrong pool class",
-                    self.options.progress_timeout,
-                )
-                .await?;
+                send_static_error(&mut respond, StatusCode::FORBIDDEN, "wrong pool class").await?;
                 return Ok(());
             }
             let bytes = read_body(
                 &self.executor,
                 MemoryClass::Management,
                 peer.class.control_body_limit(&self.executor),
-                self.options.progress_timeout,
                 request.into_body(),
             )
             .await?;
@@ -2633,24 +2594,12 @@ impl TransportState {
             if let Some(admission_key) = terminal_admission {
                 peer.relay_owner.retire_outbound_admission(&admission_key);
             }
-            send_response(
-                respond,
-                StatusCode::NO_CONTENT,
-                None,
-                self.options.progress_timeout,
-            )
-            .await?;
+            send_response(respond, StatusCode::NO_CONTENT, None).await?;
             return Ok(());
         }
         if path == RELAY_CANCEL_PATH || path == RELAY_STATUS_PATH {
             if peer.class != PoolClass::Management {
-                send_static_error(
-                    &mut respond,
-                    StatusCode::FORBIDDEN,
-                    "wrong pool class",
-                    self.options.progress_timeout,
-                )
-                .await?;
+                send_static_error(&mut respond, StatusCode::FORBIDDEN, "wrong pool class").await?;
                 return Ok(());
             }
             return self
@@ -2666,13 +2615,7 @@ impl TransportState {
         }
         if path == RELAY_GRANT_PATH {
             if peer.class != PoolClass::Management {
-                send_static_error(
-                    &mut respond,
-                    StatusCode::FORBIDDEN,
-                    "wrong pool class",
-                    self.options.progress_timeout,
-                )
-                .await?;
+                send_static_error(&mut respond, StatusCode::FORBIDDEN, "wrong pool class").await?;
                 return Ok(());
             }
             return self
@@ -2702,7 +2645,6 @@ impl TransportState {
             &mut respond,
             StatusCode::NOT_FOUND,
             "unknown interconnect operation",
-            self.options.progress_timeout,
         )
         .await?;
         Ok(())
@@ -2718,7 +2660,6 @@ impl TransportState {
             &self.executor,
             peer.class.memory_class(),
             peer.class.control_body_limit(&self.executor),
-            self.options.progress_timeout,
             body,
         )
         .await?;
@@ -2731,13 +2672,7 @@ impl TransportState {
         .await?;
         let (control, reservation) = decoded.into_parts();
         if control.pool_class() != peer.class {
-            send_response(
-                respond,
-                StatusCode::FORBIDDEN,
-                None,
-                self.options.progress_timeout,
-            )
-            .await?;
+            send_response(respond, StatusCode::FORBIDDEN, None).await?;
             return Ok(());
         }
 
@@ -2773,24 +2708,12 @@ impl TransportState {
                 AnswerEncoding::Encoded(response) => response,
                 AnswerEncoding::Ended => return Ok(()),
             };
-            send_response(
-                respond,
-                StatusCode::OK,
-                Some(response),
-                self.options.progress_timeout,
-            )
-            .await?;
+            send_response(respond, StatusCode::OK, Some(response)).await?;
             return Ok(());
         }
 
         if let ControlEnvelope::Response(_) = control {
-            send_response(
-                respond,
-                StatusCode::BAD_REQUEST,
-                None,
-                self.options.progress_timeout,
-            )
-            .await?;
+            send_response(respond, StatusCode::BAD_REQUEST, None).await?;
             return Ok(());
         }
 
@@ -2800,13 +2723,7 @@ impl TransportState {
             Envelope::Control(control),
             Some(reservation),
         )?;
-        send_response(
-            respond,
-            StatusCode::NO_CONTENT,
-            None,
-            self.options.progress_timeout,
-        )
-        .await
+        send_response(respond, StatusCode::NO_CONTENT, None).await
     }
 
     fn increment_peer(&self, node_id: &ClusterNodeName) -> Result<(), Report<TransportError>> {
@@ -2937,7 +2854,10 @@ impl TransportState {
         }
     }
 
-    pub(crate) async fn shutdown(&self) {
+    /// Stop admitting, retire every connection and wait for every task this transport runs to
+    /// end. The streams in flight finish first. Only `ceiling`, the shutdown budget its caller
+    /// passes, if any, forces the rest closed.
+    pub(crate) async fn shutdown(&self, ceiling: Option<crate::ExchangeDeadline>) {
         self.admission_closed.cancel();
         self.requests.shutdown();
         self.cancel_all_slots();
@@ -2954,7 +2874,7 @@ impl TransportState {
             }
         }
         self.tasks.close();
-        if timeout(self.options.shutdown_drain_timeout, self.tasks.wait())
+        if crate::settings::within(ceiling, self.tasks.wait())
             .await
             .is_err()
         {

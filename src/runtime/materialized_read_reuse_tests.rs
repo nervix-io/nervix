@@ -313,14 +313,16 @@ impl RemoteGenerationFixture {
     }
 
     async fn shutdown(self) {
-        self.transport.shutdown().await;
+        self.transport
+            .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+            .await;
         self.reader
             .inner
             .remote_dispatcher
             .load_full()
             .assured("the fixture retains its dispatcher")
             .interconnect
-            .shutdown()
+            .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
             .await;
     }
 }
@@ -603,7 +605,7 @@ async fn a_partition_handoff_hides_only_its_materialized_dependency_until_the_fe
         .load_full()
         .assured("the fixture retains its dispatcher")
         .interconnect
-        .shutdown()
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
         .await;
 }
 

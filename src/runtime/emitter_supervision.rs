@@ -28,12 +28,8 @@ pub(super) type EmitterReconfigureResult<T> = Result<T, Report<EmitterReconfigur
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(super) enum EmitterReconfigureError {
-    #[error("scheduled emitter task timed out accepting reconfiguration")]
-    AcceptTimeout,
     #[error("scheduled emitter task is unavailable for reconfiguration")]
     Unavailable,
-    #[error("scheduled emitter task timed out reconfiguring")]
-    ResponseTimeout,
     #[error("scheduled emitter task dropped its reconfiguration response")]
     ResponseDropped,
 }
@@ -203,25 +199,23 @@ impl ScheduledEmitterTask {
         self.stop_signal.send_replace(Some(deadline));
     }
 
+    /// Hands the emitter task its new flush policy and waits for the task to apply it. A task that
+    /// is busy, publishing to a destination that holds it back, takes the command when it can, so
+    /// the wait costs latency only; it ends early only when the task itself ends.
     pub(super) async fn reconfigure_via(
         commands: &mpsc::Sender<EmitterTaskCommand>,
         flush_policy: FlushPolicy,
-        grace: Duration,
     ) -> EmitterReconfigureResult<()> {
         let (response, receiver) = oneshot::channel();
-        nervix_primitives::time::timeout(
-            grace,
-            commands.send(EmitterTaskCommand::Reconfigure {
+        commands
+            .send(EmitterTaskCommand::Reconfigure {
                 flush_policy,
                 response,
-            }),
-        )
-        .await
-        .map_err(|_| Report::new(EmitterReconfigureError::AcceptTimeout))?
-        .map_err(|_| Report::new(EmitterReconfigureError::Unavailable))?;
-        nervix_primitives::time::timeout(grace, receiver)
+            })
             .await
-            .map_err(|_| Report::new(EmitterReconfigureError::ResponseTimeout))?
+            .map_err(|_| Report::new(EmitterReconfigureError::Unavailable))?;
+        receiver
+            .await
             .map_err(|_| Report::new(EmitterReconfigureError::ResponseDropped))
     }
 

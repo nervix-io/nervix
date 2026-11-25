@@ -193,9 +193,6 @@ pub(super) async fn checkpoint_wasm_instance(
     let _publication = runtime.backup_publication(&state.placement.domain);
     #[cfg(feature = "testing")]
     hold_checkpoint_at(runtime, state, crate::WasmCheckpointWindow::BeforeCapture).await;
-    let deadline = Instant::now()
-        .checked_add(runtime.inner.data_plane.wasm_checkpoint_timeout())
-        .assured("a deadline seconds away stays within Instant");
     let boundary = match runtime.wasm_checkpoint_boundary(state) {
         Ok(boundary) => boundary,
         Err(error) => {
@@ -218,10 +215,7 @@ pub(super) async fn checkpoint_wasm_instance(
     let revision = captured.revision();
     #[cfg(feature = "testing")]
     hold_checkpoint_at(runtime, state, crate::WasmCheckpointWindow::AfterCapture).await;
-    let durable = match runtime
-        .persist_wasm_checkpoint(state, captured, deadline)
-        .await
-    {
+    let durable = match runtime.persist_wasm_checkpoint(state, captured).await {
         Ok(durable) => durable,
         Err(error) => {
             state.record_failed();
@@ -235,10 +229,7 @@ pub(super) async fn checkpoint_wasm_instance(
         crate::WasmCheckpointWindow::AfterLocalDurability,
     )
     .await;
-    let completed = match runtime
-        .confirm_wasm_checkpoint(state, durable, deadline)
-        .await
-    {
+    let completed = match runtime.confirm_wasm_checkpoint(state, durable).await {
         Ok(completed) => completed,
         Err(error) => {
             state.record_failed();

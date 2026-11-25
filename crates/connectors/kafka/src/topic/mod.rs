@@ -207,8 +207,6 @@ enum KafkaPartitionMetadataError {
     Admission,
     #[error("{connector} partition metadata execution failed", connector = ConnectorKind::Kafka)]
     Execution,
-    #[error("{connector} partition metadata exceeded socket.timeout.ms", connector = ConnectorKind::Kafka)]
-    Timeout,
     #[error("{connector} partition metadata was cancelled", connector = ConnectorKind::Kafka)]
     Cancelled,
     #[error("{connector} topic '{topic}' has no usable destination partitions", connector = ConnectorKind::Kafka)]
@@ -240,9 +238,7 @@ impl KafkaPartitionMetadata {
         let failure = || EmitterWriteError::Publish {
             connector: ConnectorKind::Kafka.keyword(),
         };
-        let deadline = Instant::now()
-            .checked_add(self.timeout)
-            .assured("the validated native timeout fits the monotonic clock");
+        let timeout = self.timeout;
         let producer = producer.clone();
         let topic = topic.to_owned().into_boxed_str();
         let topic_bytes = topic.len();
@@ -252,12 +248,11 @@ impl KafkaPartitionMetadata {
                 if cancellation.is_cancelled() {
                     return Err(Report::new(KafkaPartitionMetadataError::Cancelled));
                 }
-                let remaining = deadline
-                    .checked_duration_since(Instant::now())
-                    .ok_or_else(|| Report::new(KafkaPartitionMetadataError::Timeout))?;
+                // The broker's own `socket.timeout.ms` bounds the metadata call from when it
+                // starts; the wait for a storage worker before it is this node's backpressure.
                 let metadata = producer
                     .client()
-                    .fetch_metadata(Some(&topic), remaining)
+                    .fetch_metadata(Some(&topic), timeout)
                     .change_context(KafkaPartitionMetadataError::Partitions {
                         topic: topic.clone(),
                     })?;
@@ -294,16 +289,14 @@ impl KafkaPartitionMetadata {
             .try_reserve(MemoryClass::Commands, charge_bytes.arch_into())
             .change_context(KafkaPartitionMetadataError::Admission)
             .change_context_lazy(failure)?;
-        let running = self.executor.run_storage_with(
-            StorageClass::Connector,
-            nervix_execution::QueueAdmission::WaitForPlace,
-            charge,
-            operation,
-        );
-        timeout_at(deadline, running)
+        self.executor
+            .run_storage_with(
+                StorageClass::Connector,
+                nervix_execution::QueueAdmission::WaitForPlace,
+                charge,
+                operation,
+            )
             .await
-            .map_err(|_| Report::new(KafkaPartitionMetadataError::Timeout))
-            .change_context_lazy(failure)?
             .change_context(KafkaPartitionMetadataError::Execution)
             .change_context_lazy(failure)?
             .change_context_lazy(failure)

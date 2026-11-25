@@ -80,7 +80,7 @@ async fn coordination_identity_is_unique_and_bound_to_the_authenticated_process(
     );
     assert_eq!(handled.load(Ordering::SeqCst), 1);
 
-    transport_a.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
     let (replacement_a, _replacement_incoming) = Transport::bind(
         "127.0.0.1:0".parse().expect("test address should be valid"),
         localhost_identity("test-cluster", node_a.clone()),
@@ -130,8 +130,8 @@ async fn coordination_identity_is_unique_and_bound_to_the_authenticated_process(
     );
     assert_eq!(handled.load(Ordering::SeqCst), 2);
 
-    replacement_a.shutdown().await;
-    transport_b.shutdown().await;
+    replacement_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -191,8 +191,8 @@ async fn typed_rkyv_requests_reuse_an_authenticated_http2_pool() {
     }
     assert_eq!(transport_a.active_outbound_connections().await, 5);
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -226,5 +226,5 @@ async fn process_epoch_comes_from_the_configured_entropy() {
         .expect("the transport should allocate an identity");
     assert_eq!(identity.process_epoch(), 0x5eed_0001);
     assert_eq!(draws.load(Ordering::SeqCst), 1);
-    transport.shutdown().await;
+    transport.shutdown(crate::test_teardown_ceiling()).await;
 }

@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use cucumber::{then, when};
+use cucumber::when;
 use meticulous::{OptionExt as _, ResultExt as _};
 
 use crate::{ScenarioWorld, expand_placeholders};
@@ -55,41 +55,4 @@ async fn distinct_materialized_rows(
             });
         next = end;
     }
-}
-
-#[when("the forwarded acknowledgement measurement starts")]
-fn acknowledgement_measurement_starts(world: &mut ScenarioWorld) {
-    world.runtime_ack_started_at = Some(nervix_primitives::time::Instant::now());
-}
-
-#[then(
-    expr = "the lost acknowledgement recovers consumer group {string} topic {string} after at \
-            least {string} and within {string} of the measurement start"
-)]
-async fn lost_acknowledgement_recovers(
-    world: &mut ScenarioWorld,
-    group: String,
-    topic: String,
-    minimum: String,
-    maximum: String,
-) {
-    let started = world
-        .runtime_ack_started_at
-        .expect("the measurement starts before publication");
-    let minimum =
-        crate::parse_duration_text(&minimum).expect("the lower measurement bound is a duration");
-    let maximum =
-        crate::parse_duration_text(&maximum).expect("the measurement bound is a duration");
-    let group = expand_placeholders(world, &group);
-    let topic = expand_placeholders(world, &topic);
-    world
-        .cluster()
-        .assert_kafka_consumer_group_next_offset(&group, &topic, 0, 2, true, maximum)
-        .await
-        .expect("the source resumes after the lost forwarded acknowledgement expires");
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed >= minimum && elapsed < maximum,
-        "forwarded ACK recovery took {elapsed:?}, beyond {maximum:?}"
-    );
 }

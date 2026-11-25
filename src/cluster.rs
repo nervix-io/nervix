@@ -947,8 +947,6 @@ impl InterconnectRequest for GossipExchange {
     const NAME: &'static str = "gossip_exchange";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Discovery;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Control;
     const REQUIRES_LIVE_TARGET: bool = false;
 }
 

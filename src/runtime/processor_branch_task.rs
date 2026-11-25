@@ -1209,6 +1209,8 @@ pub(super) async fn dispatch_processor_node_input(
                 )
             );
             if let Some(task) = entry.live() {
+                // The task stopped taking its input, so it is ending rather than holding input it
+                // accepted: it gets the teardown grace to end and is aborted after it.
                 nervix_primitives::expect_lint!(
                     nervix::lifecycle_call,
                     "the eviction, reset or ownership transfer transition ends its exact retained \
@@ -1219,7 +1221,7 @@ pub(super) async fn dispatch_processor_node_input(
                         &key,
                         task,
                         ProcessorBranchStopMode::Detach,
-                        runtime_handle.task_stop_grace()
+                        runtime_handle.teardown_task_stop()
                     )
                 )
                 .await;
@@ -1812,14 +1814,14 @@ pub(super) async fn stop_processor_branch_task(
     key: &Option<BranchKey>,
     entry: &ProcessorBranchTask,
     mode: ProcessorBranchStopMode,
-    grace: Duration,
+    wait: TaskStopWait,
 ) {
     let processor = processor.into();
     if matches!(&mode, ProcessorBranchStopMode::Evict) {
         entry.delivery_lifetime.cancel();
     }
     let mut task = None;
-    let stopped = nervix_primitives::time::timeout(grace, async {
+    let stopping = async {
         entry
             .commands
             .send(ProcessorBranchCommand::Stop(mode))
@@ -1830,8 +1832,18 @@ pub(super) async fn stop_processor_branch_task(
             Some(task) => Some(task.await),
             None => None,
         }
-    })
-    .await;
+    };
+    let stopped = wait
+        .wait(stopping, |waited| {
+            warn!(
+                domain = domain.as_str(),
+                processor = processor.as_str(),
+                scope = %BranchScope::from(key),
+                waited = %humantime::format_duration(waited),
+                "processor branch task is still finishing the work it holds; waiting for it"
+            );
+        })
+        .await;
     match stopped {
         Ok(Some(Ok(()))) | Ok(None) => {}
         Ok(Some(Err(error))) => {
@@ -1843,7 +1855,7 @@ pub(super) async fn stop_processor_branch_task(
                 "processor branch task join failed"
             );
         }
-        Err(_) => {
+        Err(grace) => {
             warn!(
                 domain = domain.as_str(),
                 processor = processor.as_str(),
@@ -1954,7 +1966,7 @@ pub(super) async fn handoff_all_processor_branch_instances(
             &key,
             task,
             ProcessorBranchStopMode::Handoff(response),
-            runtime.task_stop_grace(),
+            runtime.planned_task_stop(),
         )
         .await;
         if let Ok(handoff) = receiver.await {
@@ -1995,7 +2007,7 @@ pub(super) async fn expire_processor_branch_instances(
                     &key,
                     task,
                     ProcessorBranchStopMode::Evict,
-                    runtime.task_stop_grace()
+                    runtime.planned_task_stop()
                 )
             )
             .await;
@@ -2048,7 +2060,7 @@ pub(super) async fn evict_processor_branch_instances_to_capacity(
                     &key,
                     task,
                     ProcessorBranchStopMode::Evict,
-                    runtime.task_stop_grace()
+                    runtime.planned_task_stop()
                 )
             )
             .await;
@@ -2098,7 +2110,7 @@ pub(super) async fn shutdown_all_processor_branch_instances(
             &key,
             task,
             ProcessorBranchStopMode::Detach,
-            runtime.task_stop_grace(),
+            runtime.teardown_task_stop(),
         )
         .await;
         debug!(

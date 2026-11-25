@@ -144,8 +144,12 @@ async fn receive_bound_refusal_creates_no_attempt_and_a_revised_claim_is_adopted
     assert!(
         matches!(received.envelope, Envelope::RelayPayload(payload) if payload.batch_ipc.len() == 8)
     );
-    pair.transport_a.shutdown().await;
-    pair.transport_b.shutdown().await;
+    pair.transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    pair.transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 /// A receiver whose relay budget has no room left at all still answers a grant request with the
@@ -212,8 +216,8 @@ async fn a_grant_asked_while_the_relay_budget_is_full_is_refused_for_capacity() 
         .expect("the granted relay should enter the application queue")
         .expect("the application queue should remain open");
     assert!(matches!(received.envelope, Envelope::RelayPayload(_)));
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// A grant request larger than the relay room its receiver has left is refused for capacity while
@@ -307,8 +311,8 @@ async fn a_grant_request_larger_than_the_free_relay_room_is_refused_for_capacity
         records,
         "the whole request arrived"
     );
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// A request whose answer is that its relay budget is full decodes only into room that budget has

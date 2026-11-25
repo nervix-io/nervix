@@ -594,7 +594,11 @@ impl Runtime {
                                     .remove(&RelayUnitRef::new(relay.clone(), *unit))
                             });
                     if let Some(task) = previous {
-                        let stopped = task.stop(self.branch_task_stop_timeout()).await;
+                        let stopped = task
+                            .stop(TaskStopWait::UntilStopped {
+                                report_after: self.branch_task_stop_timeout(),
+                            })
+                            .await;
                         journal.step(step).record_owner_stopped(*unit);
                         if let Err(error) = stopped
                             && drain_failure.is_none()
@@ -735,7 +739,7 @@ impl Runtime {
                     let Some(task) = previous else {
                         continue;
                     };
-                    let stopped = task.stop(self.task_stop_grace()).await;
+                    let stopped = task.stop(self.planned_task_stop()).await;
                     let withdrawn = if let Some(services) = relay_services.as_ref()
                         && !desired_node.is_holding_unit(*unit)
                     {
@@ -817,7 +821,7 @@ impl Runtime {
                                     .remove(&RelayUnitRef::new(relay.clone(), *unit))
                             });
                     if let Some(task) = previous {
-                        let stopped = task.stop(self.task_stop_grace()).await;
+                        let stopped = task.stop(self.planned_task_stop()).await;
                         let withdrawn = if let Some(services) = services.as_ref()
                             && !desired_node.is_holding_unit(*unit)
                         {
@@ -1490,16 +1494,12 @@ impl Runtime {
                     }
                     for commands in instance_commands {
                         nervix_primitives::task::consume_budget().await;
-                        ScheduledEmitterTask::reconfigure_via(
-                            &commands,
-                            policy.clone(),
-                            self.task_stop_grace(),
-                        )
-                        .await
-                        .change_context_lazy(|| ExecutionBuildError::ReconfigureEmitterFlush {
-                            emitter: emitter.clone(),
-                        })
-                        .change_context_lazy(build)?;
+                        ScheduledEmitterTask::reconfigure_via(&commands, policy.clone())
+                            .await
+                            .change_context_lazy(|| ExecutionBuildError::ReconfigureEmitterFlush {
+                                emitter: emitter.clone(),
+                            })
+                            .change_context_lazy(build)?;
                     }
                 }
             }

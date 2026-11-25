@@ -138,7 +138,6 @@ impl InterconnectRequest for ReadWasmStatePage {
 
     const NAME: &'static str = "read_wasm_state_page";
     const CLASS: PoolClass = PoolClass::Commands;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 #[cfg(all(

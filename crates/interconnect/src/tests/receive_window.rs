@@ -33,7 +33,6 @@ struct WindowedBulkStream;
 impl InterconnectStreamRequest for WindowedBulkStream {
     const NAME: &'static str = "test_windowed_bulk_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 #[nervix_primitives::test]
@@ -82,8 +81,12 @@ async fn a_bulk_response_respects_a_smaller_receiver_chunk_before_membership_pub
     assert_eq!(total, 64 * 1024);
     drop(response);
     assert_eq!(bulk_window_reserved(&pair.transport_a), 0);
-    pair.transport_a.shutdown().await;
-    pair.transport_b.shutdown().await;
+    pair.transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    pair.transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -92,7 +95,6 @@ struct ExactReadStream;
 impl InterconnectStreamRequest for ExactReadStream {
     const NAME: &'static str = "test_exact_read_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 /// A reader that admitted the memory a bulk response's bytes take reads them in exact lengths
@@ -187,8 +189,12 @@ async fn a_bulk_response_reads_in_exact_lengths_into_memory_its_reader_admitted(
     assert_eq!(read, sent, "the reads return every byte once, in order");
     drop(buffers);
     drop(response);
-    pair.transport_a.shutdown().await;
-    pair.transport_b.shutdown().await;
+    pair.transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    pair.transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 /// A replica fetching a guest save, or a node fetching a resource archive, reads a bulk response
@@ -309,8 +315,8 @@ async fn a_bulk_response_puts_a_whole_bulk_receive_window_in_flight_before_its_r
         "the ended stream returned its window"
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -319,12 +325,10 @@ struct UnbackedBulkStream;
 impl InterconnectStreamRequest for UnbackedBulkStream {
     const NAME: &'static str = "test_unbacked_bulk_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline =
-        crate::RequestDeadline::Explicit(Duration::from_millis(500));
 }
 
 /// A node whose windows are all held sends no further bulk request: the request waits for a
-/// returned window until its own deadline, and opens as soon as one is returned.
+/// returned window, until a deadline its caller names, and opens as soon as one is returned.
 #[nervix_primitives::test]
 async fn a_bulk_stream_sends_nothing_until_its_receive_window_is_backed() {
     let ConnectedTransports {
@@ -375,8 +379,13 @@ async fn a_bulk_stream_sends_nothing_until_its_receive_window_is_backed() {
     let every_window = executor_a
         .try_reserve(MemoryClass::BulkWindow, capacity)
         .assured("the ended stream returned the only window the transport held");
+    let caller_deadline = crate::ExchangeDeadline::Caller(
+        Instant::now()
+            .checked_add(Duration::from_millis(200))
+            .assured("a short caller deadline fits the monotonic clock"),
+    );
     let error = match transport_a
-        .request_stream(&node_b, UnbackedBulkStream)
+        .request_stream_by(&node_b, UnbackedBulkStream, caller_deadline)
         .await
     {
         Ok(_) => panic!("a bulk stream opened without a receive window"),
@@ -385,9 +394,12 @@ async fn a_bulk_stream_sends_nothing_until_its_receive_window_is_backed() {
     assert!(
         matches!(
             error.downcast_ref::<TransportError>(),
-            Some(TransportError::RequestTimeout { .. })
+            Some(TransportError::DeadlinePassed {
+                deadline: crate::ExchangeDeadlineKind::Caller,
+                ..
+            })
         ),
-        "the request waited for a window until its deadline: {error:?}"
+        "the request waited for a window until its caller's deadline: {error:?}"
     );
     assert_eq!(
         answered.load(Ordering::Acquire),
@@ -400,8 +412,8 @@ async fn a_bulk_stream_sends_nothing_until_its_receive_window_is_backed() {
     assert_eq!(answered.load(Ordering::Acquire), 2);
     assert_eq!(bulk_window_reserved(&transport_a), 0);
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// Open one `UnbackedBulkStream` and read its chunk; dropping the stream returns its window.

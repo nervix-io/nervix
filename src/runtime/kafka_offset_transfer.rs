@@ -276,13 +276,12 @@ impl Runtime {
             })
         })?;
         let described = dispatcher
-            .request_with_timeout(
+            .request(
                 target,
                 DescribeKafkaOffsets {
                     placement: placement.to_remote(),
                     after_lsm,
                 },
-                dispatcher.request_deadline::<DescribeKafkaOffsets>(),
             )
             .await
             .change_context_lazy(failure)?

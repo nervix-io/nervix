@@ -165,14 +165,14 @@ impl<'a> Messages<'a> {
         }
     }
 
-    /// One handoff refusal of either kind a participant answers with.
+    /// One handoff refusal of any kind a participant answers with.
     fn handoff_failure(&mut self) -> OwnershipHandoffFailure {
-        if self.arbitrary.entropy().flag() {
-            OwnershipHandoffFailure::rejected(self.arbitrary.string())
-        } else {
-            OwnershipHandoffFailure::DestinationTerminating {
+        match self.arbitrary.entropy().byte() % 3 {
+            0 => OwnershipHandoffFailure::rejected(self.arbitrary.string()),
+            1 => OwnershipHandoffFailure::DestinationTerminating {
                 node: self.arbitrary.cluster_node(),
-            }
+            },
+            _ => OwnershipHandoffFailure::BudgetPassed,
         }
     }
 

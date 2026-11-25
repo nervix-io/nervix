@@ -1732,10 +1732,10 @@ impl FaultInjection {
         pause.release();
     }
 
-    /// Loses the next terminal record acknowledgement `resolver` returns to `registrar`. The
-    /// resolving node drops it instead of sending it, as a link that loses every attempt of the
-    /// send does, and reports nothing more about that record.
-    pub fn lose_next_remote_acknowledgement(
+    /// Fails the first send of the next terminal record acknowledgement `resolver` returns to
+    /// `registrar` in transport, as a connection that breaks under the send does. The resolving
+    /// node sends the acknowledgement again while the registrar stays live.
+    pub fn fail_next_remote_acknowledgement_send(
         &self,
         resolver: ClusterNodeName,
         registrar: ClusterNodeName,
@@ -1748,8 +1748,8 @@ impl FaultInjection {
         self.inner.lost_remote_acknowledgements.insert(link, loss);
     }
 
-    /// Waits until the loss armed from `resolver` to `registrar` has taken an acknowledgement.
-    pub async fn wait_for_lost_remote_acknowledgement(
+    /// Waits until the failure armed from `resolver` to `registrar` has failed a send.
+    pub async fn wait_for_failed_remote_acknowledgement_send(
         &self,
         resolver: &ClusterNodeName,
         registrar: &ClusterNodeName,
@@ -2611,13 +2611,13 @@ impl FaultInjection {
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "the scenario drops only the first acknowledgement on an armed link",
+            reason = "the scenario fails only the first acknowledgement send on an armed link",
             key = "one test resolver and registrar link",
             bound = "one keyed read and a terminal retained watch transition; no guard across \
                      await"
         )
     )]
-    pub(crate) fn loses_remote_acknowledgement(
+    pub(crate) fn fails_remote_acknowledgement_send(
         &self,
         resolver: &ClusterNodeName,
         registrar: &ClusterNodeName,

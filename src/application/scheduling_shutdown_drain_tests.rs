@@ -432,7 +432,11 @@ async fn a_stopping_node_asks_again_after_an_unanswered_drain_and_stops_once_no_
     } = build_test_service(true).await;
     let local_node = service.inner.consensus.local_node_id().clone();
     let leader = node_named("node-elsewhere");
-    service.inner.interconnect.shutdown().await;
+    service
+        .inner
+        .interconnect
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+        .await;
     let logs = CapturedLogs::default();
     let guard = tracing::subscriber::set_default(logs.subscriber());
 

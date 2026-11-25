@@ -271,8 +271,6 @@ without adding a prerequisite or changing graph acceptance.
 | `--interconnect-stream-receive-window` | 64 KiB | Advertised HTTP/2 receive credit per non-bulk stream |
 | `--interconnect-connection-receive-window` | 256 KiB | Advertised HTTP/2 receive credit per non-bulk connection, at least 65,535 bytes |
 | `--interconnect-connection-setup-timeout` | 5s | One DNS, TCP, TLS and binding budget |
-| `--interconnect-request-timeout` | 10s | Transport request budget and the base of typed RPC deadlines |
-| `--interconnect-progress-timeout` | 5s | Time without transfer progress |
 | `--interconnect-reconnect-backoff` | 200ms | First reconnect delay |
 | `--interconnect-max-reconnect-backoff` | 5s | Reconnect ceiling, at least the first delay |
 | `--interconnect-reconnect-jitter-permille` | 0 | Downward jitter in thousandths, from 0 through 1,000 |
@@ -325,10 +323,13 @@ reserve holds an append stream and its replacement for every declared peer. Each
 independent; a full general queue cannot consume health or cancellation capacity. An explicit lower
 request quota is reported as configured, and a refusal is a typed capacity outcome.
 
-Typed RPCs derive their deadlines from the request budget: control one tenth, coordination one
-fifth, setup one half, ordinary requests one, snapshot operations three, checkpoint transfers six,
-and recovery twelve. A caller's remaining operation deadline still governs explicitly bounded
-work. The application-health probe instead follows the running cluster liveness policy below.
+The transport has no request or progress timeout. A typed request, a stream and a relay delivery
+wait for their peer for as long as the liveness below keeps the peer and its connection, and end
+earlier only at a deadline their caller names: the ceiling of the whole operation they belong to,
+such as `ENTITY_GATE_DEADLINE` or `REMOTE_RELAY_TOTAL_TIMEOUT`, the deadline of a caller waiting for
+the answer, such as `--inspection-read-timeout`, or a protocol's own timer, such as Raft's.
+[Liveness And Deadlines](interconnect.md#liveness-and-deadlines) owns the rule. The
+application-health probe follows the running cluster liveness policy below.
 
 Transport ping and application-health budgets follow the installed, Raft-committed
 `NODE_UNAVAILABILITY_TIMEOUT`: ping interval one half, ping timeout one quarter and probe timeout
@@ -453,9 +454,10 @@ Forced-recovery budgets, handoff reconciliation polling, entity-gate polling, do
 polling and readiness propagation are committed cluster parameters. Their defaults are 5s,
 250ms, 25ms, 50ms and 30s respectively. First-bootstrap flags seed them; later changes use
 `ALTER CLUSTER SET`. New operations capture the current committed values at their owning
-admission boundary. RPC deadlines derive from the transport request timeout, and the initial
-membership, scheduling, health and resource pass delays derive from the gossip round. Derived
-values have no independent flag.
+admission boundary. An expired forced-recovery budget fails that recovery attempt: the schedule is
+not published, every replica keeps its state, and the next scheduling pass prepares the recovery
+again. The initial membership, scheduling, health and resource pass delays derive from the gossip
+round. Derived values have no independent flag.
 
 Local transaction-application and gate release/engagement retries, clock-progress delivery,
 backup retries and restore conversion admission have their own `--control-plane-*` capabilities.
@@ -884,19 +886,20 @@ policy from the policy each node has installed.
 | --- | --- | --- |
 | `DOMAIN_DRAIN_TIMEOUT` | 30s | Budget for draining a domain's admitted work |
 | `ENTITY_GATE_DEADLINE` | 30s | Budget for a coordinated entity gate |
-| `REMOTE_ACK_ALIVE_INTERVAL` | 100ms | Report cadence of a retained remote delivery and of held local work |
-| `REMOTE_ACK_DISPATCH_TIMEOUT` | 5s | Inactivity budget of a remote admission attempt |
-| `REMOTE_ACK_SILENCE_TIMEOUT` | 15s | Reporting silence allowed after admission |
-| `REMOTE_ACK_SWEEP_INTERVAL` | 1s | Cadence for counting silence and admission sweeps |
-| `REMOTE_RELAY_TOTAL_TIMEOUT` | 5m | Total remote admission budget |
-| `REMOTE_RELAY_INSTANTIATION_WAIT` | 5s | Budget for routing to become available |
+| `REMOTE_ACK_ALIVE_INTERVAL` | 100ms | Report cadence of a retained remote delivery and of held local work; paces retries |
+| `REMOTE_ACK_SWEEP_INTERVAL` | 1s | How often a sender applies membership and the admission bound to the remote deliveries and acknowledgements it waits for |
+| `REMOTE_RELAY_TOTAL_TIMEOUT` | 5m | Total remote admission budget: the ceiling of one delivery |
 | `PAYLOAD_UNFOLD_LIMIT` | 65,536 | Maximum records one codec unfolds from one ingested payload |
 
-Every duration is positive and no longer than `u32::MAX` seconds. Silence must be strictly greater
-than twice the sum of dispatch timeout and alive interval. The sweep divides both silence and
-total admission budgets exactly, including their nanoseconds. Dispatch and instantiation budgets
-must each fit the total admission budget. Change related values in one statement; an invalid
-combination publishes nothing. The unfold limit is a positive 32-bit record count, independent
+Every duration is positive and no longer than `u32::MAX` seconds. The sweep divides the total
+admission budget exactly, including its nanoseconds; an assignment that breaks that is refused with
+`remote-ack-sweep-interval must divide remote-relay-total-timeout exactly`. Change related values in
+one statement; an invalid combination publishes nothing. None of the three is a liveness timer: a
+remote delivery and an acknowledgement wait for their receiver for as long as membership and the
+transport keep its run, as [Liveness And Deadlines](interconnect.md#liveness-and-deadlines)
+states. A delivery's retries are paced from the alive interval, starting at a quarter of it and
+doubling up to twenty-five of it, 25 milliseconds up to 2.5 seconds at the default; these are
+derivations without flags of their own. The unfold limit is a positive 32-bit record count, independent
 of the maximum declared emitter batch size.
 
 Both domain drain and gate budgets must independently fit every admitted node's shutdown timeout. Parameter transitions capture those capacity claims in their commit fence;
@@ -907,7 +910,7 @@ removing its membership first.
 
 Each remote delivery captures the complete timing group once. Its receiver reports and its sender
 sweeps with that group for the delivery's lifetime. Live changes govern new deliveries; they do
-not shorten an earlier delivery's reporting window. A late sweep counts once and skips missed
+not shorten an earlier delivery's admission bound. A late sweep counts once and skips missed
 ticks. Each retained relay attempt and correlation keeps twice the admission budget of its delivery,
 and a channel watermark twice the longest budget among the deliveries it recorded; a sender rotates
 its channel before that channel's watermark can expire.
@@ -942,9 +945,6 @@ environment variable, formed by uppercasing the option and replacing hyphens wit
 | `--runtime-retained-removals` | 1024 | Catalog removals retained for incremental replication |
 | `--runtime-snapshot-staging-bytes` | smaller of 128GiB and temporary volume capacity | Concurrent temporary snapshot staging quota |
 | `--runtime-snapshot-bytes` | smaller of 64GiB, staging quota and temporary volume capacity | Largest snapshot staged by one transfer |
-| `--runtime-snapshot-describe-timeout` | 30s | Deadline of describing a sealed state snapshot |
-| `--runtime-snapshot-fetch-timeout` | 30s | Deadline of fetching a sealed state snapshot |
-| `--runtime-wasm-checkpoint-timeout` | 90s | Deadline until every guest checkpoint replica confirms |
 | `--runtime-event-capacity` | 256 | Runtime events retained for a lagging observer |
 | `--runtime-wasm-recovery-capacity` | 32 | Guest-state recovery requests awaiting a decision |
 | `--runtime-immediate-flush-minimum` | 100us | Minimum timer interval for immediate branch flushes |

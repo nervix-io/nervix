@@ -50,7 +50,6 @@ impl InterconnectRequest for AnswerProbe {
 
     const NAME: &'static str = "test_answer_probe";
     const CLASS: PoolClass = PoolClass::Bulk;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 /// Two bound transports with the first dialing the second.
@@ -437,99 +436,73 @@ async fn a_relay_grant_answer_waits_for_a_place_on_its_receivers_full_control_cl
                 .expect("the application queue should remain open");
             assert!(matches!(received.envelope, Envelope::RelayPayload(_)));
         }
-        transports.transport_a.shutdown().await;
-        transports.transport_b.shutdown().await;
+        transports
+            .transport_a
+            .shutdown(crate::test_teardown_ceiling())
+            .await;
+        transports
+            .transport_b
+            .shutdown(crate::test_teardown_ceiling())
+            .await;
     }
 }
 
 /// A grant's answer that reaches a sender whose control class is full waits for a place to be
-/// decoded rather than turning the delivery indeterminate, and the delivery is taken in once the
-/// class frees. The wait lasts no longer than the delivery's own deadline: past it the send fails
-/// as timed out, with the decoding's charge returned and nothing refused.
+/// decoded rather than turning the delivery indeterminate, refusing nothing, and the delivery is
+/// taken in once the class frees.
 #[nervix_primitives::test]
 async fn a_relay_grant_answer_waits_for_a_place_on_its_senders_full_control_class() {
-    let request_timeout = Duration::from_secs(2);
-    for outlive_deadline in [false, true] {
-        // The round that releases the class gives the delivery a deadline that outlasts the test.
-        let mut transports = connected_with_options(TransportOptions {
-            request_timeout: if outlive_deadline {
-                request_timeout
-            } else {
-                Duration::from_secs(600)
-            },
-            ..TransportOptions::default()
-        })
-        .await;
-        relay_one_delivery(&mut transports, 1)
+    let mut transports = connected_with_options(TransportOptions::default()).await;
+    relay_one_delivery(&mut transports, 1)
+        .await
+        .expect("an idle receiver grants the first delivery");
+
+    let executor_a = transports.transport_a.inner.executor().clone();
+    let held = HeldCpuClass::hold(&executor_a, CpuClass::Control).await;
+    let refused = executor_a.snapshot().cpu_class(CpuClass::Control).refused;
+    let reserved = executor_a.memory(MemoryClass::Management).reserved_bytes;
+    let transport_a = transports.transport_a.clone();
+    let node_b = transports.node_b.clone();
+    let payload = routed_delivery(2, transports.transport_a.node_id());
+    let sending = nervix_primitives::task::spawn(async move {
+        transport_a
+            .send(&node_b, Envelope::RelayPayload(payload))
             .await
-            .expect("an idle receiver grants the first delivery");
+    });
 
-        let executor_a = transports.transport_a.inner.executor().clone();
-        let held = HeldCpuClass::hold(&executor_a, CpuClass::Control).await;
-        let refused = executor_a.snapshot().cpu_class(CpuClass::Control).refused;
-        let reserved = executor_a.memory(MemoryClass::Management).reserved_bytes;
-        let transport_a = transports.transport_a.clone();
-        let node_b = transports.node_b.clone();
-        let payload = routed_delivery(2, transports.transport_a.node_id());
-        let sending = nervix_primitives::task::spawn(async move {
-            transport_a
-                .send(&node_b, Envelope::RelayPayload(payload))
-                .await
-        });
-
-        if outlive_deadline {
-            let error = timeout(Duration::from_secs(30), sending)
-                .await
-                .expect("the delivery's deadline ends the send before the test deadline")
-                .expect("the sending task is joined")
-                .expect_err("a class that stays full past the deadline times the send out");
-            assert!(
-                matches!(
-                    error.current_context(),
-                    TransportError::RequestTimeout { .. }
-                ),
-                "{error:?}"
-            );
-            assert!(
-                executor_a.memory(MemoryClass::Management).reserved_bytes <= reserved,
-                "the timed-out decoding returned its charge"
-            );
-            assert_eq!(
-                executor_a.snapshot().cpu_class(CpuClass::Control).refused,
-                refused,
-                "a full class refuses no grant answer"
-            );
-            held.release().await;
-        } else {
-            eventually(
-                &executor_a,
-                "the grant's answer waiting to be decoded with its charge",
-                |executor| {
-                    executor.memory(MemoryClass::Management).reserved_bytes > reserved
-                        || executor.snapshot().cpu_class(CpuClass::Control).refused > refused
-                },
-            )
-            .await;
-            assert_eq!(
-                executor_a.snapshot().cpu_class(CpuClass::Control).refused,
-                refused,
-                "a full class refuses no grant answer"
-            );
-            held.release().await;
-            timeout(Duration::from_secs(10), sending)
-                .await
-                .expect("the delivery is sent before the test deadline")
-                .expect("the sending task is joined")
-                .expect("the grant's answer is decoded once the sender's class frees");
-            let received = timeout(Duration::from_secs(10), transports.incoming_b.recv())
-                .await
-                .expect("the granted relay should enter the application queue")
-                .expect("the application queue should remain open");
-            assert!(matches!(received.envelope, Envelope::RelayPayload(_)));
-        }
-        transports.transport_a.shutdown().await;
-        transports.transport_b.shutdown().await;
-    }
+    eventually(
+        &executor_a,
+        "the grant's answer waiting to be decoded with its charge",
+        |executor| {
+            executor.memory(MemoryClass::Management).reserved_bytes > reserved
+                || executor.snapshot().cpu_class(CpuClass::Control).refused > refused
+        },
+    )
+    .await;
+    assert_eq!(
+        executor_a.snapshot().cpu_class(CpuClass::Control).refused,
+        refused,
+        "a full class refuses no grant answer"
+    );
+    held.release().await;
+    timeout(Duration::from_secs(10), sending)
+        .await
+        .expect("the delivery is sent before the test deadline")
+        .expect("the sending task is joined")
+        .expect("the grant's answer is decoded once the sender's class frees");
+    let received = timeout(Duration::from_secs(10), transports.incoming_b.recv())
+        .await
+        .expect("the granted relay should enter the application queue")
+        .expect("the application queue should remain open");
+    assert!(matches!(received.envelope, Envelope::RelayPayload(_)));
+    transports
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    transports
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 /// Wait until the second transport holds every preconnected connection the first one dials to it,
@@ -573,7 +546,6 @@ async fn a_connection_answer_waits_for_a_place_on_its_acceptors_full_control_cla
         // The setup deadline outlasts the test, so only the test decides when the dialer stops.
         let transports = connected_with_options(TransportOptions {
             connection_setup_timeout: Duration::from_secs(600),
-            request_timeout: Duration::from_secs(600),
             ..TransportOptions::default()
         })
         .await;
@@ -626,7 +598,10 @@ async fn a_connection_answer_waits_for_a_place_on_its_acceptors_full_control_cla
             // The dial runs in its pool's connection worker, so the dialing node stops it by
             // cancelling that worker, as its setup deadline does.
             requesting.abort();
-            transports.transport_a.shutdown().await;
+            transports
+                .transport_a
+                .shutdown(crate::test_teardown_ceiling())
+                .await;
             eventually(
                 &executor_b,
                 "the dialing node's departure ending the answer's wait",
@@ -652,9 +627,15 @@ async fn a_connection_answer_waits_for_a_place_on_its_acceptors_full_control_cla
                 .expect("the requesting task is joined")
                 .expect("the connection binds once the acceptor's class frees");
             assert_eq!(response, AnswerProbeResponse);
-            transports.transport_a.shutdown().await;
+            transports
+                .transport_a
+                .shutdown(crate::test_teardown_ceiling())
+                .await;
         }
-        transports.transport_b.shutdown().await;
+        transports
+            .transport_b
+            .shutdown(crate::test_teardown_ceiling())
+            .await;
     }
 }
 
@@ -768,7 +749,6 @@ async fn a_connection_refusal_waits_for_a_place_on_its_acceptors_full_control_cl
         // The setup deadline outlasts the test, so only the test decides when the dialer stops.
         let transports = MismatchedTransports::bind(TransportOptions {
             connection_setup_timeout: Duration::from_secs(600),
-            request_timeout: Duration::from_secs(600),
             ..TransportOptions::default()
         })
         .await;
@@ -812,7 +792,10 @@ async fn a_connection_refusal_waits_for_a_place_on_its_acceptors_full_control_cl
         );
 
         if dialer_gives_up {
-            transports.dialing.shutdown().await;
+            transports
+                .dialing
+                .shutdown(crate::test_teardown_ceiling())
+                .await;
             eventually(
                 &executor_b,
                 "the dialing node's departure ending the refusals' waits",
@@ -846,107 +829,81 @@ async fn a_connection_refusal_waits_for_a_place_on_its_acceptors_full_control_cl
                 "the refusal the dialing node read names the accepting node's mismatch and ends \
                  its join"
             );
-            transports.dialing.shutdown().await;
+            transports
+                .dialing
+                .shutdown(crate::test_teardown_ceiling())
+                .await;
         }
-        transports.accepting.shutdown().await;
+        transports
+            .accepting
+            .shutdown(crate::test_teardown_ceiling())
+            .await;
     }
 }
 
 /// An ack carries the outcome of a delivery its sender already resolved, which nothing presents
 /// again, so a sender whose data class is full holds the ack's encoding back, with its own charge,
-/// instead of refusing it, and the ack reaches its registrar once the class frees. The send's own
-/// deadline bounds the wait: past it the send fails as timed out, with the charge returned.
+/// instead of refusing it, and the ack reaches its registrar once the class frees.
 #[nervix_primitives::test]
 async fn an_ack_waits_for_a_place_on_its_senders_full_data_class() {
-    let request_timeout = Duration::from_secs(2);
-    for outlive_deadline in [false, true] {
-        // The round that releases the class gives the send a deadline that outlasts the test.
-        let mut transports = connected_with_options(TransportOptions {
-            request_timeout: if outlive_deadline {
-                request_timeout
-            } else {
-                Duration::from_secs(600)
-            },
-            ..TransportOptions::default()
-        })
+    let mut transports = connected_with_options(TransportOptions::default()).await;
+    let node_a = transports.transport_a.node_id().clone();
+    let ack =
+        |ack_id| Envelope::Ack(registration(ack_id, &node_a).resolution(RemoteAckOutcome::Ack));
+    transports
+        .transport_a
+        .send(&transports.node_b, ack(1))
+        .await
+        .expect("an idle sender sends the first ack");
+    let received = timeout(Duration::from_secs(10), transports.incoming_b.recv())
+        .await
+        .expect("the first ack reaches its registrar before the test deadline")
+        .expect("the application queue should remain open");
+    assert!(matches!(received.envelope, Envelope::Ack(_)));
+
+    let executor_a = transports.transport_a.inner.executor().clone();
+    let held = HeldCpuClass::hold(&executor_a, CpuClass::Data).await;
+    let refused = executor_a.snapshot().cpu_class(CpuClass::Data).refused;
+    let reserved = executor_a.memory(MemoryClass::Management).reserved_bytes;
+    let transport_a = transports.transport_a.clone();
+    let node_b = transports.node_b.clone();
+    let second = ack(2);
+    let sending =
+        nervix_primitives::task::spawn(async move { transport_a.send(&node_b, second).await });
+
+    eventually(
+        &executor_a,
+        "the ack's encoding waiting with its charge",
+        |executor| {
+            executor.memory(MemoryClass::Management).reserved_bytes > reserved
+                || executor.snapshot().cpu_class(CpuClass::Data).refused > refused
+        },
+    )
+    .await;
+    assert_eq!(
+        executor_a.snapshot().cpu_class(CpuClass::Data).refused,
+        refused,
+        "a full class refuses no ack"
+    );
+    held.release().await;
+    timeout(Duration::from_secs(10), sending)
+        .await
+        .expect("the ack is sent before the test deadline")
+        .expect("the sending task is joined")
+        .expect("the ack is encoded once the sender's class frees");
+    let received = timeout(Duration::from_secs(10), transports.incoming_b.recv())
+        .await
+        .expect("the second ack reaches its registrar before the test deadline")
+        .expect("the application queue should remain open");
+    assert!(matches!(received.envelope, Envelope::Ack(_)));
+    transports
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
         .await;
-        let node_a = transports.transport_a.node_id().clone();
-        let ack =
-            |ack_id| Envelope::Ack(registration(ack_id, &node_a).resolution(RemoteAckOutcome::Ack));
-        transports
-            .transport_a
-            .send(&transports.node_b, ack(1))
-            .await
-            .expect("an idle sender sends the first ack");
-        let received = timeout(Duration::from_secs(10), transports.incoming_b.recv())
-            .await
-            .expect("the first ack reaches its registrar before the test deadline")
-            .expect("the application queue should remain open");
-        assert!(matches!(received.envelope, Envelope::Ack(_)));
-
-        let executor_a = transports.transport_a.inner.executor().clone();
-        let held = HeldCpuClass::hold(&executor_a, CpuClass::Data).await;
-        let refused = executor_a.snapshot().cpu_class(CpuClass::Data).refused;
-        let reserved = executor_a.memory(MemoryClass::Management).reserved_bytes;
-        let transport_a = transports.transport_a.clone();
-        let node_b = transports.node_b.clone();
-        let second = ack(2);
-        let sending =
-            nervix_primitives::task::spawn(async move { transport_a.send(&node_b, second).await });
-
-        if outlive_deadline {
-            let error = timeout(Duration::from_secs(30), sending)
-                .await
-                .expect("the send's deadline ends it before the test deadline")
-                .expect("the sending task is joined")
-                .expect_err("a class that stays full past the deadline times the send out");
-            assert!(
-                matches!(
-                    error.current_context(),
-                    TransportError::RequestTimeout { .. }
-                ),
-                "{error:?}"
-            );
-            assert!(
-                executor_a.memory(MemoryClass::Management).reserved_bytes <= reserved,
-                "the timed-out encoding returned its charge"
-            );
-            assert_eq!(
-                executor_a.snapshot().cpu_class(CpuClass::Data).refused,
-                refused,
-                "a full class refuses no ack"
-            );
-            held.release().await;
-        } else {
-            eventually(
-                &executor_a,
-                "the ack's encoding waiting with its charge",
-                |executor| {
-                    executor.memory(MemoryClass::Management).reserved_bytes > reserved
-                        || executor.snapshot().cpu_class(CpuClass::Data).refused > refused
-                },
-            )
-            .await;
-            assert_eq!(
-                executor_a.snapshot().cpu_class(CpuClass::Data).refused,
-                refused,
-                "a full class refuses no ack"
-            );
-            held.release().await;
-            timeout(Duration::from_secs(10), sending)
-                .await
-                .expect("the ack is sent before the test deadline")
-                .expect("the sending task is joined")
-                .expect("the ack is encoded once the sender's class frees");
-            let received = timeout(Duration::from_secs(10), transports.incoming_b.recv())
-                .await
-                .expect("the second ack reaches its registrar before the test deadline")
-                .expect("the application queue should remain open");
-            assert!(matches!(received.envelope, Envelope::Ack(_)));
-        }
-        transports.transport_a.shutdown().await;
-        transports.transport_b.shutdown().await;
-    }
+    transports
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 /// A relay admission status is the receiver's verdict on an attempt, and a cancellation it answers
@@ -961,7 +918,6 @@ async fn a_relay_status_answer_waits_for_a_place_on_its_receivers_full_control_c
     for sender_gives_up in [false, true] {
         // The deadline outlasts the test, so only the test decides when the sender stops waiting.
         let transports = connected_with_options(TransportOptions {
-            request_timeout: Duration::from_secs(600),
             ..TransportOptions::default()
         })
         .await;
@@ -1043,7 +999,13 @@ async fn a_relay_status_answer_waits_for_a_place_on_its_receivers_full_control_c
                 .expect("the status is answered once the receiver's class frees");
             assert_eq!(status, RelayAdmissionStatus::Unknown);
         }
-        transports.transport_a.shutdown().await;
-        transports.transport_b.shutdown().await;
+        transports
+            .transport_a
+            .shutdown(crate::test_teardown_ceiling())
+            .await;
+        transports
+            .transport_b
+            .shutdown(crate::test_teardown_ceiling())
+            .await;
     }
 }

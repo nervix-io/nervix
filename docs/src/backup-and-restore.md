@@ -949,7 +949,7 @@ that compare restored and re-exported state.
 | Restore chunk | The smaller of 256 KiB and half the session frame limit the leader announced, from the Rust client and the console alike: 256 KiB at the default 4 MiB frame. The leader accepts any nonempty chunk within one frame |
 | Restore frames the Rust client queues ahead of the transport | 8 |
 | Restore archive retention | Until the restore's outcome is recorded, or the retry validity of the execution reference ends |
-| State section staging on an owner | Charged to the same node staging quota until fetched, or for at most 600 seconds; a Kafka offset or branch lifecycle section reserves the 64 MiB record limit while it is written |
+| State section staging on an owner | Charged to the same node staging quota until fetched or released when the coordinator's fetch of the domain's sections ends, and otherwise until the coordinator's run ends or `COMMAND_RETRY_VALIDITY` passes; a Kafka offset or branch lifecycle section reserves the 64 MiB record limit while it is written |
 | One owner's capture inventory | One management reply of at most 64 KiB per owner and domain |
 | Inferencer tensors | One branch at a time, bounded by the declared snapshot-section footprint: live publications retain immutable native tensors; stored checkpoints decode under twice that bound, retain one bound and reuse that charge while staging. Capture reserves twice the footprint plus two 64 KiB blocks for projection and the staged writer's output buffer, one resolved bulk chunk of at least 64 KiB: 192 KiB beside the footprint at the default. Restore streams the raw archive slice through a 64 KiB reader, wrapping identical bits in the native frame under twice the footprint plus that reader and the same output buffer: 128 KiB beside the footprint at the default. |
 | WASM guest save capture | One selected save at a time: `restore_metadata` reserves three times its stored checkpoint size for the inline Fjall value and decoded reader; two 64 KiB bulk buffers cover segmented reads and transfer, and the staged writer's output buffer, one resolved bulk chunk (64 KiB at the default), covers staging. A save up to the 64 MiB guest limit can exceed the 32 MiB default bulk budget. |
@@ -1040,8 +1040,8 @@ contents. The reasons are:
   domain, the entity and the node
 - the schedule places an entity whose state the cut archives on no node, naming the domain and the
   entity; uncordon a node or bring one back so the entity can be placed
-- an owner has not applied the cut revision within five seconds, or cannot capture or stage its
-  share, naming the domain
+- an owner could not apply the cut revision before its applied state closed, or cannot capture or
+  stage its share, naming the domain
 - a quiesced domain cannot take its lease, have its pause applied across the cluster or capture
   its owners within its timeout, reported as `timed out waiting to capture domain '<domain>'` with
   the active phase, its age, total elapsed time and completed phase durations; a drain timeout also
@@ -1052,8 +1052,11 @@ contents. The reasons are:
 - the backup coordinator lost its leader tenure while capturing a domain
 
 A capture that fails or is interrupted assembles no archive. The leader drops the sections it
-fetched and the failing owner drops its partial files; sections other owners staged for the capture
-expire 600 seconds after they were staged, holding their staging quota until then. The backup can be
+fetched and the failing owner drops its partial files. Once the leader holds the capture's
+inventories, it asks their owners to release what they staged for it when its fetch ends, whether
+or not the fetch completed; a section that request does not reach, such as one another owner staged
+before a capture failed, holds its staging quota until its owner finds the leader's run ended or
+`COMMAND_RETRY_VALIDITY` passed. The backup can be
 sent again, and takes a new cut. The same refusal applies to a selected stored keyspace or window
 whose immutable view, native validation, typed metadata or bounded projection cannot be admitted.
 Cancellation is checked between stored chunks, identities and keys; refused or interrupted staging
@@ -1106,8 +1109,8 @@ refusal of the step, a created domain whose stopped state did not become usable 
 a resource version that could not be installed or completed on every live node, a domain that holds
 models the restore did not apply, a model batch the leader refused, such as a committed parameter
 cap that its Models exceed, lookup data that does not load at its path or TLS material that does
-not load, a node that did not apply the installation
-revision within five seconds, and state that does not convert or install. Installation converts
+not load, and state that does not convert or install. A node that applies the installation
+revision slowly costs the step latency, never a failure. Installation converts
 each keyspace and window as planning did, with the same wait for room, so a momentarily busy node
 does not fail the step; a refusal for room that outlasts the wait does. An admitted restore that
 cannot reach its first step not recorded, because the leader no longer holds its archive or the

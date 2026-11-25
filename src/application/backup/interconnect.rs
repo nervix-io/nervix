@@ -15,8 +15,6 @@
     )
 )]
 
-use std::time::Duration;
-
 use arch_into::ArchInto as _;
 use error_stack::{FrameKind, Report, ResultExt as _};
 use futures_util::stream;
@@ -76,7 +74,8 @@ use nervix_interconnect::backup::CapturedStateSectionKind;
 pub(in crate::application) use nervix_interconnect::backup::{
     BackupDrainAction, BackupDrainStatus, BackupDrainStatusRequest, CaptureDomainStateRequest,
     CaptureInventoryRequest, CapturedSectionInventory, FetchCapturedSection,
-    InstallRestoredStateAction, InstallRestoredStateRequest, RestoreStateInventory,
+    InstallRestoredStateAction, InstallRestoredStateRequest, ReleaseCapturedSections,
+    RestoreStateInventory,
 };
 
 fn section_kind(content: SectionContent) -> Option<CapturedStateSectionKind> {
@@ -186,6 +185,19 @@ impl SessionServiceImpl {
                     service
                         .handle_backup_inventory_request(&peer, request)
                         .await
+                }
+            },
+        )?;
+        let release = self.clone();
+        interconnect.register_handler::<ReleaseCapturedSections, _, _>(
+            move |context, request| {
+                let service = release.clone();
+                let peer = context.peer_node_id().clone();
+                async move {
+                    // Only the coordinator that staged the sections releases them.
+                    if request.coordination.coordinator() == &peer {
+                        service.release_staged_backup_sections(&request);
+                    }
                 }
             },
         )?;
@@ -367,11 +379,12 @@ impl SessionServiceImpl {
                     "capture coordinator is not the current leader",
                 ));
             }
+            // The owner applies the cut's revision when its Raft log reaches it. A slow owner costs
+            // the cut latency; the coordinator's cut deadline bounds the whole capture.
             wait_for_capture_revision(
                 &request.domain,
                 request.revision,
                 self.inner.consensus.subscribe_applied(),
-                self.inner.raft_timings.heartbeat_interval() * 20,
             )
             .await?;
             progress.enter(CutPhase::ClusterStateApply);
@@ -460,8 +473,10 @@ impl SessionServiceImpl {
             self.inner.captured_backup_sections.retain(|key, _| {
                 key.coordination != request.coordination || key.domain != request.domain
             });
-            let expires_at =
-                Instant::now() + self.cluster_parameters().command_retry_validity() * 2 / 3;
+            // A stage waits for its coordinator to fetch it for as long as the coordinator's run
+            // lives, and at most the backup command's whole retry validity: past it, nothing can
+            // retry the command that would fetch the stage.
+            let expires_at = Instant::now() + self.cluster_parameters().command_retry_validity();
             for section in staged {
                 self.inner.captured_backup_sections.insert(
                     section.key,
@@ -564,6 +579,16 @@ impl SessionServiceImpl {
         result.map_err(project_failure)
     }
 
+    /// Releases every section `request`'s coordination staged for its domain here.
+    pub(in crate::application) fn release_staged_backup_sections(
+        &self,
+        request: &ReleaseCapturedSections,
+    ) {
+        self.inner.captured_backup_sections.retain(|key, _| {
+            key.coordination != request.coordination || key.domain != request.domain
+        });
+    }
+
     pub(crate) fn take_captured_backup_section(
         &self,
         peer: &nervix_models::ClusterNodeName,
@@ -651,7 +676,7 @@ impl SessionServiceImpl {
                                 writer: Some(writer),
                             })),
                             expires_at: Instant::now()
-                                + self.cluster_parameters().command_retry_validity() * 2 / 3,
+                                + self.cluster_parameters().command_retry_validity(),
                         },
                     );
                     Ok(())
@@ -775,36 +800,55 @@ impl SessionServiceImpl {
         result.map_err(project_failure)
     }
 
+    /// Waits until this node's Raft state machine applied `authority`'s generation, for as long as
+    /// that takes: a node that applies the leader's log slowly costs the restore latency. Only the
+    /// end of the applied revision's publisher ends the wait sooner.
     async fn wait_for_restore_installation_revision(
         &self,
         authority: &RestoreStateAuthority,
         domain: &DomainName,
     ) -> Result<(), Report<RemoteOperationFailure>> {
         let mut applied = self.inner.consensus.subscribe_applied();
-        nervix_primitives::time::timeout(self.inner.raft_timings.heartbeat_interval() * 20, async {
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                if *applied.borrow_and_update() >= authority.generation {
-                    return Ok(());
-                }
-                applied
-                    .changed()
-                    .await
-                    .map_err(|_| failed(domain, "restore installation authority is unavailable"))?;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if *applied.borrow_and_update() >= authority.generation {
+                return Ok(());
             }
-        })
-        .await
-        .map_err(|_| failed(domain, "restore installation revision has not applied"))?
+            applied
+                .changed()
+                .await
+                .map_err(|_| failed(domain, "restore installation authority is unavailable"))?;
+        }
     }
 
+    /// Releases the stages nothing can take any more: those whose coordinator's run ended, as
+    /// membership and the interconnect decide, and those past their command's retry validity.
     pub(in crate::application) fn sweep_captured_backup_sections(&self) {
         let now = Instant::now();
-        self.inner
-            .captured_backup_sections
-            .retain(|_, stage| stage.expires_at > now);
+        let local = self.inner.consensus.local_node_id();
+        self.inner.captured_backup_sections.retain(|key, stage| {
+            stage.expires_at > now && self.coordinator_run_lives(&key.coordination, local)
+        });
         self.inner
             .restored_state_uploads
-            .retain(|_, entry| entry.expires_at > now);
+            .retain(|coordination, entry| {
+                entry.expires_at > now && self.coordinator_run_lives(coordination, local)
+            });
+    }
+
+    /// Whether the run that coordinates `coordination` still lives: this node's own run, or a
+    /// peer's run the interconnect is still bound to while membership keeps its node.
+    fn coordinator_run_lives(
+        &self,
+        coordination: &nervix_models::CoordinationIdentity,
+        local: &nervix_models::ClusterNodeName,
+    ) -> bool {
+        let coordinator = coordination.coordinator();
+        if coordinator == local {
+            return true;
+        }
+        self.inner.interconnect.target_is_live(coordinator)
+            && self.inner.interconnect.peer_run(coordinator) == Some(coordination.process_epoch())
     }
 }
 
@@ -836,31 +880,23 @@ fn project_failure(report: Report<RemoteOperationFailure>) -> RemoteOperationFai
     projected
 }
 
+/// Waits until this node's Raft state machine applied `revision`, for as long as it takes; only
+/// the end of the applied revision's publisher ends the wait sooner.
 async fn wait_for_capture_revision(
     domain: &DomainName,
     revision: u64,
     mut applied: watch::Receiver<u64>,
-    budget: Duration,
 ) -> Result<(), Report<RemoteOperationFailure>> {
-    nervix_primitives::time::timeout(budget, async {
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            if *applied.borrow_and_update() >= revision {
-                return Ok(());
-            }
-            applied
-                .changed()
-                .await
-                .map_err(|_| failed(domain, "capture revision authority is unavailable"))?;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        if *applied.borrow_and_update() >= revision {
+            return Ok(());
         }
-    })
-    .await
-    .map_err(|_| {
-        failed(
-            domain,
-            "owner has not applied the cut revision within its deadline",
-        )
-    })?
+        applied
+            .changed()
+            .await
+            .map_err(|_| failed(domain, "capture revision authority is unavailable"))?;
+    }
 }
 
 #[cfg(all(test, not(feature = "loom")))]
@@ -868,7 +904,7 @@ mod section_properties;
 
 #[cfg(all(test, not(feature = "loom")))]
 mod tests {
-    use std::task::Poll;
+    use std::{task::Poll, time::Duration};
 
     use meticulous::ResultExt as _;
 
@@ -912,12 +948,7 @@ mod tests {
     async fn capture_waits_until_the_selected_revision_is_applied() {
         let domain = DomainName::parse("capture_wait").assured("domain is valid");
         let (sender, applied) = watch::channel(7);
-        let mut capture = Box::pin(wait_for_capture_revision(
-            &domain,
-            9,
-            applied,
-            nervix_consensus::RaftTimings::default().heartbeat_interval() * 20,
-        ));
+        let mut capture = Box::pin(wait_for_capture_revision(&domain, 9, applied));
         assert!(matches!(futures_util::poll!(&mut capture), Poll::Pending));
         sender.send(8).assured("capture retains its receiver");
         assert!(matches!(futures_util::poll!(&mut capture), Poll::Pending));
@@ -932,15 +963,10 @@ mod tests {
         let domain = DomainName::parse("capture_closed").assured("domain is valid");
         let (sender, applied) = watch::channel(7);
         drop(sender);
-        let failure = wait_for_capture_revision(
-            &domain,
-            9,
-            applied,
-            nervix_consensus::RaftTimings::default().heartbeat_interval() * 20,
-        )
-        .await
-        .err()
-        .assured("a closed authority cannot reach the selected revision");
+        let failure = wait_for_capture_revision(&domain, 9, applied)
+            .await
+            .err()
+            .assured("a closed authority cannot reach the selected revision");
         assert!(
             failure
                 .to_string()
@@ -948,20 +974,17 @@ mod tests {
         );
     }
 
-    #[nervix_primitives::test]
-    async fn capture_refuses_when_the_selected_revision_never_applies() {
-        let domain = DomainName::parse("capture_deadline").assured("domain is valid");
-        let (_sender, applied) = watch::channel(7);
-        let failure = wait_for_capture_revision(
-            &domain,
-            9,
-            applied,
-            nervix_consensus::RaftTimings::default().heartbeat_interval() * 20,
-        )
-        .await
-        .err()
-        .assured("an owner that does not catch up reaches its deadline");
-        assert!(failure.to_string().contains("within its deadline"));
+    #[nervix_primitives::test(start_paused = true)]
+    async fn capture_waits_for_an_owner_however_long_it_takes_to_apply_the_revision() {
+        let domain = DomainName::parse("capture_slow").assured("domain is valid");
+        let (sender, applied) = watch::channel(7);
+        let mut capture = Box::pin(wait_for_capture_revision(&domain, 9, applied));
+        nervix_primitives::time::advance(Duration::from_secs(600)).await;
+        assert!(matches!(futures_util::poll!(&mut capture), Poll::Pending));
+        sender.send(9).assured("capture retains its receiver");
+        capture
+            .await
+            .assured("a slow owner's applied revision permits capture");
     }
 
     /// A cut's pause has every live node apply the paused state before the drain's first poll, so
@@ -1015,6 +1038,94 @@ mod tests {
             }
         }
         faults.release_runtime_installation_pause(&coordinator);
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+    }
+
+    /// Stages a three-byte Kafka offsets section of `coordination` for `domain` on `service`.
+    async fn stage_kafka_offsets(
+        service: &SessionServiceImpl,
+        coordination: nervix_models::CoordinationIdentity,
+        domain: &DomainName,
+    ) -> CaptureSectionKey {
+        let artifact = service
+            .stage_captured_section(vec![1, 2, 3], domain)
+            .await
+            .assured("a three-byte section fits the staging quota");
+        let key = CaptureSectionKey {
+            coordination,
+            domain: domain.clone(),
+            path: "kafka/offsets".to_string(),
+        };
+        let stage = CapturedSectionStage {
+            artifact: Arc::new(artifact),
+            content: section_content(CapturedStateSectionKind::KafkaOffsets),
+            expires_at: Instant::now() + Duration::from_secs(3600),
+        };
+        service
+            .inner
+            .captured_backup_sections
+            .insert(key.clone(), stage);
+        key
+    }
+
+    /// A stage waits for its coordinator for as long as the coordinator's run lives: the sweep
+    /// keeps it, and the coordinator's release ends it at once when its backup ends. A stage
+    /// whose coordinator left the cluster can never be taken, so the sweep releases it.
+    #[nervix_primitives::test]
+    async fn a_stage_waits_for_its_live_coordinator_until_the_coordinator_releases_it() {
+        use nervix_recovery::Discarded as _;
+
+        use crate::application::test_fixtures::{TestService, build_test_service};
+
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        let domain = DomainName::parse("default").assured("the fixture domain name is valid");
+        let local = service
+            .inner
+            .interconnect
+            .next_coordination_identity()
+            .assured("the fixture transport issues a coordination identity");
+        let departed = nervix_models::CoordinationIdentity::new(
+            nervix_models::ClusterNodeName::parse("departed-node")
+                .assured("the fixture node name is valid"),
+            7,
+            1,
+        );
+        let local_key = stage_kafka_offsets(&service, local.clone(), &domain).await;
+        let departed_key = stage_kafka_offsets(&service, departed, &domain).await;
+
+        service.sweep_captured_backup_sections();
+        assert!(
+            service
+                .inner
+                .captured_backup_sections
+                .contains_key(&local_key),
+            "a stage whose coordinator's run lives survives the sweep"
+        );
+        assert!(
+            !service
+                .inner
+                .captured_backup_sections
+                .contains_key(&departed_key),
+            "a stage whose coordinator left the cluster is released by the sweep"
+        );
+
+        service.release_staged_backup_sections(&ReleaseCapturedSections {
+            coordination: local,
+            domain,
+        });
+        assert!(
+            !service
+                .inner
+                .captured_backup_sections
+                .contains_key(&local_key),
+            "the coordinator's release ends what its coordination staged"
+        );
         drop(service);
         drop(registry);
         std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");

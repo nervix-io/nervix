@@ -19,9 +19,7 @@
     )
 )]
 
-use nervix_interconnect::{
-    BranchCheckpointCursor, BranchCheckpointListingRequest, StateSyncRequest,
-};
+use nervix_interconnect::{BranchCheckpointCursor, BranchCheckpointListingRequest};
 use nervix_recovery::Reported as _;
 
 use super::*;
@@ -84,12 +82,7 @@ impl StateOwner for RemoteStateOwner {
         after_lsm: Option<u64>,
     ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, StateReplicationError> {
         self.runtime
-            .request_state_sync_with_deadline(
-                &self.node,
-                placement,
-                after_lsm,
-                StateSyncRequest::DEADLINE,
-            )
+            .request_state_sync_with_deadline(&self.node, placement, after_lsm, None)
             .await
     }
 
@@ -109,13 +102,12 @@ impl StateOwner for RemoteStateOwner {
             }));
         };
         let response = dispatcher
-            .request_with_timeout(
+            .request(
                 &self.node,
                 BranchCheckpointListingRequest {
                     lifecycle: lifecycle.to_remote(),
                     after,
                 },
-                dispatcher.request_deadline::<BranchCheckpointListingRequest>(),
             )
             .await
             .change_context_lazy(request_failed)?;

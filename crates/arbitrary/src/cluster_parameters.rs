@@ -64,12 +64,8 @@ impl Arbitrary<'_> {
             licensing_stream_idle_timeout: Some(parameter_duration(entropy)),
             payload_unfold_limit: Some(entropy.boundary_biased(1..=u64::from(u32::MAX))),
             remote_ack_alive_interval: Some(ack_unit * 1),
-            remote_ack_dispatch_timeout: Some(ack_unit * 1),
-            remote_ack_silence_timeout: Some(ack_unit * 10),
             remote_ack_sweep_interval: Some(ack_unit * 1),
             remote_relay_total_timeout: Some(ack_unit * 50),
-            remote_relay_instantiation_wait: Some(ack_unit * 5),
-
             password_iterations: Some(
                 entropy.boundary_biased(1..=nervix_models::PasswordIterations::MAXIMUM),
             ),
@@ -142,9 +138,6 @@ impl Arbitrary<'_> {
             retained_removals: Some(count),
             snapshot_staging_bytes: Some(count * 2),
             snapshot_bytes: Some(count),
-            snapshot_describe_timeout: Some(unit),
-            snapshot_fetch_timeout: Some(unit),
-            wasm_checkpoint_timeout: Some(unit),
             event_capacity: Some(count),
             wasm_recovery_capacity: Some(count),
             immediate_flush_minimum: Some(unit),

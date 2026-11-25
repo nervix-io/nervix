@@ -1075,10 +1075,11 @@ mod tests {
             placement: placement(),
             lsm: 4,
         };
-        let quorum = StateReplicationError::ReplicaQuorum {
+        let replication = StateReplicationError::ReplicaPlanShrunk {
             placement: placement(),
             lsm: 4,
-            required_acks: 1,
+            required: 2,
+            assigned: 1,
         };
         let refused = StateReplicationError::RemoteFailure {
             target: ClusterNodeName::parse("node-2").expect("valid name"),
@@ -1093,7 +1094,7 @@ mod tests {
             WasmLifecycleStage::LocalPersistence
         );
         assert_eq!(
-            WasmLifecycleStage::of_state_persistence(&quorum),
+            WasmLifecycleStage::of_state_persistence(&replication),
             WasmLifecycleStage::Replication
         );
         assert_eq!(

@@ -428,7 +428,7 @@ impl InferencerBranchFixture {
         let grace = runtime.branch_task_stop_timeout();
         for owner in owners {
             owner
-                .stop(grace)
+                .stop(crate::runtime::TaskStopWait::Teardown { grace })
                 .await
                 .assured("the fixture relay owner stops");
         }

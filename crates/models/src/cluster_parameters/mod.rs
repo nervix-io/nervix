@@ -93,21 +93,8 @@ pub enum ClusterParameterValueKind {
     )
 )]
 pub enum ClusterParameterError {
-    #[error(
-        "remote-ack-silence-timeout must exceed twice remote-ack-dispatch-timeout plus \
-         remote-ack-alive-interval"
-    )]
-    AckReportWindow,
-    #[error(
-        "remote-ack-sweep-interval must divide remote-ack-silence-timeout and \
-         remote-relay-total-timeout exactly"
-    )]
+    #[error("remote-ack-sweep-interval must divide remote-relay-total-timeout exactly")]
     AckSweepDivisibility,
-    #[error(
-        "remote-relay-total-timeout must cover remote-ack-dispatch-timeout and \
-         remote-relay-instantiation-wait"
-    )]
-    AckAdmissionWindow,
     #[error("{parameter} ({requested:?}) exceeds node '{node}' shutdown timeout ({available:?})")]
     NodeDeadline {
         parameter: ClusterParameterKey,
@@ -382,11 +369,8 @@ parameter_values! {
     licensing_stream_idle_timeout: LicensingStreamIdleTimeout(Duration) => Duration,
     payload_unfold_limit: PayloadUnfoldLimit(u64) => Count<u32>,
     remote_ack_alive_interval: RemoteAckAliveInterval(Duration) => Duration,
-    remote_ack_dispatch_timeout: RemoteAckDispatchTimeout(Duration) => Duration,
-    remote_ack_silence_timeout: RemoteAckSilenceTimeout(Duration) => Duration,
     remote_ack_sweep_interval: RemoteAckSweepInterval(Duration) => Duration,
     remote_relay_total_timeout: RemoteRelayTotalTimeout(Duration) => Duration,
-    remote_relay_instantiation_wait: RemoteRelayInstantiationWait(Duration) => Duration,
     node_unavailability_timeout: NodeUnavailabilityTimeout(Duration) => Duration,
     domain_drain_timeout: DomainDrainTimeout(Duration) => Duration,
     entity_gate_deadline: EntityGateDeadline(Duration) => Duration,

@@ -21,8 +21,8 @@ use nervix_models::{
 use nervix_primitives::sync::{Arc, atomic::Ordering, watch};
 
 use super::{
-    ADMISSION_SWEEPS, CLAIMS_CLOSED, DeliveryRow, REMOTE_ACK_SILENT_SWEEPS, RelayAdmissionUpdate,
-    RemoteDispatchError, RemoteDispatchRegistry,
+    ADMISSION_SWEEPS, CLAIMS_CLOSED, DeliveryRow, RelayAdmissionUpdate, RemoteDispatchError,
+    RemoteDispatchRegistry, TestMembership,
     model::{AdmissionUpdate, CorrelationModel, RecordExpectation},
 };
 use crate::runtime_ack::{AckCompletion, AckOutcome, AckProgress, AckRootTracker, AckSet};
@@ -68,6 +68,8 @@ impl RecordWitness {
 pub(super) struct CorrelationCase {
     owners: RemoteDispatchRegistry,
     model: CorrelationModel,
+    /// Which receiver runs the case ended, which the registry and the model both read.
+    membership: TestMembership,
     records: Vec<RecordWitness>,
     admissions: BTreeMap<u64, watch::Receiver<RelayAdmissionUpdate>>,
     probes: BTreeSet<u64>,
@@ -90,6 +92,7 @@ impl CorrelationCase {
         let mut case = Self {
             owners,
             model: CorrelationModel::new(capacity),
+            membership: TestMembership::default(),
             records: Vec::new(),
             admissions: BTreeMap::new(),
             probes: BTreeSet::from([0, u64::MAX]),
@@ -207,23 +210,29 @@ impl CorrelationCase {
         }
     }
 
+    /// The process epoch of one of three receiver runs, chosen by `parameter`.
+    fn receiver_run(parameter: u8) -> u64 {
+        u64::from(parameter % 3)
+    }
+
     fn admit_batch(&mut self, selection: u8, parameter: u8) {
         let first = self.model.select(selection, parameter);
         let second = self.model.select(selection ^ 8, parameter);
         // Keep both detached entries and non-record registrations in the same public bulk path.
         let foreign = self.model.select(5, parameter);
         let ids = [Some(first), None, Some(second), Some(foreign)];
+        let run = Self::receiver_run(parameter);
         let mut registrations = Vec::new();
         for id in ids {
             if let Some(id) = id {
-                self.model.admit(id);
+                self.model.admit(id, run);
                 self.probes.insert(id);
                 registrations.push(Some(Self::registration(id)));
             } else {
                 registrations.push(None);
             }
         }
-        self.owners.admit_acks(&registrations);
+        self.owners.admit_acks(&registrations, run);
     }
 
     fn memory_refusal(&mut self, parameter: u8, mask: u8) {
@@ -256,18 +265,31 @@ impl CorrelationCase {
         drop(reservation);
     }
 
-    fn sweep(&mut self, parameter: u8) {
+    /// Sweeps once or many times, after a newer run replaced a receiver run or membership removed
+    /// a receiver's node for some sweeps. However often a live run's records are swept, they never
+    /// expire.
+    fn sweep(&mut self, selection: u8, parameter: u8) {
         let count = match parameter % 6 {
             0 => 1,
-            1 => REMOTE_ACK_SILENT_SWEEPS,
-            2 => REMOTE_ACK_SILENT_SWEEPS + 1,
+            1 => {
+                self.membership
+                    .replace_run(&Self::node(selection), Self::receiver_run(parameter / 6));
+                1
+            }
+            2 => {
+                self.membership.remove_node(&Self::node(selection));
+                1
+            }
             3 => ADMISSION_SWEEPS,
             4 => ADMISSION_SWEEPS + 1,
             _ => 2,
         };
         for _ in 0..count {
-            let expected = self.model.sweep();
-            assert_eq!(self.owners.fail_silent_acks(), expected);
+            let expected = self.model.sweep(&self.membership);
+            assert_eq!(
+                self.owners.sweep_pending_acks_once(&self.membership),
+                expected
+            );
             self.assert_matches();
         }
     }
@@ -297,8 +319,9 @@ impl CorrelationCase {
             3 => self.register_admission(),
             4 => self.close_admission(id),
             5 => {
-                self.model.admit(id);
-                self.owners.admit_ack(id);
+                let run = Self::receiver_run(parameter);
+                self.model.admit(id, run);
+                self.owners.admit_ack(id, run);
             }
             6 => self.admit_batch(selection, parameter),
             7 => {
@@ -324,7 +347,7 @@ impl CorrelationCase {
                 self.model.finish(id, None);
                 self.owners.clear_ack(id);
             }
-            12 => self.sweep(parameter),
+            12 => self.sweep(selection, parameter),
             13 => assert_eq!(self.owners.holds_ack(id), self.model.holds(id)),
             14 => self.memory_refusal(parameter, mask),
             _ => self.shutdown(),
@@ -395,7 +418,7 @@ impl CorrelationCase {
                         .owners
                         .resolve_ack(*id, AckOutcome::NoAck("late refusal".to_string()))
                 );
-                self.owners.admit_ack(*id);
+                self.owners.admit_ack(*id, 0);
                 self.owners.clear_ack(*id);
             }
         }
@@ -411,8 +434,12 @@ impl CorrelationCase {
         for id in admissions {
             self.close_admission(id);
         }
-        assert!(self.model.sweep().is_empty());
-        assert!(self.owners.fail_silent_acks().is_empty());
+        assert!(self.model.sweep(&self.membership).is_empty());
+        assert!(
+            self.owners
+                .sweep_pending_acks_once(&self.membership)
+                .is_empty()
+        );
         self.assert_matches();
         if !self.model.closed {
             for side in 0..2 {

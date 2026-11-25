@@ -28,7 +28,7 @@ use nervix_models::RemoteAckTiming;
 use nervix_primitives::{
     collections::{ConcurrentQueue, PopError, PushError},
     sync::{
-        Notify,
+        CancellationToken, Notify,
         atomic::{AtomicUsize, Ordering},
         blocking::Mutex,
     },
@@ -61,7 +61,7 @@ const CLAIMS_CLOSED: usize = 1_usize << (usize::BITS - 1);
 const ROW_POSITIONS: u64 = 1 << 24;
 #[cfg(all(test, not(any(feature = "loom", feature = "shuttle"))))]
 const ADMISSION_SWEEPS: u64 =
-    REMOTE_RELAY_TOTAL_TIMEOUT.as_secs() / REMOTE_ACK_SILENCE_SWEEP_INTERVAL.as_secs();
+    REMOTE_RELAY_TOTAL_TIMEOUT.as_secs() / REMOTE_ACK_SWEEP_INTERVAL.as_secs();
 
 /// The node supplies immutable routing positions. A position owns one delivery, with independent
 /// record outcomes. Each side claims unused positions on demand and recycles returned positions
@@ -79,6 +79,10 @@ pub(super) struct RemoteDispatchRegistry {
     changed: Notify,
     sweep_epoch: Instant,
     next_sweep: Mutex<Option<Instant>>,
+    /// Cancelled once the runtime shuts this registry down. An envelope this node keeps sending
+    /// until it is delivered ends here too: while the runtime stops, membership no longer updates
+    /// the live set that would otherwise end it.
+    stopped: CancellationToken,
 }
 
 /// How storing the acknowledgement records of one delivery ended.
@@ -153,7 +157,6 @@ const _: () =
 #[derive(Clone, Copy)]
 struct SweepPolicy {
     interval_nanos: u64,
-    silence_nanos: u64,
     admission_nanos: u64,
 }
 impl SweepPolicy {
@@ -164,18 +167,83 @@ impl SweepPolicy {
         };
         Self {
             interval_nanos: nanos(timing.remote_ack_sweep_interval),
-            silence_nanos: nanos(timing.remote_ack_silence_timeout),
             admission_nanos: nanos(timing.remote_relay_total_timeout),
         }
     }
     fn interval(self) -> std::time::Duration {
         std::time::Duration::from_nanos(self.interval_nanos)
     }
-    fn silent_sweeps(self) -> u64 {
-        self.silence_nanos / self.interval_nanos
-    }
     fn admission_sweeps(self) -> u64 {
         self.admission_nanos / self.interval_nanos
+    }
+}
+
+/// Where a receiver run that admitted a forwarded record stands, as membership and the transport's
+/// connections to its node decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReceiverRunStanding {
+    /// Membership keeps the receiver's node, and its connections still bind this run.
+    Live,
+    /// Membership no longer lists the receiver's node as live.
+    Left,
+    /// A connection bound a newer run of the receiver's node, which holds none of this run's
+    /// acknowledgements.
+    Replaced,
+}
+
+/// How a registering node learns whether the receiver run its admitted acknowledgements wait for
+/// still lives. Liveness and membership decide it beneath every exchange; the registering node
+/// only reads their decision.
+pub(super) trait ReceiverMembership {
+    /// Where `receiver`'s run with process epoch `run` stands.
+    fn standing(&self, receiver: &ClusterNodeName, run: u64) -> ReceiverRunStanding;
+}
+
+/// A membership view a test drives: every receiver run lives until the test ends that run or
+/// removes its node.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct TestMembership {
+    ended: Mutex<BTreeSet<(ClusterNodeName, u64)>>,
+    left: Mutex<BTreeSet<ClusterNodeName>>,
+}
+
+#[cfg(test)]
+impl TestMembership {
+    /// A newer run of `node` replaces its run with process epoch `run`.
+    pub(super) fn replace_run(&self, node: &ClusterNodeName, run: u64) {
+        self.ended.lock().insert((node.clone(), run));
+    }
+
+    /// Membership no longer lists `node` as live.
+    pub(super) fn remove_node(&self, node: &ClusterNodeName) {
+        self.left.lock().insert(node.clone());
+    }
+}
+
+#[cfg(test)]
+impl ReceiverMembership for TestMembership {
+    fn standing(&self, receiver: &ClusterNodeName, run: u64) -> ReceiverRunStanding {
+        if self.left.lock().contains(receiver) {
+            return ReceiverRunStanding::Left;
+        }
+        if self.ended.lock().contains(&(receiver.clone(), run)) {
+            return ReceiverRunStanding::Replaced;
+        }
+        ReceiverRunStanding::Live
+    }
+}
+
+impl ReceiverMembership for Transport {
+    fn standing(&self, receiver: &ClusterNodeName, run: u64) -> ReceiverRunStanding {
+        if !self.target_is_live(receiver) {
+            return ReceiverRunStanding::Left;
+        }
+        match self.peer_run(receiver) {
+            Some(current) if current == run => ReceiverRunStanding::Live,
+            Some(_) => ReceiverRunStanding::Replaced,
+            None => ReceiverRunStanding::Left,
+        }
     }
 }
 
@@ -257,8 +325,22 @@ struct PendingRemoteAck {
 }
 
 enum RemoteAckPhase {
-    AwaitingAdmission { sweeps: u64 },
-    Admitted { silent_sweeps: u64 },
+    AwaitingAdmission {
+        sweeps: u64,
+    },
+    /// The receiver run with process epoch `receiver_run` admitted the record and holds its
+    /// acknowledgement for as long as that run lives.
+    Admitted {
+        receiver_run: u64,
+    },
+}
+
+/// Why a registering node gave a pending acknowledgement up.
+enum RemoteAckExpiry {
+    /// The record's delivery reported no admission within its admission bound.
+    AdmissionBound,
+    /// The run that admitted the record ended as `ReceiverRunStanding` says.
+    ReceiverRun(ReceiverRunStanding),
 }
 
 impl PendingRemoteAck {
@@ -273,9 +355,6 @@ impl PendingRemoteAck {
     }
 
     fn report(&mut self) {
-        if let RemoteAckPhase::Admitted { silent_sweeps } = &mut self.phase {
-            *silent_sweeps = 0;
-        }
         self.acks.ack_alive();
     }
 
@@ -293,34 +372,49 @@ impl PendingRemoteAck {
         }
     }
 
-    fn swept(&mut self, timing: SweepPolicy) -> bool {
+    /// Counts one sweep of this record, and whether the record is given up: a delivery that never
+    /// reported its admission within its admission bound, or a receiver run that ended. A record
+    /// whose receiver run lives is never given up, however long it reports nothing.
+    fn swept(
+        &mut self,
+        timing: SweepPolicy,
+        membership: &impl ReceiverMembership,
+    ) -> Option<RemoteAckExpiry> {
         match &mut self.phase {
             RemoteAckPhase::AwaitingAdmission { sweeps } => {
                 *sweeps = sweeps
                     .checked_add(1)
                     .assured("admission sweeps end at the finite admission bound");
-                *sweeps > timing.admission_sweeps()
+                (*sweeps > timing.admission_sweeps()).then_some(RemoteAckExpiry::AdmissionBound)
             }
-            RemoteAckPhase::Admitted { silent_sweeps } => {
-                *silent_sweeps = silent_sweeps
-                    .checked_add(1)
-                    .assured("silence sweeps end at the finite silence bound");
-                *silent_sweeps > timing.silent_sweeps()
+            RemoteAckPhase::Admitted { receiver_run } => {
+                match membership.standing(&self.receiver, *receiver_run) {
+                    ReceiverRunStanding::Live => None,
+                    ended @ (ReceiverRunStanding::Left | ReceiverRunStanding::Replaced) => {
+                        Some(RemoteAckExpiry::ReceiverRun(ended))
+                    }
+                }
             }
         }
     }
 
-    fn expiration_reason(&self, timing: SweepPolicy) -> String {
-        match self.phase {
-            RemoteAckPhase::AwaitingAdmission { .. } => format!(
+    fn expiration_reason(&self, expiry: &RemoteAckExpiry, timing: SweepPolicy) -> String {
+        match expiry {
+            RemoteAckExpiry::AdmissionBound => format!(
                 "node '{}' did not admit the forwarded record within {}",
                 self.receiver,
                 humantime::format_duration(std::time::Duration::from_nanos(timing.admission_nanos))
             ),
-            RemoteAckPhase::Admitted { .. } => format!(
-                "node '{}' reported nothing about the forwarded record for {}",
-                self.receiver,
-                humantime::format_duration(std::time::Duration::from_nanos(timing.silence_nanos))
+            RemoteAckExpiry::ReceiverRun(ReceiverRunStanding::Left) => format!(
+                "node '{}' left the cluster before it acknowledged the forwarded record",
+                self.receiver
+            ),
+            RemoteAckExpiry::ReceiverRun(
+                ReceiverRunStanding::Replaced | ReceiverRunStanding::Live,
+            ) => format!(
+                "the run of node '{}' that admitted the forwarded record ended before it \
+                 acknowledged the record",
+                self.receiver
             ),
         }
     }
@@ -376,8 +470,14 @@ impl RemoteDispatchRegistry {
             changed: Notify::new(),
             sweep_epoch: Instant::now(),
             next_sweep: Mutex::new(None),
+            stopped: CancellationToken::new(),
             executor,
         }
+    }
+
+    /// Resolves once the runtime has shut this registry down.
+    pub(super) async fn stopped(&self) {
+        self.stopped.cancelled().await;
     }
 
     fn register(
@@ -608,7 +708,7 @@ impl RemoteDispatchRegistry {
             remaining,
             _memory: memory,
         }))?;
-        SilenceSweeps::watching(&self.changed, &self.next_sweep).announce(next_sweep);
+        PendingAckSweeps::watching(&self.changed, &self.next_sweep).announce(next_sweep);
         for id in registrations.iter_mut().flatten() {
             *id = base
                 .checked_add(*id)
@@ -628,7 +728,7 @@ impl RemoteDispatchRegistry {
             self.timing().remote_ack_sweep_interval,
         );
         let id = self.register(RemoteCorrelationState::Admission(sender))?;
-        SilenceSweeps::watching(&self.changed, &self.next_sweep).announce(next_sweep);
+        PendingAckSweeps::watching(&self.changed, &self.next_sweep).announce(next_sweep);
         Ok((id, receiver))
     }
 
@@ -665,7 +765,8 @@ impl RemoteDispatchRegistry {
         records.rows.get_mut(row)?.as_mut()
     }
 
-    pub(super) fn admit_ack(&self, id: u64) {
+    /// Records that the receiver run with process epoch `receiver_run` admitted the record `id`.
+    pub(super) fn admit_ack(&self, id: u64, receiver_run: u64) {
         let mut slot = self.slots[self.position(id)].lock();
         if let CorrelationSlot::Open {
             correlation: Some(correlation),
@@ -674,13 +775,17 @@ impl RemoteDispatchRegistry {
             && let Some(pending) = Self::record_mut(correlation, id)
             && matches!(pending.phase, RemoteAckPhase::AwaitingAdmission { .. })
         {
-            pending.phase = RemoteAckPhase::Admitted { silent_sweeps: 0 };
+            pending.phase = RemoteAckPhase::Admitted { receiver_run };
         }
     }
 
-    pub(super) fn admit_acks(&self, registrations: &[Option<RemoteAckRegistration>]) {
+    pub(super) fn admit_acks(
+        &self,
+        registrations: &[Option<RemoteAckRegistration>],
+        receiver_run: u64,
+    ) {
         for registration in registrations.iter().flatten() {
-            self.admit_ack(registration.ack_id);
+            self.admit_ack(registration.ack_id, receiver_run);
         }
     }
 
@@ -843,13 +948,13 @@ impl RemoteDispatchRegistry {
         (0..claims.deliveries).chain(self.delivery_capacity..admission_end)
     }
 
-    /// The positions one silence sweep visits: those a side has claimed so far.
+    /// The positions one sweep of pending acknowledgements visits: those a side has claimed so far.
     ///
     /// A position no registrar has claimed has never held a correlation, so a sweep takes no guard
     /// for it: a node that forwards nothing sweeps nothing, however many positions it was built
     /// with. The counts bound the scan and order nothing: the slot guard publishes a correlation,
     /// and no reader relies on a sweep having observed a claim. A first claim these loads do not
-    /// observe registers beside this sweep, and its silence is counted from the first sweep that
+    /// observe registers beside this sweep, and its sweeps are counted from the first sweep that
     /// finds it under its guard.
     fn swept_positions(&self) -> ClaimedPositions {
         let claims = FirstClaims {
@@ -871,11 +976,15 @@ impl RemoteDispatchRegistry {
         during()
     }
 
+    /// Sweeps once now, as the sweep task does at a due deadline, under `membership`.
     #[cfg(test)]
-    pub(super) fn fail_silent_acks(&self) -> BTreeMap<ClusterNodeName, usize> {
+    pub(super) fn sweep_pending_acks_once(
+        &self,
+        membership: &impl ReceiverMembership,
+    ) -> BTreeMap<ClusterNodeName, usize> {
         let mut failed = BTreeMap::new();
-        SilenceSweeps::watching(&self.changed, &self.next_sweep).sweep_once(|| {
-            let (outcomes, next) = self.sweep_acks(None);
+        PendingAckSweeps::watching(&self.changed, &self.next_sweep).sweep_once(|| {
+            let (outcomes, next) = self.sweep_acks(None, membership);
             failed = outcomes;
             next
         });
@@ -883,7 +992,8 @@ impl RemoteDispatchRegistry {
     }
 
     /// Count at most one sweep per delivery, even when its timer runs late. Deliveries sharing
-    /// an interval use the same phase, and each keeps the report window it captured.
+    /// an interval use the same phase. A record whose delivery was admitted is given up only once
+    /// `membership` says the receiver run that admitted it ended.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the delivery owns the bounded row iterator; each step only \
@@ -892,6 +1002,7 @@ impl RemoteDispatchRegistry {
     fn sweep_acks(
         &self,
         now: Option<Instant>,
+        membership: &impl ReceiverMembership,
     ) -> (BTreeMap<ClusterNodeName, usize>, Option<Instant>) {
         let mut failed = BTreeMap::new();
         let mut next_sweep: Option<Instant> = None;
@@ -926,12 +1037,12 @@ impl RemoteDispatchRegistry {
                     let delivery_next = *delivery_next;
                     for row in records.rows.iter_mut() {
                         if let Some(pending) = row
-                            && pending.swept(timing)
+                            && let Some(expiry) = pending.swept(timing, membership)
                         {
                             let pending = row
                                 .take()
                                 .verified("the swept row was present under the owner guard");
-                            let reason = pending.expiration_reason(timing);
+                            let reason = pending.expiration_reason(&expiry, timing);
                             expired.push((pending, reason));
                             records.remaining = records
                                 .remaining
@@ -979,12 +1090,13 @@ impl RemoteDispatchRegistry {
         (failed, next_sweep)
     }
 
-    /// Sleep until the earliest retained delivery's next sweep. Register for new work before
-    /// scanning, so an arrival cannot be missed between an empty scan and waiting. Idle registries
-    /// require no periodic scan. Every completed scan yields before it can scan again.
-    pub(super) async fn sweep_silent_acks(&self) {
-        SilenceSweeps::watching(&self.changed, &self.next_sweep).run(|| {
-            let (failed, next) = self.sweep_acks(Some(Instant::now()));
+    /// Sleep until the earliest retained delivery's next sweep, and apply `membership` and the
+    /// admission bound then. Register for new work before scanning, so an arrival cannot be missed
+    /// between an empty scan and waiting. Idle registries require no periodic scan. Every
+    /// completed scan yields before it can scan again.
+    pub(super) async fn sweep_pending_acks(&self, membership: &impl ReceiverMembership) {
+        PendingAckSweeps::watching(&self.changed, &self.next_sweep).run(|| {
+            let (failed, next) = self.sweep_acks(Some(Instant::now()), membership);
             for (receiver, acknowledgements) in failed {
                 warn!(target_node = %receiver, acknowledgements, "remote record acknowledgement owner expired");
             }
@@ -1000,6 +1112,7 @@ impl RemoteDispatchRegistry {
         )
     )]
     pub(super) fn shutdown(&self) {
+        self.stopped.cancel();
         // Seal first claims before choosing the scan bounds. A claim won before either seal is
         // included even when its registrar has not reached the slot yet: the slot guard then
         // decides whether registration or shutdown owns its final state.
@@ -1047,11 +1160,11 @@ impl Drop for RemoteDispatchRegistry {
 }
 
 /// The production sweep driver, shared by runtime and cancellation checks.
-pub(super) struct SilenceSweeps<'a> {
+pub(super) struct PendingAckSweeps<'a> {
     changed: &'a Notify,
     next: &'a Mutex<Option<Instant>>,
 }
-impl<'a> SilenceSweeps<'a> {
+impl<'a> PendingAckSweeps<'a> {
     pub(super) fn watching(changed: &'a Notify, next: &'a Mutex<Option<Instant>>) -> Self {
         Self { changed, next }
     }
@@ -1150,7 +1263,4 @@ mod properties;
 mod tests;
 
 #[cfg(all(test, not(any(feature = "loom", feature = "shuttle"))))]
-use super::remote_dispatch::{
-    REMOTE_ACK_SILENCE_SWEEP_INTERVAL, REMOTE_ACK_SILENCE_TIMEOUT, REMOTE_ACK_SILENT_SWEEPS,
-    REMOTE_RELAY_TOTAL_TIMEOUT,
-};
+use super::remote_dispatch::{REMOTE_ACK_SWEEP_INTERVAL, REMOTE_RELAY_TOTAL_TIMEOUT};

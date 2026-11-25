@@ -182,7 +182,7 @@ describe_spec() {
     "${verify}" describe --transcript "${output%.json}.txt" --node "${node}" --output "${output}"
 }
 
-parameters_before='{"node-unavailability-timeout":"10s","state-snapshot-interval":"30s","replica-count":"0","command-retry-validity":"15m","remote-ack-alive-interval":"100ms","remote-ack-silence-timeout":"15s","tls-cipher-suites":"('"'"'TLS13_AES_128_GCM_SHA256'"'"', '"'"'TLS13_AES_256_GCM_SHA384'"'"')"}'
+parameters_before='{"node-unavailability-timeout":"10s","state-snapshot-interval":"30s","replica-count":"0","command-retry-validity":"15m","remote-ack-alive-interval":"100ms","remote-relay-total-timeout":"5m","tls-cipher-suites":"('"'"'TLS13_AES_128_GCM_SHA256'"'"', '"'"'TLS13_AES_256_GCM_SHA384'"'"')"}'
 # The settled cluster before a roll: every node claims the deployment's relay bound.
 settled_spec="$(jq -nc --argjson parameters "${parameters_before}" '
     {leader: "node-1", revision: 2, parameters: $parameters,
@@ -271,19 +271,19 @@ expect_rejected 'answering nodes that disagree on an incarnation' 'disagree on t
     "${verify}" claims --expect node-1=33554432 --expect node-2=33554432 --expect node-3=33554432 \
     --output "${tmp_dir}/claims.json" "${tmp_dir}/settled-node-1.json" "${tmp_dir}/mixed-node-2.json"
 
-# A committed change: revision 3 raises the unavailability timeout and the remote ACK window, and
+# A committed change: revision 3 raises the unavailability timeout and the remote delivery bound, and
 # every node runs it with the liveness that timeout derives.
 changed_spec="$(jq -c '.revision = 3
     | .parameters["node-unavailability-timeout"] = "20s"
     | .parameters["remote-ack-alive-interval"] = "200ms"
-    | .parameters["remote-ack-silence-timeout"] = "20s"
+    | .parameters["remote-relay-total-timeout"] = "10m"
     | .running = {"node-1": 3, "node-2": 3, "node-3": 3}
     | .nodes |= map_values(.liveness = "ping-interval=10s ping-timeout=5s probe-timeout=2s")' <<<"${settled_spec}")"
 for node in node-1 node-2 node-3; do
     describe_spec "${node}" "${changed_spec}" "${tmp_dir}/changed-${node}.json"
 done
 changed_expectations=(--expect node-unavailability-timeout=20s --expect remote-ack-alive-interval=200ms
-    --expect remote-ack-silence-timeout=20s --liveness 'ping-interval=10s ping-timeout=5s probe-timeout=2s')
+    --expect remote-relay-total-timeout=10m --liveness 'ping-interval=10s ping-timeout=5s probe-timeout=2s')
 expect_accepted 'every node running the committed change' \
     "${verify}" installed --before "${tmp_dir}/settled-node-1.json" "${changed_expectations[@]}" \
     --output "${tmp_dir}/installed.json" "${tmp_dir}"/changed-node-*.json

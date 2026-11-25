@@ -5877,6 +5877,27 @@ fn snapshot_chunk_bytes(limits: &nervix_execution::OperationLimits) -> usize {
         .assured("a configured bulk chunk fits the address space it is buffered in")
 }
 
+/// The deadline a Raft RPC carries: a timer the Raft protocol defines, through OpenRaft's RPC
+/// options and this node's Raft settings, rather than one the transport imposes.
+pub(crate) fn raft_deadline(timeout: Duration) -> nervix_interconnect::ExchangeDeadline {
+    nervix_interconnect::ExchangeDeadline::Protocol(
+        Instant::now()
+            .checked_add(timeout)
+            .assured("a Raft RPC's validated timer fits the monotonic clock"),
+    )
+}
+
+/// The teardown ceiling a test passes to `Transport::shutdown`: the streams a test still holds
+/// open are closed at most this long after it stops the transport.
+#[cfg(test)]
+pub(crate) fn test_teardown_ceiling() -> Option<nervix_interconnect::ExchangeDeadline> {
+    Some(nervix_interconnect::ExchangeDeadline::OperationCeiling(
+        Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .assured("a ten-second teardown ceiling fits the monotonic clock"),
+    ))
+}
+
 fn snapshot_request_timeout(deadline: Instant) -> io::Result<Duration> {
     let remaining = deadline
         .checked_duration_since(Instant::now())
@@ -5917,14 +5938,14 @@ where
             let mapping_input = {
                 let mapping_input = self
                     .interconnect
-                    .request_with_timeout(
+                    .request_by(
                         &self.target,
                         wire::HeartbeatRequest(record),
-                        replication::append_request_deadline(
+                        raft_deadline(replication::append_request_deadline(
                             &option,
                             self.append_path,
                             *self.operations.append_idle_bound.value(),
-                        ),
+                        )),
                     )
                     .await
                     .map_err(io_error);
@@ -6003,10 +6024,10 @@ where
         let response = {
             let mapping_input = self
                 .interconnect
-                .request_with_timeout(
+                .request_by(
                     &self.target,
                     wire::RequestVote(wire::VoteRequestRecord::from_request(rpc)),
-                    rpc_timeout,
+                    raft_deadline(rpc_timeout),
                 )
                 .await;
             tracing::debug!(
@@ -6052,10 +6073,10 @@ where
         let response = {
             let mapping_input = self
                 .interconnect
-                .request_with_timeout(
+                .request_by(
                     &self.target,
                     wire::RequestPreVote(wire::VoteRequestRecord::from_request(rpc)),
-                    rpc_timeout,
+                    raft_deadline(rpc_timeout),
                 )
                 .await;
             tracing::debug!(
@@ -6131,7 +6152,7 @@ where
                 let mapping_input = {
                     let mapping_input = self
                         .interconnect
-                        .request_with_timeout(
+                        .request_by(
                             &self.target,
                             wire::BeginSnapshotTransfer::from_parts(
                                 transfer_id,
@@ -6140,7 +6161,9 @@ where
                                 manifest.section_count,
                                 manifest.total_bytes,
                             ),
-                            snapshot_request_timeout(deadline).map_err(unreachable_err)?,
+                            raft_deadline(
+                                snapshot_request_timeout(deadline).map_err(unreachable_err)?,
+                            ),
                         )
                         .await
                         .map_err(io_error);
@@ -6171,7 +6194,7 @@ where
                         let mapping_input = {
                             let mapping_input = self
                                 .interconnect
-                                .request_with_timeout(
+                                .request_by(
                                     &self.target,
                                     wire::SnapshotChunk {
                                         transfer_id,
@@ -6180,7 +6203,10 @@ where
                                         offset,
                                         bytes: chunk.to_vec(),
                                     },
-                                    snapshot_request_timeout(deadline).map_err(unreachable_err)?,
+                                    raft_deadline(
+                                        snapshot_request_timeout(deadline)
+                                            .map_err(unreachable_err)?,
+                                    ),
                                 )
                                 .await
                                 .map_err(io_error);
@@ -6207,10 +6233,12 @@ where
                 let response = {
                     let mapping_input = self
                         .interconnect
-                        .request_with_timeout(
+                        .request_by(
                             &self.target,
                             wire::FinishSnapshotTransfer { transfer_id },
-                            snapshot_request_timeout(deadline).map_err(unreachable_err)?,
+                            raft_deadline(
+                                snapshot_request_timeout(deadline).map_err(unreachable_err)?,
+                            ),
                         )
                         .await
                         .map_err(io_error);
@@ -6245,10 +6273,10 @@ where
         let response = {
             let mapping_input = self
                 .interconnect
-                .request_with_timeout(
+                .request_by(
                     &self.target,
                     wire::TransferLeadership::from_request(req),
-                    rpc_timeout,
+                    raft_deadline(rpc_timeout),
                 )
                 .await
                 .map_err(io_error);

@@ -508,7 +508,7 @@ use endpoint_route_table::{EndpointBinding, EndpointIntakeRoute, EndpointIntakeR
 use entity_gate::{
     ActiveDomainAlter, BranchQuiesceGauges, DomainActivityGuard, EntityGateOperation,
     EntityGateTasks, NodeQuiesceCounters, NodeQuiesceWorkGuard, OutputBufferQuiesceGauge,
-    OwnershipHandoffFreezeState, OwnershipHandoffFreezeWatch,
+    OwnershipHandoffFreezeState, OwnershipHandoffFreezeWatch, TaskStopWait,
 };
 pub(crate) use entrypoint_routes::EntrypointBindingError;
 use entrypoint_routes::{
@@ -662,7 +662,6 @@ use relay_interaction::{
     RelayInteraction, RelayInteractionCommand, RelayInteractionEvent, RelayInteractionInput,
 };
 use relay_processor_node::RelayProcessorError;
-use relay_send_attempts::GrantCapacityRefusals;
 use relay_state_task::{RelayStateTask, RelayStateTaskSpec};
 use relay_transit::{
     RelayAdmissions, RelayOwnerAdmission, RelayOwnerBatchCompletion, RelayRoutedAdmission,

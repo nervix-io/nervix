@@ -52,15 +52,15 @@ parameter_return_liveness='ping-interval=7s 500ms ping-timeout=3s 750ms probe-ti
 parameter_return_seed='NERVIX_NODE_UNAVAILABILITY_TIMEOUT=10s'
 parameter_return_seed_parameter=node-unavailability-timeout
 # The two changes applied under load: the first raises the unavailability timeout every connection's
-# liveness derives from and widens the reporting window of every remote delivery, and the second
+# liveness derives from and extends the admission bound of every remote delivery, and the second
 # restores the deployment's values. Each liveness is what its timeout derives.
 parameter_live_statements=(
-    'ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 20s, REMOTE_ACK_ALIVE_INTERVAL = 200ms, REMOTE_ACK_SILENCE_TIMEOUT = 20s;'
-    'ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 10s, REMOTE_ACK_ALIVE_INTERVAL = 100ms, REMOTE_ACK_SILENCE_TIMEOUT = 15s;'
+    'ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 20s, REMOTE_ACK_ALIVE_INTERVAL = 200ms, REMOTE_RELAY_TOTAL_TIMEOUT = 10m;'
+    'ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 10s, REMOTE_ACK_ALIVE_INTERVAL = 100ms, REMOTE_RELAY_TOTAL_TIMEOUT = 5m;'
 )
 parameter_live_assignments=(
-    'node-unavailability-timeout=20s remote-ack-alive-interval=200ms remote-ack-silence-timeout=20s'
-    'node-unavailability-timeout=10s remote-ack-alive-interval=100ms remote-ack-silence-timeout=15s'
+    'node-unavailability-timeout=20s remote-ack-alive-interval=200ms remote-relay-total-timeout=10m'
+    'node-unavailability-timeout=10s remote-ack-alive-interval=100ms remote-relay-total-timeout=5m'
 )
 parameter_live_liveness=(
     'ping-interval=10s ping-timeout=5s probe-timeout=2s'

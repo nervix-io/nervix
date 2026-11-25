@@ -708,8 +708,8 @@ The monotonic timer is an implementation mechanism for waiting; the due predicat
 domain's logical coordinate. Lifecycle changes are checked after every wake. Cancellation is a
 separate typed outcome rather than a clock read.
 
-Reset coordination and its ninety-second initial-checkpoint deadline are physical, monotonic bounds.
-They do not wait for, pause, or re-anchor logical time. A reset that fails before generation
+Reset coordination and its initial checkpoint wait on the physical, monotonic clock, with no
+deadline of their own. They do not wait for, pause, or re-anchor logical time. A reset that fails before generation
 publication restores the old branch instance with its existing logical deadlines. After generation
 publication, recovery completes the fresh lifetime and never recreates the old instance or its
 timers.

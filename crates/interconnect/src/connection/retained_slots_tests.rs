@@ -77,8 +77,14 @@ async fn withdrawal_ends_shared_dial_slots_and_preserves_a_recreated_pool() {
                 .all(|slot| !slot.cancel.is_cancelled())
         );
     }
-    fixture.transport_a.shutdown().await;
-    fixture.transport_b.shutdown().await;
+    fixture
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    fixture
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 #[test]

@@ -50,7 +50,10 @@ async fn runtime_report_chain_detached_relay_delivery_log() {
         .remote_dispatcher
         .load_full()
         .assured("the loopback cluster installs its dispatcher");
-    dispatcher.interconnect.shutdown().await;
+    dispatcher
+        .interconnect
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+        .await;
     let services = RelayBoundaryServices::new(
         RelayBoundaryFanout::direct_with_capacity(NonZeroUsize::MIN),
         0,
@@ -100,7 +103,9 @@ async fn relay_task_stops_classify_join_failures_by_task_kind() {
         commands,
     };
     let state_error = state
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect_err("a panicked state task must fail its stop");
     assert!(matches!(
@@ -117,7 +122,9 @@ async fn relay_task_stops_classify_join_failures_by_task_kind() {
         task: nervix_primitives::task::spawn(async { panic!("owner task fixture failed") }),
     };
     let owner_error = owner
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect_err("a panicked owner task must fail its stop");
     assert!(matches!(
@@ -141,7 +148,7 @@ async fn relay_task_stops_classify_drain_timeouts_by_task_kind() {
         commands,
     };
     let state_error = state
-        .stop(grace)
+        .stop(crate::runtime::TaskStopWait::Teardown { grace })
         .await
         .expect_err("a state task that ignores shutdown must time out");
     assert!(matches!(
@@ -158,7 +165,7 @@ async fn relay_task_stops_classify_drain_timeouts_by_task_kind() {
         task: nervix_primitives::task::spawn(std::future::pending()),
     };
     let owner_error = owner
-        .stop(grace)
+        .stop(crate::runtime::TaskStopWait::Teardown { grace })
         .await
         .expect_err("an owner task that ignores shutdown must time out");
     assert!(matches!(
@@ -322,7 +329,9 @@ async fn relay_dispatch_detaches_subscription_delivery_from_ack_chain() {
     );
     drop(subscription_batch);
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 }
@@ -375,7 +384,9 @@ async fn relay_dispatch_detaches_detached_runtime_consumers_from_ack_chain() {
         AckOutcome::Ack
     );
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 }
@@ -438,7 +449,9 @@ async fn relay_runtime_consumer_broadcast_fans_out_to_multiple_attached_receiver
         AckOutcome::Ack
     );
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 }
@@ -526,7 +539,9 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
         AckOutcome::Ack
     );
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 }
@@ -957,7 +972,9 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
         "materialized reads observe the owner's presence through the relay's state placement"
     );
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should drain");
 }
@@ -1120,7 +1137,9 @@ async fn a_delivery_held_for_its_acknowledgement_watches_reaches_its_relay_once_
     .await
     .expect("the relay owner observes the delivered branch");
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should drain");
     owner.runtime.shutdown().await;
@@ -1668,7 +1687,9 @@ async fn relay_owner_enforces_branch_capacity_across_batches() {
     .await
     .expect("relay owner should evict the least-recently-used branch");
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 }
@@ -1739,7 +1760,9 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
     .await
     .expect("relay owner should expire idle branch presence");
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 }
@@ -1845,7 +1868,9 @@ async fn relay_owner_expiry_retires_only_its_own_channels_for_the_branch_key() {
     .await
     .expect("the relay owner should retire its own channel when the branch expires");
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 
@@ -1889,7 +1914,9 @@ async fn relay_owner_lru_eviction_retires_only_its_own_channels_for_the_branch_k
     .await
     .expect("the relay owner should retire its own channel when it evicts the branch");
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 
@@ -2047,7 +2074,9 @@ async fn an_established_relay_branch_publishes_its_presence_once_across_successi
         "batches for an established branch must leave its published presence untouched"
     );
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
     assert!(!services.holds_branch(&acme));
@@ -2100,7 +2129,9 @@ async fn a_successor_owner_starts_from_an_empty_presence_after_its_predecessor_w
     assert!(presence.contains(beta.as_ref()));
     assert!(!presence.contains(acme.as_ref()));
     successor
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 }
@@ -2138,7 +2169,9 @@ async fn an_ending_predecessor_owner_cannot_clear_its_successors_presence() {
         .expect("a whole relay schedules its single unit");
     fan_out_through_owner(&successor_services, &beta).await;
     predecessor
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("the predecessor drains and ends");
 
@@ -2148,7 +2181,9 @@ async fn an_ending_predecessor_owner_cannot_clear_its_successors_presence() {
     );
     assert!(!presence.contains(acme.as_ref()));
     successor
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
     assert!(!presence.contains(beta.as_ref()));
@@ -2216,9 +2251,11 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
             .expect("materialized batch should queue");
     }
 
-    task.stop(Duration::from_secs(1))
-        .await
-        .expect("relay state task should drain before the shutdown deadline");
+    task.stop(crate::runtime::TaskStopWait::Teardown {
+        grace: Duration::from_secs(1),
+    })
+    .await
+    .expect("relay state task should drain before the shutdown deadline");
 
     assert!(read.record(&acme).is_some());
     assert!(read.record(&beta).is_some());

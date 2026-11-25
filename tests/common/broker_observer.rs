@@ -1,8 +1,9 @@
 //! Messages and bounded reads a scenario observes at a broker destination.
 //!
 //! Layer: test harness.
-//! - **Owns.** Broker messages, one destination's ordered delivery stream, bounded sequence and
-//!   header assertions, cancellation of a forwarding task, and client receipt diagnostics.
+//! - **Owns.** Broker messages, one destination's ordered delivery stream, the readiness probe
+//!   copies its reads pass over, bounded sequence and header assertions, cancellation of a
+//!   forwarding task, and client receipt diagnostics.
 //! - **Depends on.** The NATS observer, channels, runtime tasks and monotonic timers.
 //! - **Must not know.** Cluster lifecycle, connector execution or how a scenario produces output.
 
@@ -10,10 +11,11 @@ use std::{future::Future, io, time::Duration};
 
 use arch_into::ArchInto as _;
 use async_nats::Message as NatsMessage;
+use meticulous::OptionExt as _;
 use nervix_primitives::{
     sync::mpsc,
     task::{AbortOnDropHandle, JoinHandle},
-    time::{Instant, timeout},
+    time::{Instant, timeout_at},
 };
 
 use super::nats_observer::NatsObserver;
@@ -140,6 +142,64 @@ impl BrokerMessage {
 #[derive(Debug)]
 pub(crate) struct BrokerObserver {
     deliveries: ObservedDeliveries,
+    /// Copies of readiness probes still on their way, which no read returns.
+    probe_copies: ProbeCopies,
+}
+
+/// The copies of readiness probe payloads that may still reach the broker.
+///
+/// A readiness probe posts one payload again and again until a copy reaches the broker. Every post
+/// the endpoint accepted is a record the cluster keeps until it delivers it, so a copy accepted
+/// while the route was still being prepared arrives after the probe saw its first one, rather than
+/// never. Those copies are the probe's own: reads after it pass over at most as many copies as it
+/// had accepted beyond the one it saw, so a later step reads what the scenario did next, and a copy
+/// beyond that count still reaches it.
+#[derive(Debug, Default)]
+struct ProbeCopies {
+    /// One entry for each readiness probe the scenario ran whose copies have not all arrived, a
+    /// handful at most, so a read compares its payload with each of them in turn.
+    pending: Vec<PendingProbeCopies>,
+}
+
+/// One readiness probe's copies still on their way.
+#[derive(Debug)]
+struct PendingProbeCopies {
+    /// The probe's payload, which every copy contains.
+    payload: String,
+    /// How many accepted copies have not arrived yet, never zero.
+    remaining: usize,
+}
+
+impl ProbeCopies {
+    fn expect(&mut self, payload: &str, copies: usize) {
+        if copies == 0 {
+            return;
+        }
+        self.pending.push(PendingProbeCopies {
+            payload: payload.trim().to_owned(),
+            remaining: copies,
+        });
+    }
+
+    /// Whether `payload` is a copy of a probe still on its way, which it then counts as arrived.
+    fn take(&mut self, payload: &str) -> bool {
+        let Some(position) = self
+            .pending
+            .iter()
+            .position(|probe| payload.contains(probe.payload.as_str()))
+        else {
+            return false;
+        };
+        let remaining = self.pending[position].remaining.checked_sub(1).assured(
+            "an entry leaves the pending list when its last copy arrives, so it holds one",
+        );
+        if remaining == 0 {
+            self.pending.swap_remove(position);
+        } else {
+            self.pending[position].remaining = remaining;
+        }
+        true
+    }
 }
 
 /// Where an observer takes the messages its broker delivered from.
@@ -172,13 +232,21 @@ impl BrokerObserver {
                 messages,
                 _reader: AbortOnDropHandle::new(reader),
             },
+            probe_copies: ProbeCopies::default(),
         }
     }
 
     pub(crate) fn nats(observer: NatsObserver) -> Self {
         Self {
             deliveries: ObservedDeliveries::Nats(observer),
+            probe_copies: ProbeCopies::default(),
         }
+    }
+
+    /// Passes over up to `copies` later copies of `payload`, a readiness probe's payload, in every
+    /// read after this one: the copies the probe's endpoint accepted beyond the one it saw arrive.
+    pub(crate) fn expect_probe_copies(&mut self, payload: &str, copies: usize) {
+        self.probe_copies.expect(payload, copies);
     }
 
     pub(crate) async fn answer_nats_request(
@@ -276,10 +344,21 @@ impl BrokerObserver {
     }
 
     pub(crate) async fn next_message(&mut self) -> io::Result<BrokerMessage> {
-        timeout(BROKER_TIMEOUT, self.deliveries.next())
-            .await
-            .map_err(|_| io::Error::other("timed out waiting for broker payload"))?
-            .ok_or_else(|| io::Error::other("broker observer closed before delivering payload"))
+        let deadline = Instant::now()
+            .checked_add(BROKER_TIMEOUT)
+            .assured("a ten-second wait fits the monotonic clock");
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let message = timeout_at(deadline, self.deliveries.next())
+                .await
+                .map_err(|_| io::Error::other("timed out waiting for broker payload"))?
+                .ok_or_else(|| {
+                    io::Error::other("broker observer closed before delivering payload")
+                })?;
+            if !self.probe_copies.take(&message.payload) {
+                return Ok(message);
+            }
+        }
     }
 
     pub(crate) async fn try_next_payload(
@@ -295,12 +374,23 @@ impl BrokerObserver {
         &mut self,
         duration: Duration,
     ) -> io::Result<Option<BrokerMessage>> {
-        match timeout(duration, self.deliveries.next()).await {
-            Ok(Some(message)) => Ok(Some(message)),
-            Ok(None) => Err(io::Error::other(
-                "broker observer closed before delivering payload",
-            )),
-            Err(_) => Ok(None),
+        let deadline = Instant::now().checked_add(duration).assured(
+            "a scenario step waits at most minutes, far inside the monotonic clock's range",
+        );
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let message = match timeout_at(deadline, self.deliveries.next()).await {
+                Ok(Some(message)) => message,
+                Ok(None) => {
+                    return Err(io::Error::other(
+                        "broker observer closed before delivering payload",
+                    ));
+                }
+                Err(_) => return Ok(None),
+            };
+            if !self.probe_copies.take(&message.payload) {
+                return Ok(Some(message));
+            }
         }
     }
 

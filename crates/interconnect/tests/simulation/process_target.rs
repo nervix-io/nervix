@@ -80,7 +80,7 @@ fn process_target_across_restart(run: ScenarioRun) -> Result<(), SimulationError
                         } else {
                             wait_for(&mut done).await;
                         }
-                        server.shutdown().await;
+                        server.shutdown(super::teardown_ceiling()).await;
                         trace.record("server", "transport process ended");
                     }
                     Ok::<(), io::Error>(())
@@ -164,7 +164,7 @@ fn process_target_across_restart(run: ScenarioRun) -> Result<(), SimulationError
                     assert_eq!(*calls.borrow(), 2);
                     trace.record("client", "replacement process request accepted");
                     done.send_replace(true);
-                    client.shutdown().await;
+                    client.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;

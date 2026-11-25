@@ -220,10 +220,11 @@ violates instead of softening the contract to match today's imports.
 - A consensus append-stream adapter consumes the caller's first request before attempting peer
   admission, so the caller's retry and cancellation gates also govern immediate failures. Leading
   empty probes use management capacity, where an unconfirmed first-data prefix is checked before
-  data admission under the setup deadline of its ordered append stream; a rejected or incomplete
-  prefix ends that input with its exact result. Admitted requests are submitted intact exactly once
-  on their owning path, later empty commit updates share the data stream, and ended input opens no
-  transport.
+  data admission within its ordered append stream's own idle bound, `raft-append-idle-bound`, a
+  Raft protocol timer that also bounds the open stream's progress and never a transport deadline;
+  a rejected or incomplete prefix ends that input with its exact result. Admitted requests are
+  submitted intact exactly once on their owning path, later empty commit updates share the data
+  stream, and ended input opens no transport.
 - Connectors adapt external systems at explicit data-plane boundaries and never weaken internal
   schema, branch, error or sensitivity rules.
 
@@ -488,7 +489,8 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   and the scope of measured tuning evidence. The connector contract retains the general host and
   engine boundary; the Emitters and Schemas And Codecs manuals own public clauses and containers.
 - [Cluster Interconnect](docs/src/interconnect.md): interconnect code and every node-to-node
-  operation, including application progress reports, queries and completion-participant views.
+  operation, including application progress reports, queries and completion-participant views, and
+  how peer liveness and the deadlines of node-to-node exchanges are decided.
 - [Name Resolution](docs/src/name-resolution.md): `nervix-dns`; how a node or a native client loads
   its resolver; a path that resolves a host name, or the hook, budget or dialling policy it uses; a
   dependency feature that selects a resolver; the DNS checks and fixtures.
@@ -863,8 +865,9 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
 ### Planned operations cost backpressure, never data
 
 - Only a cluster disruption may lose, refuse or repeat a record: a node crash, a network partition,
-  a failover or forced recovery of a node that stopped answering, or a deadline the operator set
-  expiring. Even then the loss is the narrowest the disruption forces, and it is reported.
+  a failover or forced recovery of a node that stopped answering, or the ceiling the operator set
+  for a whole operation expiring ([Liveness and deadlines](#liveness-and-deadlines)). Even then the
+  loss is the narrowest the disruption forces, and it is reported.
 - Everything else keeps every record it was given. That covers every planned or routine operation
   (an alteration, a move, a drain, a rebalance, a handoff, a pause or quiesce, a repartition, a
   reconciliation retry, a restart in order) and every temporary condition of a healthy cluster (a
@@ -883,6 +886,44 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   a comment, chapter, test or Shuttle check says about its intent. No change adds one, and none
   widens or relies on one; an existing one is recorded on ClickUp against its repair task and is
   never cited as precedent. A test asserts that the work is kept, never that it is refused.
+
+### Liveness and deadlines
+
+[Cluster Interconnect](docs/src/interconnect.md#liveness-and-deadlines) owns the contract these
+rules state.
+
+- Whether a peer or its connection is gone is decided once, beneath every exchange: by the
+  interconnect connection's HTTP/2 pings and application-health probes, and by membership
+  (`TargetLeft`, failover and the route changes it installs). Nothing above them decides it again.
+  An exchange with another node (a request, a stream, a relay delivery, an acknowledgement, a
+  handoff, gate or drain step) ends unanswered only when that liveness ends the peer or its
+  connection, when its operation's ceiling passes, when the caller waiting for it reaches its own
+  deadline, or when its owner shuts down or cancels it.
+- No timer on a single exchange, stream, request, delivery, task or step declares a live
+  counterpart dead. On a live connection, a counterpart that is slow, busy or applying
+  backpressure (a closed flow-control window, a full queue, a wait for memory or for a worker)
+  costs latency, never failure. One that never answers is a defect to surface, never a timeout to
+  turn into a failure and a retry. The transport has no per-stream progress timeout and no
+  per-request deadline class.
+- An absolute deadline is exactly one of three things, and its owner says which: the ceiling the
+  operator set for a whole operation (a named cluster parameter, node setting or Plexus clause
+  documented as that operation's budget, such as `REMOTE_RELAY_TOTAL_TIMEOUT`,
+  `ENTITY_GATE_DEADLINE`, `DOMAIN_DRAIN_TIMEOUT`, the shutdown timeout or a `STOP` or backup
+  `TIMEOUT` clause); the deadline of a caller that still holds its input and waits for the answer,
+  which it receives as a typed retryable refusal; or a timer a protocol itself defines (Raft
+  elections and heartbeats, leases, the liveness pings and probes above). A fixed constant, or a
+  fraction or multiple of another setting, never bounds a wait for a live counterpart, and a
+  setting described as an inactivity bound restarts on every successful part of the work.
+- An outcome another node needs (an admission, a terminal acknowledgement, a cancellation or status
+  answer) is sent again until it is delivered, until liveness ends its peer, or until its
+  operation's ceiling passes; it is never sent once and dropped.
+- When a deadline expires, the loss is the narrowest it forces: the operation it bounds fails and
+  the work it held is kept, handed back or carried, never negatively acknowledged, aborted in
+  flight or reset while a live owner or replica still holds it.
+- External systems keep the connector contract's operator-declared deadlines, which
+  `ConfiguredDeadline` reads ([Bounds and
+  deadlines](docs/src/connector-contract.md#bounds-and-deadlines)); these rules govern exchanges
+  between Nervix nodes and between a node's own tasks.
 
 ### Observability
 

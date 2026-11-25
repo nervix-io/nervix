@@ -1017,20 +1017,18 @@ impl Runtime {
         );
 
         nervix_primitives::task::spawn(async move {
-            let shared_routing = match runtime
-                .wait_for_domain_routing(&task_domain, &task_from_relay)
-                .await
-            {
-                Ok(routing) => routing,
-                Err(error) => {
-                    runtime.events().report_error(format!(
-                        "reingestor '{}' in domain '{}' could not bind its routing snapshot: \
-                         {error:#}",
-                        task_reingestor.as_str(),
-                        task_domain.as_str(),
-                    ));
-                    return;
-                }
+            // The installation that started this reingestor publishes its domain's routing once
+            // the whole domain is in place; a stop, or the domain dropping its sender, ends the wait.
+            let mut routing_stop = shutdown_rx.clone();
+            let stopped = async move {
+                routing_stop
+                    .wait_for(|stopped| *stopped)
+                    .await
+                    .discarded("a signalled stop and a dropped domain sender both end the wait");
+            };
+            let Some(shared_routing) = runtime.wait_for_domain_routing(&task_domain, stopped).await
+            else {
+                return;
             };
             let mut routing = DomainRoutingCache::new(shared_routing);
             let remote_ack_timing = runtime.remote_ack_timing().clone();
@@ -1441,12 +1439,16 @@ mod tests {
             ]
         );
         route_runtime
-            .shutdown(crate::runtime::entity_gate::task_stop_grace(
-                nervix_models::DomainDrainTimeout::DEFAULT,
-            ))
+            .shutdown(crate::runtime::entity_gate::TaskStopWait::Teardown {
+                grace: crate::runtime::entity_gate::task_stop_grace(
+                    nervix_models::DomainDrainTimeout::DEFAULT,
+                ),
+            })
             .await;
         owner_task
-            .stop(Duration::from_secs(1))
+            .stop(TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("relay owner should stop");
     }
@@ -1632,7 +1634,9 @@ mod tests {
             assert_eq!(instances.states().len(), 64);
         }
         owner_task
-            .stop(Duration::from_secs(1))
+            .stop(TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("relay owner should stop");
     }
@@ -1998,12 +2002,16 @@ mod tests {
         );
 
         branched_runtime
-            .shutdown(crate::runtime::entity_gate::task_stop_grace(
-                nervix_models::DomainDrainTimeout::DEFAULT,
-            ))
+            .shutdown(crate::runtime::entity_gate::TaskStopWait::Teardown {
+                grace: crate::runtime::entity_gate::task_stop_grace(
+                    nervix_models::DomainDrainTimeout::DEFAULT,
+                ),
+            })
             .await;
         owner_task
-            .stop(Duration::from_secs(1))
+            .stop(TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("relay owner should stop");
     }

@@ -304,8 +304,11 @@ it would save is the state the reset discards.
 5. **Committed.** The checkpoint becomes the committed checkpoint, and the acknowledgements the
    callback held back are released. Only then does the branch run its next callback.
 
-The whole checkpoint, from the guest's save to the last replica's confirmation, has the local
-`--runtime-wasm-checkpoint-timeout` budget, ninety seconds by default.
+The whole checkpoint, from the guest's save to the last replica's confirmation, has no deadline of
+its own: the owner's storage and replicas that are slow while they live cost the callback latency,
+never the checkpoint. A replaced replica is replaced in the wait, and only a replica plan that
+shrinks below the replicas the checkpoint was captured for, or the owner losing the placement's
+lifetime or ownership, fails it.
 While it is under way, the branch reports every input the callback holds back alive to its ingestor
 every committed `REMOTE_ACK_ALIVE_INTERVAL`, 100 milliseconds by default, as a remote receiver
 reports an acknowledgement it holds; the checkpoint reads the interval once it is under way and keeps
@@ -317,8 +320,8 @@ checkpoint and is not reported alive.
 The replica first receives a small revision, length, and digest description, then fetches that
 revision through the bulk pool in configured bulk chunks, 64 KiB by default. It verifies the complete byte count and digest
 before writing the checkpoint to its own storage. A save up to the host's 64 MiB guest buffer can
-therefore cross the 2 MiB replication-message limit. The bulk fetch has a sixty-second progress
-deadline inside the checkpoint's ninety-second completion budget.
+therefore cross the 2 MiB replication-message limit. The bulk fetch waits for its chunks for as long
+as the owner and the connection to it live.
 
 The BLAKE3 digest checks consistency with the selected checkpoint descriptor. The interconnect
 authenticates the peer, and placement and generation admission determine which state may be
@@ -328,10 +331,9 @@ non-security purpose is recorded in [Cryptography](cryptography.md#classificatio
 The fetch's bulk stream grants the owner a 1 MiB receive window, so the owner keeps sixteen 64 KiB
 chunks in flight. A save then crosses in one round trip per window rather than one per chunk, which
 matters on a loaded node, where every round trip waits for several scheduled tasks on both sides.
-The checkpoint deadline is an independently configured capacity rather than a function of the
-save's size. A deadline that grew with the save would let a replica that falls behind its owner
-hold acknowledgements longer instead of failing the checkpoint. Provision the guest-buffer
-capacity and checkpoint deadline independently. See
+A larger save takes its replicas longer to confirm, and the acknowledgements its callback holds
+back wait for them: a replica that falls behind its owner costs the callback latency, never the
+checkpoint. Provision the guest-buffer capacity for the saves a processor keeps. See
 [Cluster Interconnect](./interconnect.md#wire-contract-and-payloads) for the window and the memory
 that backs it.
 
@@ -362,11 +364,12 @@ A replica acts on an announcement only while the placement is current on it and 
 is the owner its schedule names. The announcement wakes the replica task that keeps the processor's
 branches current, which fetches the checkpoint in its next round. While idle, the task also starts a
 round after the one-second replication poll interval, so a lost announcement is recovered by
-periodic synchronization. Lifecycle, catalog and checkpoint requests each retain their typed
-five-second response deadline, including time waiting for transport capacity; the poll interval
-does not cancel a request still within that deadline. A busy or failing replica can take longer
-than one interval to catch up. The subsequent bulk fetch has a sixty-second deadline, and the
-owner's whole checkpoint has ninety seconds to complete.
+periodic synchronization. Lifecycle, catalog and checkpoint requests each wait for the owner's
+answer, time waiting for transport capacity included, for as long as the owner and its connection
+live; the poll interval never cancels a request in flight. A busy or failing replica can take
+longer than one interval to catch up. The subsequent bulk fetch waits for its chunks the same way,
+and the owner's whole checkpoint waits for the replica's confirmation for as long as the replica
+lives.
 The replica installs a revision newer than the one it holds, synchronizes its storage, and only then
 acknowledges; a replica that already holds the announced revision or a newer one synchronizes and
 acknowledges what it holds, so a lost acknowledgement is replaced by the next announcement. Each
@@ -469,9 +472,12 @@ Failover](./control-plane.md#planned-ownership-handoffs-and-failover).
 
 When a unit's owner is lost, the leader publishes the new owner together with a new generation
 for every branch of that unit. Other partitions keep their generations, saved checkpoints and
-recovery state, including when the moved unit belongs to a hard colocation group. The destination prepares the recovery within five seconds: for each branch it collects the
-checkpoints of the generation being replaced from its own storage and from every other node the new
-schedule assigns the processor, and stages the newest valid one. Two different checkpoints at the
+recovery state, including when the moved unit belongs to a hard colocation group. The destination
+prepares the recovery within the committed `FORCED_RECOVERY_BUDGET`, five seconds by default: for
+each branch it collects the checkpoints of the generation being replaced from its own storage and
+from every other node the new schedule assigns the processor, and stages the newest valid one. A
+node that liveness ended is passed over; one that lives but has not answered when the budget passes
+fails the attempt instead, because it may hold the newest checkpoint. Two different checkpoints at the
 same highest revision are a conflict, and the branch is reset. A branch with no surviving checkpoint
 is reset. The destination restores every staged checkpoint into a guest before the schedule is
 published, a promoted replica from the module it compiled while it was a replica, and activation
@@ -479,16 +485,18 @@ publishes the staged checkpoints in the new generation. `SHOW CLUSTER STATUS` re
 with `state_recovery=reset` and `resets=wasm_processor:<cause>` when it reset branches.
 
 Before selecting checkpoints, the destination waits for its local execution schedule to finish
-installing within the same five-second preparation budget. Domain lifecycle publication alone
+installing within the same budget. Domain lifecycle publication alone
 does not release that wait: the schedule application must also finish. The installed schedule must
 match the requested fingerprint and still assign the processor to the former owner. A promoted
 replica whose graph is still starting therefore retains its checkpoints rather than treating that
 temporary absence as missing state.
 
-A preparation that fails for any reason — a guest that refuses or fails to restore a staged
-checkpoint, a module the destination cannot compile, or the five seconds running out — makes the
-leader publish the recovery with recreated state: every state component of the processor is reset
-with the cause `missing_checkpoint`. `ON REJECTED STATE` does not govern this path. When the
+A preparation that fails, through a guest that refuses or fails to restore a staged checkpoint or a
+module the destination cannot compile, makes the leader publish the recovery with recreated state:
+every state component of the processor is reset with the cause `missing_checkpoint`. A preparation
+whose budget passes is not a failure of that kind and resets nothing: the leader does not publish
+the schedule, every checkpoint stays where it was, and the next scheduling pass prepares the
+recovery again. `ON REJECTED STATE` does not govern this path. When the
 processor has replicas, a replica holds every checkpoint whose acknowledgements the lost owner
 released, so a recovery that prepares successfully continues each branch from at least the state its
 acknowledged inputs produced. See [When The Former Owner Is
@@ -722,7 +730,7 @@ PROCESSOR` never presents a reset of the previous binding as a reset of the new 
 ## Shutdown And Restart
 
 A node's save at shutdown waits for a WASM branch's callback until its checkpoint reaches its
-boundary, as work in motion, and the checkpoint deadline bounds that wait. Runtime teardown gives each processor
+boundary, as work in motion, for as long as its replicas take to confirm it. Runtime teardown gives each processor
 task one fifteenth of the domain drain budget to stop, and gives each branch task the same grace
 inside that; both are two seconds at the 30-second default. A branch task never outlives its processor task: one still in its checkpoint is ended with it,
 its unreleased acknowledgements are negatively acknowledged, and a restart finds whatever that
@@ -745,8 +753,8 @@ or for external delivery:
 - output is dispatched before its checkpoint, so an emitter can publish output whose input is later
   negatively acknowledged and redelivered, and the redelivered input produces it again;
 - the state a branch continues from can already reflect a redelivered input: a guest counts buffered
-  input as it accepts it, a checkpoint that failed at its replicas stays on the owner's storage, and
-  a replica can hold a checkpoint whose acknowledgement arrived too late;
+  input as it accepts it, and a checkpoint that failed at its replicas, as one whose replica plan
+  shrank does, stays on the owner's storage, where a replica can already hold it too;
 - an ingestor that keeps redelivering while no owner accepts the input can deliver it to the recovered
   branch more than once;
 - after a failover, a guest's output can reach a survivor that has not yet started the consumer it
@@ -885,16 +893,18 @@ Nervix does not provide, and these limits apply:
 - **Exactly-once processing or delivery.** See [Replay, Duplicates, And
   Exactly-Once](#replay-duplicates-and-exactly-once).
 - **Guest state across module versions.** A binding change always starts a new lifetime.
-- **A configured checkpoint deadline, ninety seconds by default**, from the save to the last replica, and one callback per
-  branch at a time, whose acknowledgements are held for at most that long.
+- **One callback per branch at a time**, whose acknowledgements are held until its checkpoint
+  reaches the last replica, however long a slow but live replica takes; a checkpoint fails only when
+  its replica plan shrinks or the owner loses the placement.
 - **A save of at most 64 MiB**, the host's guest buffer limit.
 - **Prepared handoff memory grows with its branch inventory.** The destination retains every
   verified branch checkpoint until activation; the configured checkpoint-byte limit, 256 MiB by default, applies to each transfer, not the
   entity's aggregate state.
 - **Loss of state without replicas.** Recovering a processor without its owner resets every branch
   whose only checkpoints were on that owner.
-- **Forced recovery can reset state without a verdict.** A recovery preparation that fails or runs
-  past five seconds recreates the processor's state.
+- **Forced recovery can reset state without a verdict.** A recovery preparation that fails
+  recreates the processor's state. One that runs past its budget is prepared again by the next
+  scheduling pass instead.
 - **A failed storage synchronization is permanent** until the node restarts.
 - **A whole-cluster restart keeps ownership** only for owners that rejoin within the ten-second
   voter observation grace.
@@ -926,7 +936,7 @@ branches.
 | Recovery budget | `wasm_state_recovery.feature`: preserve, recover once, and a failed fresh initialization that spends the attempt across a restart |
 | Restart | `wasm_processor.feature`: guest state restored after a cluster restart and not resurrected by a returning former owner |
 | Large backup and restore | `backup_guest_saves.feature`: two 40 MiB branch saves on one and three nodes, bounded bulk capture, interrupted capture cleanup, exact restored bytes and the next guest callback |
-| Large saves within the replica deadline | `large_wasm_state_replication.feature`: 40 MiB saves of interleaved branches reach the checkpoint boundary on three nodes with one replica; the interconnect check that a bulk response puts one whole bulk receive window in flight before its reader reads, backed by exactly one `bulk_window` reservation |
+| Large saves reach their replicas | `large_wasm_state_replication.feature`: 40 MiB saves of interleaved branches reach the checkpoint boundary on three nodes with one replica; the interconnect check that a bulk response puts one whole bulk receive window in flight before its reader reads, backed by exactly one `bulk_window` reservation |
 
 The [WASM state qualification map](https://github.com/nervix-io/nervix/blob/main/tests/wasm-state-qualification-ledger.md)
 records crash windows, guarantees and their executable evidence.
@@ -939,8 +949,7 @@ A branch's guest-state owner retains its unit assignment publication. Schedule i
 publishes state identity and checkpoint executors/replicas together before a reset callback can
 checkpoint. Each callback and replica-boundary replan reads that retained slot. Replacement
 lifetimes and removed entities are rejected before guest capture; losing local execution ownership
-also rejects the checkpoint. The captured replica count and checkpoint deadline keep their existing
-meaning. Removal publishes absence before dropping registry interest, so a retained reader cannot
+also rejects the checkpoint. The captured replica count keeps its meaning. Removal publishes absence before dropping registry interest, so a retained reader cannot
 resurrect an assignment.
 
 ## Local Engine Capabilities
@@ -963,7 +972,7 @@ See [Node Settings](node-settings.md#engine-and-connector-host-capabilities) for
 variables and validation.
 
 Epoch tick interval, deadline ticks, invocation buffer capacity and optimization are explicit
-runtime capabilities, as are checkpoint deadlines and the recovery request queue. Their defaults
-remain 1ms, one tick, 64MiB, optimization enabled, 90 seconds and 32 requests. These do not change
+runtime capabilities, as is the recovery request queue. Their defaults remain 1ms, one tick,
+64MiB, optimization enabled and 32 requests. These do not change
 the processor's language-level linear-memory or checkpoint contract. See
 [Data-Plane Runtime Policy And Capacity](node-settings.md#data-plane-runtime-policy-and-capacity).

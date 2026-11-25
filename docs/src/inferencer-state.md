@@ -262,10 +262,13 @@ Failover](./control-plane.md#planned-ownership-handoffs-and-failover).
 
 ## Forced Recovery And Restart
 
-When a unit's owner is lost, the destination stages, within the recovery's preparation deadline and
-for every branch of the lifecycle it recovers, the newest valid snapshot that survives on its own
-storage or on another node the unit is assigned to. Ties at the same revision with different bytes
-are a conflict. The branch then starts:
+When a unit's owner is lost, the destination stages, within the recovery's budget,
+`FORCED_RECOVERY_BUDGET`, and for every branch of the lifecycle it recovers, the newest valid
+snapshot that survives on its own storage or on another node the unit is assigned to. Ties at the
+same revision with different bytes are a conflict. A node assigned the unit that lives but has not
+answered when the budget passes fails the attempt rather than being passed over: nothing is reset,
+every node keeps its snapshots, and the next scheduling pass prepares the recovery again. The branch
+then starts:
 
 | What survives of a branch | The branch continues from | The unit's transition in `SHOW CLUSTER STATUS` |
 | --- | --- | --- |

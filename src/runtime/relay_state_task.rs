@@ -69,15 +69,25 @@ pub(super) struct RelayStateTask {
 impl RelayStateTask {
     pub(super) async fn stop(
         mut self,
-        grace: Duration,
+        wait: TaskStopWait,
     ) -> error_stack::Result<(), RelayTaskStopError> {
         self.shutdown.send_replace(true);
-        match nervix_primitives::time::timeout(grace, &mut self.task).await {
+        let unit = self.unit;
+        let stopped = wait
+            .wait(&mut self.task, |waited| {
+                warn!(
+                    unit = ?unit,
+                    waited = %humantime::format_duration(waited),
+                    "relay state task is still finishing the work it holds; waiting for it"
+                );
+            })
+            .await;
+        match stopped {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(Report::new(error).change_context(RelayTaskStopError::Join {
                 task: RelayTaskKind::State,
             })),
-            Err(_) => {
+            Err(grace) => {
                 self.task.abort();
                 self.task.join_after_shutdown("relay state").await;
                 Err(Report::new(RelayTaskStopError::DrainTimeout {

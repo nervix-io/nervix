@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use error_stack::{Report, ResultExt};
 use fjall::Database;
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{Consensus, ConsensusSettings};
 use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_interconnect::{HandlerRegistrationError, Transport};
@@ -63,6 +63,9 @@ pub(in crate::application) struct ApplicationStartup {
     pub(in crate::application) runtime: Runtime,
     pub(in crate::application) consensus: Option<Consensus>,
     pub(in crate::application) interconnect: Option<Transport>,
+    /// How long a teardown step waits for the work it stops, the node's task grace period: a
+    /// start that fails ends its interconnect's connections within it.
+    pub(in crate::application) task_grace_period: std::time::Duration,
     /// Where a test build registers the consensus this startup opens, until that consensus stops.
     /// A normal build's is an empty marker.
     pub(in crate::application) fault_injection: ConfiguredFaultInjection,
@@ -177,7 +180,9 @@ impl ApplicationStartup {
             Self::stop_consensus(consensus, &self.fault_injection).await;
         }
         if let Some(interconnect) = &self.interconnect {
-            interconnect.shutdown().await;
+            interconnect
+                .shutdown(Some(teardown_ceiling(self.task_grace_period)))
+                .await;
         }
         let executor = self.runtime.executor().clone();
         if let Err(error) = Self::close_stores(&executor, move || drop(self)).await {
@@ -635,4 +640,16 @@ mod tests {
         assert_eq!(snapshot.filesystem_storage.completed, 1);
         assert_eq!(snapshot.management_memory.reserved_bytes, 0);
     }
+}
+
+/// The ceiling a teardown step waiting `grace_period` gives the interconnect's open streams: the
+/// node's task grace period, the operator's bound on each step of terminal teardown.
+pub(in crate::application) fn teardown_ceiling(
+    grace_period: std::time::Duration,
+) -> nervix_interconnect::ExchangeDeadline {
+    nervix_interconnect::ExchangeDeadline::OperationCeiling(
+        nervix_primitives::time::Instant::now()
+            .checked_add(grace_period)
+            .assured("the validated task grace period fits the monotonic clock"),
+    )
 }

@@ -36,10 +36,6 @@ pub struct InterconnectArgs {
     pub connection_receive_window: Option<HumanBytes>,
     #[arg(long = nervix_interconnect::ConnectionSetupTimeout::NAME, env = "NERVIX_INTERCONNECT_CONNECTION_SETUP_TIMEOUT", help = super::settings::capability_help::<nervix_interconnect::ConnectionSetupTimeout>("Connection setup timeout", HumanDuration(nervix_interconnect::ConnectionSetupTimeout::default_value(&()))))]
     pub connection_setup_timeout: Option<HumanDuration>,
-    #[arg(long = nervix_interconnect::RequestTimeout::NAME, env = "NERVIX_INTERCONNECT_REQUEST_TIMEOUT", help = super::settings::capability_help::<nervix_interconnect::RequestTimeout>("Request timeout", HumanDuration(nervix_interconnect::RequestTimeout::default_value(&()))))]
-    pub request_timeout: Option<HumanDuration>,
-    #[arg(long = nervix_interconnect::ProgressTimeout::NAME, env = "NERVIX_INTERCONNECT_PROGRESS_TIMEOUT", help = super::settings::capability_help::<nervix_interconnect::ProgressTimeout>("Progress timeout", HumanDuration(nervix_interconnect::ProgressTimeout::default_value(&()))))]
-    pub progress_timeout: Option<HumanDuration>,
     #[arg(long = nervix_interconnect::ReconnectBackoff::NAME, env = "NERVIX_INTERCONNECT_RECONNECT_BACKOFF", help = super::settings::capability_help::<nervix_interconnect::ReconnectBackoff>("Reconnect backoff", HumanDuration(nervix_interconnect::ReconnectBackoff::default_value(&()))))]
     pub reconnect_backoff: Option<HumanDuration>,
     #[arg(long = nervix_interconnect::MaxReconnectBackoff::NAME, env = "NERVIX_INTERCONNECT_MAX_RECONNECT_BACKOFF", help = super::settings::capability_help::<nervix_interconnect::MaxReconnectBackoff>("Max reconnect backoff", HumanDuration(nervix_interconnect::MaxReconnectBackoff::default_value(&()))))]
@@ -57,8 +53,6 @@ impl InterconnectArgs {
             stream_receive_window: self.stream_receive_window.map(|value| value.0),
             connection_receive_window: self.connection_receive_window.map(|value| value.0),
             connection_setup_timeout: self.connection_setup_timeout.map(|value| value.0),
-            request_timeout: self.request_timeout.map(|value| value.0),
-            progress_timeout: self.progress_timeout.map(|value| value.0),
             reconnect_backoff: self.reconnect_backoff.map(|value| value.0),
             max_reconnect_backoff: self.max_reconnect_backoff.map(|value| value.0),
         })
@@ -75,8 +69,6 @@ impl InterconnectArgs {
             stream_receive_window: values.stream_receive_window.map(HumanBytes),
             connection_receive_window: values.connection_receive_window.map(HumanBytes),
             connection_setup_timeout: values.connection_setup_timeout.map(HumanDuration),
-            request_timeout: values.request_timeout.map(HumanDuration),
-            progress_timeout: values.progress_timeout.map(HumanDuration),
             reconnect_backoff: values.reconnect_backoff.map(HumanDuration),
             max_reconnect_backoff: values.max_reconnect_backoff.map(HumanDuration),
         }
@@ -108,14 +100,6 @@ impl InterconnectArgs {
         command_line.optional(
             nervix_interconnect::ConnectionSetupTimeout::NAME,
             self.connection_setup_timeout,
-        );
-        command_line.optional(
-            nervix_interconnect::RequestTimeout::NAME,
-            self.request_timeout,
-        );
-        command_line.optional(
-            nervix_interconnect::ProgressTimeout::NAME,
-            self.progress_timeout,
         );
         command_line.optional(
             nervix_interconnect::ReconnectBackoff::NAME,

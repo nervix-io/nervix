@@ -30,9 +30,9 @@ const FAILURE_REASON: &str =
 /// the liveness recovery budget before the transport carries requests again, so a stage wait
 /// spans it.
 const STAGE_DEADLINE: Duration = Duration::from_secs(75);
-/// How long the observer waits for both hosts to finish, within the fault configuration's 85
+/// How long the observer waits for both hosts to finish, within the progress configuration's 120
 /// simulated seconds.
-const RUN_DEADLINE: Duration = Duration::from_secs(80);
+const RUN_DEADLINE: Duration = Duration::from_secs(115);
 
 /// How far the run has come, as the reporter announces it to the leader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -66,7 +66,7 @@ enum LeaderRequest {
     Nothing,
     /// The leader's query across the partition has ended.
     PartitionedQueryEnded,
-    /// The held query reached its deadline; the reporter releases its replies.
+    /// The held query has waited on the live link; the reporter releases its replies.
     ReleaseReplies,
     /// The leader holds revision 2; the reporter reports revision 3 and then a late report.
     ReportLatest,
@@ -148,15 +148,33 @@ fn ended_within(started: Instant, deadline: Duration) -> bool {
     started.elapsed() <= deadline + deadline / 4
 }
 
-/// Whether `outcome` is the failure a request meets when its peer cannot answer in time.
+/// How long a reporter or the leader waits for an exchange across a partition before it stops
+/// waiting, as the reporting loop and the revision barrier stop at their own deadlines: longer than
+/// liveness takes to end an established connection.
+const PARTITIONED_WAIT: Duration = Duration::from_secs(10);
+
+/// How long the leader's query waits on the live link while the reporter holds its reply.
+const HELD_REPLY_WAIT: Duration = Duration::from_secs(5);
+
+/// Whether `outcome` is the failure an exchange across a partition meets: liveness ended the
+/// connection it was sent on, or its caller stopped waiting before a connection could be made.
 fn unanswered<T: std::fmt::Debug>(outcome: &Result<T, error_stack::Report<RequestError>>) -> bool {
     match outcome {
         Ok(_) => false,
         Err(error) => matches!(
             error.current_context(),
-            RequestError::Timeout { .. } | RequestError::Transport { .. }
+            RequestError::Transport { .. }
+                | RequestError::DeadlinePassed {
+                    deadline: nervix_interconnect::ExchangeDeadlineKind::Caller,
+                    ..
+                }
         ),
     }
+}
+
+/// The caller deadline of an exchange across a partition that starts at `started`.
+fn partitioned_deadline(started: Instant) -> nervix_interconnect::ExchangeDeadline {
+    nervix_interconnect::ExchangeDeadline::Caller(started + PARTITIONED_WAIT)
 }
 
 #[test]
@@ -165,15 +183,26 @@ fn application_progress_reaches_the_leader_through_a_partition_a_held_reply_and_
         name: "application progress reaches the leader through a partition, a held reply and \
                repair",
         fault_plan: "partition the reporter from the leader after the first report, so a report \
-                     and a revision query fail within their deadlines, and partition the failing \
-                     reporter too, so its report of a revision it failed to prepare fails; repair \
+                     and a revision query go unanswered, and partition the failing reporter too, \
+                     so its report of a revision it failed to prepare goes unanswered; repair \
                      both, and once the link carries requests again hold the reporter's query \
-                     reply until the leader's query reaches its deadline; release the reply, then \
-                     report a newer and a late older record; query the failing reporter for its \
-                     failure, then report its later success",
+                     reply while the leader's query keeps waiting on the live link; release the \
+                     reply, which answers that query, then report a newer and a late older \
+                     record; query the failing reporter for its failure, then report its later \
+                     success",
         seeds: &[131, 133],
     }
-    .check(fault_config, progress_through_partition_and_hold);
+    .check(progress_config, progress_through_partition_and_hold);
+}
+
+/// The fault configuration with room for the exchanges across the partition to wait their whole
+/// bound, and for the held query to keep waiting on the repaired link.
+fn progress_config(seed: u64) -> SimulationConfig {
+    let mut simulation = fault_config(seed);
+    simulation.bounds.simulated_duration = Duration::from_secs(120);
+    simulation.bounds.max_steps = NonZeroUsize::new(200_000).assured("the step bound is nonzero");
+    simulation.bounds.wall_duration = Duration::from_secs(120);
+    simulation
 }
 
 fn progress_through_partition_and_hold(run: ScenarioRun) -> Result<(), SimulationError> {
@@ -264,15 +293,22 @@ fn progress_through_partition_and_hold(run: ScenarioRun) -> Result<(), Simulatio
                     wait_until(&mut stage, Stage::Partitioned).await;
                     let started = Instant::now();
                     let outcome = transport
-                        .request(&reporter, ApplicationRevisionRequest)
+                        .request_by(
+                            &reporter,
+                            ApplicationRevisionRequest,
+                            partitioned_deadline(started),
+                        )
                         .await;
-                    assert!(unanswered(&outcome), "partitioned query outcome: {outcome:?}");
                     assert!(
-                        ended_within(started, ApplicationRevisionRequest::DEADLINE.declared_default()),
+                        unanswered(&outcome),
+                        "partitioned query outcome: {outcome:?}"
+                    );
+                    assert!(
+                        ended_within(started, PARTITIONED_WAIT),
                         "the partitioned query ended after {:?}",
                         started.elapsed()
                     );
-                    trace.record(LEADER, "query across the partition fails within its deadline");
+                    trace.record(LEADER, "query across the partition goes unanswered");
                     request.send_replace(LeaderRequest::PartitionedQueryEnded);
 
                     wait_until(&mut stage, Stage::RepairedWithReplyHeld).await;
@@ -282,25 +318,22 @@ fn progress_through_partition_and_hold(run: ScenarioRun) -> Result<(), Simulatio
                     wait_for_liveness_recovery(&transport, &reporter).await;
                     trace.record(LEADER, "reaches the reporter again after the repair");
                     let started = Instant::now();
-                    let outcome = transport
-                        .request(&reporter, ApplicationRevisionRequest)
-                        .await;
+                    let held_query = transport.request(&reporter, ApplicationRevisionRequest);
+                    let mut held_query = std::pin::pin!(held_query);
+                    // A held reply on a live link costs the query latency, never an answer.
+                    let early =
+                        nervix_primitives::time::timeout(HELD_REPLY_WAIT, &mut held_query).await;
                     assert!(
-                        matches!(&outcome, Err(error) if matches!(error.current_context(), RequestError::Timeout { .. })),
-                        "held query outcome: {outcome:?}"
+                        early.is_err(),
+                        "the held query ended while its reply was held: {early:?}"
                     );
-                    assert!(
-                        ended_within(started, ApplicationRevisionRequest::DEADLINE.declared_default()),
-                        "the held query ended after {:?}",
-                        started.elapsed()
-                    );
-                    trace.record(LEADER, "held query reaches its deadline");
+                    trace.record(LEADER, "held query keeps waiting on the live link");
                     request.send_replace(LeaderRequest::ReleaseReplies);
 
-                    let answer = transport
-                        .request(&reporter, ApplicationRevisionRequest)
+                    let answer = held_query
                         .await
-                        .assured("the released reporter answers its revision query");
+                        .assured("the released reporter answers the query it held");
+                    assert!(started.elapsed() >= HELD_REPLY_WAIT);
                     assert_eq!(answer.identity, reporter_identity());
                     hold(&held, &answer);
                     assert_eq!(
@@ -368,7 +401,10 @@ fn progress_through_partition_and_hold(run: ScenarioRun) -> Result<(), Simulatio
                         Some(3),
                         "the other reporter prepared the revision the failing one did not"
                     );
-                    trace.record(LEADER, "query after repair supplies the failure and its reason");
+                    trace.record(
+                        LEADER,
+                        "query after repair supplies the failure and its reason",
+                    );
                     request.send_replace(LeaderRequest::ReportSuccess);
 
                     wait_until(&mut failing_stage, FailingStage::Succeeded).await;
@@ -385,7 +421,7 @@ fn progress_through_partition_and_hold(run: ScenarioRun) -> Result<(), Simulatio
                         "preparing the failed revision later replaces the failure"
                     );
                     trace.record(LEADER, "a later success replaces the failure");
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -459,14 +495,19 @@ fn progress_through_partition_and_hold(run: ScenarioRun) -> Result<(), Simulatio
                     });
                     let partitioned = progress.borrow().clone();
                     let started = Instant::now();
-                    let outcome = transport.request(&leader, report(&partitioned)).await;
-                    assert!(unanswered(&outcome), "partitioned report outcome: {outcome:?}");
+                    let outcome = transport
+                        .request_by(&leader, report(&partitioned), partitioned_deadline(started))
+                        .await;
                     assert!(
-                        ended_within(started, ApplicationProgressReport::DEADLINE.declared_default()),
+                        unanswered(&outcome),
+                        "partitioned report outcome: {outcome:?}"
+                    );
+                    assert!(
+                        ended_within(started, PARTITIONED_WAIT),
                         "the partitioned report ended after {:?}",
                         started.elapsed()
                     );
-                    trace.record(REPORTER, "report across the partition fails within its deadline");
+                    trace.record(REPORTER, "report across the partition goes unanswered");
                     stage.send_replace(Stage::Partitioned);
 
                     wait_until(&mut request, LeaderRequest::PartitionedQueryEnded).await;
@@ -501,7 +542,7 @@ fn progress_through_partition_and_hold(run: ScenarioRun) -> Result<(), Simulatio
                     assert_eq!(receipt, ApplicationProgressReceipt::Accepted);
                     trace.record(REPORTER, "newer and late reports accepted");
                     done.send_replace(true);
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -563,14 +604,22 @@ fn progress_through_partition_and_hold(run: ScenarioRun) -> Result<(), Simulatio
                     });
                     let failed = progress.borrow().clone();
                     let started = Instant::now();
-                    let outcome = transport.request(&leader, report(&failed)).await;
-                    assert!(unanswered(&outcome), "partitioned failure report outcome: {outcome:?}");
+                    let outcome = transport
+                        .request_by(&leader, report(&failed), partitioned_deadline(started))
+                        .await;
                     assert!(
-                        ended_within(started, ApplicationProgressReport::DEADLINE.declared_default()),
+                        unanswered(&outcome),
+                        "partitioned failure report outcome: {outcome:?}"
+                    );
+                    assert!(
+                        ended_within(started, PARTITIONED_WAIT),
                         "the partitioned failure report ended after {:?}",
                         started.elapsed()
                     );
-                    trace.record(FAILING, "failure report across the partition fails within its deadline");
+                    trace.record(
+                        FAILING,
+                        "failure report across the partition goes unanswered",
+                    );
                     failing_stage.send_replace(FailingStage::FailedWhilePartitioned);
 
                     wait_until(&mut reporter_stage, Stage::RepairedWithReplyHeld).await;
@@ -592,7 +641,7 @@ fn progress_through_partition_and_hold(run: ScenarioRun) -> Result<(), Simulatio
                     assert_eq!(receipt, ApplicationProgressReceipt::Accepted);
                     trace.record(FAILING, "later success reported");
                     failing_stage.send_replace(FailingStage::Succeeded);
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -605,7 +654,10 @@ fn progress_through_partition_and_hold(run: ScenarioRun) -> Result<(), Simulatio
             nervix_primitives::time::timeout(RUN_DEADLINE, async {
                 while *finished.borrow() < 3 {
                     nervix_primitives::task::consume_budget().await;
-                    finished.changed().await.assured("the fixture hosts remain alive");
+                    finished
+                        .changed()
+                        .await
+                        .assured("the fixture hosts remain alive");
                 }
             })
             .await

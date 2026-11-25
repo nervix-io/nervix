@@ -203,9 +203,11 @@ async fn subscription_delivery_can_precede_the_materialized_inspection_generatio
                 parked_capacity: 1,
             },
         );
-        task.stop(std::time::Duration::from_secs(30))
-            .await
-            .assured("the actual materialized task drains and publishes its queued update");
+        task.stop(crate::runtime::TaskStopWait::Teardown {
+            grace: std::time::Duration::from_secs(30),
+        })
+        .await
+        .assured("the actual materialized task drains and publishes its queued update");
         let after_application = runtime
             .capture_materialized_state_page(
                 &domain,

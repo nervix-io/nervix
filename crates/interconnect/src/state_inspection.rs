@@ -51,7 +51,6 @@ impl InterconnectRequest for ReadMaterializedKeyCatalog {
     const NAME: &'static str = "read_materialized_key_catalog";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
@@ -64,7 +63,6 @@ impl InterconnectStreamRequest for ReadPartitionedMaterializedStatePage {
     const NAME: &'static str = "read_partitioned_materialized_state_page";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
@@ -85,7 +83,6 @@ impl InterconnectStreamRequest for ReadMaterializedStatePage {
     const NAME: &'static str = "read_materialized_state_page";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
@@ -165,7 +162,6 @@ impl InterconnectStreamRequest for ReadProcessorStatePage {
     const NAME: &'static str = "read_processor_state_page";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 /// What one unit's processor page holds: the read origin, the complete counts, where the page

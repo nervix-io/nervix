@@ -35,6 +35,10 @@ pub(crate) enum OwnershipHandoffError {
     Transport(String),
     #[error("ownership handoff deadline elapsed: {0}")]
     Deadline(String),
+    /// A forced recovery's budget passed before every live node it waited for answered. The
+    /// recovery fails and every replica keeps the state it holds.
+    #[error("the forced-recovery budget passed before every live replica answered")]
+    BudgetPassed,
     #[error(
         "forced recovery of {} '{}' in domain '{}' timed out waiting for its local schedule installation",
         .node.kind.as_str(), .node.identifier.as_str(), .domain.as_str()
@@ -102,12 +106,26 @@ impl OwnershipHandoffError {
         Report::new(Self::Deadline(reason.into()))
     }
 
+    /// Whether the failure is an operation budget passing while the nodes it waited for lived:
+    /// the operation fails, and nothing they hold is reset because of it.
+    pub(crate) const fn is_budget_expiry(&self) -> bool {
+        matches!(
+            self,
+            Self::Deadline(_) | Self::ScheduleInstallationDeadline { .. } | Self::BudgetPassed
+        )
+    }
+
     /// The rejection a peer receives for `report`, carrying every context the report accumulated
-    /// instead of only its outermost one. A terminating destination's refusal stays typed, so its
-    /// coordinator can plan the move onto another node.
+    /// instead of only its outermost one. A terminating destination's refusal and a passed budget
+    /// stay typed, so the coordinator can plan the move onto another node, or fail the operation
+    /// without resetting what live replicas hold.
     pub(crate) fn remote_rejection(report: &Report<Self>) -> OwnershipHandoffFailure {
-        if let Self::DestinationTerminating { node } = report.current_context() {
+        let context = report.current_context();
+        if let Self::DestinationTerminating { node } = context {
             return OwnershipHandoffFailure::DestinationTerminating { node: node.clone() };
+        }
+        if context.is_budget_expiry() {
+            return OwnershipHandoffFailure::BudgetPassed;
         }
         OwnershipHandoffFailure::rejected(format!("{report:#}"))
     }
@@ -118,6 +136,7 @@ impl OwnershipHandoffError {
             OwnershipHandoffFailure::DestinationTerminating { node } => {
                 Report::new(Self::DestinationTerminating { node })
             }
+            OwnershipHandoffFailure::BudgetPassed => Report::new(Self::BudgetPassed),
             OwnershipHandoffFailure::Rejected { reason } => Self::participant(reason),
         }
     }

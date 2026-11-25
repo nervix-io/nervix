@@ -2327,7 +2327,7 @@ test-crypto-scenarios *args: build-deps build-plexus-format build-test-cli build
 test-interconnect *args:
     cargo test --package nervix-interconnect --lib -- {{ args }}
 
-# Verify the current stream-deadline API and its compile-time Duration contract.
+# Run the interconnect's API examples, optionally matching one API.
 test-interconnect-docs filter="":
     cargo test --package nervix-interconnect --doc {{ quote(filter) }}
 

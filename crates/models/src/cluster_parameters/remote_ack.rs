@@ -29,44 +29,6 @@ impl SettingDefinition for RemoteAckAliveInterval {
         ClusterParameterKey::RemoteAckAliveInterval.validate_duration(*value)
     }
 }
-pub struct RemoteAckDispatchTimeout;
-impl RemoteAckDispatchTimeout {
-    /// The compile-time source of this setting definition's default.
-    pub const DEFAULT: Duration = Duration::from_secs(5);
-}
-impl SettingDefinition for RemoteAckDispatchTimeout {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = ClusterParameterError;
-    const NAME: &'static str = "remote-ack-dispatch-timeout";
-    const DERIVATION: Option<&'static str> = None;
-    fn default_value(_: &()) -> Duration {
-        Self::DEFAULT
-    }
-    fn validate(value: &Duration, _: &()) -> Result<(), Report<Self::Error>> {
-        ClusterParameterKey::RemoteAckDispatchTimeout.validate_duration(*value)
-    }
-}
-pub struct RemoteAckSilenceTimeout;
-impl RemoteAckSilenceTimeout {
-    /// The compile-time source of this setting definition's default.
-    pub const DEFAULT: Duration = Duration::from_secs(15);
-}
-impl SettingDefinition for RemoteAckSilenceTimeout {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = ClusterParameterError;
-    const NAME: &'static str = "remote-ack-silence-timeout";
-    const DERIVATION: Option<&'static str> = None;
-    fn default_value(_: &()) -> Duration {
-        Self::DEFAULT
-    }
-    fn validate(value: &Duration, _: &()) -> Result<(), Report<Self::Error>> {
-        ClusterParameterKey::RemoteAckSilenceTimeout.validate_duration(*value)
-    }
-}
 pub struct RemoteAckSweepInterval;
 impl RemoteAckSweepInterval {
     /// The compile-time source of this setting definition's default.
@@ -105,28 +67,14 @@ impl SettingDefinition for RemoteRelayTotalTimeout {
         ClusterParameterKey::RemoteRelayTotalTimeout.validate_duration(*value)
     }
 }
-pub struct RemoteRelayInstantiationWait;
-impl RemoteRelayInstantiationWait {
-    /// The compile-time source of this setting definition's default.
-    pub const DEFAULT: Duration = Duration::from_secs(5);
-}
-impl SettingDefinition for RemoteRelayInstantiationWait {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = ClusterParameterError;
-    const NAME: &'static str = "remote-relay-instantiation-wait";
-    const DERIVATION: Option<&'static str> = None;
-    fn default_value(_: &()) -> Duration {
-        Self::DEFAULT
-    }
-    fn validate(value: &Duration, _: &()) -> Result<(), Report<Self::Error>> {
-        ClusterParameterKey::RemoteRelayInstantiationWait.validate_duration(*value)
-    }
-}
 
 /// The sender captures this policy once for a delivery. It travels once with the batch, so live
-/// parameter application never mixes a sender's silence bound with another revision's reporter.
+/// parameter application never mixes a sender's policy with another revision's reporter.
+///
+/// No part of it bounds a wait for a live counterpart: liveness and membership decide that a node
+/// is gone. The alive interval paces keepalives and retries, the sweep interval paces how often a
+/// registering node applies membership and the admission ceiling to what it waits for, and the
+/// total timeout is the operator's ceiling for one delivery.
 #[derive(
     Debug,
     Clone,
@@ -141,15 +89,12 @@ impl SettingDefinition for RemoteRelayInstantiationWait {
 )]
 pub struct RemoteAckTiming {
     pub remote_ack_alive_interval: Duration,
-    pub remote_ack_dispatch_timeout: Duration,
-    pub remote_ack_silence_timeout: Duration,
     pub remote_ack_sweep_interval: Duration,
     pub remote_relay_total_timeout: Duration,
-    pub remote_relay_instantiation_wait: Duration,
 }
 impl RemoteAckTiming {
-    /// The shortest retry and instantiation poll cadence, which keeps a deadline too short to
-    /// divide into two hundred opportunities from rounding its cadence to zero.
+    /// The shortest retry cadence, which keeps a sub-microsecond alive interval from rounding its
+    /// cadence to zero.
     #[cfg_attr(
         nervix_lint,
         nervix::constant(
@@ -160,13 +105,26 @@ impl RemoteAckTiming {
     )]
     const CADENCE_FLOOR: Duration = Duration::from_nanos(1);
 
-    /// At most two hundred poll opportunities in one owning deadline. A one-nanosecond floor
-    /// keeps sub-microsecond policies from rounding the internal retry cadence to zero.
+    /// The first wait before a sender asks again after a failed send or a capacity refusal, and
+    /// the wait between two sends of a report or outcome another node needs: a quarter of the
+    /// alive interval, 25 milliseconds at the default, so a retry comes four times as often as the
+    /// sender reports the delivery's records alive. A one-nanosecond floor keeps a
+    /// sub-microsecond policy from rounding the cadence to zero.
     pub fn retry_interval(self) -> Duration {
-        (self.remote_ack_dispatch_timeout / 200).max(Self::CADENCE_FLOOR)
+        (self.remote_ack_alive_interval / 4).max(Self::CADENCE_FLOOR)
     }
-    pub fn instantiation_poll(self) -> Duration {
-        (self.remote_relay_instantiation_wait / 200).max(Self::CADENCE_FLOOR)
+
+    /// The longest wait a held delivery's backoff reaches before it asks for its grant again:
+    /// twenty-five alive intervals, 2.5 seconds at the default, so a held delivery notices that
+    /// room returned at most that late. It paces asking, and never ends a wait.
+    pub fn retry_ceiling(self) -> Duration {
+        self.remote_ack_alive_interval
+            .checked_mul(25)
+            .assured(
+                "a validated alive interval is at most u32::MAX seconds, so twenty-five of them \
+                 fit a Duration",
+            )
+            .max(self.retry_interval())
     }
 
     /// How long a sender leaves a relay channel without a batch before its next batch opens a
@@ -189,11 +147,8 @@ impl RemoteAckTiming {
     pub fn from_parameters(values: &ClusterParameterValues) -> Self {
         Self {
             remote_ack_alive_interval: values.remote_ack_alive_interval(),
-            remote_ack_dispatch_timeout: values.remote_ack_dispatch_timeout(),
-            remote_ack_silence_timeout: values.remote_ack_silence_timeout(),
             remote_ack_sweep_interval: values.remote_ack_sweep_interval(),
             remote_relay_total_timeout: values.remote_relay_total_timeout(),
-            remote_relay_instantiation_wait: values.remote_relay_instantiation_wait(),
         }
     }
     /// Also checked on receipt: a wire value cannot introduce zero divisors or an inconsistent
@@ -201,46 +156,22 @@ impl RemoteAckTiming {
     pub fn validate(self) -> Result<(), Report<ClusterParameterError>> {
         ClusterParameterKey::RemoteAckAliveInterval
             .validate_duration(self.remote_ack_alive_interval)?;
-        ClusterParameterKey::RemoteAckDispatchTimeout
-            .validate_duration(self.remote_ack_dispatch_timeout)?;
-        ClusterParameterKey::RemoteAckSilenceTimeout
-            .validate_duration(self.remote_ack_silence_timeout)?;
         ClusterParameterKey::RemoteAckSweepInterval
             .validate_duration(self.remote_ack_sweep_interval)?;
         ClusterParameterKey::RemoteRelayTotalTimeout
             .validate_duration(self.remote_relay_total_timeout)?;
-        ClusterParameterKey::RemoteRelayInstantiationWait
-            .validate_duration(self.remote_relay_instantiation_wait)?;
-        if 2 * (self.remote_ack_dispatch_timeout + self.remote_ack_alive_interval)
-            >= self.remote_ack_silence_timeout
-        {
-            return Err(Report::new(ClusterParameterError::AckReportWindow));
-        }
         let sweep = self.remote_ack_sweep_interval.as_nanos();
         if !self
-            .remote_ack_silence_timeout
+            .remote_relay_total_timeout
             .as_nanos()
             .is_multiple_of(sweep)
-            || !self
-                .remote_relay_total_timeout
-                .as_nanos()
-                .is_multiple_of(sweep)
         {
             return Err(Report::new(ClusterParameterError::AckSweepDivisibility));
         }
-        if self.remote_ack_dispatch_timeout > self.remote_relay_total_timeout
-            || self.remote_relay_instantiation_wait > self.remote_relay_total_timeout
-        {
-            return Err(Report::new(ClusterParameterError::AckAdmissionWindow));
-        }
         Ok(())
     }
-    pub fn silent_sweeps(self) -> u64 {
-        u64::try_from(
-            self.remote_ack_silence_timeout.as_nanos() / self.remote_ack_sweep_interval.as_nanos(),
-        )
-        .assured("validated duration ratios fit the unsigned 64-bit sweep counter")
-    }
+    /// How many of its own sweeps a registering node counts before it gives up a registration
+    /// whose delivery never reported admission: the total timeout in sweep intervals.
     pub fn admission_sweeps(self) -> u64 {
         u64::try_from(
             self.remote_relay_total_timeout.as_nanos() / self.remote_ack_sweep_interval.as_nanos(),
@@ -248,6 +179,7 @@ impl RemoteAckTiming {
         .assured("validated duration ratios fit the unsigned 64-bit sweep counter")
     }
 }
+
 impl Default for RemoteAckTiming {
     fn default() -> Self {
         Self::from_parameters(&ClusterParameterValues::default())

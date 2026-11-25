@@ -4450,7 +4450,7 @@ things made a stop that slow, and CPU contention is what turned them into a fail
 a 40-CPU host whose one-minute load was 47 at the median and between 28 and 75.
 
 - **Every node swept its whole acknowledgement registry every second, and a sweep that overran
-  the second could not be cancelled.** The remote acknowledgement silence sweep took a guard for
+  the second could not be cancelled.** The remote acknowledgement sweep took a guard for
   each of a node's 16,384 correlation positions whether or not the node had forwarded anything, and
   a stress build enters Deloxide's one detector twice for each of them. On that host one sweep took
   longer than the second between sweeps. Its task then found the next tick already due and went
@@ -4496,11 +4496,13 @@ during their input rounds, and stopped its restarted clusters in 5.3 seconds at 
 seconds, the same two examples failed, one of them with the missing rows of the retained run, and
 its restarted clusters stopped in 4.5 seconds at the median.
 
-What a three-node stop still costs after this is bounded by the deadlines of the calls its nodes had
-in flight when the stop began, and each wait is named in the node's log. A relay owner that is
-delivering to a peer which has already stopped waits out the five seconds that delivery's admission
-is given and the five its cancellation is given. A checkpoint announcement to a replica that has
-stopped is waited for until its five-second dispatch deadline has passed. A replica's placement task
+What a three-node stop still costs after this is bounded by how long the calls its nodes had in
+flight when the stop began take to end, and each wait is named in the node's log. No call to a
+stopped peer has a deadline of its own: a relay owner that is delivering to a peer which has already
+stopped holds that delivery, and asks for its cancellation, until the transport's liveness view
+drops the peer, and a checkpoint announcement to a replica that has stopped ends when liveness ends
+that replica's connection or when teardown cancels the announcer after domain drain. Whatever is
+still waiting when the stopping node's task grace period passes is closed. A replica's placement task
 that is fetching or acknowledging a checkpoint when its owner stops does not observe the stop, and
 such tasks are aborted one after another, two seconds each. The node's generators share their two
 seconds. In `Every node stopping at once ends its generators together`, the slowest node of the

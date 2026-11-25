@@ -871,7 +871,7 @@ impl Runtime {
                         &primary_node,
                         &state.placement,
                         Some(after_lsm),
-                        <nervix_interconnect::StateSyncRequest as nervix_interconnect::InterconnectRequest>::DEADLINE,
+                        None,
                     )
                     .await
                 {

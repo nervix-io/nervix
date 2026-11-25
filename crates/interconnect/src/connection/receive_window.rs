@@ -98,7 +98,7 @@ impl TransportState {
 
     /// Reserve one bulk stream's receive window, waiting behind the streams that hold the class
     /// until one returns its window. A stream holding a window needs nothing more from the class
-    /// to finish, so the wait ends when one does, or at the request's own deadline.
+    /// to finish, so the wait ends when one does, or at a deadline the request's caller named.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -109,17 +109,17 @@ impl TransportState {
     pub(super) async fn reserve_bulk_receive_window(
         &self,
         node_id: &ClusterNodeName,
-        deadline: Instant,
+        deadline: Option<crate::ExchangeDeadline>,
     ) -> Result<Reservation, Report<TransportError>> {
         let window = self.bulk_receive_window_bytes();
         nervix_primitives::select! {
             _ = self.admission_closed.cancelled() => {
                 Err(Report::new(TransportError::ShuttingDown))
             }
-            _ = sleep_until(deadline) => {
-                Err(Report::new(TransportError::RequestTimeout {
+            deadline = crate::settings::passed(deadline) => {
+                Err(Report::new(TransportError::DeadlinePassed {
                     peer: node_id.clone(),
-                    timeout: self.options.request_timeout,
+                    deadline,
                 }))
             }
             reserved = self.executor.reserve(MemoryClass::BulkWindow, window) => {

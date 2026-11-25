@@ -954,7 +954,11 @@ impl SessionServiceImpl {
         let stream = match self
             .inner
             .interconnect
-            .request_stream_with_timeout(request.target.node_id(), request.clone(), deadline)
+            .request_stream_by(
+                request.target.node_id(),
+                request.clone(),
+                nervix_interconnect::ExchangeDeadline::Caller(read_deadline),
+            )
             .await
         {
             Ok(stream) => stream,
@@ -1322,7 +1326,11 @@ impl SessionServiceImpl {
         let stream = self
             .inner
             .interconnect
-            .request_stream_with_timeout(request.target.node_id(), request.clone(), deadline)
+            .request_stream_by(
+                request.target.node_id(),
+                request.clone(),
+                nervix_interconnect::ExchangeDeadline::Caller(read_deadline),
+            )
             .await
             .map_err(|error| {
                 inspection_refusal(error, StateInspectionRejection::OwnerUnavailable)

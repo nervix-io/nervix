@@ -712,7 +712,9 @@ rebinding completes on its own completion boundary, and a caller never polls a d
 finish one.
 
 Each node captures its configured resource-replication concurrency for maintenance, four fetches
-by default. Archive-open RPCs use the transport Snapshot class, three request budgets and thirty
-seconds by default. Replica publication resolves its RPC deadline as one half of the active
-transport request budget, five seconds by default. These bounds change neither version assignment,
-installation acknowledgement nor binding atomicity.
+by default. An archive fetch and a replica publication each wait for their peer, the archive's
+chunks included, for as long as that peer and the connection to it live, as
+[Liveness And Deadlines](./interconnect.md#liveness-and-deadlines) states; a source or leader that
+is slow costs the replication latency, and one that liveness ends fails the attempt, which the next
+maintenance pass makes again. This changes neither version assignment, installation
+acknowledgement nor binding atomicity.

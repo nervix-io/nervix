@@ -95,7 +95,7 @@ impl Runtime {
                 }
                 RetiringUnit::EndedRelay(task) => {
                     let unit = task.unit;
-                    if let Err(error) = task.stop(self.task_stop_grace()).await {
+                    if let Err(error) = task.stop(self.planned_task_stop()).await {
                         warn!(
                             domain = domain.as_str(),
                             relay = node.identifier.as_str(),

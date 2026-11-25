@@ -1118,16 +1118,13 @@ impl EmitterTask {
             &emitter.inputs,
             runtime.inner.branch_instance_expiration_scan_interval,
         );
-        let routing_relay = inputs
-            .first()
-            .map(|input| input.relay.clone())
-            .verified("a started emitter unit reads at least one relay unit");
         let fault_injection = runtime.inner.fault_injection.clone();
         let runtime = runtime.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         let interaction_shutdown_rx = shutdown_tx.subscribe();
         let mut domain_work_cancel_rx = shutdown_tx.subscribe();
         let mut terminal_shutdown_rx = shutdown_tx.subscribe();
+        let routing_shutdown_rx = shutdown_tx.subscribe();
         let (work_cancel, mut work_cancel_rx) = watch::channel(false);
         let task_work_cancel = work_cancel.clone();
         let quiesce_counters = runtime.unit_quiesce_counters(
@@ -1156,20 +1153,25 @@ impl EmitterTask {
         let task_stop_signal = stop_signal.clone();
 
         let task = nervix_primitives::task::spawn(async move {
-            let shared_routing = match runtime
-                .wait_for_domain_routing(&task_domain, &routing_relay)
-                .await
-            {
-                Ok(routing) => routing,
-                Err(error) => {
-                    runtime.events().report_error(format!(
-                        "emitter '{}' in domain '{}' could not bind its routing snapshot: \
-                         {error:#}",
-                        task_emitter.as_str(),
-                        task_domain.as_str(),
-                    ));
-                    return;
+            // The installation that started this emitter publishes its domain's routing once the
+            // whole domain is in place; a stop, or the domain dropping this emitter, ends the wait.
+            let mut routing_stop = stop_rx.clone();
+            let mut routing_shutdown = routing_shutdown_rx;
+            let stopped = async move {
+                nervix_primitives::select! {
+                    stop = routing_stop.wait_for(Option::is_some) => {
+                        stop.discarded("a signalled stop and a dropped emitter both end the wait");
+                    }
+                    shutdown = routing_shutdown.wait_for(|stopped| *stopped) => {
+                        shutdown.discarded(
+                            "a domain shutdown and a dropped domain sender both end the wait",
+                        );
+                    }
                 }
+            };
+            let Some(shared_routing) = runtime.wait_for_domain_routing(&task_domain, stopped).await
+            else {
+                return;
             };
             let mut routing = DomainRoutingCache::new(shared_routing.clone());
             // The emitter's explicit FLUSH EACH and COMMIT EACH cadences are domain logical

@@ -1393,7 +1393,9 @@ async fn branched_root_without_children_acks_success() {
         AckOutcome::Ack
     );
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 }
@@ -1480,12 +1482,16 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
     assert_eq!(batch.message_count(), 1);
 
     branched_runtime
-        .shutdown(crate::runtime::entity_gate::task_stop_grace(
-            nervix_models::DomainDrainTimeout::DEFAULT,
-        ))
+        .shutdown(crate::runtime::entity_gate::TaskStopWait::Teardown {
+            grace: crate::runtime::entity_gate::task_stop_grace(
+                nervix_models::DomainDrainTimeout::DEFAULT,
+            ),
+        })
         .await;
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 }
@@ -1637,12 +1643,16 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
         assert_eq!(beta.message_count(), 2);
 
         route_runtime
-            .shutdown(crate::runtime::entity_gate::task_stop_grace(
-                nervix_models::DomainDrainTimeout::DEFAULT,
-            ))
+            .shutdown(crate::runtime::entity_gate::TaskStopWait::Teardown {
+                grace: crate::runtime::entity_gate::task_stop_grace(
+                    nervix_models::DomainDrainTimeout::DEFAULT,
+                ),
+            })
             .await;
         owner_task
-            .stop(Duration::from_secs(1))
+            .stop(TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("relay owner should stop");
     }

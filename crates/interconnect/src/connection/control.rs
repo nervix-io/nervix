@@ -15,12 +15,9 @@
     )
 )]
 
-use std::time::Duration;
-
 use error_stack::Report;
 use nervix_execution::QueueAdmission;
 use nervix_models::ClusterNodeName;
-use nervix_primitives::time::Instant;
 
 use super::{CONTROL_PATH, RawRequest, TransportState};
 use crate::{ControlEnvelope, RequestSubquota, TransportError, wire};
@@ -49,15 +46,10 @@ impl TransportState {
         node_id: &ClusterNodeName,
         control: ControlEnvelope,
         subquota: RequestSubquota,
-        timeout_duration: Duration,
+        deadline: Option<crate::ExchangeDeadline>,
         fence: F,
     ) -> Result<wire::Decoded<ControlEnvelope>, Report<TransportError>> {
         let class = control.pool_class();
-        let deadline = Instant::now()
-            .checked_add(timeout_duration)
-            .ok_or_else(|| TransportError::InvalidOptions {
-                reason: "request deadline exceeds the monotonic clock range".to_string(),
-            })?;
         let lease = self.lease(node_id, class, subquota, deadline).await?;
         if let Some(expected) = fence.expected_epoch() {
             let actual = lease.connection.peer_epoch;
@@ -85,13 +77,13 @@ impl TransportState {
                     body: Some(bytes),
                     response_class: class,
                     response_limit: class.control_body_limit(&self.executor),
-                    timeout: deadline.saturating_duration_since(Instant::now()),
+                    deadline,
                     headers: &[],
                 },
             )
             .await?;
-        // The response carries work the peer already did, so a full queue holds it back until the
-        // request's own deadline rather than discarding it.
+        // The response carries work the peer already did, so a full queue holds it back rather than
+        // discarding it.
         wire::decode_rkyv_with::<ControlEnvelope>(
             &self.executor,
             class.memory_class(),

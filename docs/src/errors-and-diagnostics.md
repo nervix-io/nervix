@@ -555,8 +555,8 @@ The remote delivery owner maps a cancelled or unconfirmed admission through its 
 delivery failure and fails the record ACKs it retained, rather than reporting successful processing
 or a codec/message error. The acknowledged ingestor can then retry through the newly published route.
 An already admitted result keeps its record-ACK obligations; uncertainty can produce replay
-duplicates. Cancellation reconciliation keeps its five-second attempt budget independently of the
-entity gate deadline. [Cluster Interconnect](./interconnect.md#cancellation-and-branch-changes)
+duplicates. Cancellation reconciliation asks the former owner again until it answers, membership
+removes it, or the delivery's admission bound passes, independently of the entity gate deadline. [Cluster Interconnect](./interconnect.md#cancellation-and-branch-changes)
 owns the admission verdict and [Execution Plans](./execution-plans.md#incremental-changes-and-rebuilds) owns
 installation and publication.
 
@@ -799,9 +799,11 @@ Loading, replica conversion and backup capture all use that owning decoder; no m
 filled from domain metadata.
 
 Kafka's canonical-start coordination retains its typed offer, encoding, allocation and transfer
-causes beneath `StateReplicationError::KafkaStart`. A capture freeze reports `KafkaStartFrozen`;
-the shared checkpoint-transfer deadline reports `KafkaStartDeadline`. Changed lifecycle or
-assignment authority reports `Superseded`. The interconnect handler rejects a source node that
+causes beneath `StateReplicationError::KafkaStart`. A capture freeze reports `KafkaStartFrozen`.
+A start request carries no deadline of its own: the requesting unit waits for the coordinator's
+answer for as long as the coordinator lives, and one that liveness ends fails the request as a
+transport request failure beneath `Request`. Changed lifecycle or assignment authority reports
+`Superseded`. The interconnect handler rejects a source node that
 does not match its authenticated peer before reading or changing state. Runtime admission also
 checks the current membership incarnation. These failures end that initialization attempt; the
 host retries through its existing ingestor lifecycle without polling from substitute positions.
@@ -2606,19 +2608,28 @@ handoff destination converts the same fetch failure to a checkpoint preparation 
 persisting or activating the candidate state. Diagnostics include the revision and lengths when
 useful, never guest bytes.
 Forced-recovery preparation treats an absent destination execution during startup as an installation
-wait within its current operation deadline. Its `ScheduleInstallationDeadline` context carries the
-typed domain and node when that wait expires. An installed fingerprint mismatch remains a schedule
-validation failure. Neither diagnostic includes checkpoint contents.
+wait within the recovery's budget. Its `ScheduleInstallationDeadline` context carries the typed
+domain and node when that wait expires. A live source that has not answered with its checkpoint
+when the budget passes fails the preparation with `BudgetPassed` instead of being skipped. Both
+are budget expiries, which cross the interconnect as the typed `BudgetPassed` rejection rather than
+as rendered text, so the leader fails the attempt without resetting what live replicas hold. It
+logs `forced ownership recovery reached its budget before its destination prepared; the next
+scheduling pass prepares it again` at `warn` with the move and the complete report, then
+`discarded an automatic schedule before publication` at `info` with the reason `a forced recovery
+reached its budget while the replicas it waited for lived`, and the next scheduling pass prepares
+the recovery again. An installed fingerprint mismatch remains a schedule validation
+failure. None of these diagnostics includes checkpoint contents.
 Kafka offset replica catch-up uses the same typed envelope for its revision description. A
 subsequent bulk stream failure remains a transport request failure, with the target, placement and
 typed staging, admission, verification or native conversion cause retained beneath it. The
 replica diagnostic prints that cause chain. Cancellation or failed conversion publishes no
 partial table, and an assignment-token refusal keeps a delayed transfer from overwriting a
-promoted owner. A commit that lacks its required replica acknowledgement still reports the
-existing quorum deadline; catch-up retries do not turn that deadline into a successful commit.
-Kafka start coordination preserves typed admission, native conversion, memory and bulk-transfer
-causes through its reporting boundary. A frozen unit reports its exact placement, and a
-coordination deadline names the domain, source and unit. The current node incarnation, ownership
+promoted owner. A commit completes only once enough assigned replicas report holding its revision:
+it waits for them for as long as they live, a replica that leaves is replaced by one that catches up
+and reports, and no catch-up retry completes a commit its quorum has not reached. Kafka start
+coordination preserves typed admission, native conversion, memory and bulk-transfer causes through
+its reporting boundary. A frozen unit reports its exact placement, and a failed coordination names
+the domain, source and unit. The current node incarnation, ownership
 fingerprint and originating assignment fence stale work. A count transition refuses incomplete
 source inventories, foreign partition ownership and repeated metric identities before preparing
 target state; a failed preparation cannot publish a partial layout.
@@ -2712,12 +2723,13 @@ batch the local relay boundary refuses is the separate
 reports: the receiver logs the whole chain, and a payload it refused before admitting it is
 answered with the chain rendered as the reason.
 [Cluster Interconnect](./interconnect.md)
-defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries. A record
-acknowledgement lost between two nodes becomes an ordinary negative acknowledgement: the node that
-forwarded it fails it once the receiver has reported nothing about it for fifteen seconds, with a
-reason that names the silent receiver, and the ingestor retries the record as it retries any failed
-acknowledgement; see
-[Record Acknowledgements The Receiver Stops Reporting](./interconnect.md#record-acknowledgements-the-receiver-stops-reporting).
+defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries. A receiver
+sends a record acknowledgement back until it is delivered, so none is lost between two live nodes.
+A record acknowledgement whose receiver leaves the cluster, or whose admitting receiver run ends,
+becomes an ordinary negative acknowledgement: the node that forwarded it fails it with a reason that
+names the receiver and which of the two ended it, and the ingestor retries the record as it retries
+any failed acknowledgement; see
+[Record Acknowledgements Follow The Receiver Run](./interconnect.md#record-acknowledgements-follow-the-receiver-run).
 Local interconnect transport, typed request, and streaming-handler failures carry reports through
 their callers. A layer that changes the failure's meaning adds context to the existing report, so
 the caller can still inspect the transport or producer cause. The HTTP/2 and rkyv boundary sends
@@ -3240,9 +3252,9 @@ includes guest bytes. Stored materialized capture refuses
 malformed headers, inconsistent group or row counts, oversized identity or column frames,
 truncated checkpoints and failed stored chunk digests. These
 typed codec/storage failures follow the same domain capture failure path without column bytes.
-An owner still applying the selected revision waits within a five-second bound; a closed
-applied-state authority or an expired catch-up
-wait is a domain capture failure. A leadership change during that wait refuses the capture before
+An owner still applying the selected revision waits for it with no bound of its own, since the cut's
+budget bounds the whole capture; a closed applied-state authority, reported as `capture revision
+authority is unavailable`, is a domain capture failure. A leadership change during that wait refuses the capture before
 state is read. The failed command's message is `backup failed:` followed by the complete
 domain-capture context and cause chain, including an interrupted guest or native-metadata capture.
 A download the server does not serve is answered with a typed refusal,

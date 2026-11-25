@@ -125,24 +125,38 @@ impl InterconnectRelayPayloadLane {
     ) -> InterconnectRelayCompletion {
         let routing = match routing {
             Some(routing) => routing,
-            None => match runtime
-                .wait_for_domain_routing_with_timing(
-                    &message.payload.domain,
-                    &message.payload.relay,
-                    message.payload.ack_timing,
-                )
-                .await
-            {
-                Ok(routing) => routing,
-                Err(error) => {
-                    return InterconnectRelayCompletion {
-                        channel,
-                        routing: None,
-                        cache: None,
-                        result: Err(error),
-                    };
+            None => {
+                // A delivery can reach this node before the installation that instantiates its
+                // domain publishes the domain's routing: it is held until then, and ends with the
+                // delivery, when its sender cancels it or its own admission bound passes.
+                let bound = message.payload.ack_timing.remote_relay_total_timeout;
+                let admission = &message.admission;
+                let ended = async {
+                    nervix_primitives::select! {
+                        () = admission.cancelled() => {}
+                        () = nervix_primitives::time::sleep(bound) => {}
+                    }
+                };
+                match runtime
+                    .wait_for_domain_routing(&message.payload.domain, ended)
+                    .await
+                {
+                    Some(routing) => routing,
+                    None => {
+                        let error =
+                            Report::new(crate::runtime::RuntimeError::relay_not_instantiated(
+                                &message.payload.domain,
+                                &message.payload.relay,
+                            ));
+                        return InterconnectRelayCompletion {
+                            channel,
+                            routing: None,
+                            cache: None,
+                            result: Err(error),
+                        };
+                    }
                 }
-            },
+            }
         };
         let mut cache = cache.unwrap_or_else(|| DomainRoutingCache::new(routing.clone()));
         let result = runtime
@@ -276,7 +290,11 @@ mod tests {
             registry,
             path,
         } = build_test_service(false).await;
-        service.inner.interconnect.shutdown().await;
+        service
+            .inner
+            .interconnect
+            .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+            .await;
         let peer = named("unavailable_peer");
         let error = service
             .dispatch_interconnect_control(&peer, ControlEnvelope::Terminate)

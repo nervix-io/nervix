@@ -583,23 +583,23 @@ impl SessionServiceImpl {
             Some(filter) => {
                 self.inner
                     .interconnect
-                    .request_stream_with_timeout(
+                    .request_stream_by(
                         request.target.node_id(),
                         nervix_interconnect::ReadPartitionedMaterializedStatePage {
                             read: request.clone(),
                             filter,
                         },
-                        deadline,
+                        nervix_interconnect::ExchangeDeadline::Caller(read_deadline),
                     )
                     .await
             }
             None => {
                 self.inner
                     .interconnect
-                    .request_stream_with_timeout(
+                    .request_stream_by(
                         request.target.node_id(),
                         request.clone(),
-                        deadline,
+                        nervix_interconnect::ExchangeDeadline::Caller(read_deadline),
                     )
                     .await
             }

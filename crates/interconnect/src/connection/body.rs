@@ -1,9 +1,10 @@
 //! Engines and infrastructure.
-//! Owns: bounded HTTP/2 request and response body transfer and its progress deadlines.
+//! Owns: bounded HTTP/2 request and response body transfer; a peer's liveness, never a timer,
+//! ends one.
 //! Depends on: HTTP/2 streams, execution admission and the primitive boundary.
 //! Must not know: transport registries, graph placement or runtime records.
 
-use std::{future::poll_fn, io::Write as _, time::Duration};
+use std::{future::poll_fn, io::Write as _};
 
 use bytes::Bytes;
 use error_stack::Report;
@@ -13,7 +14,6 @@ use meticulous::OptionExt as _;
 use nervix_execution::{
     AdmissionError, BudgetedBuffer, ChargedBytes, ExecutionError, Executor, MemoryClass,
 };
-use nervix_primitives::time::timeout;
 
 use super::BODY_CHUNK_BYTES;
 use crate::{
@@ -21,13 +21,12 @@ use crate::{
     request::RemoteRequestFailure, wire::FreeRoom,
 };
 
-/// Read a refused opening under its body and progress bounds, retaining a reported operation
-/// outcome. Protocol and transport errors do not carry an operation outcome.
+/// Read a refused opening under its body bound, retaining a reported operation outcome. Protocol
+/// and transport errors do not carry an operation outcome.
 pub(super) async fn read_error_response(
     executor: &Executor,
     class: PoolClass,
     limit: u64,
-    progress_timeout: Duration,
     response: Response<RecvStream>,
 ) -> Report<TransportError> {
     let status = response.status();
@@ -48,14 +47,7 @@ pub(super) async fn read_error_response(
         }
         None => None,
     };
-    let message = match read_body(
-        executor,
-        class.memory_class(),
-        limit,
-        progress_timeout,
-        response.into_body(),
-    )
-    .await
+    let message = match read_body(executor, class.memory_class(), limit, response.into_body()).await
     {
         Ok(message) => message,
         Err(error) => return error,
@@ -83,7 +75,6 @@ pub(super) async fn send_decode_refusal(
     respond: &mut server::SendResponse<Bytes>,
     class: PoolClass,
     error: Report<TransportError>,
-    progress_timeout: Duration,
 ) -> Result<(), Report<TransportError>> {
     let admission = error.contains::<AdmissionError>()
         || matches!(
@@ -94,13 +85,7 @@ pub(super) async fn send_decode_refusal(
         return Err(error);
     }
     let failure = RemoteRequestFailure::decode(error, class);
-    send_static_error(
-        respond,
-        failure.status(),
-        &failure.to_string(),
-        progress_timeout,
-    )
-    .await
+    send_static_error(respond, failure.status(), &failure.to_string()).await
 }
 
 #[cfg_attr(
@@ -178,7 +163,6 @@ pub(super) async fn send_response(
     mut respond: server::SendResponse<Bytes>,
     status: StatusCode,
     body: Option<ChargedBytes>,
-    progress_timeout: Duration,
 ) -> Result<(), Report<TransportError>> {
     let response = Response::builder()
         .status(status)
@@ -192,11 +176,7 @@ pub(super) async fn send_response(
     if let Some(body) = body
         && !body.is_empty()
     {
-        timeout(progress_timeout, send_body(&mut stream, body))
-            .await
-            .map_err(|_| TransportError::ProgressTimeout {
-                timeout: progress_timeout,
-            })??;
+        send_body(&mut stream, body).await?;
     }
     Ok(())
 }
@@ -212,12 +192,8 @@ pub(super) async fn send_static_error(
     respond: &mut server::SendResponse<Bytes>,
     status: StatusCode,
     message: &str,
-    progress_timeout: Duration,
 ) -> Result<(), Report<TransportError>> {
-    send_error_response(respond, status, message, progress_timeout, |response| {
-        response
-    })
-    .await
+    send_error_response(respond, status, message, |response| response).await
 }
 
 /// Supplement the full diagnostic with its typed operation outcome. Successful streams retain
@@ -226,7 +202,6 @@ pub(super) async fn send_operation_error(
     respond: &mut server::SendResponse<Bytes>,
     kind: RemoteOperationFailureKind,
     message: &str,
-    progress_timeout: Duration,
 ) -> Result<(), Report<TransportError>> {
     let status = match kind {
         RemoteOperationFailureKind::Rejected => StatusCode::CONFLICT,
@@ -234,7 +209,7 @@ pub(super) async fn send_operation_error(
         RemoteOperationFailureKind::NotReady => StatusCode::TOO_EARLY,
         RemoteOperationFailureKind::Failed => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    send_error_response(respond, status, message, progress_timeout, |response| {
+    send_error_response(respond, status, message, |response| {
         response.header(OPERATION_FAILURE_HEADER, kind.as_ref())
     })
     .await
@@ -251,7 +226,6 @@ async fn send_error_response<F>(
     respond: &mut server::SendResponse<Bytes>,
     status: StatusCode,
     message: &str,
-    progress_timeout: Duration,
     headers: F,
 ) -> Result<(), Report<TransportError>>
 where
@@ -263,49 +237,43 @@ where
     let mut stream = respond
         .send_response(response, false)
         .map_err(TransportError::from)?;
-    timeout(progress_timeout, async {
-        let body = Bytes::copy_from_slice(message.as_bytes());
-        let mut offset = 0;
-        while offset < body.len() {
-            nervix_primitives::task::consume_budget().await;
-            let remaining = body
-                .len()
-                .checked_sub(offset)
-                .verified("the send offset never advances beyond the static error body");
-            let wanted = remaining.min(BODY_CHUNK_BYTES);
-            stream.reserve_capacity(wanted);
-            let assigned = poll_fn(|context| stream.poll_capacity(context))
-                .await
-                .ok_or_else(|| {
-                    TransportError::Decode(
-                        "HTTP/2 stream closed while assigning send capacity".to_string(),
-                    )
-                })?
-                .map_err(TransportError::from)?;
-            let ready = assigned.min(wanted);
-            if ready == 0 {
-                continue;
-            }
-            let end = offset
-                .checked_add(ready)
-                .verified("assigned capacity is bounded by the remaining static error body");
-            let chunk = body.slice(offset..end);
-            offset = end;
-            let end_stream = offset == body.len();
-            stream
-                .send_data(chunk, end_stream)
-                .map_err(TransportError::from)?;
-            if end_stream {
-                break;
-            }
+    let body = Bytes::copy_from_slice(message.as_bytes());
+    let mut offset = 0;
+    while offset < body.len() {
+        nervix_primitives::task::consume_budget().await;
+        let remaining = body
+            .len()
+            .checked_sub(offset)
+            .verified("the send offset never advances beyond the static error body");
+        let wanted = remaining.min(BODY_CHUNK_BYTES);
+        stream.reserve_capacity(wanted);
+        let assigned = poll_fn(|context| stream.poll_capacity(context))
+            .await
+            .ok_or_else(|| {
+                TransportError::Decode(
+                    "HTTP/2 stream closed while assigning send capacity".to_string(),
+                )
+            })?
+            .map_err(TransportError::from)?;
+        let ready = assigned.min(wanted);
+        if ready == 0 {
+            continue;
         }
-        stream.reserve_capacity(0);
-        Ok::<(), Report<TransportError>>(())
-    })
-    .await
-    .map_err(|_| TransportError::ProgressTimeout {
-        timeout: progress_timeout,
-    })?
+        let end = offset
+            .checked_add(ready)
+            .verified("assigned capacity is bounded by the remaining static error body");
+        let chunk = body.slice(offset..end);
+        offset = end;
+        let end_stream = offset == body.len();
+        stream
+            .send_data(chunk, end_stream)
+            .map_err(TransportError::from)?;
+        if end_stream {
+            break;
+        }
+    }
+    stream.reserve_capacity(0);
+    Ok(())
 }
 
 #[cfg_attr(
@@ -319,7 +287,6 @@ pub(super) async fn read_body(
     executor: &Executor,
     class: MemoryClass,
     limit: u64,
-    progress_timeout: Duration,
     body: RecvStream,
 ) -> Result<ChargedBytes, Report<TransportError>> {
     let reservation = executor
@@ -327,7 +294,7 @@ pub(super) async fn read_body(
         .await
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
     let mut buffer = BudgetedBuffer::with_limit(reservation, limit);
-    read_body_into(&mut buffer, progress_timeout, body).await?;
+    read_body_into(&mut buffer, body).await?;
     Ok(ChargedBytes::from_buffer(buffer))
 }
 
@@ -340,12 +307,11 @@ pub(super) async fn read_body(
 )]
 pub(super) async fn read_body_into(
     buffer: &mut BudgetedBuffer,
-    progress_timeout: Duration,
     mut body: RecvStream,
 ) -> Result<(), Report<TransportError>> {
     loop {
         nervix_primitives::task::consume_budget().await;
-        let Some(chunk) = next_body_chunk(&mut body, progress_timeout).await? else {
+        let Some(chunk) = next_body_chunk(&mut body).await? else {
             break;
         };
         buffer.write_all(&chunk).map_err(|error| {
@@ -375,14 +341,13 @@ pub(super) async fn read_body_in_free_room(
     executor: &Executor,
     class: MemoryClass,
     limit: u64,
-    progress_timeout: Duration,
     mut body: RecvStream,
 ) -> Result<FreeRoom<ChargedBytes>, Report<TransportError>> {
     let reservation = match executor.try_reserve(class, initial_body_charge(limit)) {
         Ok(reservation) => reservation,
         Err(refusal) => {
             if let AdmissionError::BudgetExhausted { .. } = refusal.current_context() {
-                drain_body(progress_timeout, body).await?;
+                drain_body(body).await?;
                 return Ok(FreeRoom::NoRoom);
             }
             return Err(TransportError::with_cause(refusal, TransportError::Decode));
@@ -391,7 +356,7 @@ pub(super) async fn read_body_in_free_room(
     let mut buffer = BudgetedBuffer::with_limit(reservation, limit);
     loop {
         nervix_primitives::task::consume_budget().await;
-        let Some(chunk) = next_body_chunk(&mut body, progress_timeout).await? else {
+        let Some(chunk) = next_body_chunk(&mut body).await? else {
             break;
         };
         let grown = buffer.try_extend_from_slice(&chunk);
@@ -405,7 +370,7 @@ pub(super) async fn read_body_in_free_room(
             refusal.downcast_ref::<AdmissionError>()
         {
             drop(buffer);
-            drain_body(progress_timeout, body).await?;
+            drain_body(body).await?;
             return Ok(FreeRoom::NoRoom);
         }
         return Err(TransportError::with_cause(refusal, TransportError::Decode));
@@ -422,13 +387,10 @@ pub(super) async fn read_body_in_free_room(
         reason = "the transport performs this operation for each admitted frame or stream request"
     )
 )]
-async fn drain_body(
-    progress_timeout: Duration,
-    mut body: RecvStream,
-) -> Result<(), Report<TransportError>> {
+async fn drain_body(mut body: RecvStream) -> Result<(), Report<TransportError>> {
     loop {
         nervix_primitives::task::consume_budget().await;
-        let Some(chunk) = next_body_chunk(&mut body, progress_timeout).await? else {
+        let Some(chunk) = next_body_chunk(&mut body).await? else {
             return Ok(());
         };
         body.flow_control()
@@ -453,8 +415,9 @@ fn initial_body_charge(limit: u64) -> u64 {
     limit.min(INITIAL_BODY_CHARGE)
 }
 
-/// The next chunk of `body`, or `None` at its end, failing when no chunk arrives for
-/// `progress_timeout`.
+/// The next chunk of `body`, or `None` at its end. The read waits for its sender for as long as the
+/// connection under it lives: a sender that is slow costs latency, and a connection that dies fails
+/// the stream.
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -462,16 +425,8 @@ fn initial_body_charge(limit: u64) -> u64 {
         reason = "the transport performs this operation for each admitted frame or stream request"
     )
 )]
-async fn next_body_chunk(
-    body: &mut RecvStream,
-    progress_timeout: Duration,
-) -> Result<Option<Bytes>, Report<TransportError>> {
-    let chunk = timeout(progress_timeout, body.data()).await.map_err(|_| {
-        TransportError::ProgressTimeout {
-            timeout: progress_timeout,
-        }
-    })?;
-    let Some(chunk) = chunk else {
+async fn next_body_chunk(body: &mut RecvStream) -> Result<Option<Bytes>, Report<TransportError>> {
+    let Some(chunk) = body.data().await else {
         return Ok(None);
     };
     let chunk = chunk.map_err(TransportError::from)?;

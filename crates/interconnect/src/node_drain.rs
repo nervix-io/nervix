@@ -74,9 +74,6 @@ impl InterconnectRequest for StoppingNodeDrainRequest {
     type Response = StoppingNodeDrainResponse;
 
     const NAME: &'static str = "stopping_node_drain";
-    /// The deadline of a cordon release. A stopping node bounds each drain request by what
-    /// remains of its shutdown timeout instead.
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 }
 
 #[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]

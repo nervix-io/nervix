@@ -44,7 +44,6 @@ impl Runtime {
         &self,
         placement: &RuntimeStatePlacement,
         lsm: u64,
-        deadline: Instant,
     ) -> error_stack::Result<(), StateReplicationError> {
         let superseded = || {
             Report::new(StateReplicationError::Superseded {
@@ -95,18 +94,12 @@ impl Runtime {
             if awaiting.is_empty() {
                 return Ok(());
             }
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(Report::new(StateReplicationError::ReplicaConfirmation {
-                    placement: placement.clone(),
-                    lsm,
-                    awaiting: AwaitedReplicas(awaiting),
-                }));
-            }
-            let recheck = now
+            // A replica that is slow to confirm, while it lives, costs the reset latency: the
+            // recheck follows a replaced replica, and only a shrunk plan or a superseded route
+            // ends the wait.
+            let recheck = Instant::now()
                 .checked_add(self.replica_confirmation_recheck())
-                .assured("a fraction-of-a-second recheck stays within Instant")
-                .min(deadline);
+                .assured("a fraction-of-a-second recheck stays within Instant");
             nervix_primitives::select! {
                 _ = &mut progressed => {}
                 _ = sleep_until(recheck) => {}
@@ -301,7 +294,6 @@ impl Runtime {
         &self,
         state: &ReplicatedWasmProcessorState,
         captured: CapturedWasmCheckpoint,
-        deadline: Instant,
     ) -> error_stack::Result<LocallyDurableWasmCheckpoint, StateReplicationError> {
         let placement = &state.placement;
         let revision = captured.revision();
@@ -315,19 +307,10 @@ impl Runtime {
         // A runtime without a state store, which only unit tests construct, has no stable storage
         // for a checkpoint to reach.
         if let Some(store) = self.inner.state_store.as_ref() {
-            let written = nervix_primitives::time::timeout_at(
-                deadline,
-                store.persist_wasm_checkpoint(placement, captured.saved()),
-            )
-            .await;
-            match written {
-                Ok(written) => written.change_context_lazy(failed)?,
-                Err(_elapsed) => {
-                    return Err(Report::new(failed()).attach_printable(
-                        "the checkpoint deadline passed before its write reached stable storage",
-                    ));
-                }
-            }
+            store
+                .persist_wasm_checkpoint(placement, captured.saved())
+                .await
+                .change_context_lazy(failed)?;
         }
         let durable = state.record_locally_durable(captured);
         if let WasmCheckpointBoundary::Replicas(_) = durable.boundary() {
@@ -340,12 +323,12 @@ impl Runtime {
     ///
     /// The replicas follow the committed schedule while the checkpoint waits, so a replaced replica
     /// is replaced in the wait, but a checkpoint never completes with fewer replicas than it was
-    /// captured for, and never after this node stopped executing the processor.
+    /// captured for, and never after this node stopped executing the processor. A replica that is
+    /// slow to confirm, while it lives, costs the checkpoint latency and never fails it.
     pub(in crate::runtime) async fn confirm_wasm_checkpoint(
         &self,
         state: &ReplicatedWasmProcessorState,
         durable: LocallyDurableWasmCheckpoint,
-        deadline: Instant,
     ) -> error_stack::Result<CompletedWasmCheckpoint, StateReplicationError> {
         let placement = &state.placement;
         let revision = durable.revision();
@@ -371,18 +354,9 @@ impl Runtime {
             if awaiting.is_empty() {
                 return Ok(durable.completed());
             }
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(Report::new(StateReplicationError::ReplicaConfirmation {
-                    placement: placement.clone(),
-                    lsm: revision,
-                    awaiting: AwaitedReplicas(awaiting),
-                }));
-            }
-            let recheck = now
+            let recheck = Instant::now()
                 .checked_add(self.replica_confirmation_recheck())
-                .assured("a recheck interval of a fraction of a second stays within Instant")
-                .min(deadline);
+                .assured("a recheck interval of a fraction of a second stays within Instant");
             nervix_primitives::select! {
                 _ = &mut progressed => {}
                 _ = sleep_until(recheck) => {}

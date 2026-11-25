@@ -503,7 +503,7 @@ fn interconnect_line(record: &NodeCapabilityRecord) -> String {
     format!(
         "  interconnect: max-peers={} request-quota={} health-probes={} max-connections={} \
          handshakes={} queue={} completion={} stream-window={} connection-window={} setup={} \
-         request={} progress={} backoff={} max-backoff={} jitter-permille={}",
+         backoff={} max-backoff={} jitter-permille={}",
         capacity.max_peers,
         capacity.request_quota,
         capacity.health_probes,
@@ -514,8 +514,6 @@ fn interconnect_line(record: &NodeCapabilityRecord) -> String {
         capacity.stream_window_bytes,
         capacity.connection_window_bytes,
         timing_text(capacity.connection_setup_timeout),
-        timing_text(capacity.request_timeout),
-        timing_text(capacity.progress_timeout),
         timing_text(capacity.reconnect_backoff),
         timing_text(capacity.max_reconnect_backoff),
         capacity.reconnect_jitter_permille

@@ -61,44 +61,8 @@ async fn an_abandoned_relay_send_that_found_no_connection_started_no_exchange() 
         "a send abandoned while it waited for a connection reached no receiver"
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
-}
-
-/// A send that fails while it waits for a connection reached no receiver either.
-#[nervix_primitives::test]
-async fn a_relay_send_that_failed_before_a_connection_started_no_exchange() {
-    let ConnectedTransports {
-        transport_a,
-        transport_b,
-        node_a,
-        node_b,
-        ..
-    } = bound_transports_with_options(TransportOptions {
-        request_timeout: Duration::from_millis(50),
-        ..TransportOptions::default()
-    })
-    .await;
-    let progress = RelaySendProgress::default();
-
-    let failure = transport_a
-        .send_relay(&node_b, progress_payload(&node_a, 0), &progress)
-        .await
-        .expect_err("a peer without a target cannot be leased a connection");
-    assert!(
-        matches!(
-            failure.current_context(),
-            TransportError::RequestTimeout { .. }
-        ),
-        "the send ended waiting for a connection: {failure:#}"
-    );
-    assert!(
-        !progress.exchange_started(),
-        "a send that never leased a connection reached no receiver"
-    );
-
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// A send that reaches its receiver records the exchange.
@@ -121,6 +85,10 @@ async fn a_relay_send_that_reached_its_receiver_records_the_exchange() {
         "a delivery whose body reached its receiver started an exchange"
     );
 
-    pair.transport_a.shutdown().await;
-    pair.transport_b.shutdown().await;
+    pair.transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    pair.transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }

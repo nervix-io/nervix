@@ -92,11 +92,8 @@ fn an_admitted_attempt_keeps_its_channel_open_before_its_outcome_returns() {
 fn short_timing() -> nervix_models::RemoteAckTiming {
     let timing = nervix_models::RemoteAckTiming {
         remote_ack_alive_interval: Duration::from_millis(1),
-        remote_ack_dispatch_timeout: Duration::from_millis(1),
-        remote_ack_silence_timeout: Duration::from_millis(10),
         remote_ack_sweep_interval: Duration::from_millis(1),
         remote_relay_total_timeout: Duration::from_millis(50),
-        remote_relay_instantiation_wait: Duration::from_millis(5),
     };
     timing.validate().assured("the short cohort is coherent");
     timing
@@ -228,7 +225,7 @@ impl PeerFixture {
         });
         let grant = RelayGrant {
             expires_at: Instant::now()
-                .checked_add(crate::TransportOptions::default().relay_grant_lifetime())
+                .checked_add(nervix_models::RemoteAckTiming::default().remote_relay_total_timeout)
                 .assured("the fixture grant fits the clock"),
             reservation: self
                 .executor
@@ -766,8 +763,9 @@ fn grant_expiry_and_idle_reconciliation_reclaim_every_protocol_collection() {
     );
     fixture.owner.expire_grant(1, Instant::now());
     assert_eq!(record.status(), RelayAdmissionStatus::Reserved);
+    // A grant lives until its delivery's ceiling passes, unless its body arrives first.
     let expiry = Instant::now()
-        .checked_add(crate::TransportOptions::default().relay_grant_lifetime())
+        .checked_add(nervix_models::RemoteAckTiming::default().remote_relay_total_timeout)
         .assured("the fixture expiry fits");
     fixture.owner.expire_grant(1, expiry);
     assert_eq!(record.status(), RelayAdmissionStatus::Cancelled);
@@ -1955,44 +1953,12 @@ fn independent_progress_cohorts_retain_their_send_budgets_and_channel_retention(
     let now = Instant::now();
     let (fast_reports, _) = fixture.owner.due_progress(now + Duration::from_millis(2));
     assert_eq!(fast_reports.len(), 1);
-    assert_eq!(
-        fast_reports.values().next().assured("one fast report").1,
-        timing.remote_ack_dispatch_timeout
-    );
     // The fast RPC stays in flight while the other cohort becomes due.
     let (slow_reports, _) = fixture.owner.due_progress(now + Duration::from_millis(101));
     assert_eq!(slow_reports.len(), 1);
-    assert_eq!(
-        slow_reports.values().next().assured("one slow report").1,
-        nervix_models::RemoteAckDispatchTimeout::DEFAULT
-    );
     let _next = fast_record.finish_progress_report(now + Duration::from_millis(101));
     let (again, _) = fixture.owner.due_progress(now + Duration::from_millis(103));
     assert_eq!(again.len(), 1);
     assert_eq!(again.keys().next(), fast_reports.keys().next());
     fixture.owner.end();
-}
-
-#[test]
-fn relay_progress_dispatch_respects_local_and_captured_budgets() {
-    let mut options = crate::TransportOptions::default();
-    let captured = Duration::from_secs(5);
-    assert_eq!(
-        options.relay_progress_send_timeout(captured),
-        Duration::from_secs(1)
-    );
-    assert_eq!(
-        options.relay_progress_send_timeout(Duration::from_millis(100)),
-        Duration::from_millis(100)
-    );
-    options.progress_timeout = Duration::from_millis(200);
-    assert_eq!(
-        options.relay_progress_send_timeout(captured),
-        Duration::from_millis(200)
-    );
-    options.request_timeout = Duration::from_nanos(1);
-    assert_eq!(
-        options.relay_progress_send_timeout(captured),
-        Duration::from_nanos(1)
-    );
 }

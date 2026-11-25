@@ -329,8 +329,8 @@ fn backup_inventory_is_bounded_across_a_partition_and_a_held_link() {
     Scenario {
         name: "backup inventory faults",
         fault_plan: "partition the link, then hold it, while the coordinator asks the capture \
-                     owner for its staged section inventory; each request fails at its deadline \
-                     and the repaired or released link lists the complete unchanged stage",
+                     owner for its staged section inventory; each request fails at the backup's \
+                     ceiling and the repaired or released link lists the complete unchanged stage",
         seeds: &[104],
     }
     .check(fault_config, exercise_backup_inventory_faults);
@@ -349,8 +349,12 @@ fn staged_inventory(staged: &BTreeSet<usize>) -> Vec<CapturedSectionInventory> {
         .collect()
 }
 
-/// Requires the coordinator's inventory request over a disrupted link to fail at the request's own
-/// deadline rather than return or wait longer.
+/// The ceiling a backup gives its inventory requests in this fixture, as a backup's cut deadline
+/// bounds them.
+const INVENTORY_CEILING: Duration = Duration::from_secs(5);
+
+/// Requires the coordinator's inventory request over a disrupted link to fail at the backup's own
+/// ceiling rather than return or wait longer.
 async fn assert_inventory_deadline(
     client: &Transport,
     peer: &ClusterNodeName,
@@ -358,26 +362,32 @@ async fn assert_inventory_deadline(
 ) {
     let started = turmoil::elapsed();
     let error = match client
-        .request(
+        .request_by(
             peer,
             CaptureInventoryRequest {
                 coordination: coordination.clone(),
                 domain: domain(),
             },
+            nervix_interconnect::ExchangeDeadline::OperationCeiling(
+                nervix_primitives::time::Instant::now() + INVENTORY_CEILING,
+            ),
         )
         .await
     {
-        Ok(_) => panic!("an inventory request over a disrupted link must reach its deadline"),
+        Ok(_) => panic!("an inventory request over a disrupted link must reach its ceiling"),
         Err(error) => error,
     };
     assert!(
         matches!(
             error.current_context(),
-            RequestError::Timeout { timeout, .. } if *timeout == CaptureInventoryRequest::DEADLINE.declared_default()
+            RequestError::DeadlinePassed {
+                deadline: nervix_interconnect::ExchangeDeadlineKind::OperationCeiling,
+                ..
+            }
         ),
         "{error:?}"
     );
-    assert!(turmoil::elapsed() >= started + CaptureInventoryRequest::DEADLINE.declared_default());
+    assert!(turmoil::elapsed() >= started + INVENTORY_CEILING);
 }
 
 /// Requires the capture owner to list exactly the complete stage its capture produced.
@@ -475,7 +485,7 @@ fn exercise_backup_inventory_faults(run: ScenarioRun) -> Result<(), SimulationEr
                         "server",
                         "one capture staged six sections, all still staged",
                     );
-                    server.shutdown().await;
+                    server.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -534,7 +544,7 @@ fn exercise_backup_inventory_faults(run: ScenarioRun) -> Result<(), SimulationEr
                     assert_complete_inventory(&client, &peer, &coordination).await;
                     trace.record("client", "released link listed the unchanged stage");
                     done.send_replace(true);
-                    client.shutdown().await;
+                    client.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -676,7 +686,7 @@ fn exercise_backup_section(run: ScenarioRun, sections: SectionSet) -> Result<(),
                         "server",
                         "six captured sections consumed and installed once",
                     );
-                    server.shutdown().await;
+                    server.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -781,23 +791,37 @@ fn exercise_backup_section(run: ScenarioRun, sections: SectionSet) -> Result<(),
                         path: "state/stalled.bin".to_string(),
                         ..fetch(sections, coordination.clone())
                     };
+                    // A live owner that does not answer holds the fetch until the backup's own
+                    // ceiling, which bounds every fetch of the backup.
                     let started = turmoil::elapsed();
+                    let stalled_fetch = client
+                        .request_stream_by(
+                            &peer,
+                            stalled,
+                            nervix_interconnect::ExchangeDeadline::OperationCeiling(
+                                nervix_primitives::time::Instant::now() + INVENTORY_CEILING,
+                            ),
+                        )
+                        .await;
                     assert!(
-                        client.request_stream(&peer, stalled).await.is_err(),
-                        "a stalled fetch must fail at its deadline"
+                        stalled_fetch.is_err(),
+                        "a stalled fetch must fail at the backup's ceiling"
                     );
-                    assert!(
-                        turmoil::elapsed()
-                            >= started + FetchCapturedSection::DEADLINE.declared_default()
-                    );
-                    trace.record("client", "stalled fetch reached its deadline");
+                    assert!(turmoil::elapsed() >= started + INVENTORY_CEILING);
+                    trace.record("client", "stalled fetch reached the backup's ceiling");
                     turmoil::partition("client", "server");
                     assert!(
                         client
-                            .request_stream(&peer, fetch(sections, coordination.clone()))
+                            .request_stream_by(
+                                &peer,
+                                fetch(sections, coordination.clone()),
+                                nervix_interconnect::ExchangeDeadline::OperationCeiling(
+                                    nervix_primitives::time::Instant::now() + INVENTORY_CEILING,
+                                ),
+                            )
                             .await
                             .is_err(),
-                        "a partitioned fetch reaches its request deadline"
+                        "a partitioned fetch fails by liveness or the backup's ceiling"
                     );
                     trace.record("client", "partitioned fetch failed");
                     turmoil::repair("client", "server");
@@ -860,7 +884,7 @@ fn exercise_backup_section(run: ScenarioRun, sections: SectionSet) -> Result<(),
                         "36 MiB capture verified and installed after repair",
                     );
                     done.send_replace(true);
-                    client.shutdown().await;
+                    client.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -960,7 +984,7 @@ fn exercise_backup_restart(run: ScenarioRun) -> Result<(), SimulationError> {
                             .0,
                         u64::try_from(CHUNK_BYTES).assured("bounded chunk fits")
                     );
-                    server.shutdown().await;
+                    server.shutdown(super::teardown_ceiling()).await;
                     trace.record("server", "owner and receiver process ended mid-transfer");
                     let replacement = bind("server", credentials, seed + 2).await;
                     let replacement_install =
@@ -991,7 +1015,7 @@ fn exercise_backup_restart(run: ScenarioRun) -> Result<(), SimulationError> {
                             .assured("fixture client remains alive");
                     }
                     assert!(replacement_install.lock().published);
-                    replacement.shutdown().await;
+                    replacement.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -1125,7 +1149,7 @@ fn exercise_backup_restart(run: ScenarioRun) -> Result<(), SimulationError> {
                         "replacement receiver published the complete 36 MiB transfer",
                     );
                     done.send_replace(true);
-                    client.shutdown().await;
+                    client.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;

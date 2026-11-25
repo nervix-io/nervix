@@ -15,7 +15,7 @@
     )
 )]
 
-use std::{future::poll_fn, time::Duration};
+use std::future::poll_fn;
 
 use bytes::Bytes;
 use error_stack::Report;
@@ -25,7 +25,6 @@ use http::{Response, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor};
 use nervix_models::ClusterNodeName;
-use nervix_primitives::time::{Instant, timeout};
 
 use super::{
     BODY_CHUNK_BYTES, RawRequest, STREAM_PATH, StreamLease, TransportState, read_body,
@@ -35,7 +34,7 @@ use crate::{
     PoolClass, RequestError, RequestSubquota, TransportError,
     observation::TransferDirection,
     request::{
-        RequestAdmission, StreamOpeningFailure, StreamPreconditionDeadline, StreamRequestEnvelope,
+        RequestAdmission, StreamOpeningFailure, StreamPreconditionRefusal, StreamRequestEnvelope,
         StreamingResponse,
     },
     wire,
@@ -62,7 +61,6 @@ pub struct IncomingByteStream {
     class: PoolClass,
     node: ClusterNodeName,
     request: &'static str,
-    progress_timeout: Duration,
     content_length: u64,
     received: u64,
     finished: bool,
@@ -76,7 +74,8 @@ pub(crate) struct OutboundByteStreamRequest {
     pub(crate) subquota: RequestSubquota,
     pub(crate) name: &'static str,
     pub(crate) body: ChargedBytes,
-    pub(crate) timeout: Duration,
+    /// What may end the opening besides the liveness of the peer: only a deadline its caller named.
+    pub(crate) deadline: Option<crate::ExchangeDeadline>,
     pub(crate) admission: RequestAdmission,
 }
 
@@ -212,19 +211,9 @@ impl IncomingByteStream {
         if self.finished {
             return Ok(None);
         }
-        let next = timeout(self.progress_timeout, self.body.data()).await;
-        let next = match next {
-            Ok(next) => next,
-            Err(_) => {
-                self.finished = true;
-                return Err(Report::new(RequestError::Stream {
-                    node: self.node.clone(),
-                    request: self.request,
-                    reason: format!("response made no progress for {:?}", self.progress_timeout),
-                }));
-            }
-        };
-        let Some(next) = next else {
+        // The stream waits for its producer for as long as the connection under it lives: a
+        // producer that is slow costs latency, and a connection that dies fails the stream.
+        let Some(next) = self.body.data().await else {
             self.finished = true;
             if self.received != self.content_length {
                 return Err(Report::new(RequestError::StreamLengthMismatch {
@@ -322,7 +311,6 @@ impl TransportState {
             &self.executor,
             class.memory_class(),
             class.control_body_limit(&self.executor),
-            self.options.progress_timeout,
             body,
         )
         .await?;
@@ -336,8 +324,7 @@ impl TransportState {
         let decoded = match decoded {
             Ok(decoded) => decoded,
             Err(error) => {
-                send_decode_refusal(&mut respond, class, error, self.options.progress_timeout)
-                    .await?;
+                send_decode_refusal(&mut respond, class, error).await?;
                 return Ok(());
             }
         };
@@ -351,13 +338,7 @@ impl TransportState {
         };
         let request = request.request;
         if request.class != class {
-            send_static_error(
-                &mut respond,
-                StatusCode::FORBIDDEN,
-                "wrong pool class",
-                self.options.progress_timeout,
-            )
-            .await?;
+            send_static_error(&mut respond, StatusCode::FORBIDDEN, "wrong pool class").await?;
             return Ok(());
         }
         let handled = nervix_primitives::select! {
@@ -376,23 +357,12 @@ impl TransportState {
         let handled = match handled {
             Ok(handled) => handled,
             Err(StreamOpeningFailure::Operation { kind, report }) => {
-                super::body::send_operation_error(
-                    &mut respond,
-                    kind,
-                    &format!("{report:#}"),
-                    self.options.progress_timeout,
-                )
-                .await?;
+                super::body::send_operation_error(&mut respond, kind, &format!("{report:#}"))
+                    .await?;
                 return Ok(());
             }
             Err(StreamOpeningFailure::Request(error)) => {
-                send_static_error(
-                    &mut respond,
-                    error.status(),
-                    &error.to_string(),
-                    self.options.progress_timeout,
-                )
-                .await?;
+                send_static_error(&mut respond, error.status(), &error.to_string()).await?;
                 return Ok(());
             }
         };
@@ -411,16 +381,10 @@ impl TransportState {
             subquota,
             name,
             body,
-            timeout: timeout_duration,
+            deadline,
             admission,
         } = request;
-        let deadline = Instant::now()
-            .checked_add(timeout_duration)
-            .ok_or_else(|| TransportError::InvalidOptions {
-                reason: "request deadline exceeds the monotonic clock range".to_string(),
-            })?;
         let lease = self.lease(node_id, class, subquota, deadline).await?;
-        let remaining = deadline.saturating_duration_since(Instant::now());
         let (body, content_length) = lease
             .connection
             .request_stream_raw(
@@ -430,12 +394,12 @@ impl TransportState {
                     body: Some(body),
                     response_class: class,
                     response_limit: class.control_body_limit(&self.executor),
-                    timeout: remaining,
+                    deadline,
                     headers: &[],
                 },
             )
             .await
-            .map_err(|error| StreamPreconditionDeadline::attach(error, deadline))?;
+            .map_err(StreamPreconditionRefusal::attach)?;
         Ok(IncomingByteStream {
             body,
             lease,
@@ -444,7 +408,6 @@ impl TransportState {
             class,
             node: node_id.clone(),
             request: name,
-            progress_timeout: self.options.progress_timeout,
             content_length,
             received: 0,
             finished: false,
@@ -455,13 +418,11 @@ impl TransportState {
 
 /// Writes one streamed chunk as the reader's flow-control window admits it.
 ///
-/// Only a nonzero capacity grant restarts the progress bound, so a chunk larger than the window
-/// may span many bounds while its reader keeps reading. A reader that grants no capacity for
-/// `progress_timeout` has stopped reading, and the stream is reset.
+/// A reader that grants no capacity is applying backpressure: the chunk waits for it for as long
+/// as the connection under the stream lives, and a connection that dies fails the stream.
 async fn send_stream_chunk(
     stream: &mut SendStream<Bytes>,
     body: ChargedBytes,
-    progress_timeout: Duration,
     chunk_limit: std::num::NonZeroU64,
 ) -> Result<(), Report<TransportError>> {
     let mut offset = 0;
@@ -474,15 +435,7 @@ async fn send_stream_chunk(
         let chunk_limit = usize::try_from(chunk_limit.get()).unwrap_or(usize::MAX);
         let wanted = remaining.min(BODY_CHUNK_BYTES).min(chunk_limit);
         stream.reserve_capacity(wanted);
-        let assigned = match timeout(progress_timeout, granted_send_capacity(stream)).await {
-            Ok(assigned) => assigned?,
-            Err(_) => {
-                stream.send_reset(Reason::CANCEL);
-                return Err(Report::new(TransportError::ProgressTimeout {
-                    timeout: progress_timeout,
-                }));
-            }
-        };
+        let assigned = granted_send_capacity(stream).await?;
         let ready = assigned.min(wanted);
         let end = offset
             .checked_add(ready)
@@ -530,7 +483,6 @@ impl TransportState {
         mut response: StreamingResponse,
         chunk_limit: std::num::NonZeroU64,
     ) -> Result<(), Report<TransportError>> {
-        let progress_timeout = self.options.progress_timeout;
         let headers = Response::builder()
             .status(StatusCode::OK)
             .version(Version::HTTP_2)
@@ -545,16 +497,8 @@ impl TransportState {
         let mut sent = 0_u64;
         loop {
             nervix_primitives::task::consume_budget().await;
-            let next = match timeout(progress_timeout, response.chunks.next()).await {
-                Ok(next) => next,
-                Err(_) => {
-                    stream.send_reset(Reason::CANCEL);
-                    return Err(Report::new(TransportError::ProgressTimeout {
-                        timeout: progress_timeout,
-                    }));
-                }
-            };
-            let Some(chunk) = next else {
+            // The producer is this node's own handler: one that is slow costs its reader latency.
+            let Some(chunk) = response.chunks.next().await else {
                 break;
             };
             let chunk = match chunk {
@@ -582,7 +526,7 @@ impl TransportState {
                     "stream producer exceeded its declared content length".to_string(),
                 )));
             }
-            send_stream_chunk(&mut stream, chunk, progress_timeout, chunk_limit).await?;
+            send_stream_chunk(&mut stream, chunk, chunk_limit).await?;
             self.observations
                 .bulk_transferred(class, TransferDirection::Sent, chunk_bytes);
         }

@@ -623,11 +623,7 @@ impl Runtime {
             self.answer_partition_transition(request).await
         } else {
             dispatcher
-                .request_with_timeout(
-                    &owner,
-                    request,
-                    dispatcher.request_deadline::<PartitionTransitionRequest>(),
-                )
+                .request(&owner, request)
                 .await
                 .change_context_lazy(|| PartitionClaimError::Request {
                     entity: entity.clone(),

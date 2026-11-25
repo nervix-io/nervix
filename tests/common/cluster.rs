@@ -2135,10 +2135,8 @@ impl Cluster {
         .map_err(|error| io::Error::other(error.to_string()))?;
         let options = TransportOptions {
             connection_setup_timeout: Duration::from_millis(750),
-            request_timeout: Duration::from_millis(750),
             reconnect_backoff: Duration::from_millis(25),
             max_reconnect_backoff: Duration::from_millis(50),
-            shutdown_drain_timeout: Duration::from_millis(250),
             ..TransportOptions::default()
         };
         let dns = DnsResolver::load(
@@ -2201,7 +2199,15 @@ impl Cluster {
                 Err(error) => Err(io::Error::other(error)),
             }
         };
-        transport.shutdown().await;
+        // The probe holds no stream past its one message, so a short ceiling only guards the
+        // harness against a connection that never ends.
+        transport
+            .shutdown(Some(
+                nervix_interconnect::ExchangeDeadline::OperationCeiling(
+                    nervix_primitives::time::Instant::now() + Duration::from_millis(250),
+                ),
+            ))
+            .await;
         attempt
     }
 

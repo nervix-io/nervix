@@ -33,7 +33,6 @@ impl InterconnectRequest for Ping {
     type Response = ();
 
     const NAME: &'static str = "test_ping";
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Control;
 }
 
 const DISTINCT_NAMES: [&str; 6] = [

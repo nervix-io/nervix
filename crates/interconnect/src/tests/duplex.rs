@@ -36,8 +36,7 @@ impl InterconnectDuplexRequest for CountingStream {
 
     const NAME: &'static str = "test_counting_stream";
     const CLASS: PoolClass = PoolClass::Replication;
-    const SETUP_DEADLINE: crate::DuplexSetupDeadline =
-        crate::DuplexSetupDeadline::Request(crate::RequestDeadline::Setup);
+    const SETUP_DEADLINE: crate::DuplexSetupDeadline = crate::DuplexSetupDeadline::Liveness;
 }
 
 const PIPELINED_ITEMS: u64 = 32;
@@ -51,8 +50,7 @@ impl InterconnectDuplexRequest for BulkOpening {
     const NAME: &'static str = "test_bulk_opening";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const SETUP_DEADLINE: crate::DuplexSetupDeadline =
-        crate::DuplexSetupDeadline::Request(crate::RequestDeadline::Setup);
+    const SETUP_DEADLINE: crate::DuplexSetupDeadline = crate::DuplexSetupDeadline::Liveness;
 }
 
 #[nervix_primitives::test]
@@ -87,8 +85,8 @@ async fn a_duplex_opening_reports_decode_capacity_and_recovers_after_release() {
     } else {
         panic!("the duplex stream must open once memory is released");
     }
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
     match refused {
         Err(error) => assert!(
             matches!(
@@ -174,8 +172,8 @@ async fn a_duplex_stream_answers_every_frame_in_submission_order() {
         "the responder ends its direction once the initiator half-closes"
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -221,8 +219,8 @@ async fn a_duplex_sender_reports_when_its_peer_last_accepted_its_bytes() {
         "answers arriving from the peer must not count as the peer accepting the sender's bytes"
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -236,7 +234,6 @@ impl InterconnectRequest for ReplicationShareRequest {
 
     const NAME: &'static str = "test_replication_share";
     const CLASS: PoolClass = PoolClass::Replication;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 #[nervix_primitives::test]
@@ -282,8 +279,8 @@ async fn an_open_append_stream_cannot_consume_shared_replication_streams() {
     );
 
     drop(held);
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -296,8 +293,7 @@ impl InterconnectDuplexRequest for AppendLikeStream {
     const NAME: &'static str = "test_append_like_stream";
     const CLASS: PoolClass = PoolClass::Replication;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Append;
-    const SETUP_DEADLINE: crate::DuplexSetupDeadline =
-        crate::DuplexSetupDeadline::Request(crate::RequestDeadline::Setup);
+    const SETUP_DEADLINE: crate::DuplexSetupDeadline = crate::DuplexSetupDeadline::Liveness;
 }
 
 /// How many frames the holding handler is given before the test reads what its class is charged.
@@ -372,8 +368,8 @@ async fn frames_a_handler_holds_stay_charged_to_its_class_until_it_drops_them() 
          while they were held and {released} after they were dropped"
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -393,8 +389,8 @@ async fn opening_a_duplex_stream_without_a_handler_fails() {
         "a peer with no registered duplex handler must refuse the stream"
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// How many frames a caller abandons its waits for while they are decoded.
@@ -452,8 +448,8 @@ async fn a_receive_abandoned_while_its_frame_decodes_leaves_the_frame_to_the_nex
         "abandoning a receive must lose no answer and reorder none"
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -465,8 +461,7 @@ impl InterconnectDuplexRequest for AbandoningStream {
 
     const NAME: &'static str = "test_abandoning_stream";
     const CLASS: PoolClass = PoolClass::Replication;
-    const SETUP_DEADLINE: crate::DuplexSetupDeadline =
-        crate::DuplexSetupDeadline::Request(crate::RequestDeadline::Setup);
+    const SETUP_DEADLINE: crate::DuplexSetupDeadline = crate::DuplexSetupDeadline::Liveness;
 }
 
 /// The responding side reads its frames the same way: a handler selecting its next frame against a
@@ -534,8 +529,8 @@ async fn a_handler_read_abandoned_while_its_frame_decodes_leaves_the_frame_to_th
         "abandoning a handler's read must lose no frame and reorder none"
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// A stream whose handler answers each frame only once the test opens its gate, so a test can fill
@@ -549,8 +544,7 @@ impl InterconnectDuplexRequest for GatedStream {
 
     const NAME: &'static str = "test_gated_stream";
     const CLASS: PoolClass = PoolClass::Replication;
-    const SETUP_DEADLINE: crate::DuplexSetupDeadline =
-        crate::DuplexSetupDeadline::Request(crate::RequestDeadline::Setup);
+    const SETUP_DEADLINE: crate::DuplexSetupDeadline = crate::DuplexSetupDeadline::Liveness;
 }
 
 /// What a test holds of the one gated stream it opens: the value of each frame its handler
@@ -666,8 +660,8 @@ async fn an_answer_waits_for_a_place_on_its_responders_full_class_and_arrives_on
         .expect("the frame is answered");
     assert_eq!(answer, CountingAnswer { value: 7 });
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// Once the initiator resets the stream no answer can reach it, so the reset ends an answer's wait
@@ -717,8 +711,8 @@ async fn an_initiators_reset_ends_an_answers_wait_for_a_place_on_its_responders_
     );
 
     held.release().await;
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// An answer that reaches an initiator whose class is full waits for a place to be decoded,
@@ -783,8 +777,8 @@ async fn an_answer_waits_for_a_place_on_its_initiators_full_class() {
             assert_eq!(answer, CountingAnswer { value: 7 });
             drop(sender);
         }
-        transport_a.shutdown().await;
-        transport_b.shutdown().await;
+        transport_a.shutdown(crate::test_teardown_ceiling()).await;
+        transport_b.shutdown(crate::test_teardown_ceiling()).await;
     }
 }
 
@@ -836,8 +830,8 @@ async fn a_submitted_frame_waits_for_a_place_on_its_responders_full_class() {
         .expect("the frame is answered");
     assert_eq!(answer, CountingAnswer { value: 5 });
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// The initiator holds a frame's encoding back on its own full class instead of failing the send,
@@ -892,6 +886,6 @@ async fn a_submitted_frame_waits_for_a_place_on_its_initiators_full_class() {
         .expect("the frame is answered");
     assert_eq!(answer, CountingAnswer { value: 6 });
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }

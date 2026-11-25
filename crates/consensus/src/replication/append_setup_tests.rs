@@ -29,7 +29,10 @@ use openraft::{
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, SanType};
 
 use super::AppendPath;
-use crate::{ConnectivityFault, NetworkClient, NetworkFactory, SnapshotTransferIds, TypeConfig};
+use crate::{
+    ConnectivityFault, NetworkClient, NetworkFactory, SnapshotTransferIds, TypeConfig,
+    test_teardown_ceiling,
+};
 
 async fn client_with_departed_target() -> NetworkClient<()> {
     let local = ClusterNodeName::parse("node-1").expect("valid local node");
@@ -128,7 +131,7 @@ async fn failed_append_setup_observes_the_callers_retry_gate() {
         .stream_append(input, RPCOption::new(Duration::from_millis(250)))
         .await;
     let elapsed = started.elapsed();
-    transport.shutdown().await;
+    transport.shutdown(test_teardown_ceiling()).await;
     assert!(
         result.is_err(),
         "the departed peer rejects stream admission"
@@ -150,7 +153,7 @@ async fn an_ended_append_input_finishes_without_opening_a_transport() {
     let result = client
         .stream_append(stream::empty(), RPCOption::new(Duration::from_millis(250)))
         .await;
-    transport.shutdown().await;
+    transport.shutdown(test_teardown_ceiling()).await;
     let mut answers = match result {
         Ok(answers) => answers,
         Err(error) => {

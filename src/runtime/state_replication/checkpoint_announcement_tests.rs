@@ -142,19 +142,8 @@ async fn branch_lifecycle_confirmation_keeps_its_replica_minimum_and_generation(
         BTreeSet::from([first_replica.clone(), second_replica.clone()]),
     );
     let lifecycle = runtime.replicated_branch_lifecycle(&placement);
-    let deadline = || Instant::now() + Duration::from_secs(10);
-    let expired = runtime
-        .confirm_branch_lru_checkpoint(&placement, REVISION, Instant::now())
-        .await
-        .expect_err("an unconfirmed lifecycle reaches its physical deadline");
-    assert!(matches!(
-        expired.current_context(),
-        StateReplicationError::ReplicaConfirmation { awaiting, .. }
-            if awaiting.0 == BTreeSet::from([first_replica.clone(), second_replica.clone()])
-    ));
-
-    let mut confirmation =
-        Box::pin(runtime.confirm_branch_lru_checkpoint(&placement, REVISION, deadline()));
+    // A lifecycle its replicas have not confirmed waits for them for as long as they live.
+    let mut confirmation = Box::pin(runtime.confirm_branch_lru_checkpoint(&placement, REVISION));
     assert!(confirmation.as_mut().now_or_never().is_none());
     acknowledge(&runtime, &first_replica, &placement);
     acknowledge(&runtime, &second_replica, &placement);
@@ -163,7 +152,7 @@ async fn branch_lifecycle_confirmation_keeps_its_replica_minimum_and_generation(
         .expect("the selected lifecycle confirms after both replicas acknowledge it");
 
     let mut confirmation =
-        Box::pin(runtime.confirm_branch_lru_checkpoint(&placement, REVISION + 1, deadline()));
+        Box::pin(runtime.confirm_branch_lru_checkpoint(&placement, REVISION + 1));
     assert!(confirmation.as_mut().now_or_never().is_none());
     publish(schema(), BTreeSet::from([first_replica.clone()]));
     lifecycle.replication().record(&first_replica, REVISION + 1);
@@ -180,7 +169,7 @@ async fn branch_lifecycle_confirmation_keeps_its_replica_minimum_and_generation(
     ));
 
     let mut confirmation =
-        Box::pin(runtime.confirm_branch_lru_checkpoint(&placement, REVISION + 2, deadline()));
+        Box::pin(runtime.confirm_branch_lru_checkpoint(&placement, REVISION + 2));
     assert!(confirmation.as_mut().now_or_never().is_none());
     publish(
         SchemaFingerprint::from_digest([8; 32]),
@@ -577,26 +566,27 @@ async fn runtime_shutdown_cancels_an_in_flight_checkpoint_announcement() {
 
 /// The quorum wait registers before it reads, so the acknowledgement that satisfies it wakes it at
 /// once: on a paused clock, no time passes between the commit and its completion. A lost wake-up
-/// would leave the commit to its deadline, which the paused clock reaches as soon as nothing else
-/// can run.
+/// would leave the commit waiting.
 #[nervix_primitives::test(start_paused = true)]
 async fn a_committed_offset_completes_when_its_replica_acknowledges_it() {
-    committed_offset_after_replica_delay(Some(Duration::ZERO)).await;
+    committed_offset_after_replica_delay(Duration::ZERO).await;
 }
 
 /// A native checkpoint may finish after a small command response deadline while still making
 /// progress within its bulk operation. Its replica acknowledgement must complete the commit.
 #[nervix_primitives::test(start_paused = true)]
 async fn a_committed_offset_accepts_a_replica_finishing_a_native_bulk_transfer() {
-    committed_offset_after_replica_delay(Some(Duration::from_secs(6))).await;
+    committed_offset_after_replica_delay(Duration::from_secs(6)).await;
 }
 
+/// A replica that is slow to report, while it lives, costs the commit latency and never fails it:
+/// the commit still waits half an hour later and completes once the replica reports.
 #[nervix_primitives::test(start_paused = true)]
-async fn a_committed_offset_without_replica_progress_expires_within_the_native_bulk_budget() {
-    committed_offset_after_replica_delay(None).await;
+async fn a_committed_offset_waits_for_a_replica_that_reports_late() {
+    committed_offset_after_replica_delay(Duration::from_secs(30 * 60)).await;
 }
 
-async fn committed_offset_after_replica_delay(delay: Option<Duration>) {
+async fn committed_offset_after_replica_delay(delay: Duration) {
     let runtime = Runtime::default();
     let owner = named::<ClusterNodeName>("node-1");
     let replica = named::<ClusterNodeName>("node-2");
@@ -649,26 +639,6 @@ async fn committed_offset_after_replica_delay(delay: Option<Duration>) {
         !committing.is_finished(),
         "an acknowledgement of an older revision does not complete the commit"
     );
-    let Some(delay) = delay else {
-        let refused = committing
-            .await
-            .expect("the commit task does not panic")
-            .expect_err("an absent replica acknowledgement does not complete a commit");
-        assert!(matches!(
-            refused.current_context(),
-            StateReplicationError::ReplicaQuorum {
-                lsm: 1,
-                required_acks: 1,
-                ..
-            }
-        ));
-        assert_eq!(
-            Instant::now(),
-            started + SyncKafkaOffsets::DEADLINE.declared_default(),
-            "an absent replica ends the commit at its bounded native operation deadline"
-        );
-        return;
-    };
     nervix_primitives::time::advance(delay).await;
     nervix_primitives::task::yield_now().await;
     assert!(
@@ -724,8 +694,14 @@ fn an_older_acknowledgement_never_lowers_what_a_replica_holds() {
         );
     }
     let offsets = assignment.persistence.read();
-    assert!(offsets.replica_quorum_holds(5));
-    assert!(!offsets.replica_quorum_holds(6));
+    assert!(
+        offsets.wait_for_replica_quorum(5).now_or_never().is_some(),
+        "a replica that reported revision 5 completes the quorum of revision 5"
+    );
+    assert!(
+        offsets.wait_for_replica_quorum(6).now_or_never().is_none(),
+        "no replica reported revision 6"
+    );
 }
 
 #[test]

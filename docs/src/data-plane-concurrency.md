@@ -208,13 +208,15 @@ is independent of the other rows. Each side claims unused positions on demand an
 positions to its own bounded free queue, preserving admission room when delivery positions fill.
 Shutdown seals first claims before closing the queues and visits only positions that were claimed.
 Deliveries with the same captured sweep interval share a clock phase (one second by default).
-At a due tick the silence sweep reads each side's first-claim count and takes a guard only for
-the positions below it, so a node that forwards
+At a due tick the acknowledgement sweep reads each side's first-claim count and takes a guard only
+for the positions below it, so a node that forwards
 nothing takes none and a sweep's cost follows the positions its deliveries have used, not the
 configured routing capacity (16,384 positions by default). The counts bound the scan and order nothing: a position's
 guard publishes its correlation, and nothing relies on a sweep having observed a claim. A share
-whose first claim races a sweep is counted from that sweep or from the first one after its
-registration, so it still fails between the silence timeout and one sweep interval later. Runtime
+whose first claim races a sweep is seen by that sweep or by the first one after its registration,
+so a share whose receiver run already ended still fails within one sweep interval. A sweep reads
+the decision about each admitted share's receiver run from the transport's published live-node set
+and the peer run its connections bound. Runtime
 shutdown cancels the sweep task and waits for it. The task returns to its executor after every
 sweep, because a sweep that overran its interval finds the next tick already due and that tick does
 not suspend the task, so it observes the cancellation between sweeps and a sweep's guard count also
@@ -252,9 +254,10 @@ ahead of the relay work that frees it. The batch task returns each watch's share
 ends, through its exclusively owned reservation, so the hold involves no shared state beyond the
 budget's own atomic permit count. A sender storing a delivery's record acknowledgements waits for
 room through the same hold, inside the delivery's channel slot, and a sender whose grant the
-receiver refused for capacity waits on its own timer before it asks again. Neither registers for a
-notification, so neither adds a wait-and-notify protocol: each ends on its own timer, its bound, or
-the cancellation of its channel.
+receiver refused for capacity, or whose send failed in transport, waits on its own retry timer
+before it asks again. Neither registers for a notification, so neither adds a wait-and-notify
+protocol: each ends on its own timer, the delivery's admission bound, its receiver leaving
+membership, or the cancellation of its channel.
 The registered wire number selects the position, exact generation and row without a concurrent
 map lookup. The process identity is checked before routing. Generation exhaustion seals the
 position, and cancellation, timeout, terminal resolution and shutdown compete to take each row
@@ -266,12 +269,13 @@ the membership writer's immutable incarnation publication, so registrar retireme
 charged task lifetime without a gossip lock.
 
 A watch receiving a registration from a newer run can precede that run's membership publication.
-An observed earlier incarnation therefore uses the existing undiscovered or missing grace; it
-never proves that the registrar was replaced. Only an observed newer incarnation retires the
-registrar immediately. Terminal acknowledgements remain available through the same grace: an undiscovered run is
-reported to, while a previously seen but missing run is held until it becomes visible. The registrar owner tests retain the exact discovery and
-silence bounds, and its production watcher Shuttle check races a terminal root with publication
-of the matching incarnation. This check models watcher decisions, not gossip or a network.
+An observed earlier incarnation therefore leaves the run undiscovered; it never proves that the
+registrar was replaced. Only an observed newer incarnation retires the registrar immediately. An
+undiscovered run is reported to until its delivery's admission bound, and a previously seen run that
+the live view misses is still reported to while membership keeps its node; the watch ends only when
+membership removes the node or a newer run appears. The registrar owner tests check those decisions,
+and the production watcher Shuttle check races a terminal root with publication of the matching
+incarnation. This check models watcher decisions, not gossip or a network.
 
 One authenticated peer transport owns its ordinary grant, attempt, channel, watermark and outbound
 correlation collections. Connections and operation leases retain that owner. Its guard serializes
@@ -283,8 +287,9 @@ publish routing through CAS. [Cluster Interconnect](./interconnect.md#bounded-co
 owns the capacities, grace periods and reconciliation deadlines.
 
 Production-owner Shuttle checks cover delayed events against a reused position, registration
-against shutdown, admission waiter drop against a reply, final silence sweeps against terminal and
-Alive reports, a first claim against a sweep, a sweep that completes while an unclaimed position's
+against shutdown, admission waiter drop against a reply, the sweep that gives up a share of an ended
+receiver run against terminal and Alive reports, a first claim against a sweep, a sweep that
+completes while an unclaimed position's
 guard is held, body claim against cancellation, admission against peer ending, a channel's next
 grant against the return of the outcome delivery of the attempt before it, and another peer's
 progress while one peer holds its guard. The production admission choice has a Loom model for one
@@ -294,8 +299,9 @@ Registered bounded Bolero sequences check complete verdicts, capacity and genera
 The `remote-correlation-lifetimes` sequence uses an independent sequential model to predict
 registration identities and FIFO reuse before calling the production owner. It varies both pools'
 capacity, receiver identities, attached and detached batch rows, admission receiver closure,
-single and bulk admission, Alive and sequenced parking/resume, terminal replies, clear, relay-memory
-refusal and shutdown. Every operation and every individual silence sweep checks exact root outcomes
+single and bulk admission by one of three receiver runs, Alive and sequenced parking/resume,
+terminal replies, clear, a receiver run replaced or its node removed from membership, relay-memory
+refusal and shutdown. Every operation and every individual sweep checks exact root outcomes
 and progress, drain and handoff counts, admission updates, per-receiver expiry counts, retained
 memory and the positions ever first-claimed. Stale generations and non-record admission row
 numbers are also checked through the public routing operations. This is sequential representation
@@ -307,8 +313,8 @@ ACKs. External immutable-image faults remain separate evidence.
 
 Deloxide applies to the new delivery, peer and record blocking guards and their acquisition order.
 The active and order selections run the remote ACK scenarios alongside their existing workloads,
-the lifecycle-stress selection runs their stress twins, and all three run the silence-sweep owner
-test. It
+the lifecycle-stress selection runs their stress twins, and all three run the acknowledgement-sweep
+owner test. It
 does not model publication, async channels, network waits or the atomic verdict; a clean run proves
 only the tracked acquisitions the diagnostic processes executed. Generated measurements and fault
 evidence belong on the task, and a failed required attempt remains recorded.
@@ -1257,7 +1263,7 @@ whose task ends before it finished hands its announcement back to the next offer
 
 The runtime's checkpoint announcement task owner cancels both dispatch and retry waits when it
 closes after domain drain. It joins every cancelled task before withdrawing replication routes,
-so shutdown releases the task's exact retained state without waiting for a remote dispatch timeout.
+so shutdown releases the task's exact retained state without waiting for a remote dispatch to end.
 
 The snapshot task of a deduplicator or window branch has the runtime as its owner too, because it
 outlives its branch task: once that task is gone, stopped or ended at its stop grace, the snapshot
@@ -1525,11 +1531,11 @@ concurrent map, per-record lock, or atomic ordering is introduced by this transf
 An unchanged poll repeats the held revision through the existing replica assignment admission.
 This recovers a lost acknowledgement without encoding another checkpoint, while promotion or
 replacement prevents a retained poll from reporting progress through its former token.
-The runtime passes the native bulk operation's thirty-second budget into the quorum wait for both
-committed and reset Kafka offsets. The offset-state owner supplies the register-before-read wait
-mechanism; it no longer chooses a separate response budget that can expire while an admitted
-native checkpoint is still progressing. A missing replica acknowledgement still fails at this
-bounded deadline.
+The quorum wait for both committed and reset Kafka offsets has no deadline of its own. The
+offset-state owner supplies the register-before-read wait mechanism, and the wait completes on the
+replica report that satisfies the quorum: a replica that is slow while it lives costs the commit
+latency, never failure, and a replica that leaves is replaced by one that catches up and
+reports.
 
 ### Acknowledgement state
 
@@ -1566,12 +1572,15 @@ them when it fails. Holding them needs no lock and no shared registry.
 
 A share a node forwarded to another node with a relay delivery is one row of its delivery's
 correlation at a fixed routing position, kept under that position's short guard with its admission
-phase and its count of sweeps that found no report from the receiver. A report, the admission, a
-terminal outcome and a sweep at the delivery’s captured cadence each lock only that position and check its exact
+phase: before admission, its count of sweeps toward the delivery's admission bound, and after it,
+the process epoch of the receiver run that admitted it. A report, the admission, a terminal outcome
+and a sweep at the delivery's captured cadence each lock only that position and check its exact
 generation. Whichever of the terminal outcome, the delivery's own failure and the sweep takes the
-row out resolves the share, so exactly one of them does; a report that reaches the row first resets
-its silence and keeps it, and a report after the removal finds no row. The sweep takes expired rows
-out under the guard and resolves them after releasing it.
+row out resolves the share, so exactly one of them does. The sweep takes an admitted row out only
+once the transport's live-node set or its bound peer run shows that the receiver run ended; a report
+publishes progress on the row's acknowledgement for the ingestor but decides nothing about the row,
+and a report after the removal finds no row. The sweep takes expired rows out under the
+guard and resolves them after releasing it.
 
 Registrations publish the earliest wake deadline through one inline guard in the registry. A
 registration whose deadline is no earlier does not notify the driver or scan correlation positions;
@@ -2017,11 +2026,11 @@ then hands them to the unit's owner on the published route, its own owner buffer
 moved to its node. A producer whose own branch ended meanwhile fails the rows instead. A route
 change that retires a channel before a delivery sent anything on it does the same while the change
 holds the unit's gate; with no change in progress the delivery fails as before. Each further delivery follows another route change, so a producer never loops on a
-retired route. Remote admission that may have reached the former owner uses its existing
-cancellation/reconciliation budget of five seconds per interrupted attempt, rather than retaining a
-permit until the former owner resumes or the entity gate deadline passes. Unconfirmed deliveries
-fail their record ACKs for ingestor retry; already admitted work retains its existing ACK and
-silence contracts. The owner tests
+retired route. Remote admission that may have reached the former owner reconciles by cancellation,
+asked again until the former owner answers, membership removes it, or the delivery's admission
+bound passes, rather than retaining a permit until the former owner resumes or the entity gate
+deadline passes. Unconfirmed deliveries fail their record ACKs for ingestor retry; already admitted
+work keeps its acknowledgement until its receiver run ends. The owner tests
 `a_batch_forwarded_to_a_departed_owner_follows_the_route_that_replaces_it`,
 `a_batch_waiting_to_store_its_records_follows_the_route_that_replaces_its_departed_owner`,
 `a_batch_held_before_its_grant_follows_the_route_that_replaces_its_departed_owner`,
@@ -3710,7 +3719,7 @@ A family of names means each member runs independently through the recipe.
 | Client emitter budget (`src/runtime/client_emitter_shuttle_tests.rs`) | `shuttle_competing_consumer_grants_never_exceed_the_node_budget`, `shuttle_consumer_loss_and_ack_race_release_one_retained_delivery` and `shuttle_publish_cancellation_and_ack_race_release_one_reservation` keep grants within the node budget and release each retained delivery and reservation once. `shuttle_a_reservation_waiting_for_a_full_budget_takes_the_bytes_a_release_returns` races a release against a reservation that finds the budget full: the reservation registers for the change before it reads the budget, so the release wakes it and it takes the bytes. |
 | Assignment authority and state updates (`src/runtime/state_store_shuttle_tests.rs`, `materialized_state.rs`, `kafka_offset_state.rs`) | `shuttle_a_rebind_yields_until_the_operation_admitted_under_its_replaced_binding_finishes` and `shuttle_no_operation_admitted_under_a_superseded_binding_outlives_its_superseding_rebind` fence admitted work even when generations reuse an even or odd counter. `shuttle_snapshot_installation_never_overlaps_origination_or_a_capture` keeps exclusive installation apart from originators and captures. `shuttle_an_originator_update_proceeds_while_the_assignment_barrier_is_held` and `shuttle_a_committed_offset_proceeds_while_the_assignment_barrier_is_held` keep ordinary admitted updates independent of a capture's barrier. |
 | ACK tree (`src/runtime_ack.rs`) | The `shuttle_tests` checks `concurrent_attachment_and_final_ack_leave_exact_tracking`, `concurrent_wait_and_active_ack_exempt_the_remaining_root`, `concurrent_wait_release_and_completion_leave_no_tracking`, `attachment_losing_its_reservation_to_completion_resolves_no_share`, `attachment_losing_its_reservation_to_completion_parks_no_share`, `wait_release_racing_the_last_active_ack_holds_domain_and_ingestor_handoff_once`, `attachment_racing_the_last_active_share_into_wait_publishes_one_active_share`, and `parked_remote_progress_survives_a_racing_heartbeat_and_resumes_once` keep pending, active, and handoff counts exact across attachment, `REQUIRED WAIT`, and remote progress. `concurrent_success_and_failure_choose_one_terminal_transition`, `fan_out_across_ingestors_with_a_failing_root_resolves_each_root_once_with_exact_counts`, and `parked_and_fanned_out_roots_hold_exact_counts_at_every_quiescent_point` require one terminal result per root, one observed completion, and zero outstanding counts after resolution. `a_confirmed_root_stays_counted_until_its_owner_confirms_and_releases_once` races a confirmed root's resolution with its owner taking the resolution and dropping its completion: a resolution the owner holds keeps the root counted and counted as confirming, and the counts, the confirming one included, are released exactly once, after both. |
-| Forwarded acknowledgement silence (`src/runtime/remote_dispatch_shuttle_tests.rs`) | `shuttle_a_terminal_outcome_racing_the_final_sweep_resolves_the_share_once` races the receiver's terminal outcome against the sweep that would fail a forwarded share: exactly one of them removes it, and the root delivers that one's outcome. `shuttle_a_report_racing_the_final_sweep_keeps_the_share_it_reached` races a report against the same sweep: a report that reached the share keeps it pending with its root unresolved, and only a report that found it removed lets the sweep fail it. |
+| Forwarded acknowledgement sweep (`src/runtime/remote_dispatch_shuttle_tests.rs`) | `shuttle_a_terminal_outcome_racing_the_final_sweep_resolves_the_share_once` races the receiver's terminal outcome against the sweep that gives up a forwarded share whose receiver run ended: exactly one of them removes it, and the root delivers that one's outcome. `shuttle_a_report_racing_the_sweep_of_an_ended_run_never_keeps_its_share` races a report against the same sweep: whether the report reached the share first or found it removed, the sweep fails the share of an ended run once. `shuttle_a_first_claim_racing_a_sweep_is_counted_by_that_sweep_or_the_next` registers and admits a share of an already ended run beside a sweep, which gives it up or leaves it to the next sweep, which does. `shuttle_a_sweep_waits_for_no_position_a_side_has_not_claimed` holds an unclaimed position's guard while a sweep and a report complete, and the share of a live run stays pending. `shuttle_retained_deliveries_keep_their_policy_and_late_sweeps_skip_missed_ticks` races a longer installed policy against the sweeps of a delivery that never reports admission, which still ends at the admission bound it captured. |
 | Entity gate and node quiesce (`src/runtime/entity_gate_shuttle_tests.rs`) | `shuttle_an_entity_gate_hold_fences_every_relay_and_admits_no_work_until_it_is_released` requires admitted work to drain before quiescence and prevents new admission while closed. `shuttle_a_work_item_parked_for_materialized_state_is_never_missing_from_a_drain` and `shuttle_every_node_quiesce_gauge_withdraws_exactly_what_it_contributed` keep parked, buffered, and branch work counted without underflow and back to zero. `shuttle_every_engagement_waiter_wakes_and_exactly_one_release_takes_the_hold`, `shuttle_a_hold_dropped_before_its_fence_completes_reopens_every_relay_it_engaged`, and `shuttle_a_failed_engagement_wakes_every_waiter_with_its_failure` cover release, drop, and failure. `shuttle_releasing_an_ownership_handoff_wakes_every_waiter_frozen_by_it` holds release-before-wake; `shuttle_an_ownership_handoff_freeze_observation_registers_before_its_read` holds register-before-read against that release. A stopping runtime ends a lease through the same exact-instance release and an interrupted engagement through the same failure that these checks cover; `runtime_shutdown_ends_an_entity_gate_lease_held_past_its_stop` and `runtime_shutdown_ends_an_engagement_still_waiting_for_its_relays` cover that teardown reaches them, and `a_stopped_runtime_refuses_a_new_entity_gate_engagement` that a stopped runtime engages nothing. |
 | Interconnect slots and membership (`crates/interconnect/src/connection/stream_slots/shuttle_checks.rs`, `request/shuttle_checks.rs`) | `management_drain_stops_leasing_and_waits_for_every_leased_slot`, `replication_drain_stops_leasing_and_waits_for_every_leased_slot`, `bulk_drain_stops_leasing_and_waits_for_every_leased_slot`, and `relay_drain_stops_leasing_and_waits_for_every_leased_slot` keep partition and subquota reservations isolated, forbid leases after drain starts, and wait for every lease to return. `racing_registrations_lose_no_handler_and_publish_each_name_once` prevents a lost handler registration and duplicate name. `a_membership_change_between_a_callers_check_and_its_wait_is_never_lost` prevents a missed discovery wakeup. |
 | Shutdown and signals (`src/application/shutdown.rs`, `termination_signals.rs`) | `shuttle_racing_stop_requests_accept_exactly_one_and_keep_its_deadline` retains the first stop request and its deadline. `shuttle_phases_only_advance_and_every_completion_waiter_observes_the_one_outcome` keeps phase order and one completion. `shuttle_an_expired_deadline_and_a_repeated_signal_let_exactly_one_forced_exit_end_the_process` and `shuttle_a_repeated_signal_before_the_deadline_ends_the_process_with_the_status_of_that_signal` give one forced-exit claimant and the exit status of the cause that won. |
@@ -4294,14 +4303,15 @@ map access or lock, and retains the default 1 MiB read.
 
 A remote delivery retains one coherent committed timing group. Its sender's correlation rows,
 the receiver's watches and admission progress reports all use that captured group. Applying a new
-parameter revision does not mix its report cadence with an earlier delivery's silence bound.
+parameter revision does not mix its report cadence with an earlier delivery's admission bound.
 The registry keeps policy once per delivery in its existing row allocation. The relay budget pays
 for one row-width policy header per live delivery, plus every retained row and its receiver name;
 the header is returned with the final record. Unused correlation positions contain no timing
 state, row width is checked at compile time and the allocation count stays unchanged.
 
 Each delivery schedules its next sweep from the sweep that actually ran. A late sweep increments
-its counters once, so a stalled node cannot manufacture missed reports. The sweeper registers for
+its admission counters once, so a stalled node cannot manufacture a passed admission bound; an
+admitted share counts nothing and follows only its receiver run. The sweeper registers for
 new work before scanning, yields after each scan and waits for the earliest retained deadline or a
 new registration. Admission reports stay multiplexed in the connection's retained future owner;
 a slow cohort cannot hold up a different cohort's report. Terminal delivery does not stay retained
@@ -4309,7 +4319,7 @@ by an outstanding report's weak handle.
 
 [Node Settings](node-settings.md#data-plane-runtime-policy-and-capacity) owns the complete timing
 relationships. Focused owner tests and the registered Shuttle policy-cohort check cover retained
-bounds and skipped late ticks alongside the existing report/terminal/sweep races.
+admission bounds and skipped late ticks alongside the report/terminal/sweep races.
 
 ## HTTP Input And Connection Ownership
 

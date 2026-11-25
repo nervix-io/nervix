@@ -141,7 +141,7 @@ Every other wait of a shutdown has a bound of its own:
   runtime, consensus, cluster membership, and the interconnect — run to completion rather than
   being cut short, because stopping them is what
   releases the node's tasks, connections, and storage. The interconnect drains its transport within
-  its request timeout. Closing the node's databases synchronizes their journals and blocks until
+  the task grace period. Closing the node's databases synchronizes their journals and blocks until
   their background workers have left, so the services that own them are dropped last, as one job on
   the node's filesystem storage workers; a node that cannot take that job reports teardown
   `Abandoned`. A background worker whose flush or compaction failed never holds that close open;
@@ -758,10 +758,11 @@ its exact freeze identity, so a pending flush cannot make mutable state ready fo
 Frozen owners retain state until capture and activation finish. Preparation retains its original
 deadline, distinct from the activation lease. A pending-drain timeout reports its node and counts,
 releases every attempted hold, and leaves independent schedule units available for later moves.
-Repeated engagement requests use the same identity and scope; a bounded reply timeout creates
-no additional flush and restarts no lease. A request whose interconnect stream broke is retried the
-same way within the preparation deadline, so one lost connection to any participant does not fail
-the unit while preparation time remains.
+An engagement or drain-status request waits for its participant's answer until the gate's own
+deadline; a participant that is slow while it lives costs the unit latency and creates no
+additional flush. A request whose interconnect stream broke is retried with the same identity and
+scope within the preparation deadline, so one lost connection to any participant does not fail the
+unit while preparation time remains.
 
 Every step of the handoff carries one coordination identity, composed of the coordinating node, its
 process incarnation, and a sequence. The receiver verifies that identity against the authenticated
@@ -837,12 +838,20 @@ reset of every component. State is recreated only when the accepted decision eit
 recreated inventory or reports a reset for every state component the entity owns.
 
 The destination first waits for the execution schedule it validates to finish installing, within
-the existing five-second preparation deadline. Lifecycle state can be published before the graph,
-so recovery also orders its schedule read after local application completes. A missing startup
-execution is a wait for installation, rather than evidence that the replica lacks checkpoints.
-An installed schedule with a different fingerprint still refuses preparation. Expiry identifies
-the domain and scheduled entity as an installation deadline failure; the existing failed-preparation
-recreation policy remains in effect.
+the recovery's budget, the committed `FORCED_RECOVERY_BUDGET` (five seconds by default). Lifecycle
+state can be published before the graph, so recovery also orders its schedule read after local
+application completes. A missing startup execution is a wait for installation, rather than evidence
+that the replica lacks checkpoints. An installed schedule with a different fingerprint still
+refuses preparation.
+
+The budget is the ceiling of the whole recovery attempt, and its expiry never resets state a live
+node still holds. When it passes before the destination has installed the schedule, before a live
+replica the destination asked has answered with its checkpoint, or before the destination has
+answered the coordinator, the attempt fails as a passed budget rather than as missing checkpoints:
+the coordinator does not publish the schedule, every replica keeps its checkpoints, and the next
+scheduling pass prepares the recovery again with a fresh budget. A replica that liveness ended, or
+that answers that it holds nothing, is skipped, and the other failed-preparation policies below
+apply.
 
 A forced recovery of a WASM processor starts a new guest-state generation for every branch in the
 same schedule publication, and activation publishes the staged checkpoints in that generation. The
@@ -860,7 +869,8 @@ state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 
 A forced recovery of a stateful inferencer stages, for every branch of the lifecycle it recovers,
 the newest tensor snapshot that survives on the destination or on another node the unit is
-assigned to, within the recovery's preparation deadline. A replica receives the generations its
+assigned to; a node assigned the unit that is live but has not answered when the recovery's budget
+passes fails the attempt, as above, instead of being passed over. A replica receives the generations its
 owner publishes, so a promoted replica continues each branch from at least the generation it last
 received. Recovery can skip updates made after that generation. Inference releases its input
 acknowledgement shares after dispatching output; another attached consumer can still hold the
@@ -1224,7 +1234,7 @@ retained route cannot attach to replacement state; a request already admitted th
 checkpoint handle may finish on that exact state. After domain drain, closing the replication task
 owner cancels its announcers, including pending dispatches and retry waits, and waits for their
 retained handles to be released before these routes are cleared. Teardown does not wait for an
-announcement's remote dispatch timeout; synchronization supplies any missed availability hint.
+announcement's remote dispatch to end; synchronization supplies any missed availability hint.
 
 Closing a Kafka offset replica task also cancels its pending revision request or bulk checkpoint
 stream immediately. A partially received or cancelled conversion never publishes a checkpoint or
@@ -1265,7 +1275,7 @@ is unadmitted, so that cancellation ends its hold, and so does the end of the re
 when the node stops; it is never admitted afterwards. Decoded metadata stays charged while a borrower keeps it. Runtime
 teardown cancels and joins its charged ACK watcher tasks, closes delivery and admission routing
 queues, and negatively resolves remaining volatile correlations exactly once. The once-a-second
-silence sweep is one of the joined tasks. A sweep is synchronous, so its task cannot observe the
+acknowledgement sweep is one of the joined tasks. A sweep is synchronous, so its task cannot observe the
 cancellation while one runs, and a sweep that overran the second between sweeps finds the next tick
 already due, which does not suspend the task. The task therefore returns to its executor after every
 sweep and observes the cancellation there, whatever the sweep took, so the join waits for the sweep
@@ -1275,8 +1285,8 @@ delivery to the forwarding node, so they return to the executor within their coo
 sweep, like the resolution that follows, visits only the correlation positions the node's deliveries
 and admissions have claimed, never its fixed capacity, which is what keeps it inside that second. No
 ACK owner state is stored for restart. The interconnect also retires the pool
-connections the node opened, giving their leased streams up to ten seconds before closing whatever
-remains. Connections that peers opened to the node close at once, together with the handlers still
+connections the node opened, giving their leased streams up to the task grace period,
+`--task-grace-period`, before closing whatever remains. Connections that peers opened to the node close at once, together with the handlers still
 serving their streams, so a peer's request the node has not answered fails instead of completing.
 A forced ending skips this entirely, so peers observe the connections ending exactly as they do
 when a process crashes.

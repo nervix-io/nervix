@@ -144,8 +144,7 @@ impl ConnectionFailureReason {
             | TransportError::Tls(_)
             | TransportError::Http2(_)
             | TransportError::Http(_)
-            | TransportError::RequestTimeout { .. }
-            | TransportError::ProgressTimeout { .. }
+            | TransportError::DeadlinePassed { .. }
             | TransportError::PeerProcessChanged { .. }
             | TransportError::Closed(_) => Self::Setup,
             TransportError::RelayAckTiming
@@ -191,8 +190,7 @@ impl StreamResetReason {
     /// The class one failed request belongs to.
     pub(crate) fn of(error: &TransportError) -> Self {
         match error {
-            TransportError::RequestTimeout { .. }
-            | TransportError::ProgressTimeout { .. }
+            TransportError::DeadlinePassed { .. }
             | TransportError::ConnectionSetupTimeout { .. } => Self::Deadline,
             TransportError::Http2StreamCapacity { .. }
             | TransportError::PoolExhausted

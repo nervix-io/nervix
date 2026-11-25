@@ -1073,6 +1073,26 @@ impl EmitterBatchBuffer {
         }
     }
 
+    /// Moves from `retired` into `kept` every branch this buffer still holds an unresolved row of:
+    /// the emitter holds that branch's work, so the branch stays.
+    pub(super) fn keep_branches_with_held_work(
+        &self,
+        retired: &mut EmitterBranchRetirements,
+        kept: &mut EmitterBranchRetirements,
+    ) {
+        for batch in &self.pending {
+            if batch.unresolved_messages() == 0 {
+                continue;
+            }
+            let key = &batch.relay_batch().key;
+            if retired.remove(batch.source_relay(), key)
+                && let Some(key) = key
+            {
+                kept.insert(batch.source_relay().clone(), [key.clone()]);
+            }
+        }
+    }
+
     /// What a flush that just completed published: every row its emitter delivered while this buffer
     /// held it, over every attempt the flush took, each counted once, and the payload bytes they
     /// carry. Absent when the emitter delivered none of them.
@@ -1105,6 +1125,63 @@ mod tests {
         emitter_ordering_group::EvaluatedOrderingGroups,
         test_fixtures::{emitter_context, input_batch, input_batch_with, input_schema, named},
     };
+
+    /// A branch whose rows the buffer still holds unresolved moves from the retirements to the
+    /// kept branches, so its TTL never retires it with its rows; a branch whose every buffered row
+    /// was delivered, and one the buffer holds nothing of, stay retired.
+    #[nervix_primitives::test]
+    async fn a_branch_with_unresolved_rows_is_kept_and_a_resolved_branch_stays_retired() {
+        use crate::runtime::test_fixtures::string_branch_key;
+
+        let source: RelayName = named("events");
+        let held = string_branch_key("tenant", "held");
+        let delivered = string_branch_key("tenant", "delivered");
+        let absent = string_branch_key("tenant", "absent");
+        let mut buffer = EmitterBatchBuffer::new(
+            &emitter_context(),
+            &FlushPolicy::Immediate,
+            Arc::new(EmitterBufferedMessages::default()),
+        );
+        let (held_acks, _held_completion) = AckSet::root();
+        let mut held_input = input_batch_with(0, 0, held_acks);
+        held_input.key = held.clone();
+        let held_batch = EmitterPublishBatch::from_input(
+            source.clone(),
+            held_input,
+            Timestamp::from_unix_nanos(0),
+        );
+        buffer
+            .retain_without_cadence(held_batch)
+            .assured("the fixture buffer has an initialized immediate flush policy");
+        let (delivered_acks, _delivered_completion) = AckSet::root();
+        let mut delivered_input = input_batch_with(1, 1, delivered_acks);
+        delivered_input.key = delivered.clone();
+        let mut delivered_batch = EmitterPublishBatch::from_input(
+            source.clone(),
+            delivered_input,
+            Timestamp::from_unix_nanos(1),
+        );
+        delivered_batch
+            .mark_delivered(0, DeliveredAcknowledgements::Host)
+            .assured("the fixture batch has one pending row before its delivery is marked");
+        buffer
+            .retain_without_cadence(delivered_batch)
+            .assured("the fixture buffer has an initialized immediate flush policy");
+
+        let mut retired = EmitterBranchRetirements::default();
+        retired.insert(source.clone(), held.clone());
+        retired.insert(source.clone(), delivered.clone());
+        retired.insert(source.clone(), absent.clone());
+        let mut kept = EmitterBranchRetirements::default();
+        buffer.keep_branches_with_held_work(&mut retired, &mut kept);
+
+        assert!(kept.contains(&source, &held));
+        assert!(!retired.contains(&source, &held));
+        assert!(retired.contains(&source, &delivered));
+        assert!(!kept.contains(&source, &delivered));
+        assert!(retired.contains(&source, &absent));
+        assert!(!kept.contains(&source, &absent));
+    }
 
     #[nervix_primitives::test]
     async fn retiring_one_source_branch_settles_only_its_unresolved_host_rows() {

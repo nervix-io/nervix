@@ -334,7 +334,7 @@ async fn open_state_stream(
 ) -> Result<IncomingByteStream, Report<RequestError>> {
     if let CheckpointFixture::MaterializedPage = fixture {
         client
-            .request_stream_with_timeout(
+            .request_stream_by(
                 peer,
                 ReadMaterializedStatePage {
                     domain: DomainName::parse("simulated").assured("fixture domain"),
@@ -351,7 +351,10 @@ async fn open_state_stream(
                         ClusterNodeIncarnation::new(revision),
                     ),
                 },
-                Duration::from_secs(10),
+                // An inspection read waits as long as the session that asked for it does.
+                nervix_interconnect::ExchangeDeadline::Caller(
+                    nervix_primitives::time::Instant::now() + Duration::from_secs(10),
+                ),
             )
             .await
     } else {
@@ -396,13 +399,13 @@ fn exchange_fixture(run: ScenarioRun, fixture: CheckpointFixture) -> Result<(), 
                     serve(&first, 1, fixture);
                     ready.send_replace(true);
                     wait_for_transfer(&mut replace).await;
-                    first.shutdown().await;
+                    first.shutdown(super::teardown_ceiling()).await;
                     trace.record("server", "first materialized transport owner ended");
                     let current = bind("server", credentials, seed + 2).await;
                     serve(&current, 2, fixture);
                     replaced.send_replace(true);
                     wait_for_transfer(&mut done).await;
-                    current.shutdown().await;
+                    current.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -551,7 +554,7 @@ fn exchange_fixture(run: ScenarioRun, fixture: CheckpointFixture) -> Result<(), 
                         }
                     }
                     done.send_replace(true);
-                    client.shutdown().await;
+                    client.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;

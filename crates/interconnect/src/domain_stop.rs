@@ -149,7 +149,6 @@ impl InterconnectRequest for StopDrainRequest {
     const NAME: &'static str = "domain_stop_drain";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -180,7 +179,6 @@ impl InterconnectRequest for StopReportRequest {
     const NAME: &'static str = "domain_stop_report";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)

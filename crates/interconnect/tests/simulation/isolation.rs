@@ -47,13 +47,15 @@ const STREAM_CHUNK_BYTES: usize = 16 * 1024;
 const STREAM_BYTES: u64 = 2 * 1024 * 1024;
 /// The current serialized grant for this fixture's names, unit, decoded-size claim, empty row
 /// metadata, the captured acknowledgement timing group and one registrar.
-const HELD_RELAY_METADATA_BYTES: u64 = 248;
-/// How long one more shared management request waits for a stream on the saturated connection.
+const HELD_RELAY_METADATA_BYTES: u64 = 200;
+/// How long one more shared management request waits for a stream on the saturated connection,
+/// and one more resource stream for a reserved stream, before its caller stops waiting.
 const SLOT_WAIT: Duration = Duration::from_millis(250);
 /// The interval between reads inside a condition wait: one simulation tick.
 const POLL: Duration = Duration::from_millis(1);
-/// How far a release may fall from its documented deadline: the observation interval on each side.
-const DEADLINE_SLACK: Duration = Duration::from_millis(2);
+/// How long the hub watches two unread streams on a live connection before their reader reads
+/// them: far longer than any per-stream timer could have held them.
+const STALLED_STREAM_HOLD: Duration = Duration::from_secs(30);
 
 /// A shared management operation the stalled peer accepts and never answers.
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -67,8 +69,6 @@ impl InterconnectRequest for StalledOperation {
 
     const NAME: &'static str = "simulation_stalled_operation";
     const CLASS: PoolClass = PoolClass::Management;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Transfer;
 }
 
 /// A shared management operation answered at once.
@@ -85,8 +85,6 @@ impl InterconnectRequest for ManagementProbe {
 
     const NAME: &'static str = "simulation_management_probe";
     const CLASS: PoolClass = PoolClass::Management;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Coordination;
 }
 
 /// A management operation on the reserved relay-cancellation streams.
@@ -102,8 +100,6 @@ impl InterconnectRequest for CancellationProbe {
     const NAME: &'static str = "simulation_cancellation_probe";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Cancellation;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Coordination;
 }
 
 /// A management operation on the reserved discovery streams gossip uses.
@@ -119,8 +115,6 @@ impl InterconnectRequest for DiscoveryProbe {
     const NAME: &'static str = "simulation_discovery_probe";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Discovery;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Coordination;
 }
 
 /// A typed request on the bulk pool, encoded and decoded by the bulk CPU class.
@@ -135,8 +129,6 @@ impl InterconnectRequest for BulkProbe {
 
     const NAME: &'static str = "simulation_bulk_probe";
     const CLASS: PoolClass = PoolClass::Bulk;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Request;
 }
 
 /// A flow-controlled resource stream the hub produces in charged chunks.
@@ -146,8 +138,6 @@ struct ResourceStream;
 impl InterconnectStreamRequest for ResourceStream {
     const NAME: &'static str = "simulation_resource_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Resource;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Coordination;
 }
 
 /// Worker counts fixed independently of the machine, so every replay admits the same jobs.
@@ -693,7 +683,13 @@ impl PeerHost {
         let started = turmoil::elapsed();
         let error = match self
             .transport
-            .request_stream(&self.hub, ResourceStream)
+            .request_stream_by(
+                &self.hub,
+                ResourceStream,
+                nervix_interconnect::ExchangeDeadline::Caller(
+                    nervix_primitives::time::Instant::now() + SLOT_WAIT,
+                ),
+            )
             .await
         {
             Ok(_) => panic!("both reserved resource streams are leased"),
@@ -702,6 +698,16 @@ impl PeerHost {
         assert!(
             matches!(error.current_context(), RequestError::Stream { .. }),
             "{error:?}"
+        );
+        assert!(
+            matches!(
+                error.downcast_ref::<TransportError>(),
+                Some(TransportError::DeadlinePassed {
+                    deadline: nervix_interconnect::ExchangeDeadlineKind::Caller,
+                    ..
+                })
+            ),
+            "the third stream ends at its caller's deadline: {error:?}"
         );
         let waited = turmoil::elapsed()
             .checked_sub(started)
@@ -731,8 +737,10 @@ impl PeerHost {
                             .checked_add(length)
                             .assured("streams are bounded by their declared length");
                     }
-                    Ok(None) => panic!("a stream the hub reset cannot complete"),
-                    Err(_) => break,
+                    Ok(None) => break,
+                    Err(error) => {
+                        panic!("a held stream on a live connection completes: {error:?}")
+                    }
                 }
             }
         }
@@ -746,7 +754,9 @@ impl PeerHost {
         assert_eq!(observation.executor.bulk_window_memory.reserved_bytes, 0);
         self.trace.record(
             self.name,
-            format!("unread streams ended after {received} bytes; leases and windows returned"),
+            format!(
+                "held streams read to their end, {received} bytes; leases and windows returned"
+            ),
         );
         received
     }
@@ -797,7 +807,7 @@ impl PeerHost {
 
     async fn shut_down(&mut self) -> Duration {
         let started = turmoil::elapsed();
-        self.transport.shutdown().await;
+        self.transport.shutdown(super::teardown_ceiling()).await;
         let took = turmoil::elapsed()
             .checked_sub(started)
             .assured("simulated time does not run backwards");
@@ -1039,14 +1049,26 @@ impl HubHost {
         let started = turmoil::elapsed();
         let error = match self
             .transport
-            .request_with_timeout(&self.stalled.node, StalledOperation, SLOT_WAIT)
+            .request_by(
+                &self.stalled.node,
+                StalledOperation,
+                nervix_interconnect::ExchangeDeadline::Caller(
+                    nervix_primitives::time::Instant::now() + SLOT_WAIT,
+                ),
+            )
             .await
         {
             Ok(_) => panic!("the stalled peer never answers"),
             Err(error) => error,
         };
         assert!(
-            matches!(error.current_context(), RequestError::Timeout { timeout, .. } if *timeout == SLOT_WAIT),
+            matches!(
+                error.current_context(),
+                RequestError::DeadlinePassed {
+                    deadline: nervix_interconnect::ExchangeDeadlineKind::Caller,
+                    ..
+                }
+            ),
             "{error:?}"
         );
         let waited = Self::since(started);
@@ -1224,9 +1246,11 @@ impl HubHost {
         );
     }
 
-    /// The stalled peer opens resource streams and never reads them. HTTP/2 flow control stops
-    /// the hub after one bulk receive window each, the progress deadline returns their admissions
-    /// and memory, and the healthy peer's stream is unaffected throughout.
+    /// The stalled peer opens resource streams and reads nothing of them for a long time. HTTP/2
+    /// flow control stops the hub after one bulk receive window each, and the streams keep their
+    /// admissions and the chunks their windows refused for as long as their live reader holds them
+    /// back. The healthy peer's stream is unaffected throughout, and the stalled streams complete
+    /// once their reader reads them.
     async fn stall_bulk_flow_control(&mut self) {
         let options = TransportOptions::default();
         let window = options
@@ -1252,8 +1276,8 @@ impl HubHost {
         };
 
         // The hub is read every tick from before each stream opens, so the moment its window runs
-        // out, and with it the start of the progress deadline, is observed within one tick.
-        let ((), (_, first_stalled_at)) = tokio::join!(
+        // out is observed within one tick.
+        let ((), _) = tokio::join!(
             self.stalled.call(PeerCommand::StallStream),
             self.wait_until_at(
                 "the first unread stream to fill its window",
@@ -1298,7 +1322,7 @@ impl HubHost {
             "the hub holds the chunk the window refused: {first:?}"
         );
 
-        let ((), (_, second_stalled_at)) = tokio::join!(
+        let ((), _) = tokio::join!(
             self.stalled.call(PeerCommand::StallStream),
             self.wait_until_at(
                 "the second unread stream to fill its window",
@@ -1327,10 +1351,7 @@ impl HubHost {
         );
 
         let waited = self.stalled.call(PeerCommand::OverflowResourceSlots).await;
-        assert!(
-            waited >= ResourceStream::DEADLINE.declared_default(),
-            "{waited:?}"
-        );
+        assert!(waited >= SLOT_WAIT, "{waited:?}");
         let read = self.healthy.call(PeerCommand::ReadStream).await;
         assert_eq!(read, STREAM_BYTES);
         let during = self.observe();
@@ -1350,44 +1371,43 @@ impl HubHost {
             "the healthy peer read a whole stream while both stalled streams were held",
         );
 
+        // A reader on a live connection that reads nothing holds its streams back, however long
+        // it reads nothing: each keeps its admission and the chunk its window refused.
+        nervix_primitives::time::sleep(STALLED_STREAM_HOLD).await;
+        let held = self.observe();
+        assert_eq!(
+            held.pending(ConnectionDirection::Inbound, RequestSubquota::Resource),
+            2,
+            "a stalled stream ended on a live connection: {held:?}"
+        );
+        assert_eq!(
+            held.executor.bulk_memory.reserved_bytes, both_streams,
+            "a stalled stream returned its memory on a live connection: {held:?}"
+        );
+        self.trace.record(
+            HUB,
+            format!("both stalled streams stay held after {STALLED_STREAM_HOLD:?}"),
+        );
+
+        let received = self.stalled.call(PeerCommand::ReleaseStreams).await;
+        assert_eq!(
+            received,
+            STREAM_BYTES
+                .checked_mul(2)
+                .assured("two fixture streams are small"),
+            "the stalled peer receives both whole streams once it reads them"
+        );
         self.wait_until(
-            "the first stalled stream's progress deadline",
-            |observation| {
-                observation.pending(ConnectionDirection::Inbound, RequestSubquota::Resource) < 2
-            },
-        )
-        .await;
-        let first_held = Self::since(first_stalled_at);
-        self.wait_until(
-            "the second stalled stream's progress deadline",
+            "both read streams to return their admission and memory",
             |observation| {
                 observation.pending(ConnectionDirection::Inbound, RequestSubquota::Resource) == 0
                     && observation.executor.bulk_memory.reserved_bytes == bulk_before
             },
         )
         .await;
-        let second_held = Self::since(second_stalled_at);
-        for held in [first_held, second_held] {
-            assert!(
-                held.abs_diff(options.progress_timeout) <= DEADLINE_SLACK,
-                "a stalled stream returned its admission after {held:?}"
-            );
-        }
         self.trace.record(
             HUB,
-            format!(
-                "stalled streams released their admission and memory at the {:?} progress deadline",
-                options.progress_timeout
-            ),
-        );
-
-        let received = self.stalled.call(PeerCommand::ReleaseStreams).await;
-        assert_eq!(
-            received,
-            window
-                .checked_mul(2)
-                .assured("two stream windows are small"),
-            "the stalled peer receives exactly what its windows let through before the resets"
+            "the read streams completed and returned their admissions and memory",
         );
     }
 
@@ -1599,8 +1619,11 @@ impl HubHost {
     async fn finish(&mut self) {
         self.exchange_with_healthy().await;
         let took = self.healthy.call(PeerCommand::Shutdown).await;
-        assert!(took < TransportOptions::default().shutdown_drain_timeout);
-        self.transport.shutdown().await;
+        assert!(
+            took < HOST_DEADLINE,
+            "the healthy peer's teardown ended without its ceiling forcing it: {took:?}"
+        );
+        self.transport.shutdown(super::teardown_ceiling()).await;
         while self.ingress.incoming.try_recv().is_ok() {
             nervix_primitives::task::consume_budget().await;
         }

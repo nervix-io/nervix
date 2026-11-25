@@ -528,13 +528,24 @@ impl Drop for ForcedRecoveryPreparations<'_> {
     }
 }
 
+/// Whether a forced recovery's schedule may be published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::application) enum ForcedRecoveryReadiness {
+    /// Every move prepared, or recreates what its destination could not recover.
+    Ready,
+    /// A move's budget passed while the nodes its preparation waited for still lived. Publishing
+    /// would reset state a live replica holds, so the schedule waits for the next scheduling pass,
+    /// which prepares the recovery again.
+    BudgetPassed,
+}
+
 impl ForcedOwnershipRecoveryCoordinator<'_> {
     pub(in crate::application) async fn prepare_schedule(
         &self,
         current: &nervix_models::DomainSchedule,
         target: &mut nervix_models::DomainSchedule,
         attempts: &mut ForcedRecoveryPreparations<'_>,
-    ) {
+    ) -> ForcedRecoveryReadiness {
         let base_schedule_fingerprint = match ownership_handoff_schedule_fingerprint(current) {
             Ok(fingerprint) => fingerprint,
             Err(reason) => {
@@ -544,7 +555,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                     error = %format_args!("{reason:#}"),
                     "forced ownership recovery could not fingerprint the committed schedule"
                 );
-                return;
+                return ForcedRecoveryReadiness::Ready;
             }
         };
         let target_schedule_fingerprint = match ownership_handoff_schedule_fingerprint(target) {
@@ -556,7 +567,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                     error = %format_args!("{reason:#}"),
                     "forced ownership recovery could not fingerprint the target schedule"
                 );
-                return;
+                return ForcedRecoveryReadiness::Ready;
             }
         };
         struct PreparedForcedMove {
@@ -616,26 +627,37 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                                     .prepare_forced_ownership_recovery(request, deadline)
                                     .await;
                             }
+                            // The budget is the recovery's own ceiling: a destination that is slow
+                            // while it lives fails this attempt, and the next pass asks again.
                             let response = self
                                 .interconnect
-                                .request_with_timeout(
+                                .request_by(
                                     &moved.destination,
                                     request,
-                                    self.recovery_budget,
+                                    nervix_interconnect::ExchangeDeadline::OperationCeiling(
+                                        deadline,
+                                    ),
                                 )
-                                .await
-                                .map_err(|error| {
-                                    error.change_context(OwnershipHandoffError::Transport(
-                                        "forced-recovery preparation".to_owned(),
-                                    ))
-                                })?;
+                                .await;
+                            let response = match response {
+                                Ok(response) => response,
+                                Err(error) => {
+                                    let failure = match error.current_context() {
+                                        nervix_interconnect::RequestError::DeadlinePassed {
+                                            ..
+                                        } => OwnershipHandoffError::BudgetPassed,
+                                        _ => OwnershipHandoffError::Transport(
+                                            "forced-recovery preparation".to_owned(),
+                                        ),
+                                    };
+                                    return Err(error.change_context(failure));
+                                }
+                            };
                             response.map_err(OwnershipHandoffError::of_remote_rejection)
                         };
                         match nervix_primitives::time::timeout_at(deadline, preparation).await {
                             Ok(result) => result,
-                            Err(_) => Err(OwnershipHandoffError::deadline(
-                                "state preparation exceeded its captured forced-recovery budget",
-                            )),
+                            Err(_) => Err(Report::new(OwnershipHandoffError::BudgetPassed)),
                         }
                     }
                     None => Err(OwnershipHandoffError::participant(format!(
@@ -652,6 +674,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
         }
         #[cfg(feature = "testing")]
         let mut confirmed = false;
+        let mut readiness = ForcedRecoveryReadiness::Ready;
         while let Some(preparation) = preparations.next().await {
             nervix_primitives::task::consume_budget().await;
             let moved = preparation.moved;
@@ -685,6 +708,19 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                         "forced ownership recovery prepared destination state"
                     );
                 }
+                Err(reason) if reason.current_context().is_budget_expiry() => {
+                    readiness = ForcedRecoveryReadiness::BudgetPassed;
+                    warn!(
+                        domain = current.domain.as_str(),
+                        kind = moved.entity.kind.as_str(),
+                        name = moved.entity.identifier.as_str(),
+                        source = %moved.former_owner,
+                        destination = %moved.destination,
+                        error = %format_args!("{reason:#}"),
+                        "forced ownership recovery reached its budget before its destination \
+                         prepared; the next scheduling pass prepares it again"
+                    );
+                }
                 Err(reason) => {
                     Self::mark_reset(
                         node,
@@ -711,6 +747,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
             .fault_injection()
             .observe_forced_recovery_preparation(&current.domain, confirmed)
             .await;
+        readiness
     }
 
     fn reset_every_move(
@@ -2292,11 +2329,9 @@ impl SessionServiceImpl {
                         .reconcile_local_ownership_handoff_preparations(&request)
                         .await
                 } else {
-                    let response = service
-                        .inner
-                        .interconnect
-                        .request_with_timeout(&node, request, self.coordination_rpc_timeout())
-                        .await;
+                    // A reconciliation pass waits for every live node: one that is slow costs the
+                    // pass latency, and liveness ends the wait for one that is gone.
+                    let response = service.inner.interconnect.request(&node, request).await;
                     match response {
                         Ok(response) => response
                             .map_err(|error| OwnershipHandoffError::participant(error.to_string())),
@@ -2563,9 +2598,17 @@ impl SessionServiceImpl {
                 let response = self
                     .inner
                     .interconnect
-                    .request_with_timeout(&destination, request, remaining)
+                    .request_by(
+                        &destination,
+                        request,
+                        nervix_interconnect::ExchangeDeadline::OperationCeiling(
+                            handoff.activation_deadline,
+                        ),
+                    )
                     .await
-                    .map_err(|error| OwnershipHandoffError::transport(error.to_string()))?;
+                    .change_context(OwnershipHandoffError::Transport(
+                        "ownership handoff activation".to_owned(),
+                    ))?;
                 response.map_err(OwnershipHandoffError::of_remote_rejection)?;
             }
         }

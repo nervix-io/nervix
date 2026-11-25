@@ -1305,13 +1305,13 @@ impl IngestorRouteRuntime {
         self.sender.clone()
     }
 
-    pub(super) async fn shutdown(&self, grace: Duration) {
+    pub(super) async fn shutdown(&self, wait: TaskStopWait) {
         self.shutdown.send_replace(true);
         let task = self.task.lock().take();
         if let Some(task) = task {
             task.join_after_shutdown("branch entrypoint").await;
         }
-        self.branch_runtime.shutdown(grace).await;
+        self.branch_runtime.shutdown(wait).await;
     }
 }
 
@@ -2064,13 +2064,23 @@ impl BranchExecutionRuntime {
             reason = "install or terminate the one branch lifecycle task and its join handle"
         )
     )]
-    pub(super) async fn shutdown(&self, grace: Duration) {
+    pub(super) async fn shutdown(&self, wait: TaskStopWait) {
         self.shutdown.send_replace(true);
         let Some(mut task) = self.task.lock().take() else {
             return;
         };
 
-        match nervix_primitives::time::timeout(grace, &mut task).await {
+        let stopped = wait
+            .wait(&mut task, |waited| {
+                warn!(
+                    domain = self.domain.as_str(),
+                    ingestor = self.ingestor.as_str(),
+                    waited = %humantime::format_duration(waited),
+                    "branched ingestor task is still finishing the work it holds; waiting for it"
+                );
+            })
+            .await;
+        match stopped {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
                 if error.is_cancelled() {
@@ -2088,7 +2098,7 @@ impl BranchExecutionRuntime {
                     );
                 }
             }
-            Err(_) => {
+            Err(grace) => {
                 warn!(
                     domain = self.domain.as_str(),
                     ingestor = self.ingestor.as_str(),

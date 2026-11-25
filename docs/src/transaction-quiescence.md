@@ -282,6 +282,12 @@ the transition to `COMMITTING`. Every step then executes that frozen plan; leade
 restart does not replan it against later configuration. A conflict discovered after admission is
 reported as a step failure, not a silent widening or substitution of the frozen plan.
 
+A standalone command, one statement outside `BEGIN … COMMIT`, has no reviewed preview. When an
+allowed planning change, such as a committed parameter, a schedule publication or a membership
+change, moves its transaction's preview between its statement's preflight and its commit, the
+command plans its commit again against the inputs that now stand. It answers that plan's outcome,
+its commit or its own refusal, and never a stale preview no one was shown.
+
 ```mermaid
 sequenceDiagram
     participant C as Client
@@ -375,8 +381,9 @@ paused status and starts fresh planning. It neither claims a transaction's pause
 local alteration guard. A backup's distinct mutation lease and alteration guard keep its cut
 protected. Only a confirmed status change emits `resumed orphaned ALTER pause`.
 
-Completed effects are not repeated. If an owner timed out, inspection can show `UNCERTAIN` rather
-than falsely declaring that no gate engaged. An entity swap that cannot complete on a node never
+Completed effects are not repeated. If an owner had not answered when the gate's ceiling passed, or
+liveness ended it first, inspection can show `UNCERTAIN` rather than falsely declaring that no gate
+engaged. An entity swap that cannot complete on a node never
 widens into a rebuild of the domain: the node puts back the entities it had begun to replace,
 before their gate opens, and keeps running its previous revision. The change answers with that
 node's failure and its reason, the actual history keeps the entity attempt and its release, and the

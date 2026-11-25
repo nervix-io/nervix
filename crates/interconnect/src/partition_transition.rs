@@ -26,7 +26,7 @@ use nervix_models::{
 use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::{
-    InterconnectRequest, RemoteOperationFailure, RequestDeadline, RequestSubquota,
+    InterconnectRequest, RemoteOperationFailure, RequestSubquota,
     runtime_state::{StatePlacementEnvelope, StateSnapshotEnvelope},
 };
 
@@ -177,9 +177,6 @@ impl InterconnectRequest for PartitionTransitionRequest {
 
     const NAME: &'static str = "partition_transition";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
-    /// A release stops the key's branch, which drains its pending work and persists its final
-    /// state within the branch's shutdown grace, before the answer can describe that state.
-    const DEADLINE: RequestDeadline = RequestDeadline::Request;
 }
 
 #[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]

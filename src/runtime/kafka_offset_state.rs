@@ -11,12 +11,12 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
 
 use ahash::HashMap;
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::ResultExt as _;
 use nervix_checkpoint_replication::{CheckpointReplication, ReplicaProgress};
 use nervix_connector_kafka::KafkaOffsetPosition;
 use nervix_models::ClusterNodeName;
@@ -26,7 +26,6 @@ use nervix_primitives::{
         Arc, StdArc,
         atomic::{AtomicI64, AtomicU64, Ordering},
     },
-    time::{Instant, timeout_at},
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -543,13 +542,6 @@ impl KafkaOffsetStateRead {
         &self.state.replication
     }
 
-    /// Whether enough of the assigned replicas reported holding revision `lsm`.
-    pub(super) fn replica_quorum_holds(&self, lsm: u64) -> bool {
-        self.state
-            .replication
-            .with_progress(|progress| self.quorum_holds(progress, lsm))
-    }
-
     /// Whether `progress` has at least the required number of the replicas assigned now holding
     /// revision `lsm`.
     fn quorum_holds(&self, progress: &ReplicaProgress, lsm: u64) -> bool {
@@ -557,32 +549,18 @@ impl KafkaOffsetStateRead {
         progress.holding(&roles.replica_nodes, lsm) >= roles.required_replica_acks
     }
 
-    /// Wait until enough assigned replicas report holding revision `lsm`, within the caller's
-    /// checkpoint-operation budget.
+    /// Wait until enough assigned replicas report holding revision `lsm`.
     ///
-    /// The wait registers for the next replica report before it reads what the replicas hold, so a
-    /// report that lands in between wakes it instead of leaving the commit to its deadline. The
-    /// replicas are the ones assigned when each report arrives.
-    pub(super) async fn wait_for_replica_quorum(
-        &self,
-        lsm: u64,
-        wait: Duration,
-    ) -> error_stack::Result<(), StateReplicationError> {
-        let deadline = Instant::now()
-            .checked_add(wait)
-            .assured("the bounded checkpoint operation fits a monotonic deadline");
-        let quorum = self
-            .state
+    /// A replica that is slow to report costs the commit latency, never failure: the commit waits
+    /// for as long as its replicas live, and a replica that leaves is replaced by one that catches
+    /// up and reports. The wait registers for the next replica report before it reads what the
+    /// replicas hold, so a report that lands in between wakes it. The replicas are the ones
+    /// assigned when each report arrives.
+    pub(super) async fn wait_for_replica_quorum(&self, lsm: u64) {
+        self.state
             .replication
-            .wait_until(|progress| self.quorum_holds(progress, lsm));
-        if timeout_at(deadline, quorum).await.is_ok() || self.replica_quorum_holds(lsm) {
-            return Ok(());
-        }
-        Err(Report::new(StateReplicationError::ReplicaQuorum {
-            placement: self.placement().clone(),
-            lsm,
-            required_acks: self.required_replica_acks(),
-        }))
+            .wait_until(|progress| self.quorum_holds(progress, lsm))
+            .await;
     }
 }
 
@@ -1419,6 +1397,8 @@ pub(in crate::runtime) fn assert_offset_payload_decodes_typed(payload: &[u8]) {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use futures_util::FutureExt as _;
+    use meticulous::OptionExt as _;
     use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName};
     use nervix_primitives::sync::{Arc, oneshot};
@@ -1589,7 +1569,13 @@ mod tests {
         assert_eq!(first_report, revision);
         // The first report is lost before the primary receives it. A later poll asks for only
         // changes, so the primary has no checkpoint to send back.
-        assert!(!originator.read().replica_quorum_holds(revision));
+        assert!(
+            originator
+                .read()
+                .wait_for_replica_quorum(revision)
+                .now_or_never()
+                .is_none()
+        );
         assert!(
             originator
                 .read()
@@ -1603,7 +1589,13 @@ mod tests {
             .read()
             .replication()
             .record(&replica, repeated_report);
-        assert!(originator.read().replica_quorum_holds(revision));
+        assert!(
+            originator
+                .read()
+                .wait_for_replica_quorum(revision)
+                .now_or_never()
+                .is_some()
+        );
         assert_eq!(installer.read().next_offset("events", 0), Some(9));
     }
 

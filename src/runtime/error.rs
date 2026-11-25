@@ -176,7 +176,7 @@ impl RuntimeError {
         }
     }
 
-    pub(super) fn relay_not_instantiated(domain: &DomainName, relay: &RelayName) -> Self {
+    pub(crate) fn relay_not_instantiated(domain: &DomainName, relay: &RelayName) -> Self {
         Self::RelayNotInstantiated {
             domain: domain.clone(),
             relay: relay.clone(),

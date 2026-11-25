@@ -59,8 +59,8 @@ async fn concurrent_peer_registration_preserves_the_publication_limit() {
             TransportError::PoolExhausted
         ));
     }
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -82,9 +82,11 @@ async fn leasing_a_stream_from_an_established_pool_does_not_allocate() {
     })
     .await
     .assured("the connected test transports become ready");
-    let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
-        .assured("a five-second test deadline fits the monotonic clock");
+    let deadline = Some(crate::ExchangeDeadline::Caller(
+        Instant::now()
+            .checked_add(Duration::from_secs(5))
+            .assured("a five-second test deadline fits the monotonic clock"),
+    ));
 
     let leases = [
         (PoolClass::Relay, RequestSubquota::Shared),
@@ -112,8 +114,8 @@ async fn leasing_a_stream_from_an_established_pool_does_not_allocate() {
         );
     }
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// Leases every free stream of `class` and `subquota` to `node`, without waiting.
@@ -122,7 +124,7 @@ fn lease_every_free_stream(
     node: &ClusterNodeName,
     class: PoolClass,
     subquota: RequestSubquota,
-    deadline: Instant,
+    deadline: Option<crate::ExchangeDeadline>,
 ) -> Vec<StreamLease> {
     let mut leases = Vec::new();
     loop {
@@ -160,9 +162,11 @@ async fn a_released_stream_wakes_a_waiter_its_subquota_can_serve() {
     })
     .await
     .assured("the connected test transports become ready");
-    let deadline = Instant::now()
-        .checked_add(Duration::from_secs(60))
-        .assured("a minute-long test deadline fits the monotonic clock");
+    let deadline = Some(crate::ExchangeDeadline::Caller(
+        Instant::now()
+            .checked_add(Duration::from_secs(60))
+            .assured("a minute-long test deadline fits the monotonic clock"),
+    ));
     let mut admissions = lease_every_free_stream(
         &transport_a,
         &node_b,
@@ -224,8 +228,8 @@ async fn a_released_stream_wakes_a_waiter_its_subquota_can_serve() {
     terminal_waiter.abort();
     drop(terminals);
     drop(admissions);
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -250,9 +254,11 @@ async fn established_pool_cost() {
         (PoolClass::Management, RequestSubquota::Terminal),
     ] {
         let mut timings = Vec::with_capacity(10_000);
-        let deadline = Instant::now()
-            .checked_add(Duration::from_secs(30))
-            .expect("fixed benchmark duration fits the monotonic clock");
+        let deadline = Some(crate::ExchangeDeadline::Caller(
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("fixed benchmark duration fits the monotonic clock"),
+        ));
         let mut allocation_calls = 0;
         let mut reallocation_calls = 0;
         for _ in 0..10_000 {
@@ -286,6 +292,6 @@ async fn established_pool_cost() {
         );
         assert_eq!((allocation_calls, reallocation_calls), (0, 0));
     }
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }

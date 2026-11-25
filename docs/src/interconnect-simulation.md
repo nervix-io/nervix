@@ -185,7 +185,7 @@ differently.
 
 | Time | Source on a simulated host | Read by |
 | --- | --- | --- |
-| Scheduler time | The timers and instants of `nervix_primitives::time`, which are Tokio's and follow the host runtime's paused clock, advanced by Turmoil one tick at a time | Every transport deadline: connection setup, request and progress timeouts, liveness, reconnect backoff, relay grant lifetimes, the drain deadline derived from certificate expiry |
+| Scheduler time | The timers and instants of `nervix_primitives::time`, which are Tokio's and follow the host runtime's paused clock, advanced by Turmoil one tick at a time | Every transport deadline: connection setup, liveness pings and probes, a caller's exchange deadline, reconnect backoff, relay grant lifetimes, certificate expiry |
 | Certificate UTC | The bundle's `TransportClock`, given a provider that reads the configured epoch plus simulated elapsed time, with an optional per-host skew | Rustls verification on both sides of a handshake, the transport's checks of its local and peer certificates, and the mapping of certificate expiry onto a monotonic drain deadline |
 | Domain time | Not simulated | Domain-clock authority and execution time, owned by [Domain Clock](./domain-clock.md) |
 
@@ -305,7 +305,8 @@ The model has consequences that every scenario respects:
 - Holding and one-way partitions cannot be combined on one link, so scenarios use them separately.
 - Turmoil 0.7.2 has no disconnect control. TCP closure is exercised by shutting a listener down or
   crashing a host.
-- A request whose deadline expires while its messages are held stays expired when they are released.
+- A request whose caller's deadline expires while its messages are held stays expired when they are
+  released.
 - Turmoil's own socket count can keep failed connection attempts after a partition. Scenarios
   measure session cleanup with the transport's connection counts instead.
 - Random link failures are disabled. A scenario's faults are its written plan, applied at named
@@ -587,8 +588,8 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | multiple authenticated peers preserve remote failure classes | `transport::multiple_peers_keep_remote_failure_classes_and_reject_invalid_authentication` | 57 | 30 s / 50,000 / 90 s | One client resolves and exchanges typed Arrow responses with two peers, each peer's rejected, unavailable, not-ready, and failed outcomes arrive as their own remote failure classes naming their subject, and a dial under a DNS identity the certificate does not name is rejected |
 | partition before connect | `transport::network_disruption_respects_deadlines_and_repairs_authenticated_service` | 61 | 85 s / 100,000 / 90 s | Setup fails and liveness times out through twelve seconds of partition; repair restores authenticated service |
 | one-way partition before connect | The same | 62 | 85 s / 100,000 / 90 s | The same, with only server-to-client messages dropped |
-| held authenticated exchange | The same | 63 | 85 s / 100,000 / 90 s | A one-second liveness probe and a two-second request expire while held; release restores service |
-| partitioned authenticated exchange | The same | 64 | 85 s / 100,000 / 90 s | Both deadlines expire; after repair, protocol pings replace the stalled sessions without a restart or pool reset |
+| held authenticated exchange | The same | 63 | 85 s / 100,000 / 90 s | A one-second health probe and a request's two-second caller deadline expire while held; release restores service |
+| partitioned authenticated exchange | The same | 64 | 85 s / 100,000 / 90 s | The probe's and the caller's deadlines expire; after repair, protocol pings replace the stalled sessions without a restart or pool reset |
 | one-way loss after authenticated exchange | The same | 65 | 85 s / 100,000 / 90 s | Client-to-server packets are lost after authentication; repair restores service without a restart or pool reset |
 | relay response lost after admission | `transport::relay::relay_reconciliation_and_cancellation_survive_lost_replies` | 71 | 60 s / 50,000 / 90 s | A retry to the same receiver process returns the admitted outcome and ACK without a second enqueue, and a late cancellation returns admitted |
 | relay cancellation before grant | The same | 72 | 60 s / 50,000 / 90 s | A cancellation that reaches the receiver first fences the delivery |
@@ -599,16 +600,16 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | receiver restart after runtime admission | The same | 83 | 90 s / 50,000 / 90 s | The same after runtime admission |
 | receiver restart with delayed relay response | The same | 85, 1036 | 90 s / 50,000 / 90 s | A released pre-crash reply confirms only historical receipt; admission stays indeterminate against the new epoch |
 | sender replacement with a retained admitted intake | `transport::relay::sender_retirement_reclaims_capacity_while_an_admitted_intake_is_retained` | 95 | 30 s / 50,000 / 90 s | Removing the sender releases a one-item receiver's capacity while its admitted intake remains borrowed; a recreated sender transport delivers three Arrow rows with a distinct full process identity |
-| backup section partition and repair | `transport::backup::backup_section_fetch_is_fenced_and_recovers_after_partition` | 101, 1000 | 320 s / 400,000 / 90 s | A forged process identity cannot capture or consume a section; a stalled fetch reaches its deadline; a partitioned fetch fails and succeeds after repair; six 6 MiB materialized column sections, 36 MiB in all, stream in 64 KiB chunks and install as one checkpoint |
+| backup section partition and repair | `transport::backup::backup_section_fetch_is_fenced_and_recovers_after_partition` | 101, 1000 | 320 s / 400,000 / 90 s | A forged process identity cannot capture or consume a section; a fetch from an owner that does not answer reaches the backup's ceiling; a partitioned fetch fails and succeeds after repair; six 6 MiB materialized column sections, 36 MiB in all, stream in 64 KiB chunks and install as one checkpoint |
 | window section partition and repair | `transport::backup::window_sections_larger_than_the_bulk_budget_stream_across_a_partition` | 103 | 320 s / 400,000 / 90 s | The same fences and faults for three window groups of input rows and argument columns, each section classified by its own kind; 36 MiB, beyond the 32 MiB bulk budget, streams in 64 KiB chunks and installs as one branched window checkpoint |
 | backup owner restart during transfer | `transport::backup::restart_during_backup_transfer_discards_the_process_stage` | 102 | 320 s / 400,000 / 90 s | An incomplete section cannot finish after owner restart, and the replacement process has no prior capture stage |
-| backup inventory partition and held link | `transport::backup::backup_inventory_is_bounded_across_a_partition_and_a_held_link` | 104 | 85 s / 100,000 / 90 s | An inventory request across a partition, and another across a held link, each fails at the request's five-second deadline; after repair and after release the capture owner lists its complete six-section stage unchanged, from its single capture |
+| backup inventory partition and held link | `transport::backup::backup_inventory_is_bounded_across_a_partition_and_a_held_link` | 104 | 85 s / 100,000 / 90 s | An inventory request across a partition, and another across a held link, each fails at the backup's five-second ceiling; after repair and after release the capture owner lists its complete six-section stage unchanged, from its single capture |
 | stalled peer isolation | `transport::isolation::stalled_peer_cannot_consume_unrelated_capacity_or_leak_reservations` | 91–93 | 120 s / 120,000 / 120 s | A stalled peer holds only its own connection's slots, unrelated work progresses, and every reservation is released |
 | join refusal across a partition | `transport::prerequisites::a_joiner_beyond_the_heartbeat_bound_is_refused_once_a_partition_heals` | 111 | 30 s / 50,000 / 90 s | A joiner whose heartbeat is beyond the bound stays joining for three seconds of partition, is refused by its member naming the heartbeat and both values once the partition heals, and counts the refusal under its own reason; the member's own join is untouched, and a compatible latecomer joins through it |
 | rolling heartbeat change | `transport::prerequisites::a_rolling_heartbeat_change_joins_within_the_bound_and_is_refused_beyond_it` | 113 | 30 s / 50,000 / 90 s | Three hosts join; one crashes and restarts with a heartbeat within the bound and rejoins; another crashes and restarts with one beyond the bound and is refused by the first peer it reaches, while the two others stay joined and connected |
 | stale recorded endpoint | `transport::prerequisites::a_recorded_endpoint_another_cluster_now_serves_is_a_stale_route` | 115 | 30 s / 50,000 / 90 s | A node of another cluster that shares the certificate authority serves the endpoint a returning node recorded for a departed member: bootstrapping it fails as a stale route naming the endpoint and the member, counts no prerequisite refusal and leaves the node joining, and the node then joins through a recorded member that still answers |
-| application progress through a partition and a held reply | `transport::progress::application_progress_reaches_the_leader_through_a_partition_a_held_reply_and_repair` | 131, 133 | 85 s / 100,000 / 90 s | The leader holds the reporter's first progress report; across a partition the reporter's next report and the leader's revision query each fail within their two-second deadlines; after repair, once each side's liveness probe answers again, the reporter's reply is held and the leader's query meets its deadline; once released, the query supplies the progress the failed report carried, and a newer report followed by a late older one leaves the newer progress held. This exercises the production progress shapes, their deadlines and their merge over the transport; the server's barriers, reporter and leader fencing are covered by their owner tests, the registered Shuttle checks and the public scenarios. |
-| a stop with a node that answers late | `transport::stop::a_stop_waits_for_a_node_that_answers_late_and_collects_its_report_after_repair` | 151, 153 | 85 s / 100,000 / 90 s | Three hosts: the stop's owner, a prompt node and a late one. In the releasing round the prompt node answers that it still releases a batch, and the late node's view is held, so its drain request ends unanswered within the request's coordination deadline: the round cannot find the domain at rest, and nothing waits past the deadline. Once the late node answers, the confirming round and the round after it find every node at rest with the same motion, and the late node's view arrives intact. The report request across a partition of the late node ends unanswered within its deadline; after repair it answers pending while its teardown runs, then reports exactly what its teardown cut, beside the prompt node's report. This exercises the production stop request shapes, their coordination identity and their deadlines over the transport; the owner's decisions from these answers are covered by its owner tests, the registered Shuttle checks and the public scenarios. |
+| application progress through a partition and a held reply | `transport::progress::application_progress_reaches_the_leader_through_a_partition_a_held_reply_and_repair` | 131, 133 | 120 s / 200,000 / 120 s | The leader holds the reporter's first progress report; across a partition the reporter's next report and the leader's revision query each go unanswered, ended by liveness or by their caller's own ten-second deadline; after repair, once each side's liveness probe answers again, the reporter's reply is held and the leader's query keeps waiting on the live link; once released, that same query supplies the progress the failed report carried, and a newer report followed by a late older one leaves the newer progress held. This exercises the production progress shapes, their liveness and their merge over the transport; the server's barriers, reporter and leader fencing are covered by their owner tests, the registered Shuttle checks and the public scenarios. |
+| a stop with a node that answers late | `transport::stop::a_stop_waits_for_a_node_that_answers_late_and_collects_its_report_after_repair` | 151, 153 | 85 s / 100,000 / 90 s | Three hosts: the stop's owner, a prompt node and a late one. In the releasing round the prompt node answers that it still releases a batch, and the late node's view is held: its drain request keeps the round waiting on the live link, so the round cannot find the domain at rest until the late node answers. Once it answers, the confirming round and the round after it find every node at rest with the same motion, and the late node's view arrives intact. The report request across a partition of the late node goes unanswered, ended by liveness or by the caller's own deadline; after repair it answers pending while its teardown runs, then reports exactly what its teardown cut, beside the prompt node's report. This exercises the production stop request shapes, their coordination identity and their liveness over the transport; the owner's decisions from these answers are covered by its owner tests, the registered Shuttle checks and the public scenarios. |
 | process-bound request across transport replacement | `transport::process_target::a_process_bound_request_cannot_reach_a_replacement_transport` | 137, 139 | 30 s / 50,000 / 90 s | An exact-process request succeeds; the receiver restarts its transport at the same address with a distinct authenticated process epoch; a request retaining the preceding epoch fails before its handler, and a request naming the replacement succeeds. The connection lease supplies the epoch fence without adding fields to each request payload. |
 
 The simulation target also holds 26 runner and driver checks, such as the supervision, bound, clock,
@@ -680,13 +681,13 @@ exactly once.
 
 The backup cases send the production typed capture, inventory, and bulk fetch messages. A request
 that claims another process epoch is rejected before the capture or stream handler runs. The
-partition case bounds a stalled fetch by its request deadline, leaves the staged section available
+partition case bounds a fetch from an owner that does not answer by the backup's ceiling, leaves the staged section available
 when the link is partitioned, repairs the link, and reads the verified section. The restart case
 ends an owner process after its first stream chunk;
 the incomplete stream fails, and the rebound owner has no stage from that process. The inventory
 case partitions the coordinator's link to the capture owner, and later holds it, while the
-coordinator asks for the staged section inventory. Each request fails at the inventory request's
-deadline, and a request over the repaired or released link lists the whole stage unchanged: a
+coordinator asks for the staged section inventory. Each request fails at the backup's ceiling, and
+a request over the repaired or released link lists the whole stage unchanged: a
 disrupted inventory request consumes and alters nothing, and the owner captured only once. These
 are transport and in-memory staging boundary checks; the Cucumber cluster scenarios verify the
 server's archive and restore behavior, and the external `backup-fault` chaos scenario the same
@@ -703,15 +704,16 @@ and subquota, worker queues, and memory budgets against their configured bounds.
 
 Key transitions assert exact values. The stalled peer holds all 32 shared management streams of its
 connection while liveness, cancellation, and discovery still use the reserved streams, and one more
-shared operation waits until its own deadline. A burst fills the one bulk worker and its eight-job
+shared operation waits for a stream until its caller's own deadline. A burst fills the one bulk worker and its eight-job
 queue, the two submissions beyond them are refused without a charge, and control work is admitted in
 the same pass. Unread 2 MiB resource streams stop at one bulk receive window each, which the stalled
-peer backs with one `bulk_window` reservation per stream. They release their admission and memory at
-the five-second progress deadline, and the stalled peer returns every window once its streams end.
+peer backs with one `bulk_window` reservation per stream. They keep their admission and the chunk
+their window refused for as long as the stalled peer lives, thirty simulated seconds included, and
+once it reads them they complete and return every admission, window and byte.
 The held relay reserves its exact body, largest decoded batch, and scratch, plus its retained grant
 metadata, until cancellation and release of the borrowed intake.
 
-The fixture then holds the stalled link. The hub's own liveness deadline ends its probe to the
+The fixture then holds the stalled link. The probe's protocol deadline ends the hub's probe to the
 stalled peer while the healthy peer keeps exchanging every traffic class. Removing the stalled peer
 from membership ends the hub's operations to it and closes the hub's pools to it at once, without
 that peer's cooperation. Tearing the stalled host down while the link is still held closes the
@@ -914,17 +916,18 @@ last test, the receiver restart group, which then passed its 64 seeds alone in 2
 
 The inferencer checkpoint transport scenario (`transport::materialized::inferencer_branch_state_transfers_reconnect_to_the_replacement_owner`, seeds 51 and 53) uses the production authenticated state description and bulk fetch paths. It partitions a multi-chunk fetch, repairs the link, replaces the transport owner, then checks complete distinct bytes for two branches at each revision and their length and digest. Its opaque payload oracle qualifies transport continuity; the native snapshot codec properties separately qualify shapes, incarnations and exact F32 bits.
 
-## Declared Window And Deadline Regression
+## Declared Window And Connection Liveness Regression
 
-`transport::infrastructure::declared_windows_and_rpc_deadlines_survive_latency_loss_and_repair`
+`transport::infrastructure::declared_windows_and_connection_liveness_survive_latency_loss_and_repair`
 uses committed seed 141. Two production transports advertise 4 KiB stream and 65,535-byte
-connection receive windows, the smallest connection window HTTP/2 can bound, a two-second request
-budget and a four-request local reserve. A 128 KiB echo
-crosses both windows under 5–10ms message latency and the harness's normal TCP buffering. Holding all bytes
-must end the next RPC at its configured deadline. A partition then prevents success, and repair
-must restore exact payload delivery and return transport reservations on shutdown.
+connection receive windows, the smallest connection window HTTP/2 can bound, and a four-request
+local reserve. A 128 KiB echo crosses both windows under 5–10ms message latency and the harness's
+normal TCP buffering. Holding all bytes ends the next RPC only when liveness ends its connection,
+within one ping interval and its timeout; no per-request timer ends it sooner. A partition then
+prevents success until the caller's own deadline, and repair must restore exact payload delivery
+and return transport reservations on shutdown.
 
 The scenario uses the existing 30s simulated, 50,000-step and 90s wall bounds. It targets the risk
-that a configured deadline remains a default constant or that peer SETTINGS stall a transfer
+that a timer above connection liveness ends a held exchange, or that peer SETTINGS stall a transfer
 larger than the advertised windows. The fixed regression seed is qualification of that case,
 without claiming a wider seed campaign.

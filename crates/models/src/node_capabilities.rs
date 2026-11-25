@@ -145,8 +145,6 @@ pub struct InterconnectCapabilities {
     pub stream_window_bytes: u32,
     pub connection_window_bytes: u32,
     pub connection_setup_timeout: Duration,
-    pub request_timeout: Duration,
-    pub progress_timeout: Duration,
     pub reconnect_backoff: Duration,
     pub max_reconnect_backoff: Duration,
 }

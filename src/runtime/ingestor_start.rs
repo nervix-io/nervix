@@ -416,7 +416,7 @@ impl Runtime {
                 .await;
         }
         for branched in branched {
-            branched.shutdown(self.task_stop_grace()).await;
+            branched.shutdown(self.planned_task_stop()).await;
         }
 
         let placement = RuntimeStatePlacement {

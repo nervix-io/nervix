@@ -120,7 +120,8 @@ async fn forced_recovery_resets_an_inferencer_branch_without_surviving_tensors_t
 
     let recovered = runtime
         .forced_recovery_checkpoint(&placement, &[], deadline)
-        .await;
+        .await
+        .expect("a recovery without live sources to wait for prepares within its budget");
     assert!(recovered.snapshot.is_none());
     assert_eq!(
         recovered.reset_cause,

@@ -674,15 +674,23 @@ pub(super) enum RelayTaskStopError {
 impl RelayOwnerTask {
     pub(super) async fn stop(
         mut self,
-        grace: Duration,
+        wait: TaskStopWait,
     ) -> error_stack::Result<(), RelayTaskStopError> {
         self.shutdown.send_replace(true);
-        match nervix_primitives::time::timeout(grace, &mut self.task).await {
+        let stopped = wait
+            .wait(&mut self.task, |waited| {
+                warn!(
+                    waited = %humantime::format_duration(waited),
+                    "relay owner task is still finishing the work it holds; waiting for it"
+                );
+            })
+            .await;
+        match stopped {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(Report::new(error).change_context(RelayTaskStopError::Join {
                 task: RelayTaskKind::Owner,
             })),
-            Err(_) => {
+            Err(grace) => {
                 self.task.abort();
                 self.task.join_after_shutdown("relay owner").await;
                 Err(Report::new(RelayTaskStopError::DrainTimeout {
@@ -1956,7 +1964,6 @@ impl RelayBoundaryServices {
                     &remote_batch.batch,
                     RelayDeliveryChannel::new(&outbound_slot, None),
                     deadline,
-                    GrantCapacityRefusals::Hold,
                     registration_owner.as_mut(),
                 )
                 .await;

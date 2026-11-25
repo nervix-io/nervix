@@ -47,6 +47,46 @@ pub(crate) const fn task_stop_grace(drain: Duration) -> Duration {
     }
 }
 
+/// How long the owner of a task it stops waits for that task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum TaskStopWait {
+    /// A planned operation, such as a move, a swap, an eviction, a reset or an alteration, waits
+    /// for the task to finish the work it holds, however long that takes: the stop costs latency,
+    /// never the work. A task still stopping after `report_after` is reported at `warn`, as a
+    /// stop that never ends is a defect to surface, and waited for further.
+    UntilStopped { report_after: Duration },
+    /// Terminal teardown of a domain's execution, or the cleanup of a task that already stopped
+    /// taking its input, gives the task `grace` to finish and aborts it afterwards.
+    Teardown { grace: Duration },
+}
+
+impl TaskStopWait {
+    /// Waits for `stopping` under this bound: its output once it ends, or the grace that passed
+    /// first under [`Self::Teardown`]. `on_slow` reports a planned stop that takes longer than its
+    /// report threshold, once.
+    pub(in crate::runtime) async fn wait<F: std::future::Future>(
+        self,
+        stopping: F,
+        on_slow: impl FnOnce(Duration),
+    ) -> Result<F::Output, Duration> {
+        match self {
+            Self::UntilStopped { report_after } => {
+                tokio::pin!(stopping);
+                if let Ok(output) =
+                    nervix_primitives::time::timeout(report_after, &mut stopping).await
+                {
+                    return Ok(output);
+                }
+                on_slow(report_after);
+                Ok(stopping.await)
+            }
+            Self::Teardown { grace } => nervix_primitives::time::timeout(grace, stopping)
+                .await
+                .map_err(|_| grace),
+        }
+    }
+}
+
 /// Includes the grace a branch task receives after its configured drain deadline.
 pub const fn branch_task_stop_timeout(domain_drain_timeout: Duration) -> Duration {
     // Saturation is the meaning: a drain timeout configured near `Duration::MAX` already asks to

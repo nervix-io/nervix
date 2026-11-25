@@ -534,8 +534,9 @@ remain inside the fully occupied cluster. The mutations share one ten-second bud
 has another. The harness drives and timestamps replies independently of its cooperative scenario
 runner, checking the sixth mutation's acknowledgement explicitly. Holds remain through readiness
 and stable-leader observations, then cleanup releases them before diagnostics and node stop, even
-after a failed assertion. These harness bounds provide public class-isolation evidence; product
-request deadlines keep their existing owners.
+after a failed assertion. These harness bounds provide public class-isolation evidence and are
+not product deadlines: a product request waits for its peer for as long as liveness holds, as
+[Liveness And Deadlines](./interconnect.md#liveness-and-deadlines) states.
 
 ## Thread Creation Outside The Executor
 
