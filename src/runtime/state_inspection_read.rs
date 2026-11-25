@@ -103,10 +103,7 @@ impl MaterializedPageReply {
             return 1;
         }
         // A bound past what the plan can count is past the class, which clamps the share.
-        let container = match ResidentEncodingPlan::bound(executor, max_bytes) {
-            Ok(bound) => bound,
-            Err(_beyond) => u64::MAX,
-        };
+        let container = ResidentEncodingPlan::bound(executor, max_bytes).unwrap_or(u64::MAX);
         let most = container.saturating_add(descriptor);
         let class = executor.memory(MemoryClass::Bulk);
         let free = class.capacity_bytes.saturating_sub(class.reserved_bytes);
