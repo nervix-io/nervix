@@ -1314,27 +1314,9 @@ impl RestoredMaterializedSnapshot {
         let relay_capacity = executor.memory(MemoryClass::Relay).capacity_bytes;
         let layout = header.metadata_layout(rows, relay_capacity)?;
         let metadata_bytes = layout.metadata_bytes.max(1);
-        let mut retained = match share {
-            ShareSource::Reserve(share) => {
-                let share = match share {
-                    Some(share) => share,
-                    None => {
-                        Self::first_share(executor, cursor, &header, metadata_bytes, section_limit)
-                    }
-                };
-                RetainedShare::reserve(executor, share.max(metadata_bytes)).await?
-            }
-            ShareSource::Provided { share, sections } => {
-                // A container opened within memory admitted for its declared layout has exactly
-                // that layout: what its sections keep is what the admission counted for them.
-                if cursor.scanned_retained_bytes(header.groups, section_limit) != Some(sections) {
-                    return Err(MaterializedSnapshotError::decoding(
-                        "the container differs from its declared layout",
-                    ));
-                }
-                RetainedShare::provided(share)
-            }
-        };
+        let mut retained = share
+            .retained(executor, cursor, &header, metadata_bytes, section_limit)
+            .await?;
         // Admit the row views and uniqueness table before either grows. The columns become
         // materialized runtime state; these arrays are transient until installation consumes them.
         let Some(mut metadata_charge) = retained.draw(metadata_bytes)? else {
@@ -1524,6 +1506,47 @@ enum ShareSource {
     /// A share its caller already holds, admitted for a container whose sections keep exactly
     /// `sections` bytes once decoded.
     Provided { share: Reservation, sections: u64 },
+}
+
+impl ShareSource {
+    /// The share an attempt on the container `cursor` reads, whose header is `header`, draws the
+    /// charges it keeps from: one it waits for now, of the size this source names or of what the
+    /// container's size suggests, or the one its caller admitted for the container's declared
+    /// layout, which the container must then have.
+    async fn retained(
+        self,
+        executor: &Executor,
+        cursor: &SealedSource<'_>,
+        header: &SealedSnapshotHeader,
+        metadata_bytes: u64,
+        section_limit: u64,
+    ) -> Result<RetainedShare, Report<MaterializedSnapshotError>> {
+        match self {
+            Self::Reserve(share) => {
+                let share = match share {
+                    Some(share) => share,
+                    None => RestoredMaterializedSnapshot::first_share(
+                        executor,
+                        cursor,
+                        header,
+                        metadata_bytes,
+                        section_limit,
+                    ),
+                };
+                RetainedShare::reserve(executor, share.max(metadata_bytes)).await
+            }
+            Self::Provided { share, sections } => {
+                // A container opened within memory admitted for its declared layout has exactly
+                // that layout: what its sections keep is what the admission counted for them.
+                if cursor.scanned_retained_bytes(header.groups, section_limit) != Some(sections) {
+                    return Err(MaterializedSnapshotError::decoding(
+                        "the container differs from its declared layout",
+                    ));
+                }
+                Ok(RetainedShare::provided(share))
+            }
+        }
+    }
 }
 
 /// The state-read share one attempt to open a snapshot draws the charges it keeps from.

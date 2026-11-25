@@ -85,6 +85,13 @@ use routing::ReplicatedState;
 pub(crate) use routing::StateReplicationRequest;
 pub(in crate::runtime) use tasks::{CheckpointWriter, StateSnapshotTasks};
 
+/// The unit a forced ownership recovery prepares on this node: its scheduled node, and the replicas
+/// the recovery reads the unit's state from.
+struct ForcedRecoveryTarget {
+    scheduled: ExecutionNode,
+    recovery_sources: Vec<ClusterNodeName>,
+}
+
 impl Runtime {
     /// One process-local lifetime per constructed state, without changing record publication.
     fn next_materialized_inspection_instance(&self) -> u64 {
@@ -708,46 +715,13 @@ impl Runtime {
         request: nervix_interconnect::PrepareForcedOwnershipRecoveryRequest,
         deadline: Instant,
     ) -> OwnershipHandoffResult<nervix_interconnect::ForcedOwnershipRecoveryPreparation> {
-        let source = &request.source;
-        let destination = &request.destination;
         let domain = &request.domain;
         let entity = &request.entity;
         let unit = request.unit;
-        let base_schedule_fingerprint = request.base_schedule_fingerprint;
-        let scheduled = self
-            .forced_recovery_node_until(domain, entity, base_schedule_fingerprint, deadline)
-            .await?;
-        if scheduled
-            .units
-            .get(&unit)
-            .and_then(|placement| placement.primary_node.as_ref())
-            != Some(source)
-        {
-            return Err(OwnershipHandoffError::participant(format!(
-                "{} '{}' is no longer assigned to lost owner '{}'",
-                entity.kind.as_str(),
-                entity.identifier.as_str(),
-                source
-            )));
-        }
-        let dispatcher = self.inner.remote_dispatcher.load_full().ok_or_else(|| {
-            OwnershipHandoffError::participant("local node identity is unavailable")
-        })?;
-        let local_node = dispatcher.local_node_id();
-        if local_node != destination {
-            return Err(OwnershipHandoffError::participant(format!(
-                "forced ownership recovery targets node '{destination}' but reached '{local_node}'"
-            )));
-        }
-        let recovery_sources = scheduled
-            .units
-            .get(&unit)
-            .ok_or_else(|| OwnershipHandoffError::participant("scheduled unit is unavailable"))?
-            .assigned_nodes
-            .iter()
-            .filter(|node| *node != source && *node != destination)
-            .cloned()
-            .collect::<Vec<_>>();
+        let ForcedRecoveryTarget {
+            scheduled,
+            recovery_sources,
+        } = self.forced_recovery_target(&request, deadline).await?;
         let mut checkpoints = Vec::new();
         let mut resets = BTreeMap::new();
 
@@ -884,6 +858,64 @@ impl Runtime {
                 OwnershipStateRecoveryOutcome::Reset
             },
             resets,
+        })
+    }
+
+    /// Waits, within `deadline`, for the schedule `request` was made under, and confirms that it
+    /// still assigns the request's unit to the lost owner and that the recovery reached its
+    /// destination, this node. Returns the unit's scheduled node and the replicas, neither the
+    /// lost owner nor this node, that the recovery reads the unit's state from.
+    async fn forced_recovery_target(
+        &self,
+        request: &nervix_interconnect::PrepareForcedOwnershipRecoveryRequest,
+        deadline: Instant,
+    ) -> OwnershipHandoffResult<ForcedRecoveryTarget> {
+        let source = &request.source;
+        let destination = &request.destination;
+        let entity = &request.entity;
+        let unit = request.unit;
+        let scheduled = self
+            .forced_recovery_node_until(
+                &request.domain,
+                entity,
+                request.base_schedule_fingerprint,
+                deadline,
+            )
+            .await?;
+        if scheduled
+            .units
+            .get(&unit)
+            .and_then(|placement| placement.primary_node.as_ref())
+            != Some(source)
+        {
+            return Err(OwnershipHandoffError::participant(format!(
+                "{} '{}' is no longer assigned to lost owner '{}'",
+                entity.kind.as_str(),
+                entity.identifier.as_str(),
+                source
+            )));
+        }
+        let dispatcher = self.inner.remote_dispatcher.load_full().ok_or_else(|| {
+            OwnershipHandoffError::participant("local node identity is unavailable")
+        })?;
+        let local_node = dispatcher.local_node_id();
+        if local_node != destination {
+            return Err(OwnershipHandoffError::participant(format!(
+                "forced ownership recovery targets node '{destination}' but reached '{local_node}'"
+            )));
+        }
+        let recovery_sources = scheduled
+            .units
+            .get(&unit)
+            .ok_or_else(|| OwnershipHandoffError::participant("scheduled unit is unavailable"))?
+            .assigned_nodes
+            .iter()
+            .filter(|node| *node != source && *node != destination)
+            .cloned()
+            .collect::<Vec<_>>();
+        Ok(ForcedRecoveryTarget {
+            scheduled,
+            recovery_sources,
         })
     }
 
