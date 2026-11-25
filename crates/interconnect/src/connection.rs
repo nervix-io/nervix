@@ -119,7 +119,9 @@ pub use duplex::{
     DuplexSender, EncodedMessage,
 };
 pub use relay::RelaySendProgress;
-use relay_owner::{RelayControl, RelayGrantPosition, RelayOwnersPublication, RelayPeerOwner};
+use relay_owner::{
+    PeerRuns, RelayControl, RelayGrantPosition, RelayOwnersPublication, RelayPeerOwner,
+};
 pub(crate) use relay_watermarks::RelayChannelWatermarks;
 pub use stream::IncomingByteStream;
 pub(crate) use stream::OutboundByteStreamRequest;
@@ -981,11 +983,9 @@ pub(crate) struct TransportStateInner {
     /// Immutable routing only. Connections and attempts retain their peer owner before recurring
     /// protocol work, and only peer installation and withdrawal replace this publication.
     relay_owners: ArcSwap<RelayOwnersPublication>,
-    /// The process epoch of the run each peer's relay protocol is bound to, republished whole when
-    /// a connection binds a run or membership retires a peer, so a reader takes no owner's lock.
-    peer_runs: ArcSwap<BTreeMap<ClusterNodeName, u64>>,
-    /// Wakes whoever waits for a peer's run to end, when `peer_runs` is republished.
-    relay_runs_changed: Notify,
+    /// The run each peer's relay protocol is bound to, which a reader takes without an owner's
+    /// lock, and the wait for one to end.
+    peer_runs: PeerRuns,
     relay_progress_changed: Notify,
     /// The relay channel retention the installed committed parameters give a delivery that starts
     /// now: an owner still awaiting membership ends after it, and the sweep passes at least once a
@@ -1080,8 +1080,7 @@ impl TransportState {
                 handshake_permits: StdArc::new(Semaphore::new(options.max_concurrent_handshakes)),
                 requests: super::RequestState::new(&options, Arc::clone(&observations)),
                 relay_owners: ArcSwap::from_pointee(RelayOwnersPublication::default()),
-                peer_runs: ArcSwap::from_pointee(BTreeMap::new()),
-                relay_runs_changed: Notify::new(),
+                peer_runs: PeerRuns::default(),
                 relay_progress_changed: Notify::new(),
                 relay_retention: watch::channel(RelayChannelRetention::default()).0,
                 relay_retention_changed: Notify::new(),
