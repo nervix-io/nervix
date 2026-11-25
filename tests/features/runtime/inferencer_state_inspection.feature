@@ -124,7 +124,7 @@ Feature: Bounded typed inferencer state inspection
       | 1            | 0             | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |                   | SENSITIVE          | <masked>     | <masked>      | "<masked>"   | "<masked>"     |
       | 3            | 1             | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |                   | SENSITIVE          | <masked>     | <masked>      | "<masked>"   | "<masked>"     |
 
-  @inferencer_state_inspection
+  @inferencer_state_inspection @deloxide_stress
   Scenario Outline: An inferencer read the bulk memory cannot hold in one page pages through every tensor
     Given runtime replication is configured with replica count 0 and snapshot interval "1h"
     And the production sticky scheduler is configured

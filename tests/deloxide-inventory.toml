@@ -7523,6 +7523,26 @@ invocation = "stress-scenarios"
 scenario = "Stateful inference publishes typed tensor inspection pages"
 selections = ["deloxide-stress"]
 
+[[workload]]
+coverage = "Inference inspection pages through held bulk memory on the capture path scenario.inferencer-inspection takes, claiming only the tracked locks that path acquires. Tensor publication, Arrow copying, async memory admission and transport are outside Deloxide."
+examples = 2
+feature = "tests/features/runtime/inferencer_state_inspection.feature"
+id = "scenario.inferencer-inspection-paging"
+invariant = "An inferencer read whose pages the held bulk memory cannot hold whole ends each page before the tensor that no longer fits and returns every tensor across its pages, without a tracked deadlock."
+invocation = "scenarios"
+scenario = "An inferencer read the bulk memory cannot hold in one page pages through every tensor"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: inference inspection pages through held bulk memory on the capture path stress.inferencer-inspection takes. Tensor publication, Arrow copying, async memory admission and transport are outside Deloxide."
+examples = 2
+feature = "tests/features/runtime/inferencer_state_inspection.feature"
+id = "stress.inferencer-inspection-paging"
+invariant = "An inferencer read whose pages the held bulk memory cannot hold whole ends each page before the tensor that no longer fits and returns every tensor across its pages, without a tracked deadlock."
+invocation = "stress-scenarios"
+scenario = "An inferencer read the bulk memory cannot hold in one page pages through every tensor"
+selections = ["deloxide-stress"]
+
 [[owner]]
 gap = "The diagnostic-node workload reaches successful HTTP input and its retained accounting guard. Slow bodies, capacity refusal and cancellation racing allocation observation are qualified by the ordinary listener scenarios and the production-owner Shuttle check; those interleavings are outside detector evidence. The selected accounting mutex holds no I/O, await, copy or graph dispatch."
 path = "src/application/listener_input.rs"

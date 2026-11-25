@@ -2481,7 +2481,7 @@ manifest = "Cargo.toml"
 max_input_bytes = 4096
 package = "nervix-server"
 random_iterations = 128
-source = "src/runtime/materialized_snapshot.rs"
+source = "src/runtime/materialized_snapshot_tests.rs"
 test = "runtime::materialized_snapshot::tests::bolero_materialized_archive_columns_preserve_the_exact_schema_and_rows"
 test_target = "lib"
 
