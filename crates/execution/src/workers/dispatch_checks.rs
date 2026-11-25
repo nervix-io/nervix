@@ -133,6 +133,81 @@ async fn a_panicking_job_reports_its_own_failure_and_the_worker_drains_its_succe
     assert_eq!(executor.snapshot().management_memory.reserved_bytes, 0);
 }
 
+/// A carrying job whose callback panics reports the panic, and the state it carried goes with it,
+/// since only the callback could have handed it back. The worker survives and drains the next
+/// carrying job, whose state comes home with its outcome.
+#[nervix_primitives::test]
+async fn a_panicking_carrying_job_takes_its_state_and_the_worker_drains_its_successor() {
+    let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Control), NonZeroUsize::MIN);
+    let executor = Executor::default();
+    let held = HeldWorker::new(&pool);
+    let mut panicking_home: Option<Vec<u8>> = None;
+    let mut succeeding_home: Option<Vec<u8>> = None;
+    let charge = executor
+        .try_reserve(MemoryClass::Management, 1)
+        .assured("one byte fits in the management budget");
+    let mut panicking = Box::pin(pool.run_carrying(
+        None,
+        charge,
+        vec![1_u8],
+        &mut panicking_home,
+        |_state, _, _| -> (Vec<u8>, u8) { panic!("the callback's deliberate panic") },
+    ));
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(panicking.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    let charge = executor
+        .try_reserve(MemoryClass::Management, 1)
+        .assured("a second byte fits in the management budget");
+    let mut succeeding = Box::pin(pool.run_carrying(
+        None,
+        charge,
+        vec![2_u8],
+        &mut succeeding_home,
+        |mut state, _, _| {
+            state.push(3);
+            (state, 7)
+        },
+    ));
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(succeeding.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    drop(held);
+    let failure = panicking
+        .await
+        .expect_err("the deliberate panic is reported");
+    assert!(matches!(
+        failure.current_context(),
+        ExecutionError::JobPanicked {
+            class: "control_cpu"
+        }
+    ));
+    assert_eq!(
+        succeeding
+            .await
+            .assured("the worker survives the carrying callback's panic"),
+        7
+    );
+    assert_eq!(
+        panicking_home, None,
+        "the state the panicking callback held went with it"
+    );
+    assert_eq!(
+        succeeding_home,
+        Some(vec![2, 3]),
+        "the next job's state comes home with its outcome"
+    );
+    let drained = pool.snapshot();
+    assert_eq!(drained.completed, 2);
+    assert_eq!(drained.running, 0);
+    assert_eq!(drained.waiting, 0);
+    assert_eq!(executor.snapshot().management_memory.reserved_bytes, 0);
+}
+
 #[nervix_primitives::test]
 async fn a_single_worker_drains_its_backlog_without_polling_submitters_again() {
     let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Control), NonZeroUsize::MIN);
