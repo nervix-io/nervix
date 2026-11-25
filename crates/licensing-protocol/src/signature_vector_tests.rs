@@ -486,7 +486,7 @@ impl SignatureVectors {
             )
             .err()
             .assured("a decision with a changed signature byte does not verify");
-        assert!(matches!(error.current_context(), TrustError::Document));
+        assert!(matches!(error.current_context(), TrustError::Decision));
         assert_signature_refused(&error);
         let error = Request::verify(
             &tampered(&self.request),
