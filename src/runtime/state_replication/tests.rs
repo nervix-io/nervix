@@ -2565,6 +2565,84 @@ fn graph_and_schedule_key_materialized_relay_state_alike() {
     assert_eq!(from_graph, from_schedule);
 }
 
+/// A swap that stops a part before it installs every identity publishes that part's identity
+/// alone first, so the part's last state lands where its replacement reads it, and every other
+/// node keeps the identity it had until the swap installs them all.
+#[test]
+fn installing_one_nodes_identities_leaves_every_other_node_as_installed() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let schema = named::<SchemaName>("event");
+    let scheduled = |fingerprint: u8| {
+        let mut nodes = vec![ScheduledNode::new(
+            nervix_models::Model::Schema(CreateSchema {
+                labels: Default::default(),
+                name: schema.clone(),
+                fields: vec![SchemaField {
+                    name: named("seq"),
+                    ty: ParseAsType::I64,
+                    optional: false,
+                    sensitive: false,
+                }],
+            }),
+            SchemaFingerprint::from_digest([fingerprint; 32]),
+        )];
+        for relay in ["replaced", "kept"] {
+            let mut node = ScheduledNode::new(
+                nervix_models::Model::Relay(CreateRelay {
+                    labels: Default::default(),
+                    name: named(relay),
+                    schema: schema.clone(),
+                    buffer: nonzero!(4usize),
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                }),
+                SchemaFingerprint::from_digest([fingerprint; 32]),
+            );
+            node.resolved_branching = Some(ResolvedBranching::unbranched());
+            nodes.push(node);
+        }
+        nodes
+    };
+    runtime.install_schedule_state_identities(&DomainSchedule::new(
+        domain.clone(),
+        scheduled(1),
+        Vec::new(),
+    ));
+    let desired = crate::runtime::test_fixtures::test_execution_revision(&domain, scheduled(2));
+    let lifecycle_schema = |relay: &str| {
+        let placement = runtime
+            .state_placement(
+                &domain,
+                RuntimeStateKind::BranchLru,
+                ModelKind::Relay,
+                named::<RelayName>(relay),
+                None,
+            )
+            .expect("every relay of the schedule has a published identity");
+        match placement.state {
+            RuntimeState::BranchLru { schema } => schema,
+            other => panic!("a branch lifecycle is placed as one, got {other:?}"),
+        }
+    };
+
+    runtime.install_state_identities_of(
+        &desired,
+        &NodeRef::new(ModelKind::Relay, named::<ModelName>("replaced")),
+    );
+
+    assert_eq!(
+        lifecycle_schema("replaced"),
+        SchemaFingerprint::from_digest([2; 32]),
+        "the stopping part takes the identity the swap gives it"
+    );
+    assert_eq!(
+        lifecycle_schema("kept"),
+        SchemaFingerprint::from_digest([1; 32]),
+        "every other node keeps its installed identity"
+    );
+}
+
 /// Branch-aggregated metrics and Kafka offsets depend on no schema, so they are placed without any
 /// published identity. Every other kind of state is placed only under the schema fingerprint the
 /// committed schedule publishes for its node, and WASM guest state also in the generation it names,

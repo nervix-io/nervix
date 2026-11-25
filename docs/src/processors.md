@@ -1034,7 +1034,12 @@ Every reingestor change uses entity pause because inputs, route construction, at
 dependency changes affect its relay consumers or branch-entrypoint wiring. Nervix gates both old
 and desired input relays, force-flushes collected input, drains node work, stops only the affected
 reingestor tasks, rebuilds their branch entrypoints, and reconnects their relay consumers. Other
-domain nodes continue to run.
+domain nodes continue to run. A node that applies the change without that drain, as when it
+retries a change that failed there, still loses nothing the stopping reingestor holds: it drains the
+input it already received and flushes its output, and its routes deliver every branch's rows before
+the replacement starts, with no time limit of their own. A row still waiting for its state under
+`REQUIRED WAIT` when the reingestor stops is the exception: its acknowledgement fails with the
+stop as its reason, as it does when its domain stops.
 
 ## Generator
 
@@ -1080,7 +1085,10 @@ at least one route.
 Every generator change uses entity pause. Nervix gates its old and desired materialized source
 relays, lets the old timed task force-flush pending route output, waits until that task reports
 quiescent, then replaces only that generator task from the published schedule. The gate has a
-deadline expiry backstop, so a failed control-plane operation cannot leave generation wedged.
+deadline expiry backstop, so a failed control-plane operation cannot leave generation wedged. A node
+that applies the change without that drain, as when it retries a change that failed there, still
+loses nothing the old task holds: the task finishes the occurrence in hand and flushes its routes
+before the replacement starts.
 
 ## Message errors
 

@@ -91,7 +91,10 @@ impl DeferredSwapWork {
 
 impl Runtime {
     /// A test holds or fails the swap here, where this node replaces `entity`: its previous
-    /// runtime has stopped, handing over what it held, and its replacement has not started.
+    /// runtime has stopped, handing over what it held, and its replacement has not started. A
+    /// generator or reingestor the swap stops before its main hold reaches this right after that
+    /// stop, and again before its replacement starts, so a failure armed for it fails the swap at
+    /// the first of the two it reaches and a pause holds the first one only.
     #[cfg(feature = "testing")]
     pub(super) async fn hold_or_fail_entity_swap(
         &self,
@@ -416,7 +419,7 @@ impl Runtime {
         let step = journal.record(IngestorSwap::new(ingestor.clone()));
         for unit in self.running_ingestor_units(domain, &ingestor) {
             nervix_primitives::task::consume_budget().await;
-            self.stop_ingestor_unit(domain, &ingestor, unit)
+            self.stop_ingestor_unit(domain, &ingestor, unit, RouteStop::Finish)
                 .await
                 .change_context_lazy(build)?;
             journal.step(step).record_stopped(unit);
@@ -430,40 +433,34 @@ impl Runtime {
         Ok(())
     }
 
-    /// Replaces the tasks and branched entrypoints of the reingestor `entity` with those
-    /// `revision` plans, where this node runs it.
-    pub(super) async fn swap_reingestor_entity(
+    /// Stops the reingestor `entity` where this node runs it, recording the stop in `journal` so a
+    /// swap that fails afterwards starts it again. A reingestor `revision` does not plan, or the
+    /// installed execution lacks, fails the swap before anything of it stops.
+    ///
+    /// Its tasks drain the input they already received and flush their output into its routes,
+    /// and its routes finish their deliveries, with no limit of their own. The swap has already
+    /// held the reingestor's input relays, so nothing new reaches it, and holds none of the relays
+    /// it delivers into: it stops the reingestors it replaces upstream first, before its main
+    /// hold.
+    pub(super) async fn stop_swapped_reingestor(
         &self,
         domain: &DomainName,
         entity: &NodeRef,
-        revision: &Arc<ExecutionRevision>,
-        registrations: &InstalledRegistrations<'_>,
-        local_node_id: Option<&ClusterNodeName>,
+        revision: &ExecutionRevision,
         journal: &mut EntitySwapJournal,
     ) -> error_stack::Result<(), RuntimeError> {
         let build = || RuntimeError::build_domain_execution(domain);
-        let entrypoints = &revision.entrypoints;
         let reingestor = ReingestorName::from(&entity.identifier);
-        let Some(desired_plan) = entrypoints.reingestor(&reingestor).cloned() else {
+        if revision.entrypoints.reingestor(&reingestor).is_none() {
             return Err(Report::new(ExecutionBuildError::MissingDesiredNode {
                 node: entity.clone(),
             })
             .change_context(build()));
-        };
-        let reingestor_swap_unavailable = || {
-            Report::new(ExecutionBuildError::ExecutionUnavailable {
-                step: ExecutionStep::ReingestorSwap,
-            })
-            .change_context(build())
-        };
-        let desired_node = revision
-            .nodes
-            .get(entity)
-            .assured("the entrypoint plans were decided from this same schedule");
+        }
         /// What the outgoing reingestor left behind, taken out while the execution is
         /// borrowed so the tasks below are awaited without holding that borrow.
         struct RetiredReingestor {
-            tasks: Vec<JoinHandle<()>>,
+            tasks: Vec<ReingestorTask>,
             entrypoints: Vec<Arc<IngestorRouteRuntime>>,
         }
 
@@ -473,7 +470,10 @@ impl Runtime {
             entrypoints: old_entrypoints,
         } = {
             let Some(mut execution) = self.inner.executions.get_mut(domain) else {
-                return Err(reingestor_swap_unavailable());
+                return Err(Report::new(ExecutionBuildError::ExecutionUnavailable {
+                    step: ExecutionStep::ReingestorSwap,
+                })
+                .change_context(build()));
             };
             let Some(old_plan) = execution
                 .revision
@@ -497,11 +497,11 @@ impl Runtime {
             if !old_tasks.is_empty() || !old_entrypoints.is_empty() {
                 journal.step(step).record_previous_stopped();
             }
+            // The swap repartitions no relay before its main hold, so the consumer each task
+            // registered still counts in the current services of its input relay.
             if !old_tasks.is_empty() {
                 for input in &old_plan.inputs {
-                    if let Some(services) = execution.relay_services.get(&input.relay)
-                        && registrations.counts(&input.relay, entity, None)
-                    {
+                    if let Some(services) = execution.relay_services.get(&input.relay) {
                         services.remove_local_runtime_consumer(old_plan.mode);
                         journal.step(step).record_withdrawn(input.relay.clone());
                     }
@@ -512,15 +512,48 @@ impl Runtime {
                 entrypoints: old_entrypoints,
             }
         };
+        // The tasks end first: what they flush goes to the routes, which finish it afterwards.
         for task in old_tasks {
             nervix_primitives::task::consume_budget().await;
-            task.abort();
-            task.join_after_shutdown("scheduled node").await;
+            task.stop().await;
         }
         for runtime in old_entrypoints {
             nervix_primitives::task::consume_budget().await;
-            runtime.shutdown(self.task_stop_grace()).await;
+            runtime.stop(RouteStop::Finish).await;
         }
+        Ok(())
+    }
+
+    /// Starts the tasks and branched entrypoints `revision` plans for the reingestor `entity`,
+    /// where this node runs it. The swap stopped the previous reingestor before its main hold.
+    pub(super) async fn swap_reingestor_entity(
+        &self,
+        domain: &DomainName,
+        entity: &NodeRef,
+        revision: &Arc<ExecutionRevision>,
+        local_node_id: Option<&ClusterNodeName>,
+        journal: &mut EntitySwapJournal,
+    ) -> error_stack::Result<(), RuntimeError> {
+        let build = || RuntimeError::build_domain_execution(domain);
+        let entrypoints = &revision.entrypoints;
+        let reingestor = ReingestorName::from(&entity.identifier);
+        let Some(desired_plan) = entrypoints.reingestor(&reingestor).cloned() else {
+            return Err(Report::new(ExecutionBuildError::MissingDesiredNode {
+                node: entity.clone(),
+            })
+            .change_context(build()));
+        };
+        let reingestor_swap_unavailable = || {
+            Report::new(ExecutionBuildError::ExecutionUnavailable {
+                step: ExecutionStep::ReingestorSwap,
+            })
+            .change_context(build())
+        };
+        let desired_node = revision
+            .nodes
+            .get(entity)
+            .assured("the entrypoint plans were decided from this same schedule");
+        let step = journal.record(ReingestorSwap::new(entity.clone()));
         #[cfg(feature = "testing")]
         self.hold_or_fail_entity_swap(domain, entity, local_node_id)
             .await?;
@@ -573,8 +606,51 @@ impl Runtime {
         Ok(())
     }
 
-    /// Replaces the task of each unit of the generator `entity` to swap with one of the generator
-    /// `revision` plans, where the unit runs on this node.
+    /// Stops the task of each unit of the generator `entity` the swap replaces, where it runs on
+    /// this node, recording each stop in `journal` so a swap that fails afterwards starts the unit
+    /// again.
+    ///
+    /// The swap stops the generators it replaces before it holds any relay, so each task finishes
+    /// the occurrence in hand and flushes what its routes buffered into relays nobody holds, with
+    /// no limit of its own.
+    pub(super) async fn stop_swapped_generator_units(
+        &self,
+        domain: &DomainName,
+        entity: &NodeRef,
+        revision: &ExecutionRevision,
+        replace_all: bool,
+        local_node_id: Option<&ClusterNodeName>,
+        journal: &mut EntitySwapJournal,
+    ) -> error_stack::Result<(), RuntimeError> {
+        let units =
+            self.processor_units_to_swap(domain, entity, revision, replace_all, local_node_id);
+        for unit in units {
+            nervix_primitives::task::consume_budget().await;
+            let owner = NodeUnitRef::new(entity.clone(), unit);
+            let old_task = {
+                let Some(mut execution) = self.inner.executions.get_mut(domain) else {
+                    return Err(Report::new(ExecutionBuildError::ExecutionUnavailable {
+                        step: ExecutionStep::GeneratorSwap,
+                    })
+                    .change_context(RuntimeError::build_domain_execution(domain)));
+                };
+                execution.generator_tasks.remove(&owner)
+            };
+            let Some(task) = old_task else {
+                continue;
+            };
+            let step = journal.record(GeneratorUnitSwap::new(owner));
+            journal.step(step).record_previous_stopped();
+            task.stop().await;
+            #[cfg(feature = "testing")]
+            self.hold_or_fail_entity_swap(domain, entity, local_node_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Starts the task `revision` plans for each unit of the generator `entity` to swap, where
+    /// the unit runs on this node. The swap stopped each previous task before it held any relay.
     pub(super) async fn swap_generator_entity(
         &self,
         domain: &DomainName,
@@ -607,17 +683,6 @@ impl Runtime {
             nervix_primitives::task::consume_budget().await;
             let owner = NodeUnitRef::new(entity.clone(), unit);
             let step = journal.record(GeneratorUnitSwap::new(owner.clone()));
-            let old_task = {
-                let Some(mut execution) = self.inner.executions.get_mut(domain) else {
-                    return Err(generator_swap_unavailable());
-                };
-                execution.generator_tasks.remove(&owner)
-            };
-            if let Some(task) = old_task {
-                journal.step(step).record_previous_stopped();
-                task.abort();
-                task.join_after_shutdown("generator").await;
-            }
             #[cfg(feature = "testing")]
             self.hold_or_fail_entity_swap(domain, entity, local_node_id)
                 .await?;

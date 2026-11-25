@@ -1150,6 +1150,16 @@ waits for those writes and for the last write of each of its deduplicator, windo
 inferencer branches, which a branch ended at its grace left to its snapshot task, before teardown
 moves to the next domain.
 
+The routes of an ingestor or a reingestor that divide rows into branches have no grace of their
+own. A domain's stop ends an ingestor's routes when it stops the ingestor, before the domain's
+other tasks, and a reingestor's routes once the domain's other tasks have ended. Each route takes
+the input it was handed, waits for every branch's delivery in hand and every one queued behind it,
+writes its final branch snapshot and removes its branches, however long those deliveries wait. A
+delivery that waits on a peer ends at that peer's request deadline, or when failure detection judges
+the peer gone. An enforced stop ends the routes at once instead: the delivery of every branch ends,
+every batch a route still holds is refused with a reason, and the route still writes its final
+branch snapshot and removes its branches.
+
 ### A Domain's Stop
 
 A domain's `STOP` ends the domain's tasks through the same teardown, without stopping the node, and

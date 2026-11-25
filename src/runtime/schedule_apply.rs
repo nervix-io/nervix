@@ -21,11 +21,13 @@
 use error_stack::ResultExt as _;
 
 use super::{
+    entity_gate::EntityGateHold,
     entity_swap::{DeferredSwapWork, EntitySwapContext},
     entity_swap_restore::{EntitySwapJournal, EntitySwapStep, IngestorSwap, ReboundNodeSwap},
     ingestor_start::RetiringIngestorInput,
     partition_claims::UnitPartitionTransition,
     relay_repartition::InstalledRegistrations,
+    swap_stops::{ReingestorStops, UpstreamStops},
     *,
 };
 
@@ -523,11 +525,16 @@ impl Runtime {
             if entity.kind == ModelKind::Ingestor {
                 for unit in previous_local_units.difference(&desired_local_units) {
                     let key = DomainNodeUnitRef::new(entity.in_domain(domain), *unit);
-                    if !ingestor_layout_replaced || self.inner.ingestors.contains_key(&key) {
+                    // A unit whose rows reach a relay the swap holds stopped before the swap held
+                    // any relay, recorded in the journal then.
+                    let stops_here = !journal.stopped_before_holds(&key)
+                        && (!ingestor_layout_replaced || self.inner.ingestors.contains_key(&key));
+                    if stops_here {
                         self.stop_ingestor_unit(
                             domain,
                             &IngestorName::from(&entity.identifier),
                             *unit,
+                            RouteStop::Finish,
                         )
                         .await
                         .change_context_lazy(build)?;
@@ -962,6 +969,7 @@ impl Runtime {
             state_purges,
             gate_relays,
             forced_recovery_relays,
+            stop_order,
         } = change;
         let explicitly_replaced = entities.iter().cloned().collect::<BTreeSet<_>>();
         let reassigned_units = reassignments.clone();
@@ -1029,6 +1037,35 @@ impl Runtime {
         relays.extend(gate_relays.iter().cloned());
         relays.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         relays.dedup();
+
+        let installed = self
+            .inner
+            .executions
+            .get(domain)
+            .map(|execution| execution.revision.clone());
+        let mut journal = EntitySwapJournal::new(installed.clone());
+        // Every part the swap stops delivers what it holds before it ends, so the swap stops them
+        // upstream first: the sources before any hold, then each reingestor once its input relays
+        // are held, so no stopping part delivers into a relay the swap already holds.
+        let upstream = UpstreamStops {
+            entities,
+            explicitly_replaced: &explicitly_replaced,
+            reassignments: &reassignments,
+            stop_order,
+            targets: &targets,
+            local_node_id,
+        };
+        if let Err(error) =
+            Box::pin(self.stop_swap_sources(domain, &revision, upstream, &mut journal)).await
+        {
+            return Err(Box::pin(self.fail_swap(domain, journal, Vec::new(), error)).await);
+        }
+        let ReingestorStops { mut holds, outcome } =
+            Box::pin(self.stop_swapped_reingestors(domain, &revision, upstream, &mut journal))
+                .await;
+        if let Err(error) = outcome {
+            return Err(Box::pin(self.fail_swap(domain, journal, holds, error)).await);
+        }
         // The swap changes the routes an owner's fan-out reads, so it holds that hand-on back too.
         // The fan-out waits for the swap rather than being refused: nothing the swap waits for
         // waits for that fan-out.
@@ -1050,17 +1087,14 @@ impl Runtime {
                 local_node_id,
             );
         }
-        if !local_gate_hold.wait_quiescent().await {
-            return Err(Report::new(ExecutionBuildError::GateFenceTimeout).change_context(build()));
+        let fenced = local_gate_hold.wait_quiescent().await;
+        holds.push(local_gate_hold);
+        if !fenced {
+            let error = Report::new(ExecutionBuildError::GateFenceTimeout).change_context(build());
+            return Err(Box::pin(self.fail_swap(domain, journal, holds, error)).await);
         }
         self.force_flush_domain(domain);
 
-        let installed = self
-            .inner
-            .executions
-            .get(domain)
-            .map(|execution| execution.revision.clone());
-        let mut journal = EntitySwapJournal::new(installed.clone());
         let replaced = Box::pin(self.replace_swapped_entities(
             domain,
             &revision,
@@ -1084,16 +1118,7 @@ impl Runtime {
         } = match replaced {
             Ok(publication) => publication,
             Err(error) => {
-                // The previous execution is back before the gate opens, so nothing reaches an
-                // entity between its replacement and its restore.
-                let restored = Box::pin(self.restore_entity_swap(domain, journal)).await;
-                local_gate_hold.release();
-                if restored {
-                    return Err(error);
-                }
-                return Err(error.change_context(RuntimeError::IncompleteSwapRestore {
-                    domain: domain.clone(),
-                }));
+                return Err(Box::pin(self.fail_swap(domain, journal, holds, error)).await);
             }
         };
         // Nothing of the swap can fail any more, so the inputs it replaced give up what they kept
@@ -1143,8 +1168,32 @@ impl Runtime {
             self.bump_relay_state_epoch(domain);
             self.inner.materialized_state_changed.notify_waiters();
         }
-        local_gate_hold.release();
+        for hold in holds {
+            hold.release();
+        }
         Ok(())
+    }
+
+    /// Puts back what a failed swap changed, from `journal`, and only then opens every hold the
+    /// swap engaged, so nothing reaches a part between its replacement and its restore. Returns
+    /// the swap's failure, marked when the restore could not put everything back.
+    async fn fail_swap(
+        &self,
+        domain: &DomainName,
+        journal: EntitySwapJournal,
+        holds: Vec<EntityGateHold>,
+        error: Report<RuntimeError>,
+    ) -> Report<RuntimeError> {
+        let restored = Box::pin(self.restore_entity_swap(domain, journal)).await;
+        for hold in holds {
+            hold.release();
+        }
+        if restored {
+            return error;
+        }
+        error.change_context(RuntimeError::IncompleteSwapRestore {
+            domain: domain.clone(),
+        })
     }
 
     /// Replaces this node's runtime of everything `targets` swap, recording each step in
@@ -1233,7 +1282,6 @@ impl Runtime {
                         domain,
                         entity,
                         revision,
-                        &registrations,
                         local_node_id,
                         journal,
                     ))
@@ -1337,7 +1385,8 @@ impl Runtime {
             let step = journal.record(IngestorSwap::new(ingestor.clone()));
             for unit in self.running_ingestor_units(domain, ingestor) {
                 nervix_primitives::task::consume_budget().await;
-                self.stop_ingestor_unit(domain, ingestor, unit).await?;
+                self.stop_ingestor_unit(domain, ingestor, unit, RouteStop::Finish)
+                    .await?;
                 journal.step(step).record_stopped(unit);
             }
             self.inner.metrics.remove_ingestor_metrics(

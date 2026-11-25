@@ -29,7 +29,7 @@ use thiserror::Error;
 use super::ActiveGraph;
 use super::{
     DomainActivationPlan, EntrypointPlans, MessageErrorRouteSpecs, ResourceExecutionPlans,
-    ScheduleDelta, entity_pause_relays_for_schedule,
+    ScheduleDelta, SwapStopOrder, entity_pause_relays_for_schedule,
     processor_plan::{BranchedNodeSpecs, branched_node_specs_from_scheduled_nodes},
 };
 use crate::emitter_execution_plan::EmitterExecutionPlans;
@@ -671,6 +671,8 @@ pub(crate) struct EntitySwapExecution {
     pub(crate) gate_relays: Vec<nervix_models::RelayName>,
     /// Input routes whose preceding delivery generation must end before the local swap fence.
     pub(crate) forced_recovery_relays: Vec<nervix_models::RelayName>,
+    /// The order in which the swap stops the parts it replaces, upstream first.
+    pub(crate) stop_order: SwapStopOrder,
 }
 
 pub(crate) enum DynamicExecutionUpdate {
@@ -789,6 +791,18 @@ impl ExecutionDelta {
                 } else {
                     Vec::new()
                 };
+                let stop_order = match existing {
+                    Some(previous) => {
+                        let mut gated = entities.clone();
+                        gated.extend(reassignments.iter().map(|unit| unit.node.clone()));
+                        // The swap holds the input relays every replaced or moved node had and
+                        // the ones it has now, as the runtime engages them.
+                        let mut held = entity_pause_relays_for_schedule(previous, &gated);
+                        held.extend(gate_relays.iter().cloned());
+                        SwapStopOrder::plan(previous, &gated, &held)
+                    }
+                    None => SwapStopOrder::default(),
+                };
                 Self::EntitySwap(EntitySwapExecution {
                     entities,
                     reassignments,
@@ -796,6 +810,7 @@ impl ExecutionDelta {
                     state_purges,
                     gate_relays,
                     forced_recovery_relays,
+                    stop_order,
                 })
             }
             ScheduleDelta::Rebuild => Self::Rebuild,

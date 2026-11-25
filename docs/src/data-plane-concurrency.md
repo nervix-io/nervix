@@ -2142,6 +2142,16 @@ fan-out, so the wait cannot deadlock. The hand-on flag follows the same protocol
 flag: an engagement stores it before its fence reads the dispatch count with a read-modify-write,
 and a hand-on raises the count with a read-modify-write before it reads the flag.
 
+A local schedule swap engages its holds upstream first, because every part it stops delivers what
+it holds before it ends, with no limit of its own. Before any engagement it stops the generator
+units it replaces and the ingestor units whose rows reach a relay it holds. It then engages one hold
+per reingestor it replaces, in the order rows flow, on that reingestor's input relays, and stops the
+reingestor once that hold is fenced. Its main engagement covers every relay it holds. Each
+engagement stays engaged until the swap publishes or puts the previous execution back; two
+engagements of one gate coexist and release on their own. A stopping part therefore delivers only
+into relays no engagement of its own swap holds yet, and since a domain's graph has no loops, no
+stop waits for a hold its own swap engaged ([Execution Plans](./execution-plans.md)).
+
 A fan-out takes the permits of its partition's gate and of the whole relay's gate together and
 holds neither while it waits, so a fence on one gate never waits for a fan-out waiting at the other.
 Two cases still refuse. An owner that is told to stop while a swap holds its batch fails the batch's

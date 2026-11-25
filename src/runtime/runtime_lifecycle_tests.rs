@@ -172,7 +172,7 @@ async fn generators_that_outlast_their_stop_grace_share_one_grace() {
         let generator = named::<GeneratorName>(&format!("produce_{index}"));
         execution.generator_tasks.insert(
             NodeUnitRef::new(NodeRef::new(ModelKind::Generator, &generator), Unit::SINGLE),
-            unresponsive_task(),
+            GeneratorTask::standing_for(unresponsive_task()),
         );
     }
 
@@ -195,7 +195,10 @@ async fn reingestor_tasks_that_outlast_their_stop_grace_share_one_grace() {
         let reingestor = named::<ReingestorName>(&format!("reroute_{index}"));
         execution.reingestor_tasks.insert(
             NodeRef::new(ModelKind::Reingestor, &reingestor),
-            vec![unresponsive_task(), unresponsive_task()],
+            vec![
+                ReingestorTask::standing_for(unresponsive_task()),
+                ReingestorTask::standing_for(unresponsive_task()),
+            ],
         );
     }
 
@@ -216,12 +219,12 @@ async fn task_kinds_stop_in_turn_so_each_kind_keeps_its_own_grace() {
     let generator = named::<GeneratorName>("produce");
     execution.generator_tasks.insert(
         NodeUnitRef::new(NodeRef::new(ModelKind::Generator, &generator), Unit::SINGLE),
-        unresponsive_task(),
+        GeneratorTask::standing_for(unresponsive_task()),
     );
     let reingestor = named::<ReingestorName>("reroute");
     execution.reingestor_tasks.insert(
         NodeRef::new(ModelKind::Reingestor, &reingestor),
-        vec![unresponsive_task()],
+        vec![ReingestorTask::standing_for(unresponsive_task())],
     );
 
     let elapsed = stop_duration(&runtime, &domain, execution).await;
@@ -245,12 +248,12 @@ async fn tasks_that_stop_at_once_cost_no_grace() {
         let mut stopped = stopped.clone();
         execution.generator_tasks.insert(
             NodeUnitRef::new(NodeRef::new(ModelKind::Generator, &generator), Unit::SINGLE),
-            nervix_primitives::task::spawn(async move {
+            GeneratorTask::standing_for(nervix_primitives::task::spawn(async move {
                 stopped
                     .wait_for(|stopped| *stopped)
                     .await
                     .expect("the domain signals its stop before it drops the sender");
-            }),
+            })),
         );
     }
 

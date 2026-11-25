@@ -48,6 +48,7 @@ mod resource_plan;
 mod restore_plan;
 mod schedule_delta;
 mod scheduler;
+mod swap_stop_order;
 #[cfg(test)]
 pub(crate) use scheduler::uniform_records;
 mod unit_placement;
@@ -85,7 +86,7 @@ pub(crate) use error::RegistryError;
 pub(crate) use execution_revision::ExecutionRevisionError;
 pub(crate) use execution_revision::{
     DynamicExecutionUpdate, EntitySwapExecution, ExecutionDelta, ExecutionNode, ExecutionRevision,
-    InstalledSchedule, PlannedClusterRevision, inferencer_model_fingerprint,
+    ExecutionUnit, InstalledSchedule, PlannedClusterRevision, inferencer_model_fingerprint,
 };
 pub(crate) use graph::{ActiveGraph, EdgeKind};
 pub(crate) use ingestor_plan::{
@@ -142,6 +143,7 @@ pub(crate) use schedule_delta::ScheduleDelta;
 #[cfg(feature = "testing")]
 pub use scheduler::SchedulerMode;
 pub(crate) use storage::Registry;
+pub(crate) use swap_stop_order::SwapStopOrder;
 pub(crate) use transaction::{
     PlannedTransaction, PlannedTransactionStep, PlannedTransactionStepKind,
     TransactionPlanningError, TransactionPlanningSnapshot, TransactionScheduleDecision,

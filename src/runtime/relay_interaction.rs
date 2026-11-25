@@ -41,7 +41,7 @@ use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use indexmap::IndexMap;
 use meticulous::OptionExt as _;
 use nervix_models::{RelayName, Unit};
-use nervix_primitives::sync::{Arc, mpsc, watch};
+use nervix_primitives::sync::{Arc, CancellationToken, mpsc, watch};
 use thiserror::Error;
 
 use super::{
@@ -139,6 +139,8 @@ pub(super) enum RelayInteractionStop {
     InputsClosed,
     CommandsClosed,
     ForceFlushClosed,
+    /// The task's own stop was requested, while its domain keeps running.
+    TaskStopped,
 }
 
 #[derive(Debug)]
@@ -657,6 +659,8 @@ pub(super) struct RelayInteraction<C> {
     drain_shutdown_rx: watch::Receiver<bool>,
     force_flush: Option<DomainForceFlushParticipant>,
     commands: Option<mpsc::Receiver<C>>,
+    /// The task's own stop, apart from its domain's shutdown, when the task has one.
+    stop: Option<CancellationToken>,
     quiesce_counters: Option<Arc<NodeQuiesceCounters>>,
     drain: Option<RelayInteractionDrain<C>>,
     suppress_shutdown: bool,
@@ -664,13 +668,43 @@ pub(super) struct RelayInteraction<C> {
 }
 
 impl RelayInteraction<NoRelayInteractionCommand> {
+    /// An interaction that ends only with its domain, which only the tests of the interaction
+    /// itself need: every task the node runs can also be stopped on its own.
+    #[cfg(test)]
     pub(super) fn new(
         inputs: Vec<RelayInteractionInput>,
         shutdown_rx: watch::Receiver<bool>,
         force_flush: Option<DomainForceFlushParticipant>,
         quiesce_counters: Option<Arc<NodeQuiesceCounters>>,
     ) -> error_stack::Result<Self, RelayInteractionError> {
-        Self::build(inputs, shutdown_rx, force_flush, quiesce_counters, None)
+        Self::build(
+            inputs,
+            shutdown_rx,
+            force_flush,
+            quiesce_counters,
+            None,
+            None,
+        )
+    }
+
+    /// An interaction of a task that takes no commands and can be stopped on its own: once `stop`
+    /// is cancelled it drains the input cut it holds, as its domain's shutdown does, and then
+    /// reports the task stopped.
+    pub(super) fn with_stop(
+        inputs: Vec<RelayInteractionInput>,
+        shutdown_rx: watch::Receiver<bool>,
+        force_flush: Option<DomainForceFlushParticipant>,
+        quiesce_counters: Option<Arc<NodeQuiesceCounters>>,
+        stop: CancellationToken,
+    ) -> error_stack::Result<Self, RelayInteractionError> {
+        Self::build(
+            inputs,
+            shutdown_rx,
+            force_flush,
+            quiesce_counters,
+            None,
+            Some(stop),
+        )
     }
 }
 
@@ -688,6 +722,7 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
             force_flush,
             quiesce_counters,
             Some(commands),
+            None,
         )
     }
 
@@ -697,6 +732,7 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
         force_flush: Option<DomainForceFlushParticipant>,
         quiesce_counters: Option<Arc<NodeQuiesceCounters>>,
         commands: Option<mpsc::Receiver<C>>,
+        stop: Option<CancellationToken>,
     ) -> error_stack::Result<Self, RelayInteractionError> {
         let (drain_shutdown_tx, drain_shutdown_rx) = watch::channel(false);
         Ok(Self {
@@ -706,6 +742,7 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
             drain_shutdown_rx,
             force_flush,
             commands,
+            stop,
             quiesce_counters,
             drain: None,
             suppress_shutdown: false,
@@ -781,6 +818,12 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 self.begin_drain(DrainFinish::Stop(RelayInteractionStop::Shutdown), true);
                 continue;
             }
+            if let Some(stop) = &self.stop
+                && stop.is_cancelled()
+            {
+                self.begin_drain(DrainFinish::Stop(RelayInteractionStop::TaskStopped), true);
+                continue;
+            }
 
             if let Some(completion) = self.force_flush_changed() {
                 self.begin_drain(DrainFinish::ForceFlush(completion), receive_input);
@@ -818,6 +861,7 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 changed = self.shutdown_rx.changed() => {
                     Selected::Shutdown(changed.map_err(|_| ()))
                 }
+                () = cancelled_optional_stop(&self.stop) => Selected::TaskStopped,
                 changed = changed_optional_force_flush(&mut self.force_flush) => {
                     Selected::ForceFlush(changed)
                 }
@@ -845,6 +889,9 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                     if changed.is_err() || *self.shutdown_rx.borrow() {
                         self.begin_drain(DrainFinish::Stop(RelayInteractionStop::Shutdown), true);
                     }
+                }
+                Selected::TaskStopped => {
+                    self.begin_drain(DrainFinish::Stop(RelayInteractionStop::TaskStopped), true);
                 }
                 Selected::ForceFlush(Ok(completion)) => {
                     self.begin_drain(DrainFinish::ForceFlush(completion), receive_input);
@@ -997,6 +1044,7 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
 enum Selected<C> {
     Command(Option<C>),
     Shutdown(Result<(), ()>),
+    TaskStopped,
     ForceFlush(Result<DomainForceFlushCompletion, ()>),
     Wake(BranchBufferTimingResult<()>),
     CollectionDue(BranchBufferTimingResult<()>),
@@ -1014,6 +1062,13 @@ struct ReceivedBatch {
 async fn recv_optional_command<C>(commands: &mut Option<mpsc::Receiver<C>>) -> Option<C> {
     match commands {
         Some(commands) => commands.recv().await,
+        None => pending().await,
+    }
+}
+
+async fn cancelled_optional_stop(stop: &Option<CancellationToken>) {
+    match stop {
+        Some(stop) => stop.cancelled().await,
         None => pending().await,
     }
 }

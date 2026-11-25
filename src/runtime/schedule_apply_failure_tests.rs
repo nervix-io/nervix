@@ -96,6 +96,7 @@ fn swap_of(entity: NodeRef) -> EntitySwapExecution {
         state_purges: BTreeMap::new(),
         gate_relays: Vec::new(),
         forced_recovery_relays: Vec::new(),
+        stop_order: crate::registry::SwapStopOrder::default(),
     }
 }
 
