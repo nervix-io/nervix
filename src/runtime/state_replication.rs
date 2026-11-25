@@ -2651,8 +2651,12 @@ impl Runtime {
                 SealedSource::stored(self.inner.executor.clone(), reader)
             }
         };
-        let opened =
-            RestoredMaterializedSnapshot::open_relay(&self.inner.executor, schema, source).await;
+        let opened = RestoredMaterializedSnapshot::open_relay(
+            &self.inner.executor,
+            schema,
+            RelayContainerSource::Sealed(source),
+        )
+        .await;
         let restored = match opened {
             Ok(restored) => restored,
             Err(error) => {

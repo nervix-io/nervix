@@ -146,7 +146,7 @@ impl RelayOpening {
 impl SealedContainerLayout {
     /// What opening a relay container of this layout and of `length` bytes takes on `executor`:
     /// the bound on one section's decoding scratch, and the share the opened rows keep, which
-    /// [`RestoredMaterializedSnapshot::open_relay_within`] draws every step of the opening from. A
+    /// [`RestoredMaterializedSnapshot::open_relay`] draws every step of the opening from. A
     /// layout whose sections pass their bounds, or whose row views pass the relay's budget, is
     /// refused as opening the container would refuse it.
     pub(in crate::runtime) fn relay_opening(

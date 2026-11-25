@@ -579,7 +579,7 @@ impl Runtime {
         RestoredMaterializedSnapshot::open_relay(
             executor,
             &schema,
-            SealedSource::stored(executor.clone(), reader),
+            RelayContainerSource::Sealed(SealedSource::stored(executor.clone(), reader)),
         )
         .await
         .map(Some)

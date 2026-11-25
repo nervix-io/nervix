@@ -42,7 +42,8 @@ use nervix_models::DomainNodeRef;
 use thiserror::Error;
 
 use super::{
-    RestoredMaterializedSnapshot, Runtime, RuntimeStatePlacement, SealedSource,
+    RelayContainerSource, RestoredMaterializedSnapshot, Runtime, RuntimeStatePlacement,
+    SealedSource,
     materialized_state::MaterializedRelayStateRead,
     state_snapshot_transfer::{
         DescribeStateSnapshot, DescribedStateSnapshot, FetchStateSnapshot, SealedSnapshotEnvelope,
@@ -533,7 +534,7 @@ impl Runtime {
         let restored = RestoredMaterializedSnapshot::open_relay(
             &self.inner.executor,
             schema,
-            SealedSource::staged(staged),
+            RelayContainerSource::Sealed(SealedSource::staged(staged)),
         )
         .await
         .change_context(MaterializedSnapshotExchangeError::OpenSnapshot {

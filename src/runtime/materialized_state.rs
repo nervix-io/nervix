@@ -947,7 +947,10 @@ mod tests {
     use nervix_models::{DomainName, ModelKind, ModelName, RelayName};
 
     use super::{
-        super::{Runtime, materialized_snapshot::SealedSource},
+        super::{
+            Runtime,
+            materialized_snapshot::{RelayContainerSource, SealedSource},
+        },
         *,
     };
     use crate::runtime_schema::{RuntimeValue, test_runtime_row};
@@ -1246,9 +1249,11 @@ mod tests {
         let restored = RestoredMaterializedSnapshot::open_relay(
             &executor,
             &schema,
-            SealedSource::artifact(sealed.artifact)
-                .await
-                .assured("the artifact opens"),
+            RelayContainerSource::Sealed(
+                SealedSource::artifact(sealed.artifact)
+                    .await
+                    .assured("the artifact opens"),
+            ),
         )
         .await
         .assured("the sealed generation should open");
@@ -1488,9 +1493,11 @@ mod tests {
         let restored = RestoredMaterializedSnapshot::open_relay(
             &executor,
             &schema,
-            SealedSource::artifact(earlier.artifact)
-                .await
-                .assured("the artifact opens"),
+            RelayContainerSource::Sealed(
+                SealedSource::artifact(earlier.artifact)
+                    .await
+                    .assured("the artifact opens"),
+            ),
         )
         .await
         .assured("the sealed generation should open");

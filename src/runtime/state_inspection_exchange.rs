@@ -28,8 +28,8 @@ use nervix_models::{ProcessorStateSection, SchemaField, StateInspectionRejection
 use nervix_primitives::{sync::StdArc, time::Instant};
 
 use super::{
-    MaterializedGenerationRecord, PageReply, ProcessorStatePageMemory, ReplyMemory,
-    RestoredMaterializedSnapshot, SealedContainerLayout, SealedGroupLayout,
+    MaterializedGenerationRecord, PageReply, ProcessorStatePageMemory, RelayContainerSource,
+    ReplyMemory, RestoredMaterializedSnapshot, SealedContainerLayout, SealedGroupLayout,
     materialized_snapshot::MaterializedSnapshotError,
     state_inspection_read::{MaterializedInspectionPage, MaterializedReplyMemory},
 };
@@ -972,12 +972,14 @@ pub(crate) async fn receive_materialized_page(
     read_to_end(&mut stream).await?;
     let (received, opening_charge) =
         verified_body_within(executor, received, body.identity, opening_charge).await?;
-    let snapshot = RestoredMaterializedSnapshot::open_relay_within(
+    let snapshot = RestoredMaterializedSnapshot::open_relay(
         executor,
         schema,
-        received,
-        &layout,
-        opening_charge,
+        RelayContainerSource::Received {
+            sealed: received,
+            layout: &layout,
+            memory: opening_charge,
+        },
     )
     .await
     .change_context(StatePageExchangeError::Columns)?;

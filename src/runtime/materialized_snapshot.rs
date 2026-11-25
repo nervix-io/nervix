@@ -1161,22 +1161,58 @@ impl RestoredMaterializedSnapshot {
     pub(in crate::runtime) async fn open_relay(
         executor: &Executor,
         schema: &StdArc<ArrowSchema>,
-        source: SealedSource<'_>,
+        source: RelayContainerSource<'_>,
     ) -> Result<Self, Report<MaterializedSnapshotError>> {
-        // A relay's sealed state is opened for a transfer, a replication stream or a stored read,
-        // none of which answers a caller that waits on it, so a full bulk queue holds it back.
-        let snapshot = Self::open(executor, schema, source, RestoredRows::Relay).await?;
-        Self::check_relay_branches(executor, snapshot).await
+        let snapshot = match source {
+            // A relay's sealed state is opened for a transfer, a replication stream or a stored
+            // read, none of which answers a caller that waits on it, so a full bulk queue holds
+            // it back.
+            RelayContainerSource::Sealed(source) => {
+                Self::open(executor, schema, source, RestoredRows::Relay).await?
+            }
+            RelayContainerSource::Received {
+                sealed,
+                layout,
+                memory,
+            } => Self::open_received_relay(executor, schema, sealed, layout, memory).await?,
+        };
+        let charge = executor.charge_nothing(MemoryClass::Bulk);
+        executor
+            .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
+                #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"))]
+                let mut branches = ahash::HashSet::with_capacity_and_hasher(
+                    snapshot.records.len(),
+                    ahash::RandomState::default(),
+                );
+                for record in &snapshot.records {
+                    cancellation
+                        .check()
+                        .change_context(MaterializedSnapshotError::Execution)?;
+                    if record.branch.is_none() && snapshot.records.len() != 1 {
+                        return Err(MaterializedSnapshotError::decoding(
+                            "an unbranched materialized relay contains one record",
+                        ));
+                    }
+                    if !branches.insert(record.branch.clone()) {
+                        return Err(MaterializedSnapshotError::decoding(
+                            "duplicate materialized branch identity",
+                        ));
+                    }
+                }
+                Ok(snapshot)
+            })
+            .await
+            .change_context(MaterializedSnapshotError::Execution)?
     }
 
-    /// Opens a relay container a reader received into memory it admitted before receiving it, as
-    /// [`Self::open_relay`] opens one. `memory` holds what [`SealedContainerLayout::relay_opening`]
-    /// names for `layout` and the container's length: its decoders' scratch and the share the
-    /// opened rows keep. Every step draws on it, so none of them waits for memory. A container
-    /// whose sections differ from the declared layout is refused before any of it is decoded, and
-    /// an opening that needs more than `memory` holds is refused as an admission failure rather
-    /// than opened again. What the opened rows do not keep goes back once the container is open.
-    pub(in crate::runtime) async fn open_relay_within(
+    /// Opens a relay container a reader received into memory it admitted before receiving it.
+    /// `memory` holds what [`SealedContainerLayout::relay_opening`] names for `layout` and the
+    /// container's length: its decoders' scratch and the share the opened rows keep. Every step
+    /// draws on it, so none of them waits for memory. A container whose sections differ from the
+    /// declared layout is refused before any of it is decoded, and an opening that needs more than
+    /// `memory` holds is refused as an admission failure rather than opened again. What the opened
+    /// rows do not keep goes back once the container is open.
+    async fn open_received_relay(
         executor: &Executor,
         schema: &StdArc<ArrowSchema>,
         sealed: ChargedBytes,
@@ -1205,42 +1241,7 @@ impl RestoredMaterializedSnapshot {
             // names, or a header that declares more records than the layout does.
             return Err(Report::new(MaterializedSnapshotError::Admission));
         };
-        Self::check_relay_branches(executor, snapshot).await
-    }
-
-    /// Applies the relay's contract of one record per concrete branch, and of one record only when
-    /// the relay is unbranched, to `snapshot`.
-    async fn check_relay_branches(
-        executor: &Executor,
-        snapshot: Self,
-    ) -> Result<Self, Report<MaterializedSnapshotError>> {
-        let charge = executor.charge_nothing(MemoryClass::Bulk);
-        executor
-            .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
-                #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"))]
-                let mut branches = ahash::HashSet::with_capacity_and_hasher(
-                    snapshot.records.len(),
-                    ahash::RandomState::default(),
-                );
-                for record in &snapshot.records {
-                    cancellation
-                        .check()
-                        .change_context(MaterializedSnapshotError::Execution)?;
-                    if record.branch.is_none() && snapshot.records.len() != 1 {
-                        return Err(MaterializedSnapshotError::decoding(
-                            "an unbranched materialized relay contains one record",
-                        ));
-                    }
-                    if !branches.insert(record.branch.clone()) {
-                        return Err(MaterializedSnapshotError::decoding(
-                            "duplicate materialized branch identity",
-                        ));
-                    }
-                }
-                Ok(snapshot)
-            })
-            .await
-            .change_context(MaterializedSnapshotError::Execution)?
+        Ok(snapshot)
     }
 
     /// Open a sealed snapshot against the schema installed here.
@@ -1638,6 +1639,19 @@ impl RetainedShare {
             .checked_add(missed)?
             .checked_add(u64::from(groups))
     }
+}
+
+/// Where a relay container [`RestoredMaterializedSnapshot::open_relay`] opens comes from.
+pub(in crate::runtime) enum RelayContainerSource<'a> {
+    /// A sealed container this node holds, opened under a state-read share the opening waits for.
+    Sealed(SealedSource<'a>),
+    /// A container another node sent, opened within `memory`, which its reader admitted by the
+    /// container's declared `layout` before receiving it.
+    Received {
+        sealed: ChargedBytes,
+        layout: &'a SealedContainerLayout,
+        memory: Reservation,
+    },
 }
 
 /// Where a sealed container's bytes come from while it is opened.

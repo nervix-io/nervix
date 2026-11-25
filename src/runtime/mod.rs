@@ -570,8 +570,8 @@ pub(crate) use materialized_snapshot::{
     materialized_container_header, materialized_identity_section,
 };
 use materialized_snapshot::{
-    RestoredMaterializedSnapshot, SealedContainerLayout, SealedGroupLayout, SealedSource,
-    empty_sealed_container, inspect_sealed_container,
+    RelayContainerSource, RestoredMaterializedSnapshot, SealedContainerLayout, SealedGroupLayout,
+    SealedSource, empty_sealed_container, inspect_sealed_container,
 };
 use materialized_state::{
     MaterializedRelaySnapshotInstaller, MaterializedRelayStateAssignment,
