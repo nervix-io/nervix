@@ -676,6 +676,16 @@ impl Drop for WaitingCancellation {
 /// A carrying job's entry among those waiting, removed when its caller stops waiting before a
 /// worker takes it; the state the job carried then goes back to the caller's `home`. Once a worker
 /// has the job, the state travels with it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        reason = "a caller removes only its exact waiting carrying job when it withdraws, and \
+                  takes back the state that job carried",
+        key = "one admitted executor job",
+        bound = "one keyed removal; destruction and the state's return happen after the fence"
+    )
+)]
 struct CarriedWithdrawal<'a, S: 'static> {
     pool: &'a Arc<PoolShared>,
     id: u64,
