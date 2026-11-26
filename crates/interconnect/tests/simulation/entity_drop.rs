@@ -273,7 +273,7 @@ fn drop_with_a_partitioned_node(run: ScenarioRun) -> Result<(), SimulationError>
                     );
                     trace.record(COORDINATOR, "every node's report is collected after repair");
                     done.send_replace(true);
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -300,7 +300,7 @@ fn drop_with_a_partitioned_node(run: ScenarioRun) -> Result<(), SimulationError>
                     ready.send_replace(true);
                     wait_for(&mut coordinator_ready).await;
                     wait_until(&mut done, true).await;
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -341,7 +341,7 @@ fn drop_with_a_partitioned_node(run: ScenarioRun) -> Result<(), SimulationError>
                     applied.send_replace(true);
                     trace.record(LATE, "drop applied");
                     wait_until(&mut done, true).await;
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
