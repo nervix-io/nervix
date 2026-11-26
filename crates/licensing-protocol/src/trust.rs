@@ -58,6 +58,8 @@ pub enum TrustError {
     Document,
     #[error("the decision has an invalid signature profile or payload")]
     Decision,
+    #[error("the proof of life has an invalid signature profile or payload")]
+    ProofOfLife,
     #[error("the signature set has {verified} verified roots, below its threshold of {required}")]
     Threshold { verified: usize, required: usize },
     #[error("the document names a different root epoch from its verified signers")]
@@ -614,7 +616,7 @@ impl TrustState {
         limits: DocumentLimits,
     ) -> Result<ProofOfLife, Report<TrustError>> {
         let parsed = UnverifiedDocument::parse(compact, DocumentType::ProofOfLife, limits)
-            .change_context(TrustError::Document)?;
+            .change_context(TrustError::ProofOfLife)?;
         // A key identity is its key's own thumbprint, so every epoch holding it holds the same
         // public key; the first one found verifies the signature.
         let mut signing_root = None;
@@ -629,7 +631,7 @@ impl TrustState {
         };
         let proof: ProofOfLife = parsed
             .verify(signing_root)
-            .change_context(TrustError::Document)?;
+            .change_context(TrustError::ProofOfLife)?;
         if proof.protocol != 1 {
             return Err(Report::new(TrustError::Protocol));
         }

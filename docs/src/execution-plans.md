@@ -428,7 +428,10 @@ entities stay gated:
   emitter's held records, as it always has;
 - an ingestor starts again the units the swap stopped. The swap itself starts no ingestor unit: an
   ingestor is a source, so the units the desired revision places on a node start when the revision
-  activates, once every node has prepared it, as after a rebuild;
+  activates, once every node has prepared it, as after a rebuild. Stopping an ingestor's units
+  never fails the swap: an ingestor's own step fails a committed change only while an MQTT
+  replacement prepares or retires a broker session, as described below, so its units start again
+  when another part of the change fails;
 - a relay gets back its previous partition count's services and owner tasks, and a rebound or
   materialized node its previous placement and state tasks;
 - every consumer registration a previous task had is restored, and the routing, state identities
