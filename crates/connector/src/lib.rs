@@ -57,6 +57,7 @@ mod ingest_metadata;
 mod emitter;
 mod emitter_observation;
 mod ingestor;
+mod partition_inspector;
 pub mod physical_time;
 mod pooled_client;
 mod row_requests;
@@ -116,6 +117,7 @@ pub use ingestor::{
     PacedIngestorConnector,
 };
 pub use nervix_tls::OutwardTlsPolicy;
+pub use partition_inspector::PartitionInspectorHost;
 pub use pooled_client::{
     PooledClient, PooledClientHost, PooledClientLease, PooledClientWait, PooledClientWaits,
 };
