@@ -118,8 +118,26 @@ impl UnfoldingDomain {
         shutdown: watch::Receiver<bool>,
         intake: HostIntake,
     ) -> RuntimeIngestorHost {
-        let plan = self
-            .runtime
+        let connector_host = self.connector_host(
+            crate::runtime::ingestors::connector_host::IngestorEntityServices::default(),
+        );
+        self.host_driving(quiesce, shutdown, intake, connector_host)
+            .await
+    }
+
+    /// The handle the fixture's ingestor unit hands its connector, with what `entity` prepared
+    /// for it, as its composer builds it before the connector opens.
+    pub(super) fn connector_host(
+        &self,
+        entity: crate::runtime::ingestors::connector_host::IngestorEntityServices,
+    ) -> IngestorConnectorHost {
+        self.runtime
+            .ingestor_connector_host(&self.planned_ingestor().ingestor, entity)
+    }
+
+    /// The start plan the fixture's execution holds for its one ingestor.
+    fn planned_ingestor(&self) -> Arc<IngestorStartPlan> {
+        self.runtime
             .inner
             .executions
             .get(&self.domain)
@@ -129,7 +147,18 @@ impl UnfoldingDomain {
             .ingestors()
             .find(|plan| plan.ingestor.name == self.ingestor)
             .cloned()
-            .assured("the fixture's execution plans its one ingestor");
+            .assured("the fixture's execution plans its one ingestor")
+    }
+
+    /// A second host for the fixture's ingestor that drives its connector with `connector_host`.
+    pub(super) async fn host_driving(
+        &mut self,
+        quiesce: Arc<IngestorQuiesceControl>,
+        shutdown: watch::Receiver<bool>,
+        intake: HostIntake,
+        connector_host: IngestorConnectorHost,
+    ) -> RuntimeIngestorHost {
+        let plan = self.planned_ingestor();
         let BoundIngestor {
             input,
             dependencies,
@@ -179,6 +208,7 @@ impl UnfoldingDomain {
             flush_each_intake: intake.flush_each_intake,
             general_error_policy: plan.ingestor.general_error_policy.clone(),
             rate_limit,
+            connector_host,
         })
     }
 

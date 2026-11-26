@@ -35,10 +35,9 @@ impl EmitterConnectorStarter {
                 input_schema: input_schema.arrow_schema(),
                 udfs: context.udfs.as_ref(),
             })?;
-            let connections =
-                PooledEmitterClient::lease(context, &connector.client, connector.pooled_client())
-                    .await
-                    .change_context(EmitterRuntimeError::InitializeConnector)?;
+            let lease = context
+                .lease_pooled_client::<MySqlPool>(&connector.client, connector.pool)
+                .await?;
             Self::row(
                 projection,
                 MySqlTableEmitter::open(
@@ -46,10 +45,8 @@ impl EmitterConnectorStarter {
                         table: connector.table.clone(),
                         conflict_action: connector.conflict_action,
                         batch: connector.batch,
-
-                        connections: Box::new(connections),
                     },
-                    context.emitter_host(),
+                    context.emitter_host_leasing(lease),
                 )
                 .await,
             )?

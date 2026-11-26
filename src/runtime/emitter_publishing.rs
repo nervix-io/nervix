@@ -516,19 +516,27 @@ impl EmitterConnectorState {
             Err(error) => {
                 let reason = emitter_error_message(&error);
                 context.report_init_error(&plan.label, &reason);
-                let configuration = error.frames().any(|frame| {
-                    matches!(
-                        frame.downcast_ref::<nervix_connector::EmitterOpenError>(),
-                        Some(nervix_connector::EmitterOpenError::InvalidConfiguration { .. })
-                    )
-                }) || error.current_context()
-                    == &EmitterRuntimeError::InvalidConnectorConfig;
                 Self::Unavailable {
                     reason,
-                    retry_open: !configuration,
+                    retry_open: !Self::refuses_configuration(&error),
                 }
             }
         }
+    }
+
+    /// Whether `error` judged the emitter's configuration, which no later attempt can change, so
+    /// the host does not open the emitter again: the connector or the pooled client its host
+    /// leased for it refused the configuration, wherever in the typed chain it said so, or the
+    /// host refused the connector's configuration itself.
+    pub(super) fn refuses_configuration(error: &Report<EmitterRuntimeError>) -> bool {
+        let refused_by_connector = error.frames().any(|frame| {
+            matches!(
+                frame.downcast_ref::<nervix_connector::EmitterOpenError>(),
+                Some(nervix_connector::EmitterOpenError::InvalidConfiguration { .. })
+            )
+        });
+        refused_by_connector
+            || error.current_context() == &EmitterRuntimeError::InvalidConnectorConfig
     }
 
     /// The wake that releases this emitter's buffered work on its own flush cadence and its

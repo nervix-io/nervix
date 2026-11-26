@@ -38,7 +38,7 @@ use rdkafka::{
     topic_partition_list::TopicPartitionList,
 };
 
-use super::{KAFKA, KafkaTopicIngestor, KafkaTopicIngestorError, KafkaTopicIngestorOffsetMode};
+use super::{InstanceOffsetMode, KAFKA, KafkaTopicIngestor, KafkaTopicIngestorError};
 
 /// A normal stream read can end up to half a native poll interval after the last driver poll.
 /// Service starts a quarter interval after that read ends, leaving the last quarter for
@@ -261,7 +261,7 @@ impl KafkaTopicIngestor {
             .as_ref()
             .verified("the caller found a possible native pause");
         let topology = match &self.offset_mode {
-            KafkaTopicIngestorOffsetMode::ConsumerGroup {
+            InstanceOffsetMode::ConsumerGroup {
                 committed_partitions: Some(read),
                 ..
             } => read.paused_for_topology.as_ref(),

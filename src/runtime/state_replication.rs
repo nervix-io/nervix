@@ -2381,7 +2381,7 @@ impl Runtime {
     pub(in crate::runtime) async fn commit_domain_kafka_offset(
         &self,
         state: &KafkaOffsetStateOriginator,
-        position: KafkaOffsetPosition,
+        position: DomainOffsetPosition,
     ) -> error_stack::Result<(), StateReplicationError> {
         let publication = self.backup_publication(&state.placement().domain);
         let lsm = state
@@ -2413,7 +2413,7 @@ impl Runtime {
         &self,
         state: &KafkaOffsetStateOriginator,
         generation: u64,
-        offsets: Vec<KafkaOffsetPosition>,
+        offsets: Vec<DomainOffsetPosition>,
         application: super::kafka_offset_state::KafkaStartApplication,
     ) -> error_stack::Result<(), StateReplicationError> {
         let _publication = self.backup_publication(&state.placement().domain);

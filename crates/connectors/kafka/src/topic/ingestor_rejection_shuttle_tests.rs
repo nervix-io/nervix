@@ -16,6 +16,7 @@
 )]
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_connector::DomainOffsetPosition;
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_primitives::sync::mpsc;
 use rdkafka::{
@@ -23,7 +24,7 @@ use rdkafka::{
     topic_partition_list::{Offset, TopicPartitionList},
 };
 
-use super::{super::KafkaOffsetPosition, KafkaConsumerContext};
+use super::KafkaConsumerContext;
 
 const CHECK_TASK_JOINS: &str =
     "a check task that panics fails the execution before its join returns";
@@ -37,8 +38,8 @@ const REJECTED: i64 = 5;
 /// group committed nothing for.
 const END: i64 = 9;
 
-fn position(offset: i64) -> KafkaOffsetPosition {
-    KafkaOffsetPosition {
+fn position(offset: i64) -> DomainOffsetPosition {
+    DomainOffsetPosition {
         topic: TOPIC.to_string(),
         partition: 0,
         offset,

@@ -2521,9 +2521,9 @@ An unrelated trait module default cannot replace an implementation body's lexica
 An engine that receives validated plans also declares `nervix::input(plans, ...)`; general
 infrastructure is not presumed to execute graph plans.
 
-`nervix::value(model|name|cluster_access, ...)` classifies exact semantic ADTs or traits. The current
-configuration Model union, shared name vocabulary and cluster observation capability carry those
-roles. `nervix::model_in_data_plane` rejects the configuration union in data-plane and plan-consuming
+`nervix::value(model|name|cluster_access|host_handle, ...)` classifies exact semantic ADTs or traits.
+The current configuration Model union, shared name vocabulary, cluster observation capability and
+the two connector host handles carry those roles. `nervix::model_in_data_plane` rejects the configuration union in data-plane and plan-consuming
 interfaces or bodies, including normalized generic containers, aliases, constructors and patterns.
 An ordinary user type called Model has its own meaning. These checks do not treat every vocabulary
 field or schema descriptor as a configuration Model.
@@ -2552,9 +2552,24 @@ contract; opaque external future implementations, arbitrary stored-future relati
 whole-program effects are not inferred. Execution graphs and recurring reachability are conservative
 within the declared local graph; annotations are reviewed architectural assertions.
 
+`nervix::undeclared_host_service` diagnoses a call, a qualified call or a function reference that
+resolves to a method carrying `nervix::host_service(<service>, ...)` when the narrowest
+`nervix::host_services(...)` contract of the calling owner does not list that service, or when no
+such contract covers the owner. The narrowest contracted function, impl, type, module or crate
+decides, and a narrower contract replaces a wider one instead of extending it. An owner whose
+nearest `nervix::layer` contract is `harness` is outside the rule and declares nothing. A method of an
+unrelated type with the same name carries no contract and reaches no host service. A public method
+with a receiver on a type marked `nervix::value(host_handle, ...)` must name its service, which
+`nervix::invalid_contract` enforces at the method. The rule follows resolved definitions through
+aliases, re-exports and crate metadata; it does not follow a service value after its accessor
+returned it, so a connector that passes the resolver it took to a helper has already declared the
+reach where it took it. [Host handles and declared
+services](./connector-contract.md#host-handles-and-declared-services) owns the handles, their
+services and where a connector declares them.
+
 `nervix::node_identity`, `nervix::installed_state` and `nervix::state_contract` implement the exact
 identity and representation contracts in [Typed States](./typed-states.md#source-owned-identity-and-installation-contracts).
-All six architecture diagnostics use the same normal lint levels, exact-operation expectations and
+All seven architecture diagnostics use the same normal lint levels, exact-operation expectations and
 complete current configuration evidence as synchronization and failure rules. No count, product
 owner catalog or source-review hash grants permission.
 

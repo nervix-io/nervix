@@ -1,7 +1,8 @@
 //! Scripted broker and paced ingestor fixtures and contract-level observations.
 //!
 //! Layer: test harness.
-//! - **Owns.** Queued and channel input, typed metadata, lifecycle scripts and transport observations.
+//! - **Owns.** Queued and channel input, typed metadata, lifecycle scripts, the scripted use of the
+//!   host handle an instance is opened, resumed and read with, and transport observations.
 //! - **Depends on.** The connector contract, vocabulary and selected execution primitives.
 //! - **Must not know.** Runtime intake adapters, graph planning, real drivers or ACK trees.
 
@@ -191,6 +192,12 @@ pub struct FakeIngestor {
     /// Replays each resume leaves pending, as a quiesce released during it would.
     pub replays_pending_after_resume: usize,
     pub resume_gate: Option<Arc<Notify>>,
+    /// When set, the instance publishes its failed resumes and reads as its transient status
+    /// through its host handle, announcing this retry, and withdraws the status once a resume
+    /// succeeds, as a connector that reports its own connection does.
+    pub status_retry: Option<std::time::Duration>,
+    /// The handle the instance was opened with, which it keeps for as long as it lives.
+    host: Option<IngestorHost>,
     pub observations: Arc<Mutex<IngestorObservations>>,
 }
 
@@ -201,11 +208,18 @@ impl IngestorConnector for FakeIngestor {
 
     type Plan = FakeIngestorPlan;
 
-    async fn open(plan: &Self::Plan, instance_index: u64) -> IngestorResult<Self> {
-        match plan.instances.lock().remove(&instance_index) {
+    async fn open(
+        plan: &Self::Plan,
+        host: &IngestorHost,
+        instance_index: u64,
+    ) -> IngestorResult<Self> {
+        let opened = match plan.instances.lock().remove(&instance_index) {
             Some(result) => result,
             None => Err(Report::new(IngestorError::Open { connector: "fake" })),
-        }
+        };
+        let mut instance = opened?;
+        instance.host = Some(host.clone());
+        Ok(instance)
     }
 
     fn needs_resume(&mut self) -> bool {
@@ -222,7 +236,7 @@ impl IngestorConnector for FakeIngestor {
             bound = "one synchronous resume observation; guards end before any await"
         )
     )]
-    async fn resume(&mut self) -> IngestorResult<IngestorResume> {
+    async fn resume(&mut self, host: &IngestorHost) -> IngestorResult<IngestorResume> {
         {
             let mut observations = self.observations.lock();
             observations.resumes += 1;
@@ -242,6 +256,16 @@ impl IngestorConnector for FakeIngestor {
         };
         if let Ok(IngestorResume::Ready) = resumed {
             self.transport_lost = false;
+        }
+        if let Some(retry) = self.status_retry {
+            match &resumed {
+                Ok(IngestorResume::Ready) => host.clear_transient_error(),
+                Ok(IngestorResume::Waiting { retry_after }) => host.record_transient_error(
+                    "the scripted transport is waiting".to_string(),
+                    *retry_after,
+                ),
+                Err(error) => host.record_transient_error(format!("{error:#}"), retry),
+            }
         }
         resumed
     }
@@ -298,6 +322,7 @@ impl BrokerIngestorConnector for FakeIngestor {
     )]
     async fn next_batch(
         &mut self,
+        host: &IngestorHost,
         request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {
@@ -311,7 +336,11 @@ impl BrokerIngestorConnector for FakeIngestor {
             if self.failure_loses_transport {
                 self.transport_lost = true;
             }
-            return Err(Report::new(IngestorError::Read { connector: "fake" }));
+            let failure = Report::new(IngestorError::Read { connector: "fake" });
+            if let Some(retry) = self.status_retry {
+                host.record_transient_error(format!("{failure:#}"), retry);
+            }
+            return Err(failure);
         }
         if self.resume_required {
             self.resume_required = false;
@@ -444,8 +473,17 @@ impl FakeIngestor {
             replay_rejected: false,
             replays_pending_after_resume: 0,
             resume_gate: None,
+            status_retry: None,
+            host: None,
             observations,
         }
+    }
+
+    /// The handle this instance was opened with.
+    pub fn host(&self) -> &IngestorHost {
+        self.host
+            .as_ref()
+            .assured("an instance keeps the handle its host opened it with")
     }
 
     pub fn new(messages: mpsc::Receiver<FakeMessage>) -> Self {
@@ -464,13 +502,22 @@ impl FakeIngestor {
 
 #[async_trait]
 impl PacedIngestorConnector for FakeIngestor {
-    async fn poll(&mut self, scheduled_at: Timestamp) -> IngestorResult<IngestorPoll> {
+    async fn poll(
+        &mut self,
+        host: &IngestorHost,
+        scheduled_at: Timestamp,
+    ) -> IngestorResult<IngestorPoll> {
         if let Some(shutdown) = &self.stop_after_poll {
             shutdown.send_replace(true);
         }
         if let Some(poll) = self.polls.pop_front() {
             if poll.is_err() && self.failure_loses_transport {
                 self.transport_lost = true;
+            }
+            if let Some(retry) = self.status_retry
+                && let Err(error) = &poll
+            {
+                host.record_transient_error(format!("{error:#}"), retry);
             }
             return poll;
         }

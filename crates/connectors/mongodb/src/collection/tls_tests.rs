@@ -12,6 +12,7 @@ use std::fs;
 
 use meticulous::ResultExt as _;
 use mongodb::options::{ClientOptions, Tls, TlsOptions};
+use nervix_connector::{PooledClient, PooledClientHost};
 use nervix_execution::{ExecutionConfig, Executor};
 use nervix_models::{ClientConfigEntry, ClientPoolBounds};
 
@@ -243,5 +244,34 @@ async fn native_tls_file_refusal_retains_its_driver_cause_after_worker_admission
         executor.snapshot().filesystem_storage.admitted,
         1,
         "CA-only native construction also runs on the filesystem executor"
+    );
+}
+
+#[nervix_primitives::test]
+async fn the_client_a_host_opens_runs_its_construction_on_the_executor_the_host_hands_over() {
+    let executor = executor();
+    let directory = tempfile::tempdir().assured("test directory is available");
+    let missing = directory.path().join("missing-ca.pem");
+    let config = [
+        entry("addr", "mongodb://unresolvable.invalid/events?tls=true"),
+        entry("tls_ca_file", missing.to_string_lossy()),
+    ];
+    let bounds = ClientPoolBounds::new(0, std::num::NonZeroU32::MIN)
+        .assured("the minimum does not exceed the maximum");
+    let host = PooledClientHost::new(None, executor.clone());
+    let result = <MongoDbClient as PooledClient>::open(&config, bounds, &host).await;
+    let report = match result {
+        Ok(_) => panic!("a missing CA cannot initialize native TLS"),
+        Err(report) => report,
+    };
+    assert!(report.downcast_ref::<mongodb::error::Error>().is_some());
+    assert!(matches!(
+        report.current_context(),
+        nervix_connector::EmitterOpenError::InvalidConfiguration { .. }
+    ));
+    assert_eq!(
+        executor.snapshot().filesystem_storage.admitted,
+        1,
+        "the pooled client takes the node's bounded executor from the handle it is opened with"
     );
 }

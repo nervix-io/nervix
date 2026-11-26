@@ -13,9 +13,11 @@
 //!   the host rejected, retirement of obsolete broker sessions, the retirement an instance owes a
 //!   session its preceding input left with another subscription before it first connects, and
 //!   ownership of pending SUBACK across cancellation of the host's wait.
-//! - **Depends on.** The connector contract, the crate's connection options and its broker
-//!   connection through the node DNS resolver, the driver task that keeps each connection's event
-//!   loop polled, the vocabulary's typed client configuration, `error-stack`, Tokio and `rumqttc`.
+//! - **Depends on.** The connector contract and the host handle through which an instance takes
+//!   the node DNS resolver and its unit's read-ahead overflow report, the crate's connection
+//!   options and its broker connection through that resolver, the driver task that keeps each
+//!   connection's event loop polled, the vocabulary's typed client configuration, `error-stack`,
+//!   Tokio and `rumqttc`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
 #![cfg_attr(
@@ -27,6 +29,15 @@
     nervix::layer(
         engine,
         reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        metrics,
+        reason = "the MQTT topic ingestor dials its broker through its node's resolver and \
+                  records the publishes its read-ahead has no room for"
     )
 )]
 
@@ -49,9 +60,9 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestRowHeaders,
-    IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
-    IngestorReadAheadOverflow, IngestorReadCancellation, IngestorResult, IngestorResume,
-    optional_client_config_value,
+    IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError, IngestorHost,
+    IngestorMessage, IngestorReadAheadOverflow, IngestorReadCancellation, IngestorResult,
+    IngestorResume, optional_client_config_value,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{
@@ -95,6 +106,8 @@ pub enum MqttTopicIngestorError {
     /// connection options' for a TLS file they cannot read.
     #[error("invalid MQTT client configuration")]
     ClientConfig,
+    /// The driver's refusal of the completed options is beneath, or the host handle's refusal of
+    /// the node resolver a cleanup client dials through.
     #[error("failed to build MQTT client")]
     BuildClient,
     #[error("instance {instance} has no MQTT client configuration")]
@@ -298,6 +311,10 @@ impl MqttSessionRetirement {
 }
 
 /// What one MQTT ingestor subscribes with.
+///
+/// The node resolver every instance resolves its broker host through when it connects, and the
+/// host's report of QoS 0 publishes that do not fit ACK-mode read-ahead, reach each instance
+/// through its host handle.
 pub struct MqttTopicIngestorSettings {
     /// The client entries every instance connects with, rendered for that instance.
     pub instances: Arc<[Vec<ClientConfigEntry>]>,
@@ -312,11 +329,6 @@ pub struct MqttTopicIngestorSettings {
     /// acknowledges each publish itself once the host accepted it. Absent, the client acknowledges
     /// each publish on receipt.
     pub acknowledgement_window: Option<NonZeroU64>,
-    /// The node resolver every instance resolves its broker host through when it connects.
-    pub dns: DnsResolver,
-    /// The host's report of QoS 0 publishes that do not fit ACK-mode read-ahead, which it resolved
-    /// once for the executing unit.
-    pub read_ahead_overflow: IngestorReadAheadOverflow,
     /// The node's read-ahead headroom, which the host resolved once for every MQTT ingestor it
     /// runs.
     pub read_ahead: MqttReadAheadSettings,
@@ -404,8 +416,13 @@ impl IngestorAcknowledgement {
     }
 }
 
-/// One MQTT ingestor's subscription settings, the client entries of each of its instances, and the
-/// node resolver they connect through.
+/// One MQTT ingestor's subscription settings and the client entries of each of its instances.
+/// Cloning a plan shares its immutable instance entries, so the units of one ingestor keep the
+/// prepared client configurations and their identity validation.
+///
+/// A plan carries no service of its node. Each instance takes the node resolver it connects
+/// through and its executing unit's read-ahead overflow report from its host handle when it
+/// opens, and [`MqttTopicIngestorPlan::retire`] takes the resolver from the handle it is given.
 #[derive(Clone)]
 pub struct MqttTopicIngestorPlan {
     instances: Arc<[Vec<ClientConfigEntry>]>,
@@ -415,8 +432,6 @@ pub struct MqttTopicIngestorPlan {
     qos: QoS,
     acknowledgement: IngestorAcknowledgement,
     client_id_conflict: Option<MqttClientIdError>,
-    dns: DnsResolver,
-    read_ahead_overflow: IngestorReadAheadOverflow,
     /// The retirement the executing unit's instance owes its broker session before it first
     /// connects, absent when it owes none.
     first_connection_retirement: Option<MqttSessionRetirement>,
@@ -564,14 +579,6 @@ enum GatherPublishOutcome {
 }
 
 impl MqttTopicIngestorPlan {
-    /// Selects the executing unit's overflow report while retaining the prepared client
-    /// configurations and their identity validation. Cloning a plan shares its immutable instance
-    /// entries.
-    pub fn with_read_ahead_overflow(mut self, overflow: IngestorReadAheadOverflow) -> Self {
-        self.read_ahead_overflow = overflow;
-        self
-    }
-
     /// Makes the executing unit's instance retire its broker session before it first connects
     /// while `retirement` is outstanding, and complete `retirement` once the instance has
     /// subscribed in its place.
@@ -589,8 +596,6 @@ impl MqttTopicIngestorPlan {
             session,
             qos,
             acknowledgement_window,
-            dns,
-            read_ahead_overflow,
             read_ahead,
         } = settings;
         let client_id_conflict = Self::identity_conflict(&instances);
@@ -609,8 +614,6 @@ impl MqttTopicIngestorPlan {
             },
             acknowledgement: IngestorAcknowledgement::of(acknowledgement_window, read_ahead),
             client_id_conflict,
-            dns,
-            read_ahead_overflow,
             first_connection_retirement: None,
         }
     }
@@ -650,7 +653,13 @@ impl MqttTopicIngestorPlan {
         None
     }
 
-    fn client(&self, instance_index: u64) -> MqttTopicIngestorResult<UnstartedConnection> {
+    /// The unstarted connection of the instance `instance_index`, which resolves its broker host
+    /// through `dns`: the node resolver its caller took from a host handle.
+    fn client(
+        &self,
+        instance_index: u64,
+        dns: &DnsResolver,
+    ) -> MqttTopicIngestorResult<UnstartedConnection> {
         let Some(instance) = self.instances.get(instance_index.arch_into()) else {
             return Err(Report::new(MqttTopicIngestorError::MissingInstance {
                 instance: instance_index,
@@ -662,7 +671,7 @@ impl MqttTopicIngestorPlan {
             &default_client_id,
             self.session,
             self.acknowledgement,
-            self.dns.clone(),
+            dns.clone(),
         )
     }
 
@@ -714,6 +723,10 @@ impl MqttTopicIngestorPlan {
     /// Releases an instance's broker session when its input retires or its subscription was refused.
     /// A clean connection clears a session left by a stopped or suspended ingestor, without
     /// restoring in-memory protocol state. Its ordinary connection budget bounds the entire cleanup.
+    ///
+    /// The cleanup connection resolves its broker host through the node resolver `host` hands
+    /// over, whether the host retires the session of a stopped input or an instance retires its
+    /// own while it resumes. A node without its resolver builds no cleanup client.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -724,10 +737,14 @@ impl MqttTopicIngestorPlan {
     )]
     pub async fn retire(
         &self,
+        host: &IngestorHost,
         instance_index: u64,
     ) -> error_stack::Result<(), MqttTopicIngestorError> {
         let retirement = async {
-            let mut connection = self.client(instance_index)?;
+            let dns = host
+                .dns()
+                .change_context(MqttTopicIngestorError::BuildClient)?;
+            let mut connection = self.client(instance_index, &dns)?;
             connection
                 .eventloop
                 .options
@@ -966,11 +983,17 @@ enum MqttIngestorConnection {
     Running(Box<MqttConnection>),
 }
 
-/// One MQTT ingestor instance: its connection, absent while suspended or reconnecting, and the
-/// publishes the host rejected that it delivers again before reading its connection.
+/// One MQTT ingestor instance: its connection, absent while suspended or reconnecting, the
+/// publishes the host rejected that it delivers again before reading its connection, and what it
+/// took from its host handle when it opened.
 pub struct MqttTopicIngestor {
     plan: MqttTopicIngestorPlan,
     instance_index: u64,
+    /// The node resolver the instance resolves its broker host through whenever it connects.
+    dns: DnsResolver,
+    /// The host's report of QoS 0 publishes that do not fit ACK-mode read-ahead, which the host
+    /// resolves once for the executing unit. Every connection of the instance keeps a clone.
+    read_ahead_overflow: IngestorReadAheadOverflow,
     connection: MqttIngestorConnection,
     replay: VecDeque<Publish>,
 }
@@ -997,7 +1020,7 @@ impl MqttTopicIngestor {
             self.plan.acknowledgement,
             keep_alive,
             admission,
-            self.plan.read_ahead_overflow.clone(),
+            self.read_ahead_overflow.clone(),
         )));
     }
 
@@ -1125,7 +1148,18 @@ impl IngestorConnector for MqttTopicIngestor {
 
     type Plan = MqttTopicIngestorPlan;
 
-    async fn open(plan: &Self::Plan, instance_index: u64) -> IngestorResult<Self> {
+    async fn open(
+        plan: &Self::Plan,
+        host: &IngestorHost,
+        instance_index: u64,
+    ) -> IngestorResult<Self> {
+        // The instance takes its unit's overflow report and its node's resolver once, here, and
+        // keeps both for every connection it opens. A node without its resolver opens no
+        // instance.
+        let read_ahead_overflow = host.read_ahead_overflow();
+        let dns = host
+            .dns()
+            .change_context(IngestorError::Open { connector: MQTT })?;
         // A session the preceding input left with another subscription is retired before the
         // first connection, through the phase a refused subscription retires its session in.
         let connection = match &plan.first_connection_retirement {
@@ -1137,6 +1171,8 @@ impl IngestorConnector for MqttTopicIngestor {
         Ok(Self {
             plan: plan.clone(),
             instance_index,
+            dns,
+            read_ahead_overflow,
             connection,
             replay: VecDeque::new(),
         })
@@ -1153,7 +1189,7 @@ impl IngestorConnector for MqttTopicIngestor {
         Ok(())
     }
 
-    async fn resume(&mut self) -> IngestorResult<IngestorResume> {
+    async fn resume(&mut self, host: &IngestorHost) -> IngestorResult<IngestorResume> {
         if let Some(conflict) = self.plan.client_id_conflict.as_ref() {
             return Err(Report::new(conflict.clone())
                 .change_context(IngestorError::Resume { connector: MQTT }));
@@ -1163,7 +1199,7 @@ impl IngestorConnector for MqttTopicIngestor {
         {
             if let MqttIngestorConnection::RetiringSubscription = self.connection {
                 self.plan
-                    .retire(self.instance_index)
+                    .retire(host, self.instance_index)
                     .await
                     .change_context(IngestorError::Resume { connector: MQTT })?;
                 // Keep retirement debt through the cancellable connection phase, until its
@@ -1172,7 +1208,7 @@ impl IngestorConnector for MqttTopicIngestor {
             }
             let mut connection = self
                 .plan
-                .client(self.instance_index)
+                .client(self.instance_index, &self.dns)
                 .change_context(IngestorError::Resume { connector: MQTT })?;
             let session_present = connection
                 .connect()
@@ -1229,6 +1265,7 @@ impl BrokerIngestorConnector for MqttTopicIngestor {
 
     async fn next_batch(
         &mut self,
+        _host: &IngestorHost,
         request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {
@@ -1302,11 +1339,18 @@ impl BrokerIngestorConnector for MqttTopicIngestor {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use nervix_connector::HostServiceError;
+    use nervix_connector_fake::FakeIngestorHost;
     use nervix_dns::{DnsLookupError, DnsLookupFailure};
     use nonzero_ext::nonzero;
 
-    use super::{overflow_fixture::ReadAheadOverflowFixture, *};
+    use super::*;
     use crate::topic::test_fixtures::DnsFixture;
+
+    /// A test host for one ingestor instance on a node whose resolver is `fixture`'s.
+    fn resolving_node(fixture: &DnsFixture) -> FakeIngestorHost {
+        FakeIngestorHost::default().with_dns(fixture.dns.clone())
+    }
 
     fn entry(key: &str, value: &str) -> ClientConfigEntry {
         ClientConfigEntry {
@@ -1357,8 +1401,8 @@ mod tests {
         }
     }
 
-    /// The settings of one ingestor instance subscribing to `events` through `addr` and `dns`.
-    fn settings(addr: &str, session: MqttSession, dns: DnsResolver) -> MqttTopicIngestorSettings {
+    /// The settings of one ingestor instance subscribing to `events` through `addr`.
+    fn settings(addr: &str, session: MqttSession) -> MqttTopicIngestorSettings {
         MqttTopicIngestorSettings {
             instances: vec![vec![entry("addr", addr)]].into(),
             default_client_id: "client".to_string(),
@@ -1367,8 +1411,6 @@ mod tests {
             session,
             qos: MqttQos::Qos1,
             acknowledgement_window: Some(nonzero!(1u64)),
-            dns,
-            read_ahead_overflow: ReadAheadOverflowFixture::new().report(),
             read_ahead: MqttReadAheadSettings::default(),
         }
     }
@@ -1646,16 +1688,16 @@ mod tests {
     #[nervix_primitives::test]
     async fn prepared_clients_keep_each_units_read_ahead_count_separate() {
         let fixture = DnsFixture::start().await;
-        let first_unit = ReadAheadOverflowFixture::new();
-        let second_unit = ReadAheadOverflowFixture::new();
-        let mut prepared = settings(
-            "mqtt://127.0.0.1:1883",
-            MqttSession::Persistent,
-            fixture.dns.clone(),
-        );
-        prepared.read_ahead_overflow = first_unit.report();
-        let first = MqttTopicIngestorPlan::new(prepared);
-        let second = first.clone().with_read_ahead_overflow(second_unit.report());
+        let first_unit = resolving_node(&fixture);
+        let second_unit = resolving_node(&fixture);
+        let prepared =
+            MqttTopicIngestorPlan::new(settings("mqtt://127.0.0.1:1883", MqttSession::Persistent));
+        let first = MqttTopicIngestor::open(&prepared, &first_unit.host(), 0)
+            .await
+            .expect("an MQTT ingestor opens without connecting");
+        let second = MqttTopicIngestor::open(&prepared, &second_unit.host(), 0)
+            .await
+            .expect("an MQTT ingestor opens without connecting");
 
         for _ in 0..3 {
             first.read_ahead_overflow.record_dropped_payload();
@@ -1664,24 +1706,20 @@ mod tests {
             second.read_ahead_overflow.record_dropped_payload();
         }
 
-        assert_eq!(first_unit.dropped(), 3);
-        assert_eq!(second_unit.dropped(), 7);
-        assert!(Arc::ptr_eq(&first.instances, &second.instances));
+        assert_eq!(first_unit.observations().dropped_payloads, 3);
+        assert_eq!(second_unit.observations().dropped_payloads, 7);
+        assert!(Arc::ptr_eq(&first.plan.instances, &second.plan.instances));
     }
 
     #[nervix_primitives::test]
     async fn retirement_keeps_matching_session_identities_and_releases_obsolete_ones() {
         let fixture = DnsFixture::start().await;
-        let mut declared = settings(
-            "mqtt://127.0.0.1:1883",
-            MqttSession::Persistent,
-            fixture.dns.clone(),
-        );
+        let mut declared = settings("mqtt://127.0.0.1:1883", MqttSession::Persistent);
         declared.default_client_id = "domain~events".to_string();
         let singleton = MqttTopicIngestorPlan::new(declared);
         assert_eq!(
             singleton
-                .client(0)
+                .client(0, &fixture.dns)
                 .assured("the ingestor plan is valid")
                 .eventloop
                 .options
@@ -1695,7 +1733,7 @@ mod tests {
         parallel.instances = vec![parallel.instances[0].clone(); 2].into();
         assert_eq!(
             parallel
-                .client(0)
+                .client(0, &fixture.dns)
                 .assured("the ingestor plan is valid")
                 .eventloop
                 .options
@@ -1704,7 +1742,7 @@ mod tests {
         );
         assert_eq!(
             parallel
-                .client(1)
+                .client(1, &fixture.dns)
                 .assured("the ingestor plan is valid")
                 .eventloop
                 .options
@@ -1748,12 +1786,7 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn sessions_tell_one_the_other_input_connects_from_one_it_never_connects() {
-        let fixture = DnsFixture::start().await;
-        let mut declared = settings(
-            "mqtt://127.0.0.1:1883",
-            MqttSession::Persistent,
-            fixture.dns.clone(),
-        );
+        let mut declared = settings("mqtt://127.0.0.1:1883", MqttSession::Persistent);
         declared.default_client_id = "domain~events".to_string();
         let previous = MqttTopicIngestorPlan::new(declared);
         let mut retopic = previous.clone();
@@ -1806,14 +1839,12 @@ mod tests {
         use crate::topic::scripted_broker::ScriptedBroker;
 
         let fixture = DnsFixture::start().await;
+        let host = resolving_node(&fixture).host();
         for reason in [0x00, 0x11, 0x87] {
             nervix_primitives::task::consume_budget().await;
             let broker = ScriptedBroker::start().await;
-            let plan = MqttTopicIngestorPlan::new(settings(
-                &broker.addr(),
-                MqttSession::Persistent,
-                fixture.dns.clone(),
-            ));
+            let plan =
+                MqttTopicIngestorPlan::new(settings(&broker.addr(), MqttSession::Persistent));
             let observe = async {
                 let mut connection = broker.accept().await;
                 let (packet_type, body) = connection.read_packet().await;
@@ -1834,7 +1865,7 @@ mod tests {
                 );
             };
             let (result, ()) = timeout(Duration::from_secs(30), async {
-                tokio::join!(plan.retire(0), observe)
+                tokio::join!(plan.retire(&host, 0), observe)
             })
             .await
             .assured("the scripted exchange completes within its observation budget");
@@ -1860,14 +1891,11 @@ mod tests {
         use crate::topic::scripted_broker::ScriptedBroker;
 
         let fixture = DnsFixture::start().await;
+        let host = resolving_node(&fixture).host();
         let broker = ScriptedBroker::start().await;
-        let plan = MqttTopicIngestorPlan::new(settings(
-            &broker.addr(),
-            MqttSession::Persistent,
-            fixture.dns.clone(),
-        ));
+        let plan = MqttTopicIngestorPlan::new(settings(&broker.addr(), MqttSession::Persistent));
         let budget = plan
-            .client(0)
+            .client(0, &fixture.dns)
             .assured("the ingestor plan is valid")
             .eventloop
             .options
@@ -1878,7 +1906,7 @@ mod tests {
             finished.cancelled().await;
         };
         let retire = async {
-            let result = plan.retire(0).await;
+            let result = plan.retire(&host, 0).await;
             finished.cancel();
             result
         };
@@ -1909,7 +1937,6 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn a_shared_client_id_names_the_conflict_as_the_resume_failure() {
-        let fixture = DnsFixture::start().await;
         let plan = MqttTopicIngestorPlan::new(MqttTopicIngestorSettings {
             instances: vec![
                 config_with_client_id("fixed-client"),
@@ -1922,8 +1949,6 @@ mod tests {
             session: MqttSession::Persistent,
             qos: MqttQos::Qos1,
             acknowledgement_window: Some(nonzero!(1u64)),
-            dns: fixture.dns.clone(),
-            read_ahead_overflow: ReadAheadOverflowFixture::new().report(),
             read_ahead: MqttReadAheadSettings::default(),
         });
         assert_eq!(
@@ -2078,13 +2103,10 @@ mod tests {
         use crate::topic::scripted_broker::ScriptedBroker;
 
         let fixture = DnsFixture::start().await;
+        let host = resolving_node(&fixture).host();
         let broker = ScriptedBroker::start().await;
-        let plan = MqttTopicIngestorPlan::new(settings(
-            &broker.addr(),
-            MqttSession::Persistent,
-            fixture.dns.clone(),
-        ));
-        let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+        let plan = MqttTopicIngestorPlan::new(settings(&broker.addr(), MqttSession::Persistent));
+        let mut ingestor = MqttTopicIngestor::open(&plan, &host, 0)
             .await
             .expect("an MQTT ingestor opens without connecting");
         let grant = async {
@@ -2092,7 +2114,7 @@ mod tests {
             connection.grant_subscription().await;
             connection
         };
-        let (resumed, mut connection) = tokio::join!(ingestor.resume(), grant);
+        let (resumed, mut connection) = tokio::join!(ingestor.resume(&host), grant);
         resumed.expect("the scripted broker granted the subscription");
         // The connection reads this publish into its read-ahead, behind the rejected ones.
         connection.write_publish(3, b"3").await;
@@ -2111,6 +2133,7 @@ mod tests {
         let replayed = timeout(
             Duration::from_secs(30),
             ingestor.next_batch(
+                &host,
                 IngestorBatchRequest {
                     max_messages: nonzero!(2usize),
                     batch_timeout: None,
@@ -2124,6 +2147,7 @@ mod tests {
         let read = timeout(
             Duration::from_secs(30),
             ingestor.next_batch(
+                &host,
                 IngestorBatchRequest {
                     max_messages: NonZeroUsize::MIN,
                     batch_timeout: None,
@@ -2156,16 +2180,16 @@ mod tests {
     async fn a_broker_whose_name_does_not_resolve_fails_the_resume_with_the_lookup() {
         let fixture = DnsFixture::start().await;
         fixture.deny("missing.nervix.test");
+        let host = resolving_node(&fixture).host();
         let plan = MqttTopicIngestorPlan::new(settings(
             "mqtt://missing.nervix.test:1883",
             MqttSession::Clean,
-            fixture.dns.clone(),
         ));
-        let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+        let mut ingestor = MqttTopicIngestor::open(&plan, &host, 0)
             .await
             .expect("an MQTT ingestor opens without connecting");
 
-        let resumed = ingestor.resume().await;
+        let resumed = ingestor.resume(&host).await;
         let Err(error) = resumed else {
             panic!("a broker whose name does not exist cannot be reached");
         };
@@ -2197,6 +2221,53 @@ mod tests {
             "resolving 'missing.nervix.test' failed: the name does not exist"
         );
         assert!(ingestor.needs_resume());
+    }
+
+    #[nervix_primitives::test]
+    async fn an_ingestor_on_a_node_without_its_resolver_fails_to_open_and_names_the_resolver() {
+        let plan =
+            MqttTopicIngestorPlan::new(settings("mqtt://127.0.0.1:1883", MqttSession::Clean));
+        let unresolving = FakeIngestorHost::default();
+
+        let Err(error) = MqttTopicIngestor::open(&plan, &unresolving.host(), 0).await else {
+            panic!("an ingestor that dials by name needs its node's resolver");
+        };
+
+        assert!(matches!(
+            error.current_context(),
+            IngestorError::Open { connector: MQTT }
+        ));
+        assert_eq!(
+            error.downcast_ref::<HostServiceError>(),
+            Some(&HostServiceError::DnsNotInstalled)
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn retiring_a_session_on_a_node_without_its_resolver_builds_no_cleanup_client() {
+        let plan =
+            MqttTopicIngestorPlan::new(settings("mqtt://127.0.0.1:1883", MqttSession::Persistent));
+        let unresolving = FakeIngestorHost::default();
+
+        let Err(error) = plan.retire(&unresolving.host(), 0).await else {
+            panic!("a cleanup connection dials by name, so it needs its node's resolver");
+        };
+
+        assert!(matches!(
+            error.current_context(),
+            MqttTopicIngestorError::RetireInstance { instance: 0 }
+        ));
+        assert!(
+            error.frames().any(|frame| matches!(
+                frame.downcast_ref::<MqttTopicIngestorError>(),
+                Some(MqttTopicIngestorError::BuildClient)
+            )),
+            "the refused resolver is why no cleanup client was built: {error:?}"
+        );
+        assert_eq!(
+            error.downcast_ref::<HostServiceError>(),
+            Some(&HostServiceError::DnsNotInstalled)
+        );
     }
 }
 

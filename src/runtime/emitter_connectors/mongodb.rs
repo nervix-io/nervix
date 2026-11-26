@@ -35,10 +35,9 @@ impl EmitterConnectorStarter {
                 input_schema: input_schema.arrow_schema(),
                 udfs: context.udfs.as_ref(),
             })?;
-            let client =
-                PooledEmitterClient::lease(context, &connector.client, connector.pooled_client())
-                    .await
-                    .map_err(emitter_init_error)?;
+            let lease = context
+                .lease_pooled_client::<MongoDbClient>(&connector.client, connector.pool)
+                .await?;
             Self::row(
                 projection,
                 MongoDbCollectionEmitter::open(
@@ -47,10 +46,8 @@ impl EmitterConnectorStarter {
                         collection: connector.collection.clone(),
                         conflict_action: connector.conflict_action.clone(),
                         batch: connector.batch,
-
-                        client: Box::new(client),
                     },
-                    context.emitter_host(),
+                    context.emitter_host_leasing(lease),
                 )
                 .await,
             )?

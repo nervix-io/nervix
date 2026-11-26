@@ -10,7 +10,11 @@ workspace = true
 
 [features]
 default = []
-shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
+shuttle = [
+  "nervix-connector/shuttle",
+  "nervix-connector-fake/shuttle",
+  "nervix-primitives/shuttle",
+]
 
 [dependencies]
 arch-into = { workspace = true }
@@ -31,7 +35,6 @@ url = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
-# The test hosts hand an emitter the node's executor, as the server's host does.
-nervix-execution = { workspace = true }
+nervix-connector-fake = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 tokio-util = { workspace = true, features = ["codec"] }

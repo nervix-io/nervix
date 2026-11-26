@@ -22,6 +22,17 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        metrics,
+        tls_policy,
+        reason = "the OTLP engine of the OpenTelemetry logs, metrics and traces emitters dials \
+                  through its node's resolver, builds its HTTP transport under the node's outward \
+                  TLS policy and records the subdivisions of the export requests it prepares"
+    )
+)]
 
 use std::{io::Write, ops::Range, str::FromStr, time::Duration};
 
@@ -114,9 +125,7 @@ pub(super) struct OtlpEncoder {
 
 /// What one OTEL emitter exports with, from its typed emitter plan.
 pub(super) struct OtlpEncoderConfig {
-    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
-    pub dns: nervix_dns::DnsResolver,
     pub signal: OtlpSignal,
     /// The emitter's `BATCH` limits, which bound the records and the exact protobuf size of
     /// every export request when it declares them.
@@ -598,9 +607,7 @@ impl OtlpEncoder {
     )]
     pub(super) fn new(config: OtlpEncoderConfig, host: EmitterHost) -> EmitterStartResult<Self> {
         let OtlpEncoderConfig {
-            tls_policy,
             config,
-            dns,
             signal,
             batch,
             values,
@@ -609,6 +616,12 @@ impl OtlpEncoder {
             scope,
             mapped_schema,
         } = config;
+        // A node without its resolver cannot open the emitter at all, so that is reported before
+        // anything its configuration says.
+        let dns = host
+            .dns()
+            .change_context(EmitterOpenError::Initialize { connector: OTEL })?;
+        let tls_policy = host.tls_policy();
         let client = OtelClient {
             transport: Self::transport_from_config(&config, &dns, &tls_policy)?,
         };

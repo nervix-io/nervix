@@ -20,23 +20,31 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        reason = "the RabbitMQ queue emitter resolves its broker host through its node's resolver"
+    )
+)]
 
 use async_trait::async_trait;
+use error_stack::ResultExt as _;
 use nervix_connector::{
-    BrokerPublishingMode, EmitterFinishResult, EmitterHost, EmitterLifecycle, EmitterRecord,
-    EmitterRecordId, EmitterStartResult, PerRecordOutcome, RecordEmitter,
+    BrokerPublishingMode, EmitterFinishResult, EmitterHost, EmitterLifecycle, EmitterOpenError,
+    EmitterRecord, EmitterRecordId, EmitterStartResult, PerRecordOutcome, RecordEmitter,
 };
-use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, RabbitMqQueueName};
 use nervix_primitives::time::Instant;
 
-use crate::publisher::{RabbitMqDestination, RabbitMqPublisher, RabbitMqPublisherConfig};
+use crate::publisher::{RABBITMQ, RabbitMqDestination, RabbitMqPublisher, RabbitMqPublisherConfig};
 
-/// What one RabbitMQ queue emitter publishes through: its client entries, the node resolver its
-/// broker host resolves through, its queue and its publishing mode.
+/// What one RabbitMQ queue emitter publishes through: its client entries, its queue and its
+/// publishing mode.
+///
+/// The node resolver its broker host resolves through reaches the emitter through its host handle.
 pub struct RabbitMqQueueEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
-    pub dns: DnsResolver,
     pub queue: RabbitMqQueueName,
     pub mode: BrokerPublishingMode,
 }
@@ -55,20 +63,26 @@ impl RabbitMqQueueEmitter {
     /// channel and checks that the queue exists within the client's `connect_timeout_ms`.
     async fn prepare(
         config: RabbitMqQueueEmitterConfig,
-        _host: EmitterHost,
+        host: EmitterHost,
     ) -> EmitterStartResult<Self> {
+        // A node without its resolver cannot open the emitter at all, so that is reported before
+        // anything its configuration says.
+        let dns = host.dns().change_context(EmitterOpenError::Initialize {
+            connector: RABBITMQ,
+        })?;
         let RabbitMqQueueEmitterConfig {
             config,
-            dns,
             queue,
             mode,
         } = config;
-        let publisher = RabbitMqPublisher::open(RabbitMqPublisherConfig {
-            config,
+        let publisher = RabbitMqPublisher::open(
+            RabbitMqPublisherConfig {
+                config,
+                destination: RabbitMqDestination::Queue(queue),
+                mode,
+            },
             dns,
-            destination: RabbitMqDestination::Queue(queue),
-            mode,
-        })?;
+        )?;
         Ok(Self { publisher })
     }
 }
@@ -116,5 +130,49 @@ impl nervix_connector::EmitterConnector for RabbitMqQueueEmitter {
     type Plan = RabbitMqQueueEmitterConfig;
     async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
         Self::prepare(plan, host).await
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod tests {
+    use nervix_connector::{EmitterConnector as _, HostServiceError};
+
+    use super::*;
+
+    #[nervix_primitives::test]
+    async fn an_emitter_on_a_node_without_its_resolver_fails_to_open_and_names_the_resolver() {
+        let opened = RabbitMqQueueEmitter::open(
+            RabbitMqQueueEmitterConfig {
+                // The entries name no broker, which alone is a configuration failure the host
+                // gives up on: the node's missing resolver is reported before it.
+                config: Vec::new(),
+                queue: RabbitMqQueueName::parse("orders").expect("a fixed queue name is valid"),
+                mode: BrokerPublishingMode::NoAck,
+            },
+            nervix_connector_fake::FakeEmitterHost::default().host(),
+        )
+        .await;
+        let error = match opened {
+            Ok(_) => panic!("an emitter that dials its broker by name needs its node's resolver"),
+            Err(error) => error,
+        };
+
+        // The failure is the node's, not the configuration's, so the host opens the emitter again.
+        assert_eq!(
+            *error.current_context(),
+            EmitterOpenError::Initialize {
+                connector: RABBITMQ
+            }
+        );
+        assert_eq!(
+            error
+                .frames()
+                .find_map(|frame| frame.downcast_ref::<HostServiceError>()),
+            Some(&HostServiceError::DnsNotInstalled)
+        );
     }
 }

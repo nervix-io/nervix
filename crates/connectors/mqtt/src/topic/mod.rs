@@ -26,6 +26,15 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        status,
+        reason = "the MQTT topic emitter dials its broker through its node's resolver and \
+                  publishes the transient status and error events of its event loop"
+    )
+)]
 
 mod client_options;
 mod connection;
@@ -124,8 +133,11 @@ impl MqttPublishingMode {
 }
 
 /// What one MQTT emitter publishes through: its client entries, topic, quality of service, the
-/// backoff its event loop reconnects on, the client id to use when the configuration declares
-/// none, and the node resolver every connection resolves the broker host through.
+/// backoff its event loop reconnects on, and the client id to use when the configuration declares
+/// none.
+///
+/// The node resolver every connection resolves the broker host through reaches the emitter through
+/// its host handle.
 pub struct MqttTopicEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub topic: MqttTopicName,
@@ -133,7 +145,6 @@ pub struct MqttTopicEmitterConfig {
     pub retry_policy: ParsedRetryPolicy,
     pub retry_settings: nervix_connector::RetryBackoffSettings,
     pub default_client_id: String,
-    pub dns: DnsResolver,
 }
 
 pub struct MqttTopicEmitter {
@@ -540,9 +551,14 @@ impl MqttEventLoopStart {
 
 impl MqttTopicEmitter {
     fn prepare(config: MqttTopicEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
+        // A node without its resolver cannot open the emitter at all, so that is reported before
+        // anything its configuration says.
+        let dns = host
+            .dns()
+            .change_context(EmitterOpenError::Initialize { connector: MQTT })?;
         let mode = config.mode;
         let (client, eventloop) =
-            Self::client_from_config(&config.config, &config.default_client_id, mode, config.dns)?;
+            Self::client_from_config(&config.config, &config.default_client_id, mode, dns)?;
         let retry_policy = config.retry_policy;
         let broker_limit = Arc::new(MqttBrokerPacketLimit::default());
         let declared_limit = broker_limit.clone();
@@ -859,7 +875,8 @@ impl RecordEmitter for MqttTopicEmitter {
 mod tests {
     use error_stack::{AttachmentKind, FrameKind};
     use meticulous::ResultExt as _;
-    use nervix_connector::{ConfirmationWindowError, PerRecordOutcomeParts};
+    use nervix_connector::{ConfirmationWindowError, HostServiceError, PerRecordOutcomeParts};
+    use nervix_connector_fake::FakeEmitterHost;
     use nervix_models::{MQTT_MAXIMUM_PACKET_BYTES, Timestamp};
 
     use super::*;
@@ -1248,115 +1265,16 @@ mod tests {
             });
     }
 
-    /// A host that ignores what the emitter reports, for tests that only read its publish outcomes.
-    struct SilentHost;
-
-    impl nervix_connector::EmitterReadiness for SilentHost {
-        fn mark_ready(&self) {}
-        fn mark_unready(&self) {}
+    /// A test host for an emitter on a node that resolves through `dns`. A test that only reads
+    /// the emitter's publish outcomes takes its handle and leaves what the emitter reports unread;
+    /// a test that reads the transient error the emitter records keeps the host.
+    fn resolving_node(dns: DnsResolver) -> FakeEmitterHost {
+        FakeEmitterHost::default().with_dns(dns)
     }
 
-    impl nervix_connector::EmitterTransientErrorStatus for SilentHost {
-        fn record_transient_error(&self, _reason: String, _retry_after: Duration) {}
-
-        fn clear_transient_error(&self) {}
-    }
-
-    impl nervix_connector::EmitterEventReporter for SilentHost {
-        fn report_error(&self, _message: String) {}
-    }
-
-    impl nervix_connector::ConnectorEventProvider for SilentHost {}
-
-    impl nervix_connector::EmitterPayloadObserver for SilentHost {
-        fn record_prepared_payload(
-            &self,
-            _measurement: nervix_connector::EmitterPayloadMeasurement,
-        ) {
-        }
-        fn record_payload_subdivisions(&self, _subdivisions: u64) {}
-    }
-
-    impl nervix_connector::EmitterStagingDirectory for SilentHost {
-        fn staging_directory(&self) -> std::path::PathBuf {
-            std::env::temp_dir()
-        }
-    }
-
-    impl nervix_connector::EmitterBoundedExecution for SilentHost {
-        fn executor(&self) -> nervix_execution::Executor {
-            nervix_execution::Executor::default()
-        }
-    }
-
-    impl nervix_connector::EmitterGeneralErrorHandler for SilentHost {
-        fn handle_general_error(
-            &self,
-            _acks: &nervix_connector::EmitterRecordAcknowledgements,
-            _class: nervix_models::MessageErrorClass,
-            _reason: String,
-        ) {
-        }
-    }
-
-    /// A host that keeps the latest transient error the emitter records, for tests that read it.
-    struct RecordingHost {
-        transient_error: watch::Sender<Option<String>>,
-    }
-
-    impl nervix_connector::EmitterReadiness for RecordingHost {
-        fn mark_ready(&self) {}
-        fn mark_unready(&self) {}
-    }
-
-    impl nervix_connector::EmitterTransientErrorStatus for RecordingHost {
-        fn record_transient_error(&self, reason: String, _retry_after: Duration) {
-            self.transient_error.send_replace(Some(reason));
-        }
-
-        fn clear_transient_error(&self) {}
-    }
-
-    impl nervix_connector::EmitterEventReporter for RecordingHost {
-        fn report_error(&self, _message: String) {}
-    }
-
-    impl nervix_connector::ConnectorEventProvider for RecordingHost {}
-
-    impl nervix_connector::EmitterPayloadObserver for RecordingHost {
-        fn record_prepared_payload(
-            &self,
-            _measurement: nervix_connector::EmitterPayloadMeasurement,
-        ) {
-        }
-        fn record_payload_subdivisions(&self, _subdivisions: u64) {}
-    }
-
-    impl nervix_connector::EmitterStagingDirectory for RecordingHost {
-        fn staging_directory(&self) -> std::path::PathBuf {
-            std::env::temp_dir()
-        }
-    }
-
-    impl nervix_connector::EmitterBoundedExecution for RecordingHost {
-        fn executor(&self) -> nervix_execution::Executor {
-            nervix_execution::Executor::default()
-        }
-    }
-
-    impl nervix_connector::EmitterGeneralErrorHandler for RecordingHost {
-        fn handle_general_error(
-            &self,
-            _acks: &nervix_connector::EmitterRecordAcknowledgements,
-            _class: nervix_models::MessageErrorClass,
-            _reason: String,
-        ) {
-        }
-    }
-
-    /// The configuration of a QoS 0 emitter on `topic` whose client connects to `addr` through `dns`,
-    /// retrying slowly enough that a test never sees a second attempt.
-    fn qos0_config(addr: &str, topic_name: &str, dns: DnsResolver) -> MqttTopicEmitterConfig {
+    /// The configuration of a QoS 0 emitter on `topic` whose client connects to `addr`, retrying
+    /// slowly enough that a test never sees a second attempt.
+    fn qos0_config(addr: &str, topic_name: &str) -> MqttTopicEmitterConfig {
         MqttTopicEmitterConfig {
             retry_settings: nervix_connector::RetryBackoffSettings::default(),
             config: vec![ClientConfigEntry {
@@ -1370,7 +1288,6 @@ mod tests {
                 max_backoff: Duration::from_secs(60),
             },
             default_client_id: "nervix-mqtt-emitter-test".to_string(),
-            dns,
         }
     }
 
@@ -1386,13 +1303,11 @@ mod tests {
         Ok(emitter)
     }
 
+    /// A resumed QoS 0 emitter on `topic` whose client connects to `addr` through `dns`.
     async fn qos0_emitter(addr: &str, topic_name: &str, dns: DnsResolver) -> MqttTopicEmitter {
-        resumed(
-            qos0_config(addr, topic_name, dns),
-            EmitterHost::new(SilentHost),
-        )
-        .await
-        .assured("the test emitter config is valid")
+        resumed(qos0_config(addr, topic_name), resolving_node(dns).host())
+            .await
+            .assured("the test emitter config is valid")
     }
 
     fn record(index: usize, payload_bytes: usize) -> EmitterRecord {
@@ -1403,6 +1318,41 @@ mod tests {
             Vec::new(),
             Timestamp::from_unix_nanos(0),
         )
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_on_a_node_without_its_resolver_fails_to_open_and_names_the_resolver() {
+        // Client entries that declare no broker address, which a node with its resolver refuses
+        // as an invalid configuration.
+        let without_address = || MqttTopicEmitterConfig {
+            config: Vec::new(),
+            ..qos0_config("mqtt://127.0.0.1:9", "unresolved")
+        };
+        let fixture = DnsFixture::start().await;
+        let resolving = resolving_node(fixture.dns.clone()).host();
+        let Err(invalid) = MqttTopicEmitter::open(without_address(), resolving).await else {
+            panic!("an emitter whose client declares no broker address has no connection options");
+        };
+        assert_eq!(
+            *invalid.current_context(),
+            EmitterOpenError::InvalidConfiguration { connector: MQTT }
+        );
+
+        let unresolving = FakeEmitterHost::default().host();
+        let Err(error) = MqttTopicEmitter::open(without_address(), unresolving).await else {
+            panic!("an emitter that dials by name needs its node's resolver");
+        };
+
+        // The failure is the node's, reported before anything the configuration says, so the host
+        // opens the emitter again instead of giving it up.
+        assert_eq!(
+            *error.current_context(),
+            EmitterOpenError::Initialize { connector: MQTT }
+        );
+        assert_eq!(
+            error.downcast_ref::<HostServiceError>(),
+            Some(&HostServiceError::DnsNotInstalled)
+        );
     }
 
     #[nervix_primitives::test]
@@ -1441,9 +1391,9 @@ mod tests {
             connection.puback(publication.packet_id, 0).await;
             (publication.properties, connection)
         });
-        let mut config = qos0_config(&address, "properties", fixture.dns.clone());
+        let mut config = qos0_config(&address, "properties");
         config.mode = MqttPublishingMode::Qos1(confirmed());
-        let mut emitter = resumed(config, EmitterHost::new(SilentHost))
+        let mut emitter = resumed(config, resolving_node(fixture.dns.clone()).host())
             .await
             .assured("the fixture supplies valid connector configuration");
         let mut message = record(0, 1).with_envelope(RecordEnvelope {
@@ -1574,18 +1524,17 @@ mod tests {
         .expect("the event loop records the CONNACK it received")
     }
 
-    /// The first transient error the emitter's event loop records with its host.
-    async fn first_transient_error(recorded: &mut watch::Receiver<Option<String>>) -> String {
+    /// The transient error the emitter shows through `host` once its event loop has recorded its
+    /// first failed connection, which a check's emitter never clears: its event loop waits out a
+    /// minute-long backoff before it connects again.
+    async fn first_transient_error(host: &FakeEmitterHost) -> String {
         nervix_primitives::time::timeout(Duration::from_secs(30), async {
             loop {
                 nervix_primitives::task::consume_budget().await;
-                if let Some(reason) = recorded.borrow_and_update().clone() {
+                if let Some(reason) = host.observations().transient_error {
                     return reason;
                 }
-                recorded
-                    .changed()
-                    .await
-                    .expect("the emitter's host keeps the sender");
+                sleep(Duration::from_millis(10)).await;
             }
         })
         .await
@@ -1596,17 +1545,13 @@ mod tests {
     async fn the_event_loop_reports_a_broker_name_that_does_not_resolve() {
         let fixture = DnsFixture::start().await;
         fixture.deny("missing.nervix.test");
-        let (transient_error, mut recorded) = watch::channel(None);
-        let config = qos0_config(
-            "mqtt://missing.nervix.test:1883",
-            "unresolved",
-            fixture.dns.clone(),
-        );
-        let _emitter = resumed(config, EmitterHost::new(RecordingHost { transient_error }))
+        let host = resolving_node(fixture.dns.clone());
+        let config = qos0_config("mqtt://missing.nervix.test:1883", "unresolved");
+        let _emitter = resumed(config, host.host())
             .await
             .assured("the test emitter config is valid");
 
-        let reason = first_transient_error(&mut recorded).await;
+        let reason = first_transient_error(&host).await;
 
         assert_eq!(
             reason,
@@ -1627,17 +1572,16 @@ mod tests {
     }
 
     /// The configuration of a QoS 1 emitter with `confirmation` on `topic` whose client connects to
-    /// `addr` through `dns`, retrying slowly enough that a test never sees a second attempt.
+    /// `addr`, retrying slowly enough that a test never sees a second attempt.
     fn qos1_config(
         addr: &str,
         topic_name: &str,
-        dns: DnsResolver,
         confirmation: AckConfirmation,
     ) -> MqttTopicEmitterConfig {
         MqttTopicEmitterConfig {
             retry_settings: nervix_connector::RetryBackoffSettings::default(),
             mode: MqttPublishingMode::Qos1(confirmation),
-            ..qos0_config(addr, topic_name, dns)
+            ..qos0_config(addr, topic_name)
         }
     }
 
@@ -1656,8 +1600,8 @@ mod tests {
             timeout: Duration::from_secs(30),
         };
         let mut connector = resumed(
-            qos1_config(&broker.addr(), "window", fixture.dns.clone(), confirmation),
-            EmitterHost::new(SilentHost),
+            qos1_config(&broker.addr(), "window", confirmation),
+            resolving_node(fixture.dns.clone()).host(),
         )
         .await
         .assured("the test emitter config is valid");
@@ -1715,8 +1659,8 @@ mod tests {
             timeout: Duration::from_secs(30),
         };
         let mut connector = resumed(
-            qos1_config(&broker.addr(), "limited", fixture.dns.clone(), confirmation),
-            EmitterHost::new(SilentHost),
+            qos1_config(&broker.addr(), "limited", confirmation),
+            resolving_node(fixture.dns.clone()).host(),
         )
         .await
         .assured("the test emitter config is valid");
@@ -1772,8 +1716,8 @@ mod tests {
             timeout: Duration::from_secs(30),
         };
         let mut connector = resumed(
-            qos1_config(&broker.addr(), "window", fixture.dns.clone(), confirmation),
-            EmitterHost::new(SilentHost),
+            qos1_config(&broker.addr(), "window", confirmation),
+            resolving_node(fixture.dns.clone()).host(),
         )
         .await
         .assured("the test emitter config is valid");
@@ -1886,13 +1830,8 @@ mod tests {
             timeout: Duration::from_secs(30),
         };
         let mut connector = resumed(
-            qos1_config(
-                "mqtt://127.0.0.1:9",
-                "answered",
-                fixture.dns.clone(),
-                confirmation,
-            ),
-            EmitterHost::new(SilentHost),
+            qos1_config("mqtt://127.0.0.1:9", "answered", confirmation),
+            resolving_node(fixture.dns.clone()).host(),
         )
         .await
         .assured("the test emitter config is valid");
@@ -2013,24 +1952,19 @@ mod tests {
         // event loop waits out the minute-long backoff without reading its request queue, which
         // holds one request.
         let fixture = DnsFixture::start().await;
-        let (transient_error, mut recorded) = watch::channel(None);
+        let host = resolving_node(fixture.dns.clone());
         let timeout = Duration::from_millis(50);
         let confirmation = AckConfirmation {
             max_in_flight: NonZeroUsize::MIN,
             timeout,
         };
         let mut connector = resumed(
-            qos1_config(
-                "mqtt://127.0.0.1:9",
-                "unreachable",
-                fixture.dns.clone(),
-                confirmation,
-            ),
-            EmitterHost::new(RecordingHost { transient_error }),
+            qos1_config("mqtt://127.0.0.1:9", "unreachable", confirmation),
+            host.host(),
         )
         .await
         .assured("the test emitter config is valid");
-        first_transient_error(&mut recorded).await;
+        first_transient_error(&host).await;
 
         let unanswered = connector.publish(vec![record(0, 1)]).await.into_parts();
         let failure = unanswered
@@ -2075,14 +2009,14 @@ mod tests {
         // As above: the event loop no longer reads its one-request queue after its first failed
         // connection, so the client takes the first record and refuses the second.
         let fixture = DnsFixture::start().await;
-        let (transient_error, mut recorded) = watch::channel(None);
+        let host = resolving_node(fixture.dns.clone());
         let mut connector = resumed(
-            qos0_config("mqtt://127.0.0.1:9", "unreachable", fixture.dns.clone()),
-            EmitterHost::new(RecordingHost { transient_error }),
+            qos0_config("mqtt://127.0.0.1:9", "unreachable"),
+            host.host(),
         )
         .await
         .assured("the test emitter config is valid");
-        first_transient_error(&mut recorded).await;
+        first_transient_error(&host).await;
 
         let outcome = connector
             .publish(vec![record(0, 1), record(1, 1)])

@@ -24,6 +24,13 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        reason = "the SQS queue emitter builds its client over its node's resolver when it opens"
+    )
+)]
 
 mod connection;
 mod ingestor;
@@ -89,12 +96,13 @@ fn max_request_bytes() -> usize {
 }
 
 /// What one SQS emitter sends to: its client entries, queue name and request shape.
+///
+/// The node resolver every connection of the client resolves the endpoint host through reaches
+/// the emitter through its host handle.
 pub struct SqsQueueEmitterConfig {
     pub config: Vec<ClientConfigEntry>,
     pub queue: nervix_models::SqsQueueName,
     pub send: SqsSend,
-    /// The node resolver every connection of the client resolves the endpoint host through.
-    pub dns: DnsResolver,
 }
 
 pub struct SqsQueueEmitter {
@@ -271,15 +279,16 @@ impl PreparedSqsRecord {
 }
 
 impl SqsQueueEmitter {
-    async fn prepare(
-        config: SqsQueueEmitterConfig,
-        _host: EmitterHost,
-    ) -> EmitterStartResult<Self> {
+    async fn prepare(config: SqsQueueEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
+        // A node without its resolver cannot open the emitter at all, so that is reported before
+        // anything its configuration says.
+        let dns = host
+            .dns()
+            .change_context(EmitterOpenError::Initialize { connector: SQS })?;
         let SqsQueueEmitterConfig {
             config,
             queue,
             send,
-            dns,
         } = config;
         let client = Self::client_from_config(&config, dns).await?;
         Ok(Self {
@@ -1757,5 +1766,71 @@ mod tests {
                 "{value}: unexpected error: {error:?}"
             );
         }
+    }
+
+    fn orders_queue() -> nervix_models::SqsQueueName {
+        nervix_models::SqsQueueName::parse(crate::queue::connection_tests::QUEUE)
+            .expect("a fixed queue name is valid")
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_on_a_node_without_its_resolver_fails_to_open_and_names_the_resolver() {
+        let opened = <SqsQueueEmitter as nervix_connector::EmitterConnector>::open(
+            SqsQueueEmitterConfig {
+                // The entries name no endpoint, which alone is a configuration failure the host
+                // gives up on: the node's missing resolver is reported before it.
+                config: Vec::new(),
+                queue: orders_queue(),
+                send: SqsSend::Single,
+            },
+            nervix_connector_fake::FakeEmitterHost::default().host(),
+        )
+        .await;
+        let error = match opened {
+            Ok(_) => panic!("an emitter that dials its endpoint by name needs its node's resolver"),
+            Err(error) => error,
+        };
+
+        // The failure is the node's, not the configuration's, so the host opens the emitter again.
+        assert_eq!(
+            *error.current_context(),
+            EmitterOpenError::Initialize { connector: SQS }
+        );
+        assert_eq!(
+            error
+                .frames()
+                .find_map(|frame| frame.downcast_ref::<nervix_connector::HostServiceError>()),
+            Some(&nervix_connector::HostServiceError::DnsNotInstalled)
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_builds_its_client_over_the_resolver_of_the_handle_it_is_opened_with() {
+        let fixture = Fixture::start().await;
+        let mut opened = <SqsQueueEmitter as nervix_connector::EmitterConnector>::open(
+            SqsQueueEmitterConfig {
+                config: client_config("275"),
+                queue: orders_queue(),
+                send: SqsSend::Single,
+            },
+            nervix_connector_fake::FakeEmitterHost::default()
+                .with_dns(fixture.dns())
+                .host(),
+        )
+        .await
+        .expect("the node provides the resolver the client dials through");
+
+        // Opening built the client alone: the emitter looks its queue up when it resumes.
+        assert!(opened.needs_resume());
+        let timeout = opened
+            .client
+            .sdk()
+            .config()
+            .timeout_config()
+            .expect("SQS client should have a request timeout");
+        assert_eq!(
+            timeout.operation_timeout(),
+            Some(Duration::from_millis(275))
+        );
     }
 }

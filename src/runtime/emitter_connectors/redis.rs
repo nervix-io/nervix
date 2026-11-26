@@ -28,17 +28,18 @@ impl EmitterConnectorStarter {
         batch: Option<EmitterBatchPolicy>,
     ) -> EmitterRuntimeResult<Box<dyn EmitterConnector>> {
         let opened = {
-            let pool = context.lease_redis_pool(connector).await?;
+            let lease = context
+                .lease_pooled_client::<RedisCommandPool>(&connector.client, connector.pool)
+                .await?;
             Self::record(
                 label,
                 codec,
                 batch,
                 RedisPubSubEmitter::open(
                     RedisPubSubEmitterConfig {
-                        pool,
                         channel: connector.channel.clone(),
                     },
-                    context.emitter_host(),
+                    context.emitter_host_leasing(lease),
                 )
                 .await,
             )?

@@ -544,6 +544,31 @@ fn recognition_requires_actual_definition_and_receiver_identity() {
 }
 
 #[test]
+fn host_service_catalog_names_only_the_services_a_handle_hands_over() {
+    use crate::rules::host_service;
+
+    for service in [
+        "cancellation",
+        "dns",
+        "domain_offsets",
+        "executor",
+        "general_errors",
+        "metrics",
+        "pool",
+        "readiness",
+        "signaling",
+        "staging",
+        "status",
+        "tls_policy",
+    ] {
+        assert!(host_service(service), "{service}");
+    }
+    for unknown in ["", "DNS", "dns ", "resolver", "host_service", "telepathy"] {
+        assert!(!host_service(unknown), "{unknown}");
+    }
+}
+
+#[test]
 fn audit_catalogs_resolve_owners_and_conversions() {
     use crate::audit::{
         KeyedAccess, checked_operation, copies_text, copies_value, fallback, keyed_access,

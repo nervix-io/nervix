@@ -7,23 +7,13 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     EmitterConnector as _, EmitterRecord, EmitterRecordId, UndeclaredConnectorEvent,
 };
-use nervix_connector_fake::FakeEmitterHost;
+use nervix_connector_fake::{FakeEmitterHost, FakePooledClientWaits};
 use nervix_models::{ConnectorEvent, Timestamp};
 
 use super::{counting_redis::CountingRedis, test_fixture::Fixture, *};
 
-struct Pool(RedisCommandPool);
-
-impl RedisPoolServices for Pool {
-    fn pool(&self) -> RedisCommandPool {
-        self.0.clone()
-    }
-    fn begin_pool_wait(&self) -> RedisPoolWait {
-        RedisPoolWait::new(())
-    }
-}
-
-async fn config(fixture: &Fixture, redis: &CountingRedis) -> RedisPubSubEmitterConfig {
+/// The lease a host takes for one emitter on a command pool it opened against the fixture peer.
+async fn lease(fixture: &Fixture, redis: &CountingRedis) -> PooledClientLease<RedisCommandPool> {
     let pool = open_redis_command_pool(
         &[ClientConfigEntry {
             key: "addr".into(),
@@ -35,8 +25,11 @@ async fn config(fixture: &Fixture, redis: &CountingRedis) -> RedisPubSubEmitterC
     )
     .await
     .assured("the fixture peer accepts the configured local command connection");
+    PooledClientLease::new(Arc::new(pool), FakePooledClientWaits::default(), ())
+}
+
+fn config() -> RedisPubSubEmitterConfig {
     RedisPubSubEmitterConfig {
-        pool: RedisPoolHandle::new(Pool(pool)),
         channel: RedisChannelName::parse("declared_events")
             .assured("the fixed fixture channel name is valid"),
     }
@@ -58,9 +51,10 @@ async fn successful_publish_counts_only_zero_receivers_and_keeps_every_record_de
     for (response, expected) in [(b":0\r\n".as_slice(), 2), (b":1\r\n".as_slice(), 0)] {
         let redis = CountingRedis::start_with_publish_response(response).await;
         let host = FakeEmitterHost::declaring(RedisPubSubEmitter::KIND.capabilities().events);
-        let mut emitter = RedisPubSubEmitter::open(config(&fixture, &redis).await, host.host())
-            .await
-            .assured("the fixture host declares the event this emitter resolves");
+        let mut emitter =
+            RedisPubSubEmitter::open(config(), host.leasing(lease(&fixture, &redis).await))
+                .await
+                .assured("the fixture host declares the event this emitter resolves");
         assert_eq!(
             host.observations().events[&ConnectorEvent::PublishedWithoutSubscribers],
             0
@@ -87,9 +81,10 @@ async fn a_failed_publish_contributes_no_successful_zero_receiver_event() {
     let fixture = Fixture::start().await;
     let redis = CountingRedis::start_with_publish_response(b"-ERR unavailable\r\n").await;
     let host = FakeEmitterHost::declaring(RedisPubSubEmitter::KIND.capabilities().events);
-    let mut emitter = RedisPubSubEmitter::open(config(&fixture, &redis).await, host.host())
-        .await
-        .assured("the fixture host declares the event this emitter resolves");
+    let mut emitter =
+        RedisPubSubEmitter::open(config(), host.leasing(lease(&fixture, &redis).await))
+            .await
+            .assured("the fixture host declares the event this emitter resolves");
     let result = emitter.publish(vec![record(0)]).await.into_parts();
     assert!(result.delivered.is_empty());
     assert!(result.rejected.is_empty());
@@ -105,8 +100,9 @@ async fn a_host_refuses_an_undeclared_event_during_emitter_construction() {
     let fixture = Fixture::start().await;
     let redis = CountingRedis::start().await;
     let host = FakeEmitterHost::default();
-    let Err(error) = RedisPubSubEmitter::open(config(&fixture, &redis).await, host.host()).await
-    else {
+    let opened =
+        RedisPubSubEmitter::open(config(), host.leasing(lease(&fixture, &redis).await)).await;
+    let Err(error) = opened else {
         panic!("a host declaring no events cannot construct this emitter");
     };
     let cause = error

@@ -68,6 +68,7 @@ contract and a violated contract require different corrections.
 | `partial_report_fields` | A report recorded as a tracing field renders its whole context chain. [Errors](errors-and-diagnostics.md#rendering) owns the rendering contract. | `error = %format_args!("{error:#}")`; a debug field; `%error` over an error that is not a report. | `%error`, `%self.error` or a written-out `display` field over a report, directly or through a borrow, box or shared owner. | Compiler `partial_report_field`; assigned, shorthand, owner-field, explicit and renamed `display`, alias, authored-macro, unrelated same-named type and function, and exact-expectation fixtures. |
 | `bare_unwrap_and_expect` | A canonical Option/Result panic needs a construction or checked guarantee, expressed through meticulous. | `verified` after checking the condition; an unrelated object's method named `expect`. | Canonical `unwrap` or `expect`, including aliases and UFCS. | Compiler `bare_panic`; canonical/custom methods, dereference and call-form fixtures. |
 | `model_matches_in_data_plane` | Configuration Models stay inside their owning boundary; data plane and connector engines consume plans. | A vocabulary Model or a typed connector plan. | A forbidden Model in a body, normalized interface or nested aggregate. | Compiler `model_in_data_plane`; source `layer`, `value` and `input` contracts, cross-crate and projection fixtures. |
+| `undeclared_host_services` | An ingestor or an emitter reaches the node only through the services of its host handle, and code reaches only the host services its owner declares. [Connector Crates And The Connector Contract](connector-contract.md#host-handles-and-declared-services) owns the handles and their services. | A module that declares `dns` and `executor` and calls both accessors; a nested module that inherits the declaration; an unrelated type's method of the same name; a harness that asserts what a handle hands over. | A call, a qualified call or a function reference to an accessor whose service the narrowest `host_services` contract of its owner does not list, or that no contract covers, a product layer included. | Compiler `undeclared_host_service`; method, qualified, alias and function-reference forms, an authored macro, narrower and inherited declarations, a same-named unrelated method, a harness and a product layer without a contract, metadata across crates, exact spans, and fulfilled, unfulfilled, widened and invalid contract fixtures. |
 | `parser_imports_outside_edges` | Language dependencies belong to the language and its declared edges. | The session adapter consuming public parsing; a runtime consuming Models. | A language reference outside its authorized layer, including aliases. | Compiler `parser_dependency` plus disjoint inactive import/manifest provenance; qualified names, reexports, foreign items and dependency fixtures. |
 | `data_plane_cluster_awaits` | Recurring processing retains observations instead of awaiting cluster control access. | A lifecycle observation; reading an installed immutable publication. | Recurring work awaiting a declared cluster-access capability. | Compiler `cluster_await`; direct, bound-future, helper and trait fixtures. |
 | `string_node_ids` | Declared node identities use the shared typed vocabulary. [Typed States](typed-states.md#source-owned-identity-and-installation-contracts) owns the identity contract. | `ClusterNodeId`; an ordinary string unrelated to node identity. | A declared identity interface or field represented by a string. | Compiler `node_identity`; alias, interface, aggregate, field and metadata fixtures. |
@@ -98,7 +99,7 @@ integer/Duration overflow choice this family enforces.
 
 ## Source Contracts
 
-What the compiler cannot infer is stated once, at its owner, in one of nine annotations. Each is
+What the compiler cannot infer is stated once, at its owner, in one of eleven annotations. Each is
 gated as `#[cfg_attr(nervix_lint, nervix::...)]`: only the analysis driver registers the `nervix`
 tool and sets that cfg, so stable product and browser builds never see an annotation. Every
 annotation carries a reason. An unknown `nervix::` annotation, a duplicated or misplaced one, or a
@@ -110,11 +111,26 @@ kind its annotation does not accept fails as `nervix::invalid_contract`.
 | `dispatch` | callable | The external driver or callback boundary that recurring execution enters through generic, dynamic-trait or function-pointer dispatch | [Source contracts](data-plane-concurrency.md#source-contracts) |
 | `layer(primitives\|vocabulary\|language\|engine\|decisions\|data_plane\|control_plane\|edge\|harness)` | crate, module, type, trait, impl or callable | The layer that owns the code | [Resolved architecture boundaries](data-plane-concurrency.md#resolved-architecture-boundaries) |
 | `input(plans)` | crate, module, type, trait or callable | An engine that receives validated plans, which its layer alone does not grant | [Resolved architecture boundaries](data-plane-concurrency.md#resolved-architecture-boundaries) |
-| `value(model\|name\|cluster_access)` | type or trait | The configuration Model union, the shared name vocabulary and the cluster observation capability | [Resolved architecture boundaries](data-plane-concurrency.md#resolved-architecture-boundaries) |
+| `value(model\|name\|cluster_access\|host_handle)` | type or trait | The configuration Model union, the shared name vocabulary, the cluster observation capability and a connector's host handle | [Resolved architecture boundaries](data-plane-concurrency.md#resolved-architecture-boundaries); a host handle: [Host handles and declared services](connector-contract.md#host-handles-and-declared-services) |
+| `host_service(<service>)` | callable | The one host service this method of a host handle hands to its caller | [Host handles and declared services](connector-contract.md#host-handles-and-declared-services) |
+| `host_services(<service>, ...)` | crate, module, type, trait, impl or callable | The host services the owner's code reaches through a host handle | [Host handles and declared services](connector-contract.md#host-handles-and-declared-services) |
 | `identity(node)` | vocabulary type, field, parameter, type alias or callable return | A node identity | [Typed States](typed-states.md#source-owned-identity-and-installation-contracts) |
 | `state(installed\|mutable)` | field | An installation-only field, or a genuinely replaceable one with its lifetime | [Typed States](typed-states.md#source-owned-identity-and-installation-contracts) |
 | `error_boundary(outcome\|library)` | exact error type or function return contract | An ordinary outcome or a modeled library error contract | [Errors And Diagnostics](errors-and-diagnostics.md) |
 | `constant(fixed)` | `const` item | A constant fixed by a wire format, RFC, persisted layout, ABI or invariant | [Hidden Tunables](#hidden-tunables) and [Node Settings](node-settings.md) |
+
+The host-service contracts name services from the finite list in the rule catalog
+(`report/src/rules.rs`): `cancellation`, `dns`, `domain_offsets`, `executor`, `general_errors`,
+`metrics`, `pool`, `readiness`, `signaling`, `staging`, `status` and `tls_policy`. A new service
+joins that list in the change that adds the accessor handing it over. `host_services` lists at
+least one service, each once. The narrowest contracted owner of a call decides: a function's
+contract replaces its module's, a module's replaces its parent's, and a type's contract covers
+every implementation written for that type. A narrower contract never extends a wider one, so each
+owner's list reads as everything its code reaches. Every public method with a receiver on a type
+marked `value(host_handle)` carries `host_service`, so a handle offers nothing a declaration cannot
+name; a constructor, which has no receiver, hands nothing over. A harness is outside the rule: an
+owner whose nearest `layer` contract is `harness` declares no services, because a test asserts what
+a handle hands over and a scripted connector stands in for any real one.
 
 A contract is a reviewed assertion, not a proof. The compiler checks its placement, its kind and the
 effects it supports, and a contract moves with its source owner and crosses crate metadata. It does

@@ -21,6 +21,15 @@
         reason = "owns the engines and infrastructure boundary declared above"
     )
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        tls_policy,
+        reason = "the Syslog collector emitter dials through its node's resolver under the node's \
+                  outward TLS policy"
+    )
+)]
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -52,10 +61,11 @@ use crate::config::{SyslogConfigError, tls_client_config};
 const SYSLOG: &str = "syslog";
 
 /// What one Syslog emitter sends through: the entries its client declares its transport with.
+///
+/// The node resolver every connection resolves the collector's host through, and the outward TLS
+/// policy a TLS transport's handshakes take, reach the emitter through its host handle.
 pub struct SyslogCollectorEmitterConfig {
-    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
-    pub dns: DnsResolver,
 }
 
 pub struct SyslogCollectorEmitter {
@@ -94,8 +104,14 @@ enum SyslogPayloadError {
 impl SyslogCollectorEmitter {
     async fn prepare(
         config: SyslogCollectorEmitterConfig,
-        _host: EmitterHost,
+        host: EmitterHost,
     ) -> EmitterStartResult<Self> {
+        // A node without its resolver cannot open the emitter at all, so that is reported before
+        // anything its configuration says.
+        let dns = host
+            .dns()
+            .change_context(EmitterOpenError::Initialize { connector: SYSLOG })?;
+        let tls_policy = host.tls_policy();
         let client = Self::client_config(&config.config)?;
         let connect_timeout = Self::connect_timeout(&config.config)?;
         let write_timeout = Self::write_timeout(&config.config)?;
@@ -117,8 +133,7 @@ impl SyslogCollectorEmitter {
             };
             Some((
                 TlsConnector::from(
-                    tls_client_config(&config.config, &config.tls_policy)
-                        .map_err(Self::config_error)?,
+                    tls_client_config(&config.config, &tls_policy).map_err(Self::config_error)?,
                 ),
                 name,
             ))
@@ -128,7 +143,7 @@ impl SyslogCollectorEmitter {
         Ok(Self {
             sender: None,
             client,
-            dns: config.dns,
+            dns,
             connect_timeout,
             tls,
             write_timeout,
@@ -858,6 +873,74 @@ mod tests {
             .await
             .assured("the hosts-file address was dialled");
         assert_eq!(fixture.authority.questions_for("listed.nervix.test"), 0);
+    }
+
+    /// A node without its resolver cannot open the emitter, and says so before anything the
+    /// emitter's configuration says: these entries declare no transport at all.
+    #[nervix_primitives::test]
+    async fn an_emitter_on_a_node_without_its_resolver_fails_to_open_and_names_the_resolver() {
+        let opened = <SyslogCollectorEmitter as nervix_connector::EmitterConnector>::open(
+            SyslogCollectorEmitterConfig { config: Vec::new() },
+            nervix_connector_fake::FakeEmitterHost::default().host(),
+        )
+        .await;
+        let error = match opened {
+            Ok(_) => panic!("an emitter that dials by name needs its node's resolver"),
+            Err(error) => error,
+        };
+
+        // The failure is the node's, not the configuration's, so the host opens the emitter again.
+        assert_eq!(
+            *error.current_context(),
+            EmitterOpenError::Initialize { connector: SYSLOG }
+        );
+        assert_eq!(
+            error.downcast_ref::<nervix_connector::HostServiceError>(),
+            Some(&nervix_connector::HostServiceError::DnsNotInstalled)
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_dials_through_the_resolver_of_the_handle_it_is_opened_with() {
+        // Only the fixture's resolver knows this name, so a connection proves whose resolver the
+        // emitter kept.
+        let fixture = DnsFixture::start("127.0.7.2 handle.nervix.test\n").await;
+        let listener = nervix_primitives::net::TcpListener::bind("127.0.7.2:0")
+            .await
+            .assured("a loopback TCP port is available");
+        let port = listener
+            .local_addr()
+            .assured("the listener is bound")
+            .port();
+        let config = vec![
+            ClientConfigEntry {
+                key: "protocol".to_string(),
+                value: "tcp".to_string(),
+            },
+            ClientConfigEntry {
+                key: "addr".to_string(),
+                value: format!("handle.nervix.test:{port}"),
+            },
+        ];
+        let mut emitter = <SyslogCollectorEmitter as nervix_connector::EmitterConnector>::open(
+            SyslogCollectorEmitterConfig { config },
+            nervix_connector_fake::FakeEmitterHost::default()
+                .with_dns(fixture.resolver.clone())
+                .host(),
+        )
+        .await
+        .assured("the node provides the resolver the emitter dials through");
+
+        emitter
+            .resume()
+            .await
+            .assured("the name the handle's resolver lists has a listener");
+
+        listener
+            .accept()
+            .await
+            .assured("the address the handle's resolver listed was dialled");
+        assert!(!emitter.needs_resume());
     }
 
     #[nervix_primitives::test]

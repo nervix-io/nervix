@@ -26,4 +26,5 @@ url = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
+nervix-connector-fake = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }

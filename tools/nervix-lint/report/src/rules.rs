@@ -1,4 +1,5 @@
-//! Finite synchronization APIs identified by resolved definition and normalized receiver.
+//! Finite synchronization APIs identified by resolved definition and normalized receiver, and the
+//! finite set of services a connector host handle hands over.
 //! This is rule code; it contains no product-source classifications.
 
 use crate::Acquisition;
@@ -230,5 +231,26 @@ pub fn may_acquire(operation: &str) -> bool {
             | "write"
             | "write_arc"
             | "write_owned"
+    )
+}
+
+/// Whether `name` is a service a connector host handle hands over, as the `host_service` and
+/// `host_services` source contracts name it. A new service joins this list in the change that adds
+/// the accessor handing it over.
+pub fn host_service(name: &str) -> bool {
+    matches!(
+        name,
+        "cancellation"
+            | "dns"
+            | "domain_offsets"
+            | "executor"
+            | "general_errors"
+            | "metrics"
+            | "pool"
+            | "readiness"
+            | "signaling"
+            | "staging"
+            | "status"
+            | "tls_policy"
     )
 }

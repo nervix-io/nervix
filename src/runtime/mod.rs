@@ -494,7 +494,7 @@ use emitter_supervision::{
 };
 use emitter_task::{
     EmitterConnectorContext, EmitterRuntimeError, EmitterRuntimeResult, emitter_error_message,
-    emitter_init_error, emitter_publish_error_is_retryable, emitter_report,
+    emitter_publish_error_is_retryable, emitter_report,
 };
 use emitter_task_programs::EmitterTaskPrograms;
 use emitter_values::{
@@ -591,7 +591,7 @@ use message_error_delivery::{
 use message_error_plan::{
     BoundMessageErrorRoute, BoundMessageErrorRoutes, MessageErrorRouteBindingContext,
 };
-use nervix_connector_kafka::KafkaOffsetPosition;
+use nervix_connector::DomainOffsetPosition;
 pub(in crate::runtime) use nervix_models::IngestorMetadataDeclaration;
 use nervix_models::{DeduplicatorName, ReingestorName};
 pub(in crate::runtime) use node::RuntimeInner;
@@ -681,7 +681,7 @@ use scheduled_node::{
     EmitterTaskBuildDeps, EmitterTaskDeps, ExecutionBuildDeps, PlacedNodeState, PlacementTasks,
     ScheduledNodePlacement, ScheduledNodeTask,
 };
-pub(in crate::runtime) use shared_clients::{SharedClientError, SharedClientLease};
+pub(in crate::runtime) use shared_clients::SharedClientError;
 use snapshot_staging::{SnapshotStaging, SnapshotStagingLimits};
 pub(crate) use snapshot_staging::{
     SnapshotStagingError, StagedArtifact, StagedArtifactReader, StagedSnapshotWriter,

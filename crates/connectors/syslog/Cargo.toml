@@ -15,6 +15,7 @@ default = []
 shuttle = [
   "dep:shuttle",
   "nervix-connector/shuttle",
+  "nervix-connector-fake/shuttle",
   "nervix-model-harness/shuttle",
   "nervix-primitives/shuttle",
 ]
@@ -52,6 +53,7 @@ x509-parser = { workspace = true }
 [dev-dependencies]
 bolero = { workspace = true }
 criterion = { workspace = true }
+nervix-connector-fake = { workspace = true }
 nervix-model-harness = { workspace = true }
 nonzero_ext = { workspace = true }
 # The connection deadline checks run on a paused clock.

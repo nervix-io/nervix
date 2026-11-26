@@ -11,12 +11,11 @@ use std::{
     task::{Context, Waker},
 };
 
+use nervix_connector::PooledClientLease;
+use nervix_connector_fake::{FakePooledClient, FakePooledClientOpening};
 use nervix_models::{DomainPace, DomainStartPoint, DomainState, DomainStatus, SchemaFingerprint};
 
-use super::{
-    shared_clients::{PoolWaitRegistration, PoolWaitSlot},
-    *,
-};
+use super::*;
 use crate::metrics::{ClientIngestorSeries, IngestorQuiesceMetrics};
 
 #[derive(Clone, Copy, Debug)]
@@ -63,7 +62,8 @@ pub struct TaskHandleBenchmark {
     domain: DomainName,
     ingestor: IngestorName,
     status: task_status::TaskStatus<u8>,
-    pool: PoolWaitRegistration,
+    /// A pooled emitter's lease, whose checkout publishes its wait through this node.
+    pool: PooledClientLease<FakePooledClient>,
     confirmations: Arc<AtomicUsize>,
     ingest: IngestTaskHandles,
     generator: Arc<AckRootTracker>,
@@ -169,10 +169,22 @@ impl TaskHandleBenchmark {
             None,
             nervix_models::EmitterEntityKind::Postgres(nervix_models::PostgresEmitterEntity::Table),
         );
-        let pool = runtime.register_pool_wait(
+        let pool_waits = runtime.register_pool_wait(
             DomainNodeUnitRef::single(entity.clone()),
             ClientName::parse("pool").assured("the client is valid"),
             pool_metrics,
+        );
+        let pool = PooledClientLease::new(
+            Arc::new(FakePooledClient {
+                opening: FakePooledClientOpening {
+                    config: Vec::new(),
+                    bounds: nervix_models::ClientPoolBounds::new(0, std::num::NonZeroU32::MIN)
+                        .assured("zero is below one"),
+                    resolved_through_node: false,
+                },
+            }),
+            pool_waits,
+            (),
         );
         let confirmations = Arc::new(AtomicUsize::new(0));
         let generator = runtime.domain_ack_root_tracker(&domain);
@@ -217,10 +229,7 @@ impl TaskHandleBenchmark {
         match path {
             TaskHandlePath::HealthyStatus => self.status.clear(),
             TaskHandlePath::ReadyPoolBorrow => {
-                let mut borrow = std::pin::pin!(PoolWaitSlot::borrow(
-                    &self.pool.slot,
-                    std::future::ready(())
-                ));
+                let mut borrow = std::pin::pin!(self.pool.checkout(std::future::ready(())));
                 assert!(
                     borrow
                         .as_mut()

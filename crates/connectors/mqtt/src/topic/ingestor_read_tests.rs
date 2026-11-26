@@ -12,10 +12,10 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerIngestorConnector as _, IngestorBatch, IngestorBatchRequest, IngestorConnector as _,
-    IngestorError, IngestorMessage as _, IngestorReadCancellation, RetainedIngestMetadata,
-    RetainedIngestMetadataValue,
+    IngestorError, IngestorHost, IngestorMessage as _, IngestorReadCancellation,
+    RetainedIngestMetadata, RetainedIngestMetadataValue,
 };
-use nervix_dns::DnsResolver;
+use nervix_connector_fake::FakeIngestorHost;
 use nervix_models::{ClientConfigEntry, MqttClientConfig, MqttQos, MqttSession};
 use nervix_primitives::{
     sync::mpsc,
@@ -29,7 +29,6 @@ use super::{
     MqttTopicIngestorResult, MqttTopicIngestorSettings, PublishRead, PublishReadOutcome,
 };
 use crate::topic::{
-    ingestor::overflow_fixture::ReadAheadOverflowFixture,
     scripted_broker::{ScriptedBroker, ScriptedConnection},
     test_fixtures::DnsFixture,
 };
@@ -320,20 +319,23 @@ fn default_admission_bytes() -> usize {
     usize::try_from(admission.get()).assured("the declared admission bound fits the address space")
 }
 
-/// One ACK-mode ingestor instance subscribing to `events` at QoS 1 through `addr` and `dns`, whose
-/// publishes wait on their acknowledgements `window` at a time.
-fn acknowledged_plan(addr: &str, dns: DnsResolver, window: NonZeroU64) -> MqttTopicIngestorPlan {
-    acknowledged_plan_at(addr, dns, window, MqttQos::Qos1)
+/// The handle of an ingestor instance on a node whose resolver is `fixture`'s, which a check hands
+/// to the instance's open and to every resume and read it drives.
+fn resolving_host(fixture: &DnsFixture) -> IngestorHost {
+    FakeIngestorHost::default()
+        .with_dns(fixture.dns.clone())
+        .host()
 }
 
-/// One ACK-mode ingestor instance subscribing to `events` at `qos` through `addr` and `dns`, whose
-/// publishes wait on their acknowledgements `window` at a time.
-fn acknowledged_plan_at(
-    addr: &str,
-    dns: DnsResolver,
-    window: NonZeroU64,
-    qos: MqttQos,
-) -> MqttTopicIngestorPlan {
+/// One ACK-mode ingestor instance subscribing to `events` at QoS 1 through `addr`, whose publishes
+/// wait on their acknowledgements `window` at a time.
+fn acknowledged_plan(addr: &str, window: NonZeroU64) -> MqttTopicIngestorPlan {
+    acknowledged_plan_at(addr, window, MqttQos::Qos1)
+}
+
+/// One ACK-mode ingestor instance subscribing to `events` at `qos` through `addr`, whose publishes
+/// wait on their acknowledgements `window` at a time.
+fn acknowledged_plan_at(addr: &str, window: NonZeroU64, qos: MqttQos) -> MqttTopicIngestorPlan {
     MqttTopicIngestorPlan::new(MqttTopicIngestorSettings {
         instances: vec![vec![ClientConfigEntry {
             key: "addr".to_string(),
@@ -346,8 +348,6 @@ fn acknowledged_plan_at(
         session: MqttSession::Persistent,
         qos,
         acknowledgement_window: Some(window),
-        dns,
-        read_ahead_overflow: ReadAheadOverflowFixture::new().report(),
         read_ahead: MqttReadAheadSettings::default(),
     })
 }
@@ -360,23 +360,25 @@ fn on_receipt() -> super::IngestorAcknowledgement {
     }
 }
 
-/// An ingestor of `plan` that `broker` granted its subscription at QoS 1, and the broker's end of
-/// the ingestor's connection.
+/// An ingestor of `plan`, opened and resumed with `host`, that `broker` granted its subscription at
+/// QoS 1, and the broker's end of the ingestor's connection.
 async fn subscribed(
     plan: &MqttTopicIngestorPlan,
+    host: &IngestorHost,
     broker: &ScriptedBroker,
 ) -> (MqttTopicIngestor, ScriptedConnection) {
-    subscribed_at(plan, broker, 1).await
+    subscribed_at(plan, host, broker, 1).await
 }
 
-/// An ingestor of `plan` that `broker` granted its subscription at the QoS `granted`, and the
-/// broker's end of the ingestor's connection.
+/// An ingestor of `plan`, opened and resumed with `host`, that `broker` granted its subscription at
+/// the QoS `granted`, and the broker's end of the ingestor's connection.
 async fn subscribed_at(
     plan: &MqttTopicIngestorPlan,
+    host: &IngestorHost,
     broker: &ScriptedBroker,
     granted: u8,
 ) -> (MqttTopicIngestor, ScriptedConnection) {
-    let mut ingestor = MqttTopicIngestor::open(plan, 0)
+    let mut ingestor = MqttTopicIngestor::open(plan, host, 0)
         .await
         .assured("an MQTT ingestor opens without connecting");
     let grant = async {
@@ -384,7 +386,7 @@ async fn subscribed_at(
         connection.grant_subscription_at(granted).await;
         connection
     };
-    let (resumed, connection) = tokio::join!(ingestor.resume(), grant);
+    let (resumed, connection) = tokio::join!(ingestor.resume(host), grant);
     resumed.assured("the scripted broker granted the subscription");
     (ingestor, connection)
 }
@@ -392,9 +394,10 @@ async fn subscribed_at(
 #[nervix_primitives::test]
 async fn cancelled_reads_through_the_client_hand_over_every_publish_the_broker_sent_once() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
-    let (mut ingestor, mut connection) = subscribed(&plan, &broker).await;
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN);
+    let (mut ingestor, mut connection) = subscribed(&plan, &host, &broker).await;
     connection.write_publish(1, b"1").await;
     connection.write_publish(2, b"2").await;
 
@@ -408,7 +411,8 @@ async fn cancelled_reads_through_the_client_hand_over_every_publish_the_broker_s
     let mut handed_over = Vec::new();
     while handed_over.len() < 2 {
         nervix_primitives::task::consume_budget().await;
-        let reading = ingestor.next_batch(request(8, Some(LONG_BATCH_TIMEOUT)), &cancellation);
+        let reading =
+            ingestor.next_batch(&host, request(8, Some(LONG_BATCH_TIMEOUT)), &cancellation);
         let Ok(batch) = timeout(OBSERVATION_BUDGET, reading).await else {
             panic!(
                 "a read the host cancelled was still gathering after {OBSERVATION_BUDGET:?}, \
@@ -444,19 +448,20 @@ async fn oversized_publishes_are_counted_and_acknowledged_before_the_next_publis
     for manual in [false, true] {
         nervix_primitives::task::consume_budget().await;
         let fixture = DnsFixture::start().await;
+        let host = resolving_host(&fixture);
         let broker = ScriptedBroker::start().await;
-        let mut plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
+        let mut plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN);
         if !manual {
             plan.acknowledgement = on_receipt();
         }
-        let (mut ingestor, mut connection) = subscribed(&plan, &broker).await;
+        let (mut ingestor, mut connection) = subscribed(&plan, &host, &broker).await;
         let maximum = default_admission_bytes();
         // The payload fills the admission bound, so its complete packet exceeds it.
         connection.write_publish(1, &vec![b'x'; maximum]).await;
         connection.write_publish(2, b"2").await;
 
         let cancellation = IngestorReadCancellation::new();
-        let read = ingestor.next_batch(request(8, Some(LONG_BATCH_TIMEOUT)), &cancellation);
+        let read = ingestor.next_batch(&host, request(8, Some(LONG_BATCH_TIMEOUT)), &cancellation);
         let Ok(result) = timeout(OBSERVATION_BUDGET, read).await else {
             panic!("the oversized publish was not consumed within {OBSERVATION_BUDGET:?}");
         };
@@ -470,7 +475,7 @@ async fn oversized_publishes_are_counted_and_acknowledged_before_the_next_publis
         };
         assert_eq!(packet_id, 1);
 
-        let messages = read_whole_batch(&mut ingestor, 1).await;
+        let messages = read_whole_batch(&mut ingestor, &host, 1).await;
         assert_eq!(messages[0].payload(), b"2");
         if manual {
             ingestor
@@ -488,8 +493,9 @@ async fn oversized_publishes_are_counted_and_acknowledged_before_the_next_publis
 #[nervix_primitives::test]
 async fn a_declared_max_packet_size_admits_a_publish_above_the_default_bound() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
-    let mut plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
+    let mut plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN);
     plan.instances = vec![vec![
         ClientConfigEntry {
             key: "addr".to_string(),
@@ -501,12 +507,12 @@ async fn a_declared_max_packet_size_admits_a_publish_above_the_default_bound() {
         },
     ]]
     .into();
-    let (mut ingestor, mut connection) = subscribed(&plan, &broker).await;
+    let (mut ingestor, mut connection) = subscribed(&plan, &host, &broker).await;
     // The payload alone fills the default bound, so only the declared one admits its packet.
     let payload = vec![b'x'; default_admission_bytes()];
     connection.write_publish(1, &payload).await;
 
-    let messages = read_whole_batch(&mut ingestor, 1).await;
+    let messages = read_whole_batch(&mut ingestor, &host, 1).await;
     assert_eq!(messages[0].payload(), payload.as_slice());
     ingestor
         .acknowledge(&positions(&messages))
@@ -521,20 +527,17 @@ async fn a_declared_max_packet_size_admits_a_publish_above_the_default_bound() {
 #[nervix_primitives::test]
 async fn an_oversized_publish_splits_a_parallel_batch_without_losing_its_neighbours() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan(
-        &broker.addr(),
-        fixture.dns.clone(),
-        nonzero_ext::nonzero!(3_u64),
-    );
-    let (mut ingestor, mut connection) = subscribed(&plan, &broker).await;
+    let plan = acknowledged_plan(&broker.addr(), nonzero_ext::nonzero!(3_u64));
+    let (mut ingestor, mut connection) = subscribed(&plan, &host, &broker).await;
     let maximum = default_admission_bytes();
     connection.write_publish(1, b"1").await;
     connection.write_publish(2, &vec![b'x'; maximum]).await;
     connection.write_publish(3, b"3").await;
 
     let cancellation = IngestorReadCancellation::new();
-    let reading = ingestor.next_batch(request(3, Some(LONG_BATCH_TIMEOUT)), &cancellation);
+    let reading = ingestor.next_batch(&host, request(3, Some(LONG_BATCH_TIMEOUT)), &cancellation);
     let Ok(result) = timeout(OBSERVATION_BUDGET, reading).await else {
         panic!("the partial batch was not returned within {OBSERVATION_BUDGET:?}");
     };
@@ -554,6 +557,7 @@ async fn an_oversized_publish_splits_a_parallel_batch_without_losing_its_neighbo
 
     let batch = ingestor
         .next_batch(
+            &host,
             request(3, Some(LONG_BATCH_TIMEOUT)),
             &IngestorReadCancellation::new(),
         )
@@ -567,7 +571,7 @@ async fn an_oversized_publish_splits_a_parallel_batch_without_losing_its_neighbo
         panic!("the oversized acknowledgement did not reach the broker");
     };
     assert_eq!(packet_id, 2);
-    let last = read_whole_batch(&mut ingestor, 1).await;
+    let last = read_whole_batch(&mut ingestor, &host, 1).await;
     assert_eq!(Read::ids(&last), vec![b'3']);
     ingestor
         .acknowledge(&positions(&last))
@@ -582,14 +586,15 @@ async fn an_oversized_publish_splits_a_parallel_batch_without_losing_its_neighbo
 #[nervix_primitives::test]
 async fn a_connection_the_broker_closes_fails_the_read_and_is_dropped() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
-    let (mut ingestor, mut connection) = subscribed(&plan, &broker).await;
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN);
+    let (mut ingestor, mut connection) = subscribed(&plan, &host, &broker).await;
     connection.write_publish(1, b"1").await;
     drop(connection);
 
     let cancellation = IngestorReadCancellation::new();
-    let reading = ingestor.next_batch(request(8, Some(LONG_BATCH_TIMEOUT)), &cancellation);
+    let reading = ingestor.next_batch(&host, request(8, Some(LONG_BATCH_TIMEOUT)), &cancellation);
     let Ok(read) = timeout(OBSERVATION_BUDGET, reading).await else {
         panic!(
             "a read whose connection the broker closed was still waiting after \
@@ -618,13 +623,18 @@ async fn a_connection_the_broker_closes_fails_the_read_and_is_dropped() {
 const PINGREQ: u8 = 12;
 
 /// Reads one complete batch of `messages` publishes the scripted broker already wrote, through the
-/// client.
+/// client, with the `host` the ingestor was opened with.
 async fn read_whole_batch(
     ingestor: &mut MqttTopicIngestor,
+    host: &IngestorHost,
     messages: usize,
 ) -> Vec<MqttTopicIngestorMessage> {
     let cancellation = IngestorReadCancellation::new();
-    let reading = ingestor.next_batch(request(messages, Some(LONG_BATCH_TIMEOUT)), &cancellation);
+    let reading = ingestor.next_batch(
+        host,
+        request(messages, Some(LONG_BATCH_TIMEOUT)),
+        &cancellation,
+    );
     let Ok(batch) = timeout(OBSERVATION_BUDGET, reading).await else {
         panic!("the client received {messages} publishes within {OBSERVATION_BUDGET:?}");
     };
@@ -666,14 +676,15 @@ async fn read_pubacks(connection: &mut ScriptedConnection, count: usize) -> Vec<
 #[nervix_primitives::test]
 async fn an_acknowledged_batch_has_written_every_puback_it_asks_for() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
     let window = NonZeroU64::new(3).assured("three is non-zero");
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), window);
-    let (mut ingestor, mut connection) = subscribed(&plan, &broker).await;
+    let plan = acknowledged_plan(&broker.addr(), window);
+    let (mut ingestor, mut connection) = subscribed(&plan, &host, &broker).await;
     for packet_id in 1..=3_u16 {
         connection.write_publish(packet_id, b"x").await;
     }
-    let read = read_whole_batch(&mut ingestor, 3).await;
+    let read = read_whole_batch(&mut ingestor, &host, 3).await;
 
     let positions = positions(&read);
     let acknowledging = ingestor.acknowledge(&positions);
@@ -726,14 +737,15 @@ async fn release(connection: &mut ScriptedConnection, packet_ids: &[u16]) -> Vec
 #[nervix_primitives::test]
 async fn an_acknowledged_exactly_once_batch_has_written_every_pubrec_and_completes_each_release() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
     let window = NonZeroU64::new(3).assured("three is non-zero");
-    let plan = acknowledged_plan_at(&broker.addr(), fixture.dns.clone(), window, MqttQos::Qos2);
-    let (mut ingestor, mut connection) = subscribed_at(&plan, &broker, 2).await;
+    let plan = acknowledged_plan_at(&broker.addr(), window, MqttQos::Qos2);
+    let (mut ingestor, mut connection) = subscribed_at(&plan, &host, &broker, 2).await;
     for packet_id in 1..=3_u16 {
         connection.write_publish_exactly_once(packet_id, b"x").await;
     }
-    let read = read_whole_batch(&mut ingestor, 3).await;
+    let read = read_whole_batch(&mut ingestor, &host, 3).await;
     for message in &read {
         assert_eq!(message.position().publish().qos, QoS::ExactlyOnce);
     }
@@ -763,9 +775,10 @@ const RETAIN_AS_PUBLISHED: u8 = 0b0000_1000;
 #[nervix_primitives::test]
 async fn a_subscription_asks_the_broker_to_keep_the_retain_flag_its_publisher_wrote() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
-    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN);
+    let mut ingestor = MqttTopicIngestor::open(&plan, &host, 0)
         .await
         .assured("an MQTT ingestor opens without connecting");
     let subscribing = async {
@@ -778,7 +791,7 @@ async fn a_subscription_asks_the_broker_to_keep_the_retain_flag_its_publisher_wr
             .await;
         subscribe
     };
-    let (resumed, subscribe) = tokio::join!(ingestor.resume(), subscribing);
+    let (resumed, subscribe) = tokio::join!(ingestor.resume(&host), subscribing);
     resumed.assured("the scripted broker granted the subscription");
 
     // The packet identifier, an empty property section, and the filter with its two-byte length
@@ -793,16 +806,17 @@ async fn a_subscription_asks_the_broker_to_keep_the_retain_flag_its_publisher_wr
 #[nervix_primitives::test]
 async fn a_rejected_publish_is_read_again_with_the_row_its_packet_arrived_with() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
     let window = NonZeroU64::new(2).assured("two is non-zero");
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), window);
-    let (mut ingestor, mut connection) = subscribed(&plan, &broker).await;
+    let plan = acknowledged_plan(&broker.addr(), window);
+    let (mut ingestor, mut connection) = subscribed(&plan, &host, &broker).await;
     connection.write_publish(7, b"first delivery").await;
     connection
         .write_duplicate_retained_publish(8, b"delivered again")
         .await;
 
-    let first = read_whole_batch(&mut ingestor, 2).await;
+    let first = read_whole_batch(&mut ingestor, &host, 2).await;
     let rows = [
         RetainedIngestMetadata::capture(first[0].metadata().fields),
         RetainedIngestMetadata::capture(first[1].metadata().fields),
@@ -813,7 +827,7 @@ async fn a_rejected_publish_is_read_again_with_the_row_its_packet_arrived_with()
         panic!("a rejection on a live connection returned within its budget");
     };
     rejected.assured("a live connection replays what the host rejected");
-    let again = read_whole_batch(&mut ingestor, 2).await;
+    let again = read_whole_batch(&mut ingestor, &host, 2).await;
 
     assert_eq!(
         RetainedIngestMetadata::capture(again[0].metadata().fields),
@@ -838,16 +852,12 @@ async fn a_rejected_publish_is_read_again_with_the_row_its_packet_arrived_with()
 #[nervix_primitives::test]
 async fn a_rejected_exactly_once_publish_is_read_again_and_recorded_once_it_is_acknowledged() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan_at(
-        &broker.addr(),
-        fixture.dns.clone(),
-        NonZeroU64::MIN,
-        MqttQos::Qos2,
-    );
-    let (mut ingestor, mut connection) = subscribed_at(&plan, &broker, 2).await;
+    let plan = acknowledged_plan_at(&broker.addr(), NonZeroU64::MIN, MqttQos::Qos2);
+    let (mut ingestor, mut connection) = subscribed_at(&plan, &host, &broker, 2).await;
     connection.write_publish_exactly_once(7, b"retried").await;
-    let first = read_whole_batch(&mut ingestor, 1).await;
+    let first = read_whole_batch(&mut ingestor, &host, 1).await;
     let first_positions = positions(&first);
     let rejecting = ingestor.reject(&first_positions);
     let Ok(rejected) = timeout(OBSERVATION_BUDGET, rejecting).await else {
@@ -855,7 +865,7 @@ async fn a_rejected_exactly_once_publish_is_read_again_and_recorded_once_it_is_a
     };
     rejected.assured("a live connection replays what the host rejected");
 
-    let again = read_whole_batch(&mut ingestor, 1).await;
+    let again = read_whole_batch(&mut ingestor, &host, 1).await;
     assert_eq!(
         again[0].payload(),
         b"retried",
@@ -877,9 +887,10 @@ async fn a_rejected_exactly_once_publish_is_read_again_and_recorded_once_it_is_a
 #[nervix_primitives::test]
 async fn a_connection_sends_its_keep_alive_while_its_ingestor_reads_nothing() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
-    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN);
+    let mut ingestor = MqttTopicIngestor::open(&plan, &host, 0)
         .await
         .assured("an MQTT ingestor opens without connecting");
     let grant = async {
@@ -887,7 +898,7 @@ async fn a_connection_sends_its_keep_alive_while_its_ingestor_reads_nothing() {
         connection.grant_subscription().await;
         connection
     };
-    let (resumed, mut connection) = tokio::join!(ingestor.resume(), grant);
+    let (resumed, mut connection) = tokio::join!(ingestor.resume(&host), grant);
     resumed.assured("the scripted broker granted the subscription");
 
     // From here on the ingestor reads nothing, as while its host waits on acknowledgement trees.
@@ -907,14 +918,15 @@ async fn a_connection_sends_its_keep_alive_while_its_ingestor_reads_nothing() {
 #[nervix_primitives::test]
 async fn a_batch_of_a_whole_window_of_publishes_is_acknowledged_without_waiting_for_room() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
     let window = NonZeroU64::new(1_500).assured("1,500 is non-zero");
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), window);
-    let (mut ingestor, mut connection) = subscribed(&plan, &broker).await;
+    let plan = acknowledged_plan(&broker.addr(), window);
+    let (mut ingestor, mut connection) = subscribed(&plan, &host, &broker).await;
     for packet_id in 1..=1_500_u16 {
         connection.write_publish(packet_id, b"x").await;
     }
-    let read = read_whole_batch(&mut ingestor, 1_500).await;
+    let read = read_whole_batch(&mut ingestor, &host, 1_500).await;
 
     let positions = positions(&read);
     let acknowledging = ingestor.acknowledge(&positions);
@@ -934,11 +946,12 @@ async fn a_batch_of_a_whole_window_of_publishes_is_acknowledged_without_waiting_
 #[nervix_primitives::test]
 async fn an_acknowledgement_after_its_connection_ended_fails_and_drops_the_connection() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
-    let (mut ingestor, mut connection) = subscribed(&plan, &broker).await;
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN);
+    let (mut ingestor, mut connection) = subscribed(&plan, &host, &broker).await;
     connection.write_publish(1, b"x").await;
-    let read = read_whole_batch(&mut ingestor, 1).await;
+    let read = read_whole_batch(&mut ingestor, &host, 1).await;
     drop(connection);
     let deadline = Instant::now()
         .checked_add(OBSERVATION_BUDGET)
@@ -993,21 +1006,17 @@ async fn an_acknowledgement_after_its_connection_ended_fails_and_drops_the_conne
 #[nervix_primitives::test]
 async fn every_downgraded_subscription_fails_before_the_ingestor_is_ready() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     for (requested, granted) in [(MqttQos::Qos1, 0), (MqttQos::Qos2, 0), (MqttQos::Qos2, 1)] {
         nervix_primitives::task::consume_budget().await;
         for manual in [false, true] {
             nervix_primitives::task::consume_budget().await;
             let broker = ScriptedBroker::start().await;
-            let mut plan = acknowledged_plan_at(
-                &broker.addr(),
-                fixture.dns.clone(),
-                NonZeroU64::MIN,
-                requested,
-            );
+            let mut plan = acknowledged_plan_at(&broker.addr(), NonZeroU64::MIN, requested);
             if !manual {
                 plan.acknowledgement = on_receipt();
             }
-            let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+            let mut ingestor = MqttTopicIngestor::open(&plan, &host, 0)
                 .await
                 .assured("opening does not connect");
             let grant = async {
@@ -1016,7 +1025,7 @@ async fn every_downgraded_subscription_fails_before_the_ingestor_is_ready() {
                 connection
             };
             let Ok((resumed, _connection)) = timeout(OBSERVATION_BUDGET, async {
-                tokio::join!(ingestor.resume(), grant)
+                tokio::join!(ingestor.resume(&host), grant)
             })
             .await
             else {
@@ -1075,9 +1084,10 @@ fn subscription_setup_keeps_the_connection_phase_within_two_words() {
 async fn cancelled_connection_setup_before_connack_releases_startup_resources() {
     for replacement in [false, true] {
         let fixture = DnsFixture::start().await;
+        let host = resolving_host(&fixture);
         let broker = ScriptedBroker::start().await;
-        let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
-        let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+        let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN);
+        let mut ingestor = MqttTopicIngestor::open(&plan, &host, 0)
             .await
             .assured("opening does not connect");
         if replacement {
@@ -1087,7 +1097,7 @@ async fn cancelled_connection_setup_before_connack_releases_startup_resources() 
                 connection
             };
             let (result, connection) = timeout(OBSERVATION_BUDGET, async {
-                tokio::join!(ingestor.resume(), refusal)
+                tokio::join!(ingestor.resume(&host), refusal)
             })
             .await
             .assured("the initial refusal completes");
@@ -1106,7 +1116,7 @@ async fn cancelled_connection_setup_before_connack_releases_startup_resources() 
                     }
                     broker.accept_without_reply().await
                 };
-                let mut resuming = ingestor.resume();
+                let mut resuming = ingestor.resume(&host);
                 timeout(OBSERVATION_BUDGET, async {
                 nervix_primitives::select! {
                     result = &mut resuming => panic!("setup finished before CONNACK: {result:?}"),
@@ -1133,9 +1143,10 @@ async fn cancelled_connection_setup_before_connack_releases_startup_resources() 
 #[nervix_primitives::test]
 async fn cancelled_subscription_setup_keeps_a_replacement_refusal() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
-    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN);
+    let mut ingestor = MqttTopicIngestor::open(&plan, &host, 0)
         .await
         .assured("opening does not connect");
     let refusal = async {
@@ -1144,7 +1155,7 @@ async fn cancelled_subscription_setup_keeps_a_replacement_refusal() {
         connection
     };
     let (result, connection) = timeout(OBSERVATION_BUDGET, async {
-        tokio::join!(ingestor.resume(), refusal)
+        tokio::join!(ingestor.resume(&host), refusal)
     })
     .await
     .assured("the initial refusal completes");
@@ -1163,7 +1174,7 @@ async fn cancelled_subscription_setup_keeps_a_replacement_refusal() {
                 assert_eq!(packet, 8, "the replacement is waiting for its SUBACK");
                 (connection, [body[0], body[1]])
             };
-            let mut resuming = ingestor.resume();
+            let mut resuming = ingestor.resume(&host);
             timeout(OBSERVATION_BUDGET, async {
             nervix_primitives::select! {
                 result = &mut resuming => panic!("setup finished before its SUBACK: {result:?}"),
@@ -1176,7 +1187,7 @@ async fn cancelled_subscription_setup_keeps_a_replacement_refusal() {
         .write(&[0x90, 4, packet_id[0], packet_id[1], 0, 0x87])
         .await;
     let result = timeout(OBSERVATION_BUDGET, async {
-        let mut resuming = ingestor.resume();
+        let mut resuming = ingestor.resume(&host);
         nervix_primitives::select! {
             result = &mut resuming => result,
             retained = broker.accept_retained_session() => {
@@ -1199,9 +1210,10 @@ async fn cancelled_subscription_setup_keeps_a_replacement_refusal() {
 #[nervix_primitives::test]
 async fn cancelled_subscription_setup_keeps_a_granted_publish() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
-    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN);
+    let mut ingestor = MqttTopicIngestor::open(&plan, &host, 0)
         .await
         .assured("opening does not connect");
     let (mut connection, packet_id) =
@@ -1212,7 +1224,7 @@ async fn cancelled_subscription_setup_keeps_a_granted_publish() {
                 assert_eq!(packet, 8, "the initial session is waiting for its SUBACK");
                 (connection, [body[0], body[1]])
             };
-            let mut resuming = ingestor.resume();
+            let mut resuming = ingestor.resume(&host);
             timeout(OBSERVATION_BUDGET, async {
             nervix_primitives::select! {
                 result = &mut resuming => panic!("setup finished before its SUBACK: {result:?}"),
@@ -1225,7 +1237,7 @@ async fn cancelled_subscription_setup_keeps_a_granted_publish() {
         .await;
     connection.write_publish(17, &[91]).await;
     timeout(OBSERVATION_BUDGET, async {
-        let mut resuming = ingestor.resume();
+        let mut resuming = ingestor.resume(&host);
         nervix_primitives::select! {
             result = &mut resuming => result,
             retained = broker.accept_retained_session() => {
@@ -1241,7 +1253,7 @@ async fn cancelled_subscription_setup_keeps_a_granted_publish() {
     let cancellation = IngestorReadCancellation::new();
     let batch = timeout(
         OBSERVATION_BUDGET,
-        ingestor.next_batch(request(1, None), &cancellation),
+        ingestor.next_batch(&host, request(1, None), &cancellation),
     )
     .await
     .assured("the granted session retains its queued publish")
@@ -1252,9 +1264,10 @@ async fn cancelled_subscription_setup_keeps_a_granted_publish() {
 #[nervix_primitives::test]
 async fn closing_pending_subscription_setup_releases_its_connection() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
-    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN);
+    let mut ingestor = MqttTopicIngestor::open(&plan, &host, 0)
         .await
         .assured("opening does not connect");
     let mut connection = {
@@ -1264,7 +1277,7 @@ async fn closing_pending_subscription_setup_releases_its_connection() {
             assert_eq!(packet, 8, "the subscription is awaiting SUBACK");
             connection
         };
-        let mut resuming = ingestor.resume();
+        let mut resuming = ingestor.resume(&host);
         timeout(OBSERVATION_BUDGET, async {
             nervix_primitives::select! {
                 result = &mut resuming => panic!("setup finished before SUBACK: {result:?}"),
@@ -1287,9 +1300,10 @@ async fn closing_pending_subscription_setup_releases_its_connection() {
 #[nervix_primitives::test]
 async fn an_accepted_retained_subscription_delivers_its_queued_publish() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
-    let (mut ingestor, connection) = subscribed(&plan, &broker).await;
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN);
+    let (mut ingestor, connection) = subscribed(&plan, &host, &broker).await;
     ingestor
         .suspend()
         .await
@@ -1301,7 +1315,7 @@ async fn an_accepted_retained_subscription_delivers_its_queued_publish() {
         connection
     };
     let (result, _connection) = timeout(OBSERVATION_BUDGET, async {
-        tokio::join!(ingestor.resume(), retained_session)
+        tokio::join!(ingestor.resume(&host), retained_session)
     })
     .await
     .assured("the accepted session resumes without another SUBSCRIBE");
@@ -1309,7 +1323,7 @@ async fn an_accepted_retained_subscription_delivers_its_queued_publish() {
     let cancellation = IngestorReadCancellation::new();
     let batch = timeout(
         OBSERVATION_BUDGET,
-        ingestor.next_batch(request(1, None), &cancellation),
+        ingestor.next_batch(&host, request(1, None), &cancellation),
     )
     .await
     .assured("the queued publish reaches the resumed connection")
@@ -1320,9 +1334,10 @@ async fn an_accepted_retained_subscription_delivers_its_queued_publish() {
 #[nervix_primitives::test]
 async fn a_refused_subscription_cannot_become_ready_from_a_retained_session() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
-    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN);
+    let mut ingestor = MqttTopicIngestor::open(&plan, &host, 0)
         .await
         .assured("opening does not connect");
     let refusal = async {
@@ -1331,7 +1346,7 @@ async fn a_refused_subscription_cannot_become_ready_from_a_retained_session() {
         connection
     };
     let (result, connection) = timeout(OBSERVATION_BUDGET, async {
-        tokio::join!(ingestor.resume(), refusal)
+        tokio::join!(ingestor.resume(&host), refusal)
     })
     .await
     .assured("the scripted broker answers the subscription within the observation budget");
@@ -1348,7 +1363,7 @@ async fn a_refused_subscription_cannot_become_ready_from_a_retained_session() {
         let _connection = broker.accept_retained_session().await;
     };
     let (result, ()) = timeout(OBSERVATION_BUDGET, async {
-        tokio::join!(ingestor.resume(), retained_session)
+        tokio::join!(ingestor.resume(&host), retained_session)
     })
     .await
     .assured("the retained-session answer and closed peer end the retry within the budget");
@@ -1370,9 +1385,10 @@ async fn a_refused_subscription_cannot_become_ready_from_a_retained_session() {
 #[nervix_primitives::test]
 async fn a_refused_subscription_retires_before_a_new_grant() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
-    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN);
+    let mut ingestor = MqttTopicIngestor::open(&plan, &host, 0)
         .await
         .assured("opening does not connect");
     let refusal = async {
@@ -1381,7 +1397,7 @@ async fn a_refused_subscription_retires_before_a_new_grant() {
         connection
     };
     let (result, connection) = timeout(OBSERVATION_BUDGET, async {
-        tokio::join!(ingestor.resume(), refusal)
+        tokio::join!(ingestor.resume(&host), refusal)
     })
     .await
     .assured("the scripted broker answers the subscription within the observation budget");
@@ -1410,7 +1426,7 @@ async fn a_refused_subscription_retires_before_a_new_grant() {
         replacement
     };
     let (result, _replacement) = timeout(OBSERVATION_BUDGET, async {
-        tokio::join!(ingestor.resume(), cleanup_and_grant)
+        tokio::join!(ingestor.resume(&host), cleanup_and_grant)
     })
     .await
     .assured("retirement and a new subscription complete within the observation budget");
@@ -1421,9 +1437,10 @@ async fn a_refused_subscription_retires_before_a_new_grant() {
 #[nervix_primitives::test]
 async fn a_downgraded_subscription_retires_its_session_before_another_attempt() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
-    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN);
+    let mut ingestor = MqttTopicIngestor::open(&plan, &host, 0)
         .await
         .assured("opening does not connect");
     let refused = async {
@@ -1432,7 +1449,7 @@ async fn a_downgraded_subscription_retires_its_session_before_another_attempt() 
         connection
     };
     let Ok((result, connection)) = timeout(OBSERVATION_BUDGET, async {
-        tokio::join!(ingestor.resume(), refused)
+        tokio::join!(ingestor.resume(&host), refused)
     })
     .await
     else {
@@ -1446,7 +1463,7 @@ async fn a_downgraded_subscription_retires_its_session_before_another_attempt() 
         let _connection = broker.accept_without_reply().await;
     };
     let Ok((result, ())) = timeout(OBSERVATION_BUDGET, async {
-        tokio::join!(ingestor.resume(), failed_cleanup)
+        tokio::join!(ingestor.resume(&host), failed_cleanup)
     })
     .await
     else {
@@ -1479,7 +1496,7 @@ async fn a_downgraded_subscription_retires_its_session_before_another_attempt() 
         replacement
     };
     let Ok((result, _replacement)) = timeout(OBSERVATION_BUDGET, async {
-        tokio::join!(ingestor.resume(), cleanup_and_grant)
+        tokio::join!(ingestor.resume(&host), cleanup_and_grant)
     })
     .await
     else {
@@ -1511,11 +1528,12 @@ async fn answer_retirement(broker: &ScriptedBroker) {
 #[nervix_primitives::test]
 async fn an_instance_owing_its_session_a_retirement_retires_it_before_it_first_subscribes() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
     let retirement = MqttSessionRetirement::outstanding();
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN)
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN)
         .with_first_connection_retirement(retirement.clone());
-    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+    let mut ingestor = MqttTopicIngestor::open(&plan, &host, 0)
         .await
         .assured("opening does not connect");
 
@@ -1526,7 +1544,7 @@ async fn an_instance_owing_its_session_a_retirement_retires_it_before_it_first_s
         replacement
     };
     let (result, _replacement) = timeout(OBSERVATION_BUDGET, async {
-        tokio::join!(ingestor.resume(), retirement_and_grant)
+        tokio::join!(ingestor.resume(&host), retirement_and_grant)
     })
     .await
     .assured("retirement and the first subscription complete within the observation budget");
@@ -1541,12 +1559,13 @@ async fn an_instance_owing_its_session_a_retirement_retires_it_before_it_first_s
 #[nervix_primitives::test]
 async fn an_instance_whose_session_owes_no_retirement_subscribes_on_its_first_connection() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
     let retirement = MqttSessionRetirement::outstanding();
     retirement.complete();
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN)
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN)
         .with_first_connection_retirement(retirement.clone());
-    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+    let mut ingestor = MqttTopicIngestor::open(&plan, &host, 0)
         .await
         .assured("opening does not connect");
 
@@ -1556,7 +1575,7 @@ async fn an_instance_whose_session_owes_no_retirement_subscribes_on_its_first_co
         connection
     };
     let (result, _connection) = timeout(OBSERVATION_BUDGET, async {
-        tokio::join!(ingestor.resume(), grant)
+        tokio::join!(ingestor.resume(&host), grant)
     })
     .await
     .assured("the first subscription completes within the observation budget");
@@ -1567,11 +1586,12 @@ async fn an_instance_whose_session_owes_no_retirement_subscribes_on_its_first_co
 #[nervix_primitives::test]
 async fn a_session_retirement_an_instance_could_not_finish_passes_to_the_next_instance() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
     let retirement = MqttSessionRetirement::outstanding();
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN)
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN)
         .with_first_connection_retirement(retirement.clone());
-    let mut first = MqttTopicIngestor::open(&plan, 0)
+    let mut first = MqttTopicIngestor::open(&plan, &host, 0)
         .await
         .assured("opening does not connect");
 
@@ -1581,7 +1601,7 @@ async fn a_session_retirement_an_instance_could_not_finish_passes_to_the_next_in
         let _connection = broker.accept_without_reply().await;
     };
     let (result, ()) = timeout(OBSERVATION_BUDGET, async {
-        tokio::join!(first.resume(), closed)
+        tokio::join!(first.resume(&host), closed)
     })
     .await
     .assured("the failed cleanup ends within the observation budget");
@@ -1595,7 +1615,7 @@ async fn a_session_retirement_an_instance_could_not_finish_passes_to_the_next_in
         .await
         .assured("closing an instance always succeeds");
 
-    let mut next = MqttTopicIngestor::open(&plan, 0)
+    let mut next = MqttTopicIngestor::open(&plan, &host, 0)
         .await
         .assured("opening does not connect");
     assert!(matches!(
@@ -1609,7 +1629,7 @@ async fn a_session_retirement_an_instance_could_not_finish_passes_to_the_next_in
         replacement
     };
     let (result, _replacement) = timeout(OBSERVATION_BUDGET, async {
-        tokio::join!(next.resume(), retirement_and_grant)
+        tokio::join!(next.resume(&host), retirement_and_grant)
     })
     .await
     .assured("retirement and the subscription complete within the observation budget");
@@ -1620,11 +1640,12 @@ async fn a_session_retirement_an_instance_could_not_finish_passes_to_the_next_in
 #[nervix_primitives::test]
 async fn a_subscription_setup_lost_after_retirement_retires_the_session_again() {
     let fixture = DnsFixture::start().await;
+    let host = resolving_host(&fixture);
     let broker = ScriptedBroker::start().await;
     let retirement = MqttSessionRetirement::outstanding();
-    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN)
+    let plan = acknowledged_plan(&broker.addr(), NonZeroU64::MIN)
         .with_first_connection_retirement(retirement.clone());
-    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+    let mut ingestor = MqttTopicIngestor::open(&plan, &host, 0)
         .await
         .assured("opening does not connect");
 
@@ -1637,7 +1658,7 @@ async fn a_subscription_setup_lost_after_retirement_retires_the_session_again() 
         assert_eq!(packet_type, 8, "the instance subscribes its filter");
     };
     let (result, ()) = timeout(OBSERVATION_BUDGET, async {
-        tokio::join!(ingestor.resume(), retirement_then_lost_setup)
+        tokio::join!(ingestor.resume(&host), retirement_then_lost_setup)
     })
     .await
     .assured("the lost setup ends within the observation budget");
@@ -1658,7 +1679,7 @@ async fn a_subscription_setup_lost_after_retirement_retires_the_session_again() 
         replacement
     };
     let (result, _replacement) = timeout(OBSERVATION_BUDGET, async {
-        tokio::join!(ingestor.resume(), retirement_and_grant)
+        tokio::join!(ingestor.resume(&host), retirement_and_grant)
     })
     .await
     .assured("retirement and the subscription complete within the observation budget");
