@@ -912,6 +912,7 @@ impl Runtime {
         let enforced = self
             .stop_teardown(domain)
             .is_some_and(|teardown| teardown.enforced);
+        let route_stop = self.domain_route_stop(domain);
         let emitter_finish_deadline = if enforced {
             Instant::now()
         } else {
@@ -979,7 +980,7 @@ impl Runtime {
         for (entity, task) in execution.generator_tasks {
             generators.push(StoppingTask {
                 owner: IngestorName::from(&entity.node.identifier),
-                task,
+                task: task.into_task(),
             });
         }
         self.await_shutdown_tasks_together(generators, domain, "generator")
@@ -989,7 +990,7 @@ impl Runtime {
             for task in tasks {
                 reingestors.push(StoppingTask {
                     owner: IngestorName::from(&entity.identifier),
-                    task,
+                    task: task.into_task(),
                 });
             }
         }
@@ -1041,9 +1042,11 @@ impl Runtime {
         for key in quiesce_keys {
             self.inner.node_quiesce_counters.remove(&key);
         }
+        // A reingestor's routes have no grace of their own: each finishes the delivery of every
+        // branch, or ends them at once when the stop is enforced.
         for (identifier, runtimes) in execution.branched_entrypoints {
             for runtime in runtimes {
-                runtime.shutdown(self.task_stop_grace()).await;
+                runtime.stop(route_stop).await;
                 info!(
                     domain = domain.as_str(),
                     entrypoint = identifier.as_str(),
@@ -1076,6 +1079,7 @@ impl Runtime {
     }
 
     pub(in crate::runtime) async fn stop_domain_ingestors(&self, domain: &DomainName) {
+        let route_stop = self.domain_route_stop(domain);
         let ingestors = self
             .inner
             .ingestors
@@ -1090,6 +1094,7 @@ impl Runtime {
                     domain,
                     &IngestorName::from(key.entity.identifier()),
                     key.unit,
+                    route_stop,
                 )
                 .await
             {

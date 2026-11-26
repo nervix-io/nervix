@@ -636,7 +636,8 @@ pub enum DatetimeFunction {
     DatePart { part: DatePart, zone: Zone },
     /// `date_trunc(unit, value[, zone])`.
     DateTrunc { unit: DatetimeUnit, zone: Zone },
-    /// `date_bin(unit, width, value, origin)`.
+    /// `date_bin(unit, width, value, origin)`, and `date_bin(width, value, origin)` with a
+    /// `DURATION` width.
     DateBin(DateBinWidth),
     /// `date_add(unit, amount, value[, zone])`.
     DateAdd { unit: DatetimeUnit, zone: Zone },
@@ -650,6 +651,14 @@ pub enum DatetimeFunction {
     FormatDatetime { format: DatetimeFormat, zone: Zone },
     /// `parse_datetime(format, text[, zone[, disambiguation]])`.
     ParseDatetime(DatetimeParser),
+    /// `duration_floor(unit, value)`, `duration_ceil(unit, value)` and
+    /// `duration_round(unit, value)`: the whole units in a duration, rounded as each name says.
+    DurationUnits {
+        unit: DurationUnit,
+        rounding: UnitRounding,
+    },
+    /// `to_duration(unit, count)`.
+    ToDuration(DurationUnit),
 }
 
 impl DatetimeFunction {
@@ -664,6 +673,8 @@ impl DatetimeFunction {
             Self::FromUnix(_) => DatetimeFunctionName::FromUnix,
             Self::FormatDatetime { .. } => DatetimeFunctionName::FormatDatetime,
             Self::ParseDatetime(_) => DatetimeFunctionName::ParseDatetime,
+            Self::DurationUnits { rounding, .. } => rounding.function_name(),
+            Self::ToDuration(_) => DatetimeFunctionName::ToDuration,
         }
     }
 }
@@ -692,6 +703,10 @@ pub enum DatetimeFunctionName {
     FromUnix,
     FormatDatetime,
     ParseDatetime,
+    DurationFloor,
+    DurationCeil,
+    DurationRound,
+    ToDuration,
 }
 
 #[cfg_attr(
@@ -775,6 +790,73 @@ impl FixedTimeUnit {
             Self::Hour => NANOSECONDS_PER_HOUR,
             Self::Day => NANOSECONDS_PER_DAY,
             Self::Week => NANOSECONDS_PER_WEEK,
+        }
+    }
+}
+
+/// A unit a duration is counted in by `duration_floor`, `duration_ceil`, `duration_round` and
+/// `to_duration`: a unit of fixed length from a nanosecond to a day, where a day is always 24
+/// hours because a duration is elapsed time read in no time zone.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    EnumString,
+    VariantNames,
+    strum::Display,
+    strum::EnumIter,
+)]
+#[strum(ascii_case_insensitive, serialize_all = "snake_case")]
+pub enum DurationUnit {
+    Nanosecond,
+    Microsecond,
+    Millisecond,
+    Second,
+    Minute,
+    Hour,
+    Day,
+}
+
+impl DurationUnit {
+    /// The exact length of one unit in nanoseconds, the length of the fixed unit of the same name.
+    pub const fn nanoseconds(self) -> i64 {
+        let unit = match self {
+            Self::Nanosecond => FixedTimeUnit::Nanosecond,
+            Self::Microsecond => FixedTimeUnit::Microsecond,
+            Self::Millisecond => FixedTimeUnit::Millisecond,
+            Self::Second => FixedTimeUnit::Second,
+            Self::Minute => FixedTimeUnit::Minute,
+            Self::Hour => FixedTimeUnit::Hour,
+            Self::Day => FixedTimeUnit::Day,
+        };
+        unit.nanoseconds()
+    }
+}
+
+/// How a duration converted to whole units rounds what is left past its last whole unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UnitRounding {
+    /// Toward negative infinity, as `duration_floor` does.
+    Floor,
+    /// Toward positive infinity, as `duration_ceil` does.
+    Ceil,
+    /// To the nearest whole unit, a value halfway between two counts away from zero, as
+    /// `duration_round` does and as `round` rounds a number.
+    Round,
+}
+
+impl UnitRounding {
+    /// The duration function that rounds this way.
+    pub const fn function_name(self) -> DatetimeFunctionName {
+        match self {
+            Self::Floor => DatetimeFunctionName::DurationFloor,
+            Self::Ceil => DatetimeFunctionName::DurationCeil,
+            Self::Round => DatetimeFunctionName::DurationRound,
         }
     }
 }
@@ -1503,6 +1585,17 @@ mod completion_tests {
         let names = FunctionName::ordinary_completion_names();
         assert!(names.contains(&"coalesce".to_string()));
         assert!(names.contains(&"date_add".to_string()));
+        for duration_function in [
+            "duration_floor",
+            "duration_ceil",
+            "duration_round",
+            "to_duration",
+        ] {
+            assert!(
+                names.contains(&duration_function.to_string()),
+                "{duration_function}"
+            );
+        }
         assert!(names.contains(&"ceiling".to_string()));
         assert!(names.contains(&"list_quantile".to_string()));
         assert!(!names.contains(&"read_header".to_string()));

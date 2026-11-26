@@ -15,6 +15,7 @@ use nervix_primitives::sync::StdArc;
 use crate::{
     batch::TypedArray,
     cast::CastTarget,
+    datetime::UnitLength,
     error::{CompileError, CompileErrorCode, SideErrorReason},
     ip_address::{self, IpNetwork, NetworkSource},
     ir::{
@@ -24,17 +25,19 @@ use crate::{
     },
     json::{JsonExtraction, JsonOutput, JsonScanOutput},
     membership::MembershipSet,
+    numeric::{Arithmetic, SignedInteger as _},
     program::{
-        BinaryOp, CaseArm, CastFailure, Expr, FieldRef, FunctionName, InternalFieldNamespace,
-        InternalFieldRef, Literal, Program, Span, SpannedExpr, SpannedNode, UnaryOp,
-        WindowAggregateFunction,
+        BinaryOp, CaseArm, CastFailure, DatetimeFunction, Expr, FieldRef, FunctionName,
+        InternalFieldNamespace, InternalFieldRef, Literal, Program, Span, SpannedExpr, SpannedNode,
+        UnaryOp, WindowAggregateFunction,
     },
     regexp::{PatternSource, RegexpCall, RegexpFunction},
     runtime::{cast_constant, unary_constant},
     semantics::{
         ArmExecution, BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, IntegerBits as _,
         binary_descriptor, binary_output_type, builtin_descriptor, builtin_semantics_for_lowering,
-        builtin_signature, cast_descriptor, expr_semantics, unary_descriptor,
+        builtin_signature, cast_descriptor, expr_semantics, is_temporal_arithmetic,
+        unary_descriptor,
     },
     text_search::ContainsAnyCall,
     url_component,
@@ -1296,7 +1299,22 @@ impl Compiler {
                 let right_type = self.infer_expr_type(right)?;
 
                 let Some(output_type) = binary_output_type(*op, &left_type, &right_type) else {
-                    let (code, message) = if left_type != right_type {
+                    let (code, message) = if left_type == right_type {
+                        (
+                            CompileErrorCode::UnsupportedBinary,
+                            format!("operator {op:?} is not valid for {:?}", left_type),
+                        )
+                    } else if is_temporal_arithmetic(*op, &left_type, &right_type) {
+                        // Some forms of this arithmetic combine a DURATION with a DATETIME, so the
+                        // refusal names the pair instead of asking for matching types.
+                        (
+                            CompileErrorCode::UnsupportedBinary,
+                            format!(
+                                "operator {op:?} is not valid for {:?} and {:?}",
+                                left_type, right_type
+                            ),
+                        )
+                    } else {
                         (
                             CompileErrorCode::TypeMismatch,
                             format!(
@@ -1304,11 +1322,6 @@ impl Compiler {
                                  {:?} and {:?}",
                                 left_type, right_type
                             ),
-                        )
-                    } else {
-                        (
-                            CompileErrorCode::UnsupportedBinary,
-                            format!("operator {op:?} is not valid for {:?}", left_type),
                         )
                     };
                     return Err(Report::new(CompileError {
@@ -3042,13 +3055,7 @@ fn fold_constant_expr(
             let Some(value) = fold_constant_expr(inner.as_ref())? else {
                 return Ok(None);
             };
-
-            Ok(match (op, value) {
-                (UnaryOp::Not, FoldedValue::NonNull(ScalarValue::Boolean(value))) => {
-                    Some(FoldedValue::NonNull(ScalarValue::Boolean(!value)))
-                }
-                _ => None,
-            })
+            Ok(fold_unary_expr(*op, value))
         }
         Expr::Binary { op, left, right } => {
             let Some(left) = fold_constant_expr(left.as_ref())? else {
@@ -3113,8 +3120,37 @@ fn fold_constant_expr(
     }
 }
 
+/// The value a unary operator over a folded value folds to, or `None` when it does not fold.
+fn fold_unary_expr(op: UnaryOp, value: FoldedValue) -> Option<FoldedValue> {
+    match (op, value) {
+        (UnaryOp::Not, FoldedValue::NonNull(ScalarValue::Boolean(value))) => {
+            Some(FoldedValue::NonNull(ScalarValue::Boolean(!value)))
+        }
+        // A duration's negation folds through the lane contract the checked kernel applies, and
+        // declines for the shortest duration, whose negation the operator then reports.
+        (UnaryOp::Neg, FoldedValue::NonNull(ScalarValue::Duration(value))) => {
+            folded_duration(value.lane_negation())
+        }
+        _ => None,
+    }
+}
+
 fn fold_binary_expr(op: BinaryOp, left: FoldedValue, right: FoldedValue) -> Option<FoldedValue> {
     match (op, left, right) {
+        // A duration's sum and difference fold through the lane contract the checked kernels
+        // apply, and decline where that contract fails the lane, so the operator then executes and
+        // reports its error. No DATETIME is a literal, so no other temporal form meets two folded
+        // values.
+        (
+            BinaryOp::Add,
+            FoldedValue::NonNull(ScalarValue::Duration(left)),
+            FoldedValue::NonNull(ScalarValue::Duration(right)),
+        ) => folded_duration(Arithmetic::Add.integer_lane(left, right)),
+        (
+            BinaryOp::Sub,
+            FoldedValue::NonNull(ScalarValue::Duration(left)),
+            FoldedValue::NonNull(ScalarValue::Duration(right)),
+        ) => folded_duration(Arithmetic::Sub.integer_lane(left, right)),
         (
             BinaryOp::Eq,
             FoldedValue::NonNull(ScalarValue::Int64(left)),
@@ -3226,6 +3262,45 @@ fn fold_binary_expr(op: BinaryOp, left: FoldedValue, right: FoldedValue) -> Opti
             FoldedValue::NonNull(ScalarValue::Boolean(right)),
         ) => Some(FoldedValue::NonNull(ScalarValue::Boolean(left || right))),
         _ => None,
+    }
+}
+
+/// The DURATION a checked lane computed, or `None` where the lane failed, so that the operation
+/// executes and reports its error for every row that evaluates it.
+fn folded_duration((nanoseconds, failed): (i64, bool)) -> Option<FoldedValue> {
+    if failed {
+        return None;
+    }
+    Some(FoldedValue::NonNull(ScalarValue::Duration(nanoseconds)))
+}
+
+/// The value a call of a datetime builtin over literals folds to, through the lane contract of its
+/// kernel. Only the duration conversions fold: every other datetime builtin reads a DATETIME, and
+/// no DATETIME is a literal.
+fn fold_datetime_call(function: &DatetimeFunction, args: &[FoldedValue]) -> Option<FoldedValue> {
+    match function {
+        DatetimeFunction::DurationUnits { unit, rounding } => {
+            let [FoldedValue::NonNull(ScalarValue::Duration(value))] = args else {
+                return None;
+            };
+            let units = rounding.whole_units(*value, UnitLength::of(*unit));
+            Some(FoldedValue::NonNull(ScalarValue::Int64(units)))
+        }
+        DatetimeFunction::ToDuration(unit) => {
+            let [FoldedValue::NonNull(ScalarValue::Int64(count))] = args else {
+                return None;
+            };
+            folded_duration(UnitLength::of(*unit).duration(*count))
+        }
+        DatetimeFunction::DatePart { .. }
+        | DatetimeFunction::DateTrunc { .. }
+        | DatetimeFunction::DateBin(_)
+        | DatetimeFunction::DateAdd { .. }
+        | DatetimeFunction::DateDiff { .. }
+        | DatetimeFunction::ToUnix(_)
+        | DatetimeFunction::FromUnix(_)
+        | DatetimeFunction::FormatDatetime { .. }
+        | DatetimeFunction::ParseDatetime(_) => None,
     }
 }
 
@@ -3524,9 +3599,9 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::ListAbs
         | FunctionName::Dot
         | FunctionName::Distance
-        | FunctionName::Datetime(_)
         | FunctionName::ListShape(_)
         | FunctionName::ListStatistic(_) => None,
+        FunctionName::Datetime(function) => fold_datetime_call(function, args),
     }
 }
 
@@ -4503,7 +4578,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        program::{Expr, FieldRef, InternalFieldNamespace, InternalFieldRef, Program, SpannedNode},
+        program::{
+            DurationUnit, Expr, FieldRef, FixedTimeUnit, InternalFieldNamespace, InternalFieldRef,
+            Program, SpannedNode, UnitRounding,
+        },
         test_support::parse_program,
     };
 
@@ -5740,6 +5818,79 @@ mod tests {
                 }
             )
         }));
+    }
+
+    #[test]
+    fn folds_duration_arithmetic_through_its_lane_contracts_and_declines_where_a_lane_fails() {
+        let duration = |nanoseconds| FoldedValue::NonNull(ScalarValue::Duration(nanoseconds));
+        let integer = |value| FoldedValue::NonNull(ScalarValue::Int64(value));
+        let second = 1_000_000_000;
+
+        assert_eq!(
+            fold_binary_expr(BinaryOp::Add, duration(10 * second), duration(5 * second)),
+            Some(duration(15 * second))
+        );
+        assert_eq!(
+            fold_binary_expr(BinaryOp::Sub, duration(5 * second), duration(10 * second)),
+            Some(duration(-5 * second))
+        );
+        // A result the kernel's lane fails is not folded, so the operator executes and reports it.
+        assert_eq!(
+            fold_binary_expr(BinaryOp::Add, duration(i64::MAX), duration(1)),
+            None
+        );
+        assert_eq!(
+            fold_binary_expr(BinaryOp::Sub, duration(i64::MIN), duration(1)),
+            None
+        );
+        assert_eq!(
+            fold_unary_expr(UnaryOp::Neg, duration(30 * second)),
+            Some(duration(-30 * second))
+        );
+        assert_eq!(fold_unary_expr(UnaryOp::Neg, duration(i64::MIN)), None);
+        // Integer negation can fail too and has no folding arm, so it always executes.
+        assert_eq!(fold_unary_expr(UnaryOp::Neg, integer(5)), None);
+        assert_eq!(
+            fold_unary_expr(
+                UnaryOp::Not,
+                FoldedValue::NonNull(ScalarValue::Boolean(true))
+            ),
+            Some(FoldedValue::NonNull(ScalarValue::Boolean(false)))
+        );
+
+        let floor = DatetimeFunction::DurationUnits {
+            unit: DurationUnit::Second,
+            rounding: UnitRounding::Floor,
+        };
+        let round = DatetimeFunction::DurationUnits {
+            unit: DurationUnit::Second,
+            rounding: UnitRounding::Round,
+        };
+        let to_days = DatetimeFunction::ToDuration(DurationUnit::Day);
+        assert_eq!(
+            fold_datetime_call(&floor, &[duration(-1_500_000_000)]),
+            Some(integer(-2))
+        );
+        assert_eq!(
+            fold_datetime_call(&round, &[duration(-1_500_000_000)]),
+            Some(integer(-2))
+        );
+        assert_eq!(
+            fold_datetime_call(&to_days, &[integer(2)]),
+            Some(duration(2 * 86_400 * second))
+        );
+        assert_eq!(fold_datetime_call(&to_days, &[integer(106_752)]), None);
+        // An argument of another shape declines to fold instead of guessing.
+        assert_eq!(fold_datetime_call(&floor, &[integer(1)]), None);
+        assert_eq!(fold_datetime_call(&to_days, &[duration(1)]), None);
+        // No other datetime builtin folds: each reads a DATETIME, and no DATETIME is a literal.
+        assert_eq!(
+            fold_datetime_call(
+                &DatetimeFunction::ToUnix(FixedTimeUnit::Second),
+                &[integer(1)]
+            ),
+            None
+        );
     }
 
     #[test]

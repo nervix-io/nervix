@@ -29,6 +29,7 @@ The current top-level surface includes:
 - session subscription statements
 - explicit transaction controls: `BEGIN`, `COMMIT`, and `REVERT`
 - describe and show commands
+- entity labels: a trailing `LABELS` clause on creation, `SET LABELS` and `SHOW LABELS`
 - cluster administration with `ALTER CLUSTER SET`
 
 `ALTER CLUSTER SET` changes one or more committed cluster parameters atomically, without a node
@@ -44,6 +45,12 @@ their identity. See the [statement-head contract](architecture.md#statement-head
 Input acknowledgement is a body property: write `ATTACHED | DETACHED` after the complete inputs
 and optional collection policy, as the [processor](processors.md#shared-input-and-branch-contracts)
 and [emitter](emitters.md#statement-heads-and-external-names) synopses show.
+
+Every creation form of a Model, a domain, a logical resource and a user accepts one optional
+trailing `LABELS { '<key>' = '<value>', ... }` clause. `SET LABELS ON <entity> { ... }` edits the
+labels of an existing entity and `SHOW LABELS ON <entity>` reads them, addressing the entity as
+`DROP` and `SHOW CREATE` do. Labels describe an entity and change nothing about how it runs. See
+[Entity Labels](entity-labels.md).
 
 Core create statements:
 
@@ -359,8 +366,10 @@ COMMIT;
 and every queued statement must select that same domain. `BEGIN` inside an
 active transaction is an error. `COMMIT` and `REVERT` also require an active
 transaction. Queueable content is limited to that domain's model mutations,
-including `REBIND RESOURCE`, domain configuration, and `CREATE RESOURCE`. `CREATE DOMAIN`,
-`CREATE USER`, `START`, `STOP`, most read-only statements, subscriptions, resource uploads, and
+including `REBIND RESOURCE`, domain configuration, and `CREATE RESOURCE`. A `SET LABELS` on a
+Model or a logical resource queues with them. `CREATE DOMAIN`,
+`CREATE USER`, a `SET LABELS` on a domain or a user, `START`, `STOP`, most read-only statements,
+subscriptions, resource uploads, and
 node administration are not valid inside a transaction and must be sent separately. `START` and
 `STOP` switch the domain's processing on and off rather than change its configuration; queuing one
 is refused at once and the transaction keeps what it holds, so run them after `COMMIT`.
