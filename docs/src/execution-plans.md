@@ -410,8 +410,9 @@ schedule the domain runs:
 
 - Before it holds any relay, the swap stops every generator unit it replaces or moves, and every
   ingestor unit it stops whose rows reach a relay it holds, through any number of routes, error
-  routes, correlation timeouts and running nodes; a read of materialized state carries no rows.
-  Each finishes the work in its hands into relays nobody holds yet. An ingestor unit whose rows
+  routes, correlation timeouts and running nodes; a read of materialized state carries no rows. A
+  node the same change drops counts too, since a node that has not applied the change yet still runs
+  it. Each finishes the work in its hands into relays nobody holds yet. An ingestor unit whose rows
   reach no relay the swap holds stops under the swap's hold, so its intake ends no sooner than the
   swap needs.
 - Then the swap stops each reingestor it replaces where it runs, in the order rows flow through
@@ -454,7 +455,10 @@ back, last change first, while the entities stay gated, and only then opens ever
   emitter's held records, as it always has;
 - an ingestor starts again the units the swap stopped. The swap itself starts no ingestor unit: an
   ingestor is a source, so the units the desired revision places on a node start when the revision
-  activates, once every node has prepared it, as after a rebuild;
+  activates, once every node has prepared it, as after a rebuild. Stopping an ingestor's units
+  never fails the swap: an ingestor's own step fails a committed change only while an MQTT
+  replacement prepares or retires a broker session, as described below, so its units start again
+  when another part of the change fails;
 - a relay gets back its previous partition count's services and owner tasks, and a rebound or
   materialized node its previous placement and state tasks;
 - every consumer registration a previous task had is restored, and the routing, state identities

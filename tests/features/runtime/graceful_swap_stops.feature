@@ -40,9 +40,7 @@ Feature: A change stops the parts it replaces without cutting what they hold
           FLUSH EACH 1h MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE DEDUPLICATOR swap_dedup FROM swap_incoming
-        DEDUPLICATE ON input.event_id
-        MAX TIME 10m
+      CREATE JUNCTION swap_reader FROM swap_incoming
         BRANCHED BY by_swap_tenant
         TO swap_delivered INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
@@ -51,44 +49,46 @@ Feature: A change stops the parts it replaces without cutting what they hold
       """
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status owner for scheduled "deduplicator" "swap_dedup" is saved as placeholder "dedup_owner"
-    # The ingestor runs on every node; its route and its reader run on the deduplicator's node.
+    Then the last cluster status owner for scheduled "junction" "swap_reader" is saved as placeholder "reader_owner"
+    # The ingestor runs on every node; its route and its reader run on the junction's node.
     When these Plexus commands are executed on the leader node
       """
-      RELOCATE RELAY swap_incoming, RELAY swap_delivered ONTO NODE {{dedup_owner}} IGNORE PREFERENCES;
+      RELOCATE RELAY swap_incoming, RELAY swap_delivered ONTO NODE {{reader_owner}} IGNORE PREFERENCES;
       CREATE SUBSCRIPTION swap_observed TO swap_incoming;
       """
-    Given every entity swap in domain "{{domain}}" on node "{{dedup_owner}}" fails while replacing ingestor "swap_in"
+    # An ingestor's step cannot fail once its change commits, so the fault fails the swap at the
+    # reader. The reader is a junction, which the swap replaces after it stopped the ingestor.
+    Given every entity swap in domain "{{domain}}" on node "{{reader_owner}}" fails while replacing junction "swap_reader"
     When these Plexus commands begin executing in the background
       """
       BEGIN;
       ALTER HTTP ENDPOINT INGESTOR swap_in SET FILTER WHERE input.event_id != 'none';
-      ALTER DEDUPLICATOR swap_dedup SET DEDUPLICATE ON input.content;
+      ALTER JUNCTION swap_reader SET DETACHED;
       COMMIT;
       """
     Then the background Plexus execution fails with "injected entity-level schedule apply failure"
     # Until the fault clears, the node retries the change and puts the ingestor back each time, so
     # its endpoint is briefly unavailable now and then: a post waits until it is accepted.
-    When http payload is accepted within "30s" by node "{{dedup_owner}}" with host "http-{{test_id}}-swap-stops.example.com" path "/events"
+    When http payload is accepted within "30s" by node "{{reader_owner}}" with host "http-{{test_id}}-swap-stops.example.com" path "/events"
       """
       {"event_id":"i-1","tenant":"acme","content":"c-i-1"}
       """
-    And http payload is accepted within "30s" by node "{{dedup_owner}}" with host "http-{{test_id}}-swap-stops.example.com" path "/events"
+    And http payload is accepted within "30s" by node "{{reader_owner}}" with host "http-{{test_id}}-swap-stops.example.com" path "/events"
       """
       {"event_id":"i-2","tenant":"beta","content":"c-i-2"}
       """
-    And http payload is accepted within "30s" by node "{{dedup_owner}}" with host "http-{{test_id}}-swap-stops.example.com" path "/events"
+    And http payload is accepted within "30s" by node "{{reader_owner}}" with host "http-{{test_id}}-swap-stops.example.com" path "/events"
       """
       {"event_id":"i-3","tenant":"acme","content":"c-i-3"}
       """
-    And http payload is accepted within "30s" by node "{{dedup_owner}}" with host "http-{{test_id}}-swap-stops.example.com" path "/events"
+    And http payload is accepted within "30s" by node "{{reader_owner}}" with host "http-{{test_id}}-swap-stops.example.com" path "/events"
       """
       {"event_id":"i-4","tenant":"beta","content":"c-i-4"}
       """
     # The node retries the committed change on its own, and once its swap can succeed it replaces
     # the ingestor and its reader together. Every retry, the failing ones too, stops the ingestor
     # before it holds the reader's input, and no drain flushes the route before the swap.
-    When entity swaps in domain "{{domain}}" on node "{{dedup_owner}}" stop failing
+    When entity swaps in domain "{{domain}}" on node "{{reader_owner}}" stop failing
     Then within "60s" the relay subscription receives payloads
       """
       "event_id":"i-1"

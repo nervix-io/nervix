@@ -475,7 +475,7 @@ impl SignatureVectors {
             .verify_proof_of_life(&tampered(&self.proof_of_life), limits())
             .err()
             .assured("a proof of life with a changed signature byte does not verify");
-        assert!(matches!(error.current_context(), TrustError::Document));
+        assert!(matches!(error.current_context(), TrustError::ProofOfLife));
         assert_signature_refused(&error);
         let error = self
             .trust(keys)

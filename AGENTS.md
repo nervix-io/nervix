@@ -184,6 +184,15 @@ violates instead of softening the contract to match today's imports.
   replication mechanisms.
 - The registry validates domains, references, schemas, branches, capabilities and execution
   contracts before a graph becomes active.
+- A change that passed validation commits, and nothing after the commit fails it on a node:
+  everything after the commit is scheduling and connector behavior. Whatever is structurally wrong
+  is found before the commit, a WASM module and every plan and program included. An external
+  system that does not answer never fails a committed change; it is the entity's transient error,
+  which the entity retries. Placement after the commit belongs to the scheduler, which starts the
+  new instance and then removes the old one. A check that can run before the commit moves there,
+  and a check that runs after it and can fail the change is removed, never added. An existing one
+  is debt recorded on ClickUp, never extended or copied, and a test never injects a failure into a
+  step that cannot fail after the commit.
 - Entity labels are bounded control-plane metadata owned and committed with their domain Model.
   Metadata-only edits preserve execution and state identities, tasks, allowances, resource
   bindings, connections, buffers and acknowledgement outcomes, with no pause, flush, rebuild or
