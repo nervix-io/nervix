@@ -33,8 +33,9 @@ use arrow_array::{
     builder::{BooleanBuilder, Int64Builder, PrimitiveBuilder, StringBuilder},
     new_empty_array, new_null_array,
     types::{
-        ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
-        TimestampNanosecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+        ArrowPrimitiveType, DurationNanosecondType, Float32Type, Float64Type, Int8Type, Int16Type,
+        Int32Type, Int64Type, TimestampNanosecondType, UInt8Type, UInt16Type, UInt32Type,
+        UInt64Type,
     },
 };
 use arrow_buffer::{BooleanBuffer, NullBuffer, OffsetBuffer, ScalarBuffer};
@@ -71,8 +72,8 @@ use crate::{
     count::{CountOperand, SignedCount},
     datetime::{self, FormattedColumn, TextFailure, UnitCounts, UnresolvedLocalTime},
     error::{
-        CollectionLimit, DatetimeOperation, FloatOperation, IntegerOperation, RowErrorMask,
-        RowErrors, RuntimeError, SideError, SideErrorReason, TextOperation,
+        CollectionLimit, DatetimeOperation, DurationOperation, FloatOperation, IntegerOperation,
+        RowErrorMask, RowErrors, RuntimeError, SideError, SideErrorReason, TextOperation,
     },
     extremum::{self, ClampBoundsDefect},
     ip_address::{self, NetworkSource},
@@ -93,9 +94,9 @@ use crate::{
     },
     regexp::{ActivePattern, BatchPatterns, PatternSource, RegexpCall, RegexpFunction},
     semantics::{
-        ArmExecution, BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, Volatility,
-        binary_arm_execution, builtin_arm_execution, builtin_semantics_for_lowering,
-        unary_arm_execution,
+        ArmExecution, BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass,
+        TemporalArithmetic, Volatility, binary_arm_execution, builtin_arm_execution,
+        builtin_semantics_for_lowering, unary_arm_execution,
     },
     text_column::TextColumnBuilder,
     text_search,
@@ -1758,6 +1759,11 @@ impl Instruction {
                 op,
             )));
         }
+        if let Some(arithmetic) = TemporalArithmetic::of(op, left.ty, right.ty) {
+            return execute_temporal_arithmetic(
+                registers, left, right, arithmetic, row_errors, self.span,
+            );
+        }
         let operator = NumericBinary::of(op);
         match (left.ty, operator) {
             (RegisterType::UInt8, Some(operator)) => Ok(execute_integer_binary(
@@ -1877,6 +1883,79 @@ impl Instruction {
             })),
         }
     }
+}
+
+/// Executes one form of the arithmetic a DURATION and a DATETIME take, recording a row error for
+/// every lane whose result its type cannot hold.
+fn execute_temporal_arithmetic(
+    registers: &RegisterBank,
+    left: RegisterRef,
+    right: RegisterRef,
+    arithmetic: TemporalArithmetic,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> error_stack::Result<TypedArray, RuntimeError> {
+    let output = match arithmetic {
+        TemporalArithmetic::DurationSum => record_duration_failures(
+            datetime::sums(
+                registers.operand::<DurationNanosecondArray>(left)?,
+                registers.operand::<DurationNanosecondArray>(right)?,
+            ),
+            DurationOperation::Addition,
+            row_errors,
+            span,
+        ),
+        TemporalArithmetic::DurationDifference => record_duration_failures(
+            datetime::differences(
+                registers.operand::<DurationNanosecondArray>(left)?,
+                registers.operand::<DurationNanosecondArray>(right)?,
+            ),
+            DurationOperation::Subtraction,
+            row_errors,
+            span,
+        ),
+        TemporalArithmetic::InstantPlusDuration => record_datetime_failures(
+            datetime::moved_instants(
+                registers.operand::<TimestampNanosecondArray>(left)?,
+                registers.operand::<DurationNanosecondArray>(right)?,
+                datetime::Direction::Forward,
+            ),
+            DatetimeOperation::Addition,
+            row_errors,
+            span,
+        ),
+        // The sum is the same instant whichever side the duration is written on.
+        TemporalArithmetic::DurationPlusInstant => record_datetime_failures(
+            datetime::moved_instants(
+                registers.operand::<TimestampNanosecondArray>(right)?,
+                registers.operand::<DurationNanosecondArray>(left)?,
+                datetime::Direction::Forward,
+            ),
+            DatetimeOperation::Addition,
+            row_errors,
+            span,
+        ),
+        TemporalArithmetic::InstantMinusDuration => record_datetime_failures(
+            datetime::moved_instants(
+                registers.operand::<TimestampNanosecondArray>(left)?,
+                registers.operand::<DurationNanosecondArray>(right)?,
+                datetime::Direction::Backward,
+            ),
+            DatetimeOperation::Subtraction,
+            row_errors,
+            span,
+        ),
+        TemporalArithmetic::Elapsed => record_duration_failures(
+            datetime::elapsed(
+                registers.operand::<TimestampNanosecondArray>(left)?,
+                registers.operand::<TimestampNanosecondArray>(right)?,
+            ),
+            DurationOperation::Elapsed,
+            row_errors,
+            span,
+        ),
+    };
+    Ok(output)
 }
 
 /// How a binary operator applies to numeric operands.
@@ -2028,6 +2107,12 @@ fn unary_kernel(
         (UnaryOp::Neg, TypedArray::Float64(values)) => {
             Some(TypedArray::Float64(numeric::float_negation(values)))
         }
+        (UnaryOp::Neg, TypedArray::Duration(values)) => Some(record_duration_failures(
+            datetime::negations(values),
+            DurationOperation::Negation,
+            row_errors,
+            span,
+        )),
         (UnaryOp::Not, TypedArray::Boolean(values)) => {
             Some(TypedArray::Boolean(execute_not(values)))
         }
@@ -3049,6 +3134,16 @@ fn execute_datetime(
                 }
             }
         }
+        (DatetimeFunction::DurationUnits { unit, rounding }, [TypedArray::Duration(values)]) => {
+            TypedArray::Int64(datetime::whole_units(values, *unit, *rounding))
+        }
+        (DatetimeFunction::ToDuration(unit), [counts]) => {
+            let Some(counts) = UnitCounts::from_typed(counts) else {
+                return DatetimeExecution::UnsupportedInputs;
+            };
+            let converted = datetime::durations(&counts, *unit);
+            record_duration_failures(converted, DurationOperation::ToDuration, row_errors, span)
+        }
         (DatetimeFunction::ParseDatetime(parser), [TypedArray::Utf8(texts)]) => {
             let parsed = datetime::parse_datetimes(texts, parser);
             for failed in parsed.failures {
@@ -3083,6 +3178,19 @@ impl TextFailure {
             }
         }
     }
+}
+
+/// Records a row error for every lane of a duration result longer than a DURATION holds.
+fn record_duration_failures(
+    checked: Checked<DurationNanosecondType>,
+    operation: DurationOperation,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> TypedArray {
+    row_errors.push_failures(checked.failed.lanes(), span, |_| {
+        SideErrorReason::DurationOutOfRange(operation)
+    });
+    TypedArray::Duration(checked.column)
 }
 
 /// Records a row error for every lane of a datetime result that left the DATETIME range.

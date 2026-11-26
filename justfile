@@ -2256,6 +2256,11 @@ test-list-shapes *args: build-deps build-plexus-format build-test-cli build-dead
 coverage-vm-list-shapes output=(cargo_target_dir / "vm-list-shapes.lcov"):
     cargo llvm-cov --package nervix-vm --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- list_shape
 
+# Measure the expression VM's unit tests and kernel properties, for a patch to the VM, through the
+# configured compiler cache.
+coverage-vm output=(cargo_target_dir / "vm.lcov") *args:
+    cargo llvm-cov --no-clean --package nervix-vm --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
 # Run the WASM host, guest SDK and ABI protocol unit tests, which live in their own crates rather
 # than the server lib. The host tests drive the bundled Rust and Go reference guests.
 test-wasm *args: wasm-processor-guests
