@@ -171,11 +171,11 @@ fn bolero_message_tags_and_column_descriptors_fail_typed() {
     bolero::check!().with_iterations(256).with_max_len(64).for_each(|bytes| {
         let mut values = WasmValues::new(bytes);
         let tag = values.entropy().byte();
-        for kind in [tag,13,14,16,255] {
+        for kind in [tag,13,14,16,17,255] {
             let encoded = encoded_type(kind);
             match BranchInit::decode(&encoded) {
                 Ok(init) => {
-                    assert!(kind<=15 && kind!=13 && kind!=14);
+                    assert!(kind<=16 && kind!=13 && kind!=14);
                     assert_eq!(BranchInit::decode(&init.encode()).assured("an accepted scalar reencodes"),init);
                 }
                 Err(error) => match kind {

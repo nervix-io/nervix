@@ -178,8 +178,10 @@ with a reason, and rows for the processor's `ON MESSAGE ERROR` policy in
 
 `ProcessorTypeArrow::arrow_data_type` maps ABI schema types to the exact Arrow
 types Nervix compares, including `Datetime` as
-`Timestamp(Nanosecond, "+00:00")` and `Bytes` as Arrow `Binary`. Use it when constructing generated arrays
-for non-trivial destination fields.
+`Timestamp(Nanosecond, "+00:00")`, `Duration` as `Duration(Nanosecond)` and `Bytes` as Arrow
+`Binary`. Use it when constructing generated arrays for non-trivial destination fields. A
+`DURATION` field reaches the guest as a `DurationNanosecondArray`, whose values are `i64` counts of
+nanoseconds under Arrow's `DurationNanosecondType`, and the guest returns one the same way.
 
 ## Error Handling
 
@@ -396,7 +398,9 @@ grammar.
 
 The complete reference guest — global-row filtering across buffered batches, a
 generated column shared by multiple routes, message errors, global errors, a
-failing state save, and a row ordinal as its only saved state — is
+failing state save, and a row ordinal as its saved state, followed by the running total of a
+`DURATION` field named `wait` when its input has one, which it also returns as a generated
+`total_wait` column and describes as its `waits` section — is
 `examples/wasm-processors/rust-guest` in the Nervix repository. Build it with:
 
 ```bash

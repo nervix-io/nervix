@@ -5700,6 +5700,11 @@ coverage-chaos-rate-probe:
 chaos-wasm-fixture:
     cargo test --package nervix-wasm --test chaos_branch_counter -- --ignored write_the_branch_counter_module
 
+# Check that the checked-in chaos guest equals what `chaos-wasm-fixture` writes, and drive it through
+# the host for its per-branch counts and its restore from saved state, as `just test` does.
+test-chaos-wasm-fixture:
+    cargo test --package nervix-wasm --test chaos_branch_counter
+
 server *args: build-deps generate-dev-tls
     NERVIX_NODE_ID="${NERVIX_NODE_ID:-node-1}" \
     NERVIX_INTERCONNECT_TLS_CA="${NERVIX_INTERCONNECT_TLS_CA:-tls/dev/ca.pem}" \
