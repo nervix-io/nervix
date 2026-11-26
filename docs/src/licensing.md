@@ -75,7 +75,7 @@ node, a domain or data.
 | `ACTIVATE LICENSE PERSISTENT WITH KEY '…'` | Activates a license persistently. |
 | `ACTIVATE LICENSE EPHEMERAL WITH KEY '…'` | Activates a license for a fixed lifetime. |
 | `REFRESH LICENSE` | Asks the licensing service for a current decision now. |
-| `RELEASE LICENSE` | Gives the activation back and returns the cluster to the free policy. |
+| `RELEASE LICENSE` | Gives the activation back and returns the cluster to the free policy. It returns once the cluster has recorded the release and tells the service afterwards, so an outage of the service does not hold it up, unless a key rotation is still in progress. |
 | `ROTATE LICENSE CLUSTER KEY` | Replaces the key that identifies the cluster to the service. |
 | `DESCRIBE LICENSE` | Shows the mode, the policy, the decision and every capability. |
 

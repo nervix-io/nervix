@@ -693,7 +693,10 @@ records the command, clients can recover under the same execution reference. Ner
 applying the saved decision or returns the recorded outcome. If the service already processed
 creation, Nervix adopts the matching activation through an authenticated refresh.
 `REFRESH LICENSE` runs immediately on the leader, outside domain transactions, and completes when
-the newer signed decision commits or the service or cluster returns a typed refusal.
+the newer signed decision commits or the service or cluster returns a typed refusal. The leader
+sends one licensing request at a time, so a refresh waits for a request in flight, an automatic
+refresh that retries an unreachable service included. A release that commits while the refresh
+waits ends it with `the cluster no longer holds the activation this refresh was for`.
 
 ```plexus
 ROTATE LICENSE CLUSTER KEY;
@@ -709,8 +712,12 @@ service refusal abandons the pending key. Free and released clusters rotate loca
 service access or service-issued trust documents.
 
 `RELEASE LICENSE` commits the free target policy before contacting the service. It returns after
-that local commit; `DESCRIBE LICENSE` reports `mode: released`, `policy: releasing` and
-`release: awaiting service confirmation` while the leader retries notification. Existing grants
+that local commit and waits for no other licensing request, not even an automatic refresh that
+retries an unreachable service; `DESCRIBE LICENSE` reports `mode: released`, `policy: releasing`
+and `release: awaiting service confirmation` while the leader retries notification. A refresh of
+the released activation ends when the release commits, and its answer, should one arrive after
+the commit, applies nothing. Only a key rotation still pending is finished with the service first,
+so a release waits for that rotation. Existing grants
 retain their deadlines, reported as the typed `grants_until` timestamp. Confirmation does not
 restart or extend them. Once confirmation arrives and no grant remains, the mode becomes free.
 An expired ephemeral activation refuses release with `Expired`. Activation in released mode

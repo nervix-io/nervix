@@ -128,6 +128,20 @@ impl RefreshTrigger {
     }
 }
 
+/// Whether the committed observation still holds `activation_id` as the cluster's activation, so
+/// a refresh of that activation can still apply. A release, which commits without the request
+/// turn, ends the activation while its refresh may still wait for the licensing service, and a
+/// new activation replaces it.
+pub(super) fn holds_activation(state: Option<&ClusterLicensingState>, activation_id: Uuid) -> bool {
+    let Some(state) = state else {
+        return false;
+    };
+    let LicensingMode::Activated(activation) = &state.record.mode else {
+        return false;
+    };
+    activation.binding.activation_id == activation_id
+}
+
 impl NotificationCursor {
     pub(super) fn observe(
         &mut self,
@@ -173,8 +187,9 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_consensus::{
         ActivationBinding, ActivationState, ClusterIdentity, LicenseDecisionError,
-        LicensingEnvironment, LicensingRecord, ReceivedLicenseDecision, StoredDecision,
-        StoredDecisionOperation, VerifiedLicenseDecision,
+        LicensingEnvironment, LicensingRecord, ReceivedLicenseDecision, ReleaseConfirmation,
+        ReleaseState, StoredDecision, StoredDecisionOperation, StoredLicenseTransitions,
+        VerifiedLicenseDecision,
     };
     use nervix_licensing_protocol::{
         documents::DecisionResponse,
@@ -461,5 +476,51 @@ mod tests {
         assert!(RefreshRequirement::Invalidation.needs_refresh(|| {
             panic!("an invalidation neither depends on nor scans the committed revisions")
         }));
+    }
+
+    /// The activated fixture after an operator's release of its activation.
+    fn released(activated: &ClusterLicensingState) -> ClusterLicensingState {
+        let LicensingMode::Activated(activation) = &activated.record.mode else {
+            panic!("the release fixture starts from an activated cluster");
+        };
+        let released_at = activated.record.licensing_time;
+        let request_id = test_fixture::id(9);
+        let mut released = activated.clone();
+        released.record = Arc::new(LicensingRecord {
+            licensing_time: released_at,
+            trust: activated.record.trust.clone(),
+            mode: LicensingMode::Released(Box::new(ReleaseState {
+                reference: nervix_models::CommandExecutionReference::parse(request_id.to_string())
+                    .assured("a UUID is a valid execution reference"),
+                activation: activation.as_ref().clone(),
+                identity: activated.identity.clone(),
+                request_id,
+                released_at,
+                grants_until: None,
+                transitions: StoredLicenseTransitions::new(&[], test_fixture::limits())
+                    .assured("no transitions fit every document bound"),
+                confirmation: ReleaseConfirmation::Confirmed,
+            })),
+        });
+        released
+    }
+
+    #[test]
+    fn a_refresh_applies_only_while_the_cluster_holds_its_activation() {
+        let activated = activated();
+        let LicensingMode::Activated(activation) = &activated.record.mode else {
+            panic!("the fixture is activated");
+        };
+        let activation_id = activation.binding.activation_id;
+        assert!(holds_activation(Some(&activated), activation_id));
+        assert!(
+            !holds_activation(Some(&released(&activated)), activation_id),
+            "a release ends the activation while its refresh may still wait for the service"
+        );
+        assert!(
+            !holds_activation(Some(&activated), test_fixture::id(9)),
+            "a refresh of another activation no longer applies to this cluster"
+        );
+        assert!(!holds_activation(None, activation_id));
     }
 }

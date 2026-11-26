@@ -70,6 +70,61 @@ Feature: Cluster licensing release and transfer
       | 1            |
       | 3            |
 
+  Scenario Outline: Release returns after its local commit while an automatic refresh retries an unreachable service on <cluster_size> nodes
+    Given an HTTPS licensing test service is available
+    And a <cluster_size> node nervix cluster is started
+    # Keep the refresh retrying every few seconds, and the leader's pause after an ended attempt
+    # short, so the release's confirmation follows the reconnection within the observation window.
+    When these Plexus commands are executed on the leader node
+      """
+      ALTER CLUSTER SET LICENSING_RETRY_BACKOFF_MAX = 2s, LICENSING_REQUEST_TIMEOUT = 5s;
+      """
+    And a persistent license is activated through the running quorum
+    And the licensing service becomes unreachable
+    And the cluster licensing clock passes the "refresh_after" deadline
+    Then the current leader node is saved as placeholder "refresh_leader"
+    And node "{{refresh_leader}}" observability metric "nervix_licensing_requests_total" with labels eventually reaches at least 2
+      """
+      operation="activation.refresh"
+      outcome="unreachable"
+      """
+    When these Plexus commands begin executing in the background as "release"
+      """
+      RELEASE LICENSE;
+      """
+    Then within "30s" background Plexus execution "release" reaches a successful outcome
+    And node "node-1" eventually describes this license without a selected domain
+      """
+      mode: released
+      policy: releasing
+      release: awaiting service confirmation
+      """
+    # The refresh ended with the activation it was for, so a local rotation no longer waits for it.
+    When these Plexus commands begin executing in the background as "rotation"
+      """
+      ROTATE LICENSE CLUSTER KEY;
+      """
+    Then within "30s" background Plexus execution "rotation" reaches a successful outcome
+    And node "node-1" eventually has cluster key generation 2
+    When the licensing service clock catches up with the cluster
+    And the licensing service becomes reachable
+    Then node "node-1" eventually describes this license without a selected domain
+      """
+      mode: free
+      policy: free
+      """
+    And node "node-1" eventually has cluster key generation 2
+    And node "{{refresh_leader}}" observability metric "nervix_licensing_requests_total" with labels eventually equals 0
+      """
+      operation="activation.refresh"
+      outcome="rejected_by_cluster"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: The former cluster observes transfer and a rebuilt cluster activates anew on <cluster_size> nodes
     Given an HTTPS licensing test service is available
     And the licensing service allows one persistent activation

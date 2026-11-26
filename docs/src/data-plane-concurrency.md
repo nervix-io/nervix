@@ -3773,6 +3773,14 @@ attempt's first retry keeps its backoff against a notification it already repres
 control-plane ordering check without a memory-ordering claim. The turn, the watch and the
 notification are asynchronous and outside Deloxide's tracked-lock detection; the owner tests beside
 the turn replay the found order step by step.
+An operator's release commits without the turn. The commits that end or depend on the activation,
+the release, the start of a key rotation and a refreshed decision, take the same owner's
+`activation_commit` order, an async mutex held only around their consensus writes. A holder of the
+turn takes it after the turn and gives it back before asking the service anything, so the order
+never waits for a request and adds no wakeup to the turn's protocol; the checks above still model
+every wait and notification of the turn. The order is outside Deloxide's tracked-lock detection,
+and the owner tests beside the turn show that a release's commit takes it while a refresh holds the
+turn.
 
 Consensus storage admits each Commands or Bulk working set through independent class-specific
 turns before asking its memory class, and a working set returns its bytes before its turn passes.

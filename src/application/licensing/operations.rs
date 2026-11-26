@@ -103,7 +103,12 @@ impl SessionServiceImpl {
             {
                 self.finish_cluster_key_rotation().await?;
             }
-            self.inner
+            // A release commits without the request turn. Starting the rotation in the order a
+            // release's commit takes keeps a release from committing beside a rotation it did
+            // not finish first.
+            let order = self.inner.licensing_requests.activation_commit().await;
+            let begun = self
+                .inner
                 .consensus
                 .begin_cluster_key_rotation(
                     identity,
@@ -111,8 +116,9 @@ impl SessionServiceImpl {
                     request_id,
                     clock::observe(self.inner.runtime.fault_injection()),
                 )
-                .await
-                .change_context(LicensingOperationError::Consensus)?;
+                .await;
+            drop(order);
+            begun.change_context(LicensingOperationError::Consensus)?;
             if let Some(result) = self.licensing_command_result(reference).await {
                 return result;
             }
@@ -133,31 +139,58 @@ impl SessionServiceImpl {
         reference: &CommandExecutionReference,
         binding: nervix_consensus::ActivationBinding,
     ) -> CommandResult {
-        let _turn = self.inner.licensing_requests.foreground().await;
-        let result = async {
-            if let Some(result) = self.licensing_command_result(reference).await {
-                return result;
-            }
-            let request_id = activation_request_id(reference)?;
-            if self.licensing_state()?.rotation.is_some() {
-                self.finish_cluster_key_rotation().await?;
-            }
-            self.inner
-                .consensus
-                .release_license(
-                    binding,
-                    reference.clone(),
-                    request_id,
-                    clock::observe(self.inner.runtime.fault_injection()),
-                )
-                .await
-                .change_context(LicensingOperationError::Consensus)
-        }
-        .await;
-        match result {
+        match self.commit_license_release(reference, binding).await {
             Ok(()) => command_ok("License released; awaiting service confirmation".to_owned()),
             Err(error) => command_error(format!("{error:#}")),
         }
+    }
+
+    /// Commit an operator's release without the request turn, so it never waits behind a request
+    /// to the licensing service, an automatic refresh retrying an unreachable service included.
+    /// Only a key rotation still pending is finished first, through the service, under the turn.
+    async fn commit_license_release(
+        &self,
+        reference: &CommandExecutionReference,
+        binding: nervix_consensus::ActivationBinding,
+    ) -> Result<(), Report<LicensingOperationError>> {
+        if let Some(result) = self.licensing_command_result(reference).await {
+            return result;
+        }
+        let request_id = activation_request_id(reference)?;
+        let order = self.inner.licensing_requests.activation_commit().await;
+        if self.licensing_state()?.rotation.is_none() {
+            return self
+                .commit_released_activation(binding, reference, request_id)
+                .await;
+        }
+        // The order is never held while waiting for the turn, which its holders take first.
+        drop(order);
+        let _turn = self.inner.licensing_requests.foreground().await;
+        if let Some(result) = self.licensing_command_result(reference).await {
+            return result;
+        }
+        self.finish_cluster_key_rotation().await?;
+        let _order = self.inner.licensing_requests.activation_commit().await;
+        self.commit_released_activation(binding, reference, request_id)
+            .await
+    }
+
+    async fn commit_released_activation(
+        &self,
+        binding: nervix_consensus::ActivationBinding,
+        reference: &CommandExecutionReference,
+        request_id: Uuid,
+    ) -> Result<(), Report<LicensingOperationError>> {
+        self.inner
+            .consensus
+            .release_license(
+                binding,
+                reference.clone(),
+                request_id,
+                clock::observe(self.inner.runtime.fault_injection()),
+            )
+            .await
+            .change_context(LicensingOperationError::Consensus)
     }
 
     /// The request turn serializes resumption with foreground activation/refresh commands.
