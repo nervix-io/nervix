@@ -144,6 +144,37 @@ fn an_error_route_carries_rows_toward_a_held_relay() {
 }
 
 #[test]
+fn a_correlation_timeout_carries_only_its_own_sides_rows_toward_a_held_relay() {
+    let shape = format!(
+        "{} {} CREATE CORRELATOR pairs LEFT FROM a RIGHT FROM b CORRELATE WHERE left.k = right.k \
+         MATCH EARLIEST MAX TIME 30s ON CORRELATION TIMEOUT SEND TO failed, DROP UNBRANCHED TO c \
+         SET k = left.k, v = right.v FLUSH IMMEDIATE ON MESSAGE ERROR LOG; CREATE JUNCTION \
+         replaced FROM failed UNBRANCHED TO m INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        ingestor_into("left_feed", "ingress", "a"),
+        ingestor_into("right_feed", "other_ingress", "b"),
+    );
+    let existing = schedule("correlation_timeout", &shape);
+    let gated = [node(ModelKind::Junction, "replaced")];
+
+    let timeout_held = SwapStopOrder::plan(&existing, &gated, &[relay("failed")]);
+    let output_held = SwapStopOrder::plan(&existing, &gated, &[relay("c")]);
+
+    assert!(
+        timeout_held.stops_before_holds(&ingestor("left_feed")),
+        "the left side's unmatched rows go to the held relay"
+    );
+    assert!(
+        !timeout_held.stops_before_holds(&ingestor("right_feed")),
+        "the right side's unmatched rows are dropped and its matched rows reach no held relay"
+    );
+    assert!(
+        output_held.stops_before_holds(&ingestor("left_feed"))
+            && output_held.stops_before_holds(&ingestor("right_feed")),
+        "every matched pair carries rows of both sides into the correlator's route"
+    );
+}
+
+#[test]
 fn a_read_of_materialized_state_carries_no_rows_toward_a_held_relay() {
     let shape = format!(
         "{} CREATE GENERATOR sampler USING MATERIALIZED STATE sa EACH 1h UNBRANCHED TO c SET k = \

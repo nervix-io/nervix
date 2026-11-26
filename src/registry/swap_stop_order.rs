@@ -78,33 +78,52 @@ impl SwapStopOrder {
     }
 }
 
-/// How rows travel through one schedule: the relays each node delivers rows into and the relays
-/// each node reads rows from. A read of a relay's materialized state carries no rows, so it is
-/// not a record input: the node that reads state never holds back the relay it reads.
+/// How rows travel through one schedule: the relays each node delivers rows into, each with the
+/// relays whose rows it carries there, and the relays each node reads rows from. A read of a
+/// relay's materialized state carries no rows, so it is not a record input: the node that reads
+/// state never holds back the relay it reads.
 struct RecordFlow {
-    outputs: BTreeMap<NodeRef, Vec<RelayName>>,
+    deliveries: BTreeMap<NodeRef, Vec<Delivery>>,
     inputs: BTreeMap<NodeRef, Vec<RelayName>>,
+}
+
+/// One relay a node delivers rows into.
+struct Delivery {
+    relay: RelayName,
+    /// The node's record inputs whose rows it carries into `relay`: every one of them along a
+    /// route or an error route, and only one side's along a correlator's timeout action.
+    from: Vec<RelayName>,
 }
 
 impl RecordFlow {
     fn of(schedule: &DomainSchedule) -> Self {
-        let mut outputs = BTreeMap::new();
+        let mut deliveries = BTreeMap::new();
         let mut inputs = BTreeMap::new();
         for node in schedule.nodes.values() {
             let model = node.config.as_ref();
-            outputs.insert(node.identity(), delivered_relays(model));
-            inputs.insert(node.identity(), record_inputs(model));
+            let record_inputs = record_inputs(model);
+            deliveries.insert(node.identity(), deliveries_of(model, &record_inputs));
+            inputs.insert(node.identity(), record_inputs);
         }
-        Self { outputs, inputs }
+        Self { deliveries, inputs }
     }
 
     /// Every node whose rows reach one of `held`: a node that delivers into one of them, and every
     /// node that delivers rows to such a node, through any number of relays and nodes.
     fn nodes_reaching(&self, held: &[RelayName]) -> BTreeSet<NodeRef> {
-        let mut writers = BTreeMap::<&RelayName, Vec<&NodeRef>>::new();
-        for (node, relays) in &self.outputs {
-            for relay in relays {
-                writers.entry(relay).or_default().push(node);
+        /// A node that delivers into one relay, with the inputs whose rows it carries there.
+        struct Writer<'a> {
+            node: &'a NodeRef,
+            from: &'a [RelayName],
+        }
+
+        let mut writers = BTreeMap::<&RelayName, Vec<Writer<'_>>>::new();
+        for (node, deliveries) in &self.deliveries {
+            for delivery in deliveries {
+                writers.entry(&delivery.relay).or_default().push(Writer {
+                    node,
+                    from: &delivery.from,
+                });
             }
         }
         let mut reached_relays = held.iter().collect::<BTreeSet<_>>();
@@ -115,13 +134,8 @@ impl RecordFlow {
                 continue;
             };
             for writer in relay_writers {
-                if !reaching.insert((*writer).clone()) {
-                    continue;
-                }
-                let Some(writer_inputs) = self.inputs.get(*writer) else {
-                    continue;
-                };
-                for input in writer_inputs {
+                reaching.insert(writer.node.clone());
+                for input in writer.from {
                     if reached_relays.insert(input) {
                         pending.push(input);
                     }
@@ -142,13 +156,15 @@ impl RecordFlow {
         }
         let mut downstream = BTreeMap::<&NodeRef, Vec<&NodeRef>>::new();
         let mut waiting_on = self
-            .outputs
+            .deliveries
             .keys()
             .map(|node| (node, 0_usize))
             .collect::<BTreeMap<_, _>>();
-        for (node, relays) in &self.outputs {
-            for relay in relays {
-                let Some(relay_readers) = readers.get(relay) else {
+        // The order follows every relay a node delivers into, whichever of its inputs the rows
+        // came from: a domain's graph has no loop between nodes, so the order always exists.
+        for (node, deliveries) in &self.deliveries {
+            for delivery in deliveries {
+                let Some(relay_readers) = readers.get(&delivery.relay) else {
                     continue;
                 };
                 for reader in relay_readers {
@@ -194,39 +210,49 @@ impl RecordFlow {
     }
 }
 
-/// The relays `model` delivers rows into: its routes, the error routes of its routes or, for an
-/// emitter, its own error route, and the relays a correlator's timeout actions send to.
-fn delivered_relays(model: &Model) -> Vec<RelayName> {
-    let mut relays = Vec::new();
+/// The relays `model` delivers rows into, each with the inputs whose rows reach it. Its routes,
+/// the error routes of its routes and an emitter's own error route carry rows from every input in
+/// `record_inputs`; a correlator's timeout action sends only its own side's unmatched rows.
+fn deliveries_of(model: &Model, record_inputs: &[RelayName]) -> Vec<Delivery> {
+    let mut sources = BTreeMap::<RelayName, BTreeSet<RelayName>>::new();
+    let mut deliver = |relay: &RelayName, from: &[RelayName]| {
+        sources
+            .entry(relay.clone())
+            .or_default()
+            .extend(from.iter().cloned());
+    };
     if let Some(outputs) = model.output_routes() {
         for output in outputs.outputs() {
-            relays.push(output.relay.clone());
+            deliver(&output.relay, record_inputs);
             if let MessageErrorPolicy::Dlq { relay, .. } = &output.message_error_policy {
-                relays.push(relay.clone());
+                deliver(relay, record_inputs);
             }
         }
     }
     match model {
         Model::Emitter(emitter) => {
             if let MessageErrorPolicy::Dlq { relay, .. } = &emitter.error_policies.message {
-                relays.push(relay.clone());
+                deliver(relay, record_inputs);
             }
         }
         Model::Correlator(correlator) => {
-            for action in [
-                &correlator.timeout_policy.left,
-                &correlator.timeout_policy.right,
-            ] {
-                if let CorrelationTimeoutAction::SendTo { relay } = action {
-                    relays.push(relay.clone());
-                }
+            if let CorrelationTimeoutAction::SendTo { relay } = &correlator.timeout_policy.left {
+                deliver(relay, correlator.left.relays());
+            }
+            if let CorrelationTimeoutAction::SendTo { relay } = &correlator.timeout_policy.right {
+                deliver(relay, correlator.right.relays());
             }
         }
         _ => {}
     }
-    relays.sort();
-    relays.dedup();
-    relays
+    let mut deliveries = Vec::with_capacity(sources.len());
+    for (relay, from) in sources {
+        deliveries.push(Delivery {
+            relay,
+            from: from.into_iter().collect(),
+        });
+    }
+    deliveries
 }
 
 /// The relays whose rows `model` reads. A generator reads only its source relay's materialized
