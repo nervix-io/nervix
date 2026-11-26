@@ -317,6 +317,22 @@ impl RelayUnitRef {
 }
 
 impl DomainExecution {
+    /// Removes the owner task of every unit of `relay` this execution runs, in unit order.
+    pub(super) fn take_relay_owner_tasks(&mut self, relay: &RelayName) -> Vec<RelayOwnerTask> {
+        let units = self
+            .relay_owner_tasks
+            .range(RelayUnitRef::units_of(relay))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let mut tasks = Vec::with_capacity(units.len());
+        for key in units {
+            if let Some(task) = self.relay_owner_tasks.remove(&key) {
+                tasks.push(task);
+            }
+        }
+        tasks
+    }
+
     /// Removes the state task of every unit of `relay` this execution runs, in unit order.
     pub(super) fn take_relay_state_tasks(&mut self, relay: &RelayName) -> Vec<RelayStateTask> {
         let units = self

@@ -176,6 +176,12 @@ impl Runtime {
                 in_flight_by_ingestor: DashMap::default(),
                 generator_activity_by_domain: DashMap::default(),
                 stop_ledgers: DashMap::default(),
+                drop_ledgers: DashMap::default(),
+                reingestor_discards: DashMap::default(),
+                applied_runtime_revisions: watch::channel(
+                    entity_drop::AppliedRuntimeRevisions::default(),
+                )
+                .0,
                 emitter_buffers: DashMap::default(),
                 force_flush_by_domain: DashMap::default(),
                 node_quiesce_counters: DashMap::default(),

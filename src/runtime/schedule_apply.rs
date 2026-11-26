@@ -101,7 +101,8 @@ impl Runtime {
             .plan(schedule)
             .change_context(RuntimeError::PlanScheduleRevision)?;
         let application =
-            Box::pin(self.apply_cluster_schedule_locked(local_node_id, &revision_plan, true)).await;
+            Box::pin(self.apply_cluster_schedule_locked(local_node_id, &revision_plan, true, None))
+                .await;
         installed.record_attempt(&revision_plan, schedule, &self.installed_revision_digests());
         application
     }
@@ -161,16 +162,26 @@ impl Runtime {
         self.sync_committed_domains(revision, domains, domain_clock_authorities);
         // A failed application records nothing, so the same revision is applied again rather than
         // being suppressed as one this node already holds.
-        Box::pin(self.apply_cluster_schedule_locked(local_node_id, revision_plan, false)).await?;
+        Box::pin(self.apply_cluster_schedule_locked(
+            local_node_id,
+            revision_plan,
+            false,
+            Some(revision),
+        ))
+        .await?;
         application.record_applied(revision);
+        self.record_applied_runtime_revision(revision);
         Ok(())
     }
 
+    /// Applies `revision_plan`, the committed runtime `revision` when one committed it, to every
+    /// domain this node runs.
     pub(super) async fn apply_cluster_schedule_locked(
         &self,
         local_node_id: &ClusterNodeName,
         revision_plan: &PlannedClusterRevision,
         start_ingestors: bool,
+        revision: Option<u64>,
     ) -> error_stack::Result<(), RuntimeError> {
         // Delta application and full rebuild each own substantial state. Poll them indirectly so
         // applying a cluster revision does not embed both state machines in this coordinator.
@@ -259,6 +270,11 @@ impl Runtime {
             }
             let desired_passive_only =
                 matches!(domain_status, nervix_models::DomainStatus::Stopped);
+            // The entities the change drops are destroyed before anything else of it runs on this
+            // node, whatever else it does, and nothing waits for what they hold.
+            if !already_applied {
+                Box::pin(self.destroy_dropped_entities(&domain.domain, domain, revision)).await?;
+            }
             if !matches!(delta, ExecutionDelta::Unchanged)
                 || !existing_domains.contains(&domain.domain)
                 || !predecessor_matches

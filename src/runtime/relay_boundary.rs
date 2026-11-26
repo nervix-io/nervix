@@ -33,6 +33,8 @@ mod sizing_position;
 use channels::{RelayBranchChannels, RelayChannels};
 pub(super) use sizing_position::UnusedRelayPosition;
 
+#[path = "relay_boundary_remote_consumers.rs"]
+mod remote_consumers;
 #[path = "relay_boundary_routed.rs"]
 mod routed;
 pub(super) use routed::{
@@ -248,6 +250,17 @@ pub(super) struct RelayBoundaryServices {
     /// Record ACK roots retain this domain drain tracker after the relay service's borrow ends.
     pub(super) domain_ack_tracker: Arc<AckRootTracker>,
     channels: RelayChannels,
+    /// Whether the last change to this node's attached consumers of the relay was a drop that
+    /// removed some. A batch the relay's owner on another node routed here for a consumer the drop
+    /// destroyed, before that owner applied the drop, finds no attached consumer: its share is
+    /// released as done, as the dropped consumer's share of every message is. Any later
+    /// registration or removal clears it.
+    attached_consumers_dropped: AtomicBool,
+    /// Whether a drop removed the relay itself. Its services stay registered in the domain's
+    /// routing until the domain's execution is rebuilt, so a batch another node sent before it
+    /// applied the drop, to the relay's owner here or routed to its consumers here, finds them and
+    /// counts as done instead of being refused.
+    dropped: AtomicBool,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -986,12 +999,17 @@ impl RelayConsumerFanout {
         }
         if attached_receiver_count > 0 {
             let shares = batch.attached_for_receivers(attached_receiver_count);
-            if let Err(error) = attached.broadcast(shares).await {
-                let failed = error.batch;
-                for ack in failed.acks.iter() {
-                    ack.no_ack("runtime consumer unavailable for attached delivery");
+            match attached.broadcast(shares).await {
+                // A consumer a drop destroyed after this publication selected it leaves its share
+                // to the publisher, which releases it as done.
+                Ok(departures) => batch.release_shares_as_done(departures.released),
+                Err(error) => {
+                    let failed = error.batch;
+                    for ack in failed.acks.iter() {
+                        ack.no_ack("runtime consumer unavailable for attached delivery");
+                    }
+                    return Err(Box::new(batch.clone()));
                 }
-                return Err(Box::new(batch.clone()));
             }
         }
 
@@ -1314,6 +1332,12 @@ impl RelayRuntimeFanIn {
         self.receiver.try_recv()
     }
 
+    /// Leaves the relay's fan-out as the drop that destroys this consumer does, answering the
+    /// batches delivered here that it has not taken; the caller releases their shares as done.
+    pub(super) fn depart_releasing(&mut self) -> Vec<RelayRecordBatch> {
+        self.receiver.depart_releasing()
+    }
+
     pub(super) fn poll_recv(
         &mut self,
         cx: &mut std::task::Context<'_>,
@@ -1420,7 +1444,21 @@ impl RelayBoundaryServices {
             branch_presences,
             domain_ack_tracker,
             channels: RelayChannels::for_units(&partitioning.units()),
+            attached_consumers_dropped: AtomicBool::new(false),
+            dropped: AtomicBool::new(false),
         }
+    }
+
+    /// Records that a drop removed the relay. The drop marks the relay before it stops the owner
+    /// tasks whose exit removes and closes their buffers, so a delivery that finds its owner buffer
+    /// gone or closed reads the mark set.
+    pub(super) fn mark_dropped(&self) {
+        self.dropped.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a drop removed the relay, so a batch that still reaches it counts as done.
+    pub(super) fn is_dropped(&self) -> bool {
+        self.dropped.load(Ordering::SeqCst)
     }
 
     /// The unit that owns the branch `key` names, refusing a keyless batch of a partitioned relay.
@@ -1675,6 +1713,11 @@ impl RelayBoundaryServices {
         let _dispatch_permit = dispatch_gate.acquire_dispatch().await;
         let _branch_dispatch_permits = self.fanout.acquire_branch_dispatch_gates(&batch.key).await;
         let Some(buffer) = self.fanout.owner_buffer(unit) else {
+            // A drop that removed the relay stopped its owner after this delivery last read the
+            // mark: the batch counts as done, as everything the owner held does.
+            if self.is_dropped() {
+                return Ok(());
+            }
             for ack in batch.acks.iter() {
                 ack.no_ack("relay owner buffer is unavailable");
             }
@@ -1682,6 +1725,10 @@ impl RelayBoundaryServices {
         };
         let admission = RelayOwnerAdmission::new(self.transit_for_unit(unit).clone());
         if let Err(error) = buffer.batches.broadcast(batch.attached()).await {
+            if self.is_dropped() {
+                error.batch.ack_success();
+                return Ok(());
+            }
             for ack in error.batch.acks.iter() {
                 ack.no_ack("relay owner buffer is unavailable");
             }
@@ -1741,6 +1788,14 @@ impl RelayBoundaryServices {
         unit: Unit,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
+        let dispatch = match dispatch {
+            RuntimeConsumerDispatch::Routed
+                if self.attached_consumers_dropped.load(Ordering::Acquire) =>
+            {
+                RuntimeConsumerDispatch::RoutedToDroppedConsumers
+            }
+            other => other,
+        };
         if let Some(consumers) = self.unit_runtime_consumers.get(&unit) {
             let attached = self
                 .attached_runtime_consumer_count
@@ -1775,221 +1830,11 @@ impl RelayBoundaryServices {
             .await
     }
 
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            bounded,
-            reason = "the retained channel serializes sequence and publication changes",
-            key = "delivery channel incarnation and sequence",
-            bound = "one admitted delivery is serialized against channel replacement and its \
-                     dispatch gate"
-        )
-    )]
-    pub(super) async fn dispatch_remote_runtime_consumers(
-        &self,
-        domain: &DomainName,
-        unit: Unit,
-        batch: &RelayRecordBatch,
-    ) -> RelayDispatchResult {
-        let remote_runtime_consumers = self.remote_runtime_consumers.load_full();
-        if remote_runtime_consumers.is_empty() {
-            return Ok(());
-        }
-        // A consumer's node reports the batch's records alive to their sources once it has admitted
-        // them, and not before, so this node reports them alive while their deliveries wait.
-        self.remote_ack_timing
-            .keep_alive_while_pending(
-                batch,
-                self.deliver_to_remote_runtime_consumers(
-                    domain,
-                    unit,
-                    batch,
-                    &remote_runtime_consumers,
-                ),
-            )
-            .await
-    }
-
-    async fn deliver_to_remote_runtime_consumers(
-        &self,
-        domain: &DomainName,
-        unit: Unit,
-        batch: &RelayRecordBatch,
-        remote_runtime_consumers: &[RemoteRuntimeConsumer],
-    ) -> RelayDispatchResult {
-        let Some(dispatcher) = &self.remote_dispatcher else {
-            if remote_runtime_consumers
-                .iter()
-                .any(|consumer| consumer.mode_for(unit) == Some(AckMode::Attached))
-            {
-                for ack in batch.acks.iter() {
-                    ack.no_ack("remote dispatcher unavailable for attached delivery");
-                }
-                return Err(Box::new(batch.clone()));
-            }
-            return Ok(());
-        };
-        // Every consumer of this relay receives the same columns; only the acknowledgement
-        // obligations differ, so the body is encoded once for the whole fanout and each
-        // destination carries a handle to that one allocation.
-        //
-        // The encode happens inside the first destination's outbound slot rather than ahead of
-        // the loop. A destination's slot is what orders the batches published to it, and an
-        // encode is long enough that hoisting it out lets a later batch finish serializing first
-        // and reach the slot ahead of an earlier one, delivering the relay out of order.
-        let mut encoded_body: Option<(ChargedBytes, u64)> = None;
-        for consumer in remote_runtime_consumers.iter() {
-            let Some(mode) = consumer.mode_for(unit) else {
-                continue;
-            };
-            nervix_primitives::task::consume_budget().await;
-            let outbound_slot = self.outbound_slot(
-                &consumer.node_id,
-                &consumer.relay,
-                RelayPayloadKind::Routed,
-                &batch.key,
-                unit,
-            );
-            let Some(_slot) = outbound_slot.lock_for_delivery().await else {
-                for ack in batch.acks.iter() {
-                    ack.no_ack("relay channel lifetime ended");
-                }
-                return Err(Box::new(batch.clone()));
-            };
-            let remote_batch = match mode {
-                AckMode::Attached => batch.attached(),
-                AckMode::Detached => batch.detached(),
-            };
-            // The records are stored before the body is encoded, so the first destination that
-            // waits for room to store them holds no encoded body meanwhile.
-            let timing = dispatcher.registry.timing();
-            let deadline = dispatcher.delivery_deadline(timing);
-            let mut registration_owner = if mode == AckMode::Attached {
-                let storage = dispatcher
-                    .store_pending_acks(
-                        &consumer.node_id,
-                        remote_batch.acks.to_vec(),
-                        deadline,
-                        timing,
-                        outbound_slot.cancellation().cancelled(),
-                    )
-                    .await;
-                match storage {
-                    Ok(RemoteAckStorage::Stored(owner)) => Some(owner),
-                    Ok(RemoteAckStorage::Cancelled { unstored }) => {
-                        for ack in unstored.iter().chain(batch.acks.iter()) {
-                            ack.no_ack("relay channel lifetime ended");
-                        }
-                        return Err(Box::new(batch.clone()));
-                    }
-                    Err(error) => {
-                        let reason = format!("{error:#}");
-                        for ack in &remote_batch.acks {
-                            ack.no_ack(reason.clone());
-                        }
-                        return Err(Box::new(batch.clone()));
-                    }
-                }
-            } else {
-                None
-            };
-            let (batch_ipc, decoded_bytes) = match encoded_body.clone() {
-                Some(bytes) => bytes,
-                None => match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
-                    Ok(bytes) => {
-                        let bytes = (
-                            bytes,
-                            crate::runtime_schema::batch_payload_bytes(batch.batch.batch()),
-                        );
-                        encoded_body = Some(bytes.clone());
-                        bytes
-                    }
-                    Err(error) => {
-                        if let Some(owner) = &registration_owner {
-                            for registration in owner.registrations().iter().flatten() {
-                                dispatcher.clear_pending_ack(registration);
-                            }
-                        }
-                        if remote_runtime_consumers
-                            .iter()
-                            .any(|consumer| consumer.mode_for(unit) == Some(AckMode::Attached))
-                        {
-                            for ack in batch.acks.iter() {
-                                ack.no_ack(format!("{error:#}"));
-                            }
-                            return Err(Box::new(batch.clone()));
-                        }
-                        warn!(
-                            error = %format_args!("{error:#}"),
-                            "failed to serialize detached remote relay batch"
-                        );
-                        return Ok(());
-                    }
-                },
-            };
-            let remote_acks = match &registration_owner {
-                Some(owner) => owner.registrations().to_vec(),
-                None => vec![None; remote_batch.acks.len()],
-            };
-            let delivery = outbound_slot.next_delivery_with_policy(timing);
-            let result = dispatcher
-                .dispatch_sliced_relay_payload(
-                    &consumer.node_id,
-                    routed_payload(RoutedDelivery {
-                        ack_timing: timing,
-                        decoded_bytes,
-                        delivery,
-                        domain,
-                        unit,
-                        consumer,
-                        batch: &remote_batch,
-                        batch_ipc: batch_ipc.clone(),
-                        acks: remote_acks.clone(),
-                    }),
-                    &remote_batch.batch,
-                    RelayDeliveryChannel::new(&outbound_slot, None),
-                    deadline,
-                    GrantCapacityRefusals::Hold,
-                    registration_owner.as_mut(),
-                )
-                .await;
-
-            match (mode, result) {
-                (AckMode::Attached, Ok(())) => {}
-                (AckMode::Attached, Err(error)) => {
-                    let reason = format!("{error:#}");
-                    let admitted = registration_owner
-                        .as_ref()
-                        .verified("attached delivery has a registration owner")
-                        .admitted_rows();
-                    for (ack_set, remote_ack) in remote_batch.acks[admitted..]
-                        .iter()
-                        .zip(remote_acks[admitted..].iter())
-                    {
-                        if let Some(remote_ack) = remote_ack {
-                            dispatcher.clear_pending_ack(remote_ack);
-                        }
-                        ack_set.no_ack(reason.clone());
-                    }
-                    return Err(Box::new(batch.clone()));
-                }
-                (AckMode::Detached, Err(error)) => {
-                    warn!(
-                        error = %format_args!("{error:#}"),
-                        target_node = %consumer.node_id,
-                        "detached remote delivery failed"
-                    );
-                }
-                (AckMode::Detached, Ok(())) => {}
-            }
-        }
-
-        Ok(())
-    }
-
     pub(super) fn add_local_runtime_consumer(&self, mode: AckMode) -> RelayRuntimeFanIn {
         match mode {
             AckMode::Attached => {
+                self.attached_consumers_dropped
+                    .store(false, Ordering::Release);
                 self.attached_runtime_consumer_count
                     .fetch_add(1, Ordering::AcqRel);
             }
@@ -2032,6 +1877,10 @@ impl RelayBoundaryServices {
             AckMode::Attached => (&consumers.attached, &consumers.audiences.attached),
             AckMode::Detached => (&consumers.detached, &consumers.audiences.detached),
         };
+        if let AckMode::Attached = mode {
+            self.attached_consumers_dropped
+                .store(false, Ordering::Release);
+        }
         count
             .fetch_add(1, Ordering::AcqRel)
             .checked_add(1)
@@ -2083,7 +1932,21 @@ impl RelayBoundaryServices {
             .assured("registered consumers are held in memory")
     }
 
+    /// Removes the registration of a runtime consumer of `unit` that a drop destroys, before the
+    /// consumer leaves the fan-out, so no publication counts a consumer it can no longer find.
+    pub(super) fn remove_dropped_unit_runtime_consumer(&self, mode: AckMode, unit: Unit) {
+        self.remove_local_unit_runtime_consumer(mode, unit);
+        if let AckMode::Attached = mode {
+            self.attached_consumers_dropped
+                .store(true, Ordering::Release);
+        }
+    }
+
     pub(super) fn remove_local_unit_runtime_consumer(&self, mode: AckMode, unit: Unit) {
+        if let AckMode::Attached = mode {
+            self.attached_consumers_dropped
+                .store(false, Ordering::Release);
+        }
         if unit == Unit::SINGLE {
             self.remove_local_runtime_consumer(mode);
             return;
@@ -2103,49 +1966,16 @@ impl RelayBoundaryServices {
     }
 
     pub(super) fn remove_local_runtime_consumer(&self, mode: AckMode) {
+        if let AckMode::Attached = mode {
+            self.attached_consumers_dropped
+                .store(false, Ordering::Release);
+        }
         let counter = match mode {
             AckMode::Attached => &self.attached_runtime_consumer_count,
             AckMode::Detached => &self.detached_runtime_consumer_count,
         };
         let previous = counter.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "relay runtime consumer count underflow");
-    }
-
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            lifecycle,
-            reason = "schedule publication replaces the relay's consumer routes"
-        )
-    )]
-    pub(super) fn replace_remote_runtime_consumers(&self, consumers: Vec<RemoteRuntimeConsumer>) {
-        if *self.remote_runtime_consumers.load().as_ref() == consumers {
-            return;
-        }
-        self.channels
-            .replace_owner_of(&self.changed_consumer_units(&consumers));
-        self.remote_runtime_consumers.store(StdArc::new(consumers));
-    }
-
-    fn changed_consumer_units(&self, next: &[RemoteRuntimeConsumer]) -> Vec<Unit> {
-        let current = self.remote_runtime_consumers.load();
-        self.partitioning
-            .units()
-            .into_iter()
-            .filter(|unit| {
-                let before = current.iter().filter_map(|consumer| {
-                    consumer
-                        .mode_for(*unit)
-                        .map(|mode| (&consumer.node_id, &consumer.relay, mode))
-                });
-                let after = next.iter().filter_map(|consumer| {
-                    consumer
-                        .mode_for(*unit)
-                        .map(|mode| (&consumer.node_id, &consumer.relay, mode))
-                });
-                !before.eq(after)
-            })
-            .collect()
     }
 
     /// Takes the hand-on permits of `unit`'s gate and of the relay's gate together. It holds
@@ -2271,6 +2101,11 @@ impl RelayBoundaryServices {
         let routed = RelayRoutedAdmission::new(self.transit_for_unit(unit));
         async move {
             let _routed = routed;
+            // A batch routed for a relay a drop removed here counts as done, as everything the
+            // relay's dropped consumers held does.
+            if self.is_dropped() {
+                return Ok(());
+            }
             // A routed delivery keeps refusing while a swap here holds hand-on back: it holds
             // the sending owner's fan-out permit on its own node, so waiting here could make two
             // nodes that swap at once wait for each other.
@@ -2531,6 +2366,12 @@ impl Runtime {
         branches: &mut RelayOwnerBranchState,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
+        // A drop removed the relay with every consumer of it, so what its owner still holds is
+        // released as done rather than handed on.
+        if services.is_dropped() {
+            batch.ack_success();
+            return Ok(());
+        }
         let now = match branches.expiration_time(self, domain) {
             Ok(now) => now,
             Err(error) => {

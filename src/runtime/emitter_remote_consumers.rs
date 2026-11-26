@@ -17,7 +17,7 @@ use crate::emitter_execution_plan::EmitterInputUnits;
 
 impl Runtime {
     /// Adds to `consumers` the remote consumer of every relay unit this node owns (`owned_relays`)
-    /// that an emitter unit placed on another node reads.
+    /// that an emitter unit placed on another node reads, except the emitters `left_out` names.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the typed revision supplies bounded iteration over its \
@@ -27,17 +27,19 @@ impl Runtime {
         revision: &ExecutionRevision,
         local_node_id: &ClusterNodeName,
         owned_relays: &HashSet<RelayName>,
+        left_out: &HashSet<NodeRef>,
         consumers: &mut HashMap<RelayName, Vec<RemoteRuntimeConsumer>>,
     ) {
         // A single-unit emitter reads every unit of its inputs; an instance reads only the relay
         // units it serves, on the node that runs it.
         for emitter in revision.emitters.emitters() {
+            let identity = NodeRef::new(ModelKind::Emitter, ModelName::from(&emitter.name));
+            if left_out.contains(&identity) {
+                continue;
+            }
             let node = revision
                 .nodes
-                .get(&NodeRef::new(
-                    ModelKind::Emitter,
-                    ModelName::from(&emitter.name),
-                ))
+                .get(&identity)
                 .assured("the emitter plans were decided from this same schedule");
             for unit in node.units.keys().copied() {
                 let Some(target_node) = node.unit_execution_node(unit) else {

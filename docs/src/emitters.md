@@ -1168,6 +1168,18 @@ array in MongoDB. A `BYTES` element of a ClickHouse array keeps its own octets, 
 outside an array does. Inside the JSON text Postgres and MySQL bind, a `BYTES` element is the padded
 base64 text every Nervix JSON value carries octets as.
 
+## Dropping emitters
+
+`DROP EMITTER <emitter>` removes the emitter at once and waits for nothing it holds, a destination
+that is down or a retry included. Every node that runs it first takes it out of the relays it
+reads, so the relays' other consumers keep their pace, then ends it wherever it is, a publish on
+the wire included, and closes its transport without a finish. The records it had not delivered,
+buffered, waiting for a retry, cut off in an attempt or staged for a commit, are discarded, and the
+emitter's share of each is counted as done: a source whose record the relay's other consumers
+delivered hears it acknowledged. The answer reports them as undelivered records. The
+[connector contract](connector-contract.md) describes what the host does with each emitter's
+client.
+
 ## Altering emitters
 
 `ALTER <CONNECTOR> <ENTITY> EMITTER` applies one or more comma-separated operations in written order:

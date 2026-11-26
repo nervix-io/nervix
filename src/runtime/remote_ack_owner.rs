@@ -293,6 +293,21 @@ impl PendingRemoteAck {
         }
     }
 
+    /// Resolves this record's forwarded share as acknowledged. A holder makes a parked share active
+    /// before it acknowledges it, since only an active share leaves the root's handoff tracking as
+    /// it resolves. The receiver's report that the share left its wait can be overtaken by the
+    /// outcome itself, when the receiver releases the share and resolves it at once, so a share
+    /// this registrar still holds parked becomes active here first.
+    fn acknowledge(self) {
+        let Self {
+            acks,
+            required_wait,
+            ..
+        } = self;
+        drop(required_wait);
+        acks.ack_success();
+    }
+
     fn swept(&mut self, timing: SweepPolicy) -> bool {
         match &mut self.phase {
             RemoteAckPhase::AwaitingAdmission { sweeps } => {
@@ -785,7 +800,7 @@ impl RemoteDispatchRegistry {
         };
         match pending {
             RetiredCorrelation::Record(pending) => match outcome {
-                AckOutcome::Ack => pending.acks.ack_success(),
+                AckOutcome::Ack => pending.acknowledge(),
                 AckOutcome::NoAck(error) => pending.acks.no_ack(error),
             },
             RetiredCorrelation::Admission(admission) => {
@@ -807,7 +822,7 @@ impl RemoteDispatchRegistry {
     /// and that delivery's outcome decides it.
     pub(super) fn release_ack(&self, id: u64) {
         match self.take(id) {
-            Some(RetiredCorrelation::Record(pending)) => pending.acks.ack_success(),
+            Some(RetiredCorrelation::Record(pending)) => pending.acknowledge(),
             Some(RetiredCorrelation::Admission(admission)) => drop(admission),
             None => {}
         }

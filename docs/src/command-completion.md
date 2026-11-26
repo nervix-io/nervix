@@ -431,6 +431,13 @@ and what it cut; the durable command record keeps that answer, so a retry under 
 reference recovers it. A `STOP` whose `ENFORCE AFTER` acts ends the tasks at once; one whose
 `CANCEL AFTER` acts fails with the cancelled answer. See [Stopping A
 Domain](./domains-and-time.md#stopping-a-domain).
+A `DROP` of an entity that runs on nodes, alone or in a committed transaction, waits for the
+revision that drops it to be applied on the live nodes, then collects what each live node
+discarded as it destroyed the entity; a node that does not report before the domain drain timeout
+passes, has left or restarted since is named as not reporting. The answer, for each such entity,
+says what was discarded and that its state was removed. A committed transaction's record does not
+keep that report, so a later `COMMIT` of the finished transaction answers from its record without
+it.
 Paced-domain clock authority is part of the same revision. TLS-changing model effects wait for
 every affected listener to install the configuration. Each node installs the TLS VHOSTs of a
 runtime revision before it reports that revision prepared, and the command then confirms the
