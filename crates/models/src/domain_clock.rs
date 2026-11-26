@@ -25,7 +25,7 @@ use rkyv::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{ClusterNodeIdentity, Timestamp, parse_duration_text};
+use crate::{ClusterNodeIdentity, SHORTEST_POSITIVE_DURATION, Timestamp, parse_duration_text};
 
 mod admission;
 mod observation;
@@ -381,18 +381,6 @@ pub struct DomainClockProgress {
 }
 
 impl DomainClockState {
-    /// The shortest physical wait a positive logical delta converts to, so rounding never turns a
-    /// wait that has to happen into none.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "a Duration counts whole nanoseconds, so one nanosecond is the shortest wait \
-                      that is not zero"
-        )
-    )]
-    const SHORTEST_WALL_WAIT: Duration = Duration::from_nanos(1);
-
     pub const fn new(
         wall_started_at: Timestamp,
         logical_start: Timestamp,
@@ -480,7 +468,9 @@ impl DomainClockState {
                 operation: "rate conversion",
             })
         })?;
-        Ok(Duration::from_nanos(wall_nanos).max(Self::SHORTEST_WALL_WAIT))
+        // A positive logical delta converts to at least the shortest positive duration, so
+        // rounding never turns a wait that has to happen into none.
+        Ok(Duration::from_nanos(wall_nanos).max(SHORTEST_POSITIVE_DURATION))
     }
 
     pub fn tick_boundary(

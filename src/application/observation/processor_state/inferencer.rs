@@ -281,6 +281,8 @@ fn admitted_sections(
 
 #[cfg(all(test, not(any(feature = "shuttle", feature = "loom"))))]
 mod tests {
+    use nervix_execution::ADMISSION_TOKEN_BYTES;
+
     use super::*;
 
     #[nervix_primitives::test]
@@ -290,7 +292,7 @@ mod tests {
         let too_many = usize::try_from(u32::MAX).assured("the native target holds a u32 count");
         for (entries, admitted) in [(6, true), (too_many, false)] {
             let memory = executor
-                .try_reserve(MemoryClass::Bulk, 1)
+                .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
                 .assured("fixture admission");
             let result = executor
                 .run_cpu(CpuClass::Bulk, memory, move |memory, cancellation| {
@@ -322,10 +324,10 @@ mod tests {
         let executor = Executor::default();
         let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
         let memory = executor
-            .try_reserve(MemoryClass::Bulk, 1)
+            .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
             .assured("fixture admission");
         let _held = executor
-            .try_reserve(MemoryClass::Bulk, capacity - 1)
+            .try_reserve(MemoryClass::Bulk, capacity - ADMISSION_TOKEN_BYTES)
             .assured("the test holds the rest of the bulk class");
         let result = executor
             .run_cpu(CpuClass::Bulk, memory, move |memory, cancellation| {

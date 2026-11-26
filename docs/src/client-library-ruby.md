@@ -461,7 +461,9 @@ trigger a `Cancel`; library workers never call Ruby (R-2, R-5).
 {{#include ../../tests/client_conformance/ruby/suite/cluster/commands_test.rb:threads}}
 ```
 
-`Cancel.new(deadline: seconds)` bounds a call; `trigger` cancels calls sharing the token. A Ruby
+`Cancel.new(deadline: seconds)` bounds a call, with a deadline of at least one millisecond and at
+most one day, the deadlines the Rust client accepts; any other raises `InvalidArgumentError`.
+`trigger` cancels calls sharing the token. A Ruby
 thread interrupt ends only that call, without triggering its sibling calls' token. Cancellation
 ends a wait and never rolls back admitted work.
 

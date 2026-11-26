@@ -188,15 +188,16 @@ pub use connector::{
     KafkaTopicEmitterChange, KafkaTopicEmitterMode, KafkaTopicIngestor,
     KafkaTopicIngestorAlteration, KafkaTopicIngestorChange, KafkaTopicName,
     KafkaTopicPublishingMode, LiteralHeaderWrite, LocatorDeclaration, LocatorName,
-    MONGODB_MAX_DOCUMENT_BYTES, MONGODB_NAMESPACE_MAX_BYTES, MQTT_MAXIMUM_PACKET_BYTES,
-    MQTT_SHARED_SUBSCRIPTION_LEVEL, MYSQL_MAX_PLACEHOLDERS, MappedValueField, MappedValueSection,
-    MappedValueType, MappedValueTypes, MongoDbCollectionEmitter, MongoDbCollectionEmitterChange,
-    MongoDbCollectionEmitterMode, MongoDbCollectionName, MongoDbCollectionPublishingMode,
-    MongoDbConfigEntry, MongoDbConflictAction, MongoDbConflictError, MongoDbEmitter,
-    MongoDbEmitterChange, MongoDbEmitterEntity, MongoDbValueMapping, MqttBroker, MqttClientConfig,
-    MqttClientConfigError, MqttConfigEntry, MqttEmitter, MqttEmitterChange, MqttEmitterEntity,
-    MqttIngestMode, MqttIngestor, MqttIngestorEntity, MqttPassword, MqttQos, MqttSession,
-    MqttTlsFiles, MqttTlsIdentity, MqttTopicEmitter, MqttTopicEmitterChange, MqttTopicEmitterMode,
+    MONGODB_MAX_DOCUMENT_BYTES, MONGODB_NAMESPACE_MAX_BYTES, MQTT_MAX_REMAINING_LENGTH,
+    MQTT_MAXIMUM_PACKET_BYTES, MQTT_SHARED_SUBSCRIPTION_LEVEL, MYSQL_MAX_PLACEHOLDERS,
+    MappedValueField, MappedValueSection, MappedValueType, MappedValueTypes,
+    MongoDbCollectionEmitter, MongoDbCollectionEmitterChange, MongoDbCollectionEmitterMode,
+    MongoDbCollectionName, MongoDbCollectionPublishingMode, MongoDbConfigEntry,
+    MongoDbConflictAction, MongoDbConflictError, MongoDbEmitter, MongoDbEmitterChange,
+    MongoDbEmitterEntity, MongoDbValueMapping, MqttBroker, MqttClientConfig, MqttClientConfigError,
+    MqttConfigEntry, MqttEmitter, MqttEmitterChange, MqttEmitterEntity, MqttIngestMode,
+    MqttIngestor, MqttIngestorEntity, MqttPassword, MqttQos, MqttSession, MqttTlsFiles,
+    MqttTlsIdentity, MqttTopicEmitter, MqttTopicEmitterChange, MqttTopicEmitterMode,
     MqttTopicFilter, MqttTopicIngestor, MqttTopicIngestorAlteration, MqttTopicIngestorChange,
     MqttTopicName, MqttTopicPublishingMode, MqttTransport, MySqlConfigEntry, MySqlConflictAction,
     MySqlEmitter, MySqlEmitterChange, MySqlEmitterEntity, MySqlTableEmitter,
@@ -441,7 +442,10 @@ pub use schema::{
     WireSchemaField, WireSchemaStrictness,
 };
 pub use schema_fingerprint::SchemaFingerprint;
-pub use settings::{ClusterParameters, Prerequisites, Setting, SettingClass, SettingDefinition};
+pub use settings::{
+    ClusterParameters, Prerequisites, SHORTEST_POSITIVE_DURATION, Setting, SettingClass,
+    SettingDefinition,
+};
 pub use show_wasm_state::ShowWasmProcessorState;
 pub use state_branch_selection::{
     ResolvedStateBranchSelection, StateBranchField, StateBranchSelection, StateBranchSelectionError,

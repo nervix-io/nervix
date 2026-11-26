@@ -5,6 +5,7 @@ execution again, and one session shared by several threads."""
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -68,9 +69,12 @@ def test_a_command_whose_deadline_passed_is_recovered_by_executing_it_again(
 ) -> None:
     statement = f"CREATE SCHEMA expired_{unique} ( value I64 );"
     execution = session.prepare(statement)
-    # The token's deadline passes before the call starts, so the call ends before anything is sent.
+    # The token's deadline, the shortest one accepts, passes before the call starts, so the call
+    # ends before anything is sent.
+    out_of_time = nx.Cancel(deadline=0.001)
+    time.sleep(0.01)
     with pytest.raises(nx.DeadlineError) as expired:
-        session.execute(execution, cancel=nx.Cancel(deadline=0.000001))
+        session.execute(execution, cancel=out_of_time)
     assert expired.value.execution_reference == execution.reference
     outcome = session.execute(execution, cancel=deadline())
     assert outcome.disposition == nx.Disposition.COMPLETED

@@ -514,9 +514,6 @@ pub(crate) enum TestRestoreEnd {
     Status(Box<Status>),
 }
 
-/// Archive bytes one restore chunk carries, as the Rust client sends them.
-const RESTORE_CHUNK_BYTES: usize = 256 * 1024;
-
 /// How long a restore waits for its reply once every frame was sent: the restore applies before it
 /// answers.
 const RESTORE_REPLY_TIMEOUT: Duration = Duration::from_secs(300);
@@ -557,7 +554,8 @@ pub(crate) async fn send_restore(
     .encode(&limits)
     .map_err(io::Error::other)?;
     let mut frames = vec![start];
-    for chunk in restore.archive.chunks(RESTORE_CHUNK_BYTES) {
+    // Chunks as the Rust client sends them under the same limits.
+    for chunk in restore.archive.chunks(RestoreChunk::largest_bytes(&limits)) {
         frames.push(RestoreChunk::encode(chunk, &limits).map_err(io::Error::other)?);
     }
     let path = http::uri::PathAndQuery::from_static(RESTORE_BACKUP_PATH);

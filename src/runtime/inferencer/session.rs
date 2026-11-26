@@ -48,7 +48,7 @@ use ort::{
 };
 
 use super::{
-    InferencerError, OnnxSessionOptions, RuntimeTensorSchema, SESSION_LOAD_RESERVATION_BYTES,
+    InferencerError, OnnxSessionOptions, RuntimeTensorSchema,
     columns::{MessageTensor, TensorColumn},
     onnx_environment,
     stateful::{CarriedState, NativeGeneration},
@@ -333,8 +333,11 @@ impl InferenceSession {
     ) -> error_stack::Result<(), InferencerError> {
         let path = path.to_path_buf();
         let definition = prepared.clone();
+        // ONNX Runtime allocates a session's memory itself and keeps it for as long as the
+        // inferencer holds the session, which no transient budget can stand for, so the load takes
+        // only the admission token onto the bulk workers.
         let reservation = executor
-            .reserve(MemoryClass::Bulk, SESSION_LOAD_RESERVATION_BYTES)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .change_context(InferencerError::LoadExecution)?;
         let bound = executor

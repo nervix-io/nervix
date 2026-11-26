@@ -2142,7 +2142,7 @@ impl RuntimeStateStore {
         let placement = placement.clone();
         let reservation = self
             .executor
-            .reserve(MemoryClass::Bulk, 1)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .change_context(RuntimePersistenceError::StorageAdmission)?;
         self.executor
@@ -2177,7 +2177,7 @@ impl RuntimeStateStore {
         let placement = placement.clone();
         let reservation = self
             .executor
-            .reserve(MemoryClass::Bulk, 1)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .change_context(RuntimePersistenceError::StorageAdmission)?;
         self.executor
@@ -2287,7 +2287,7 @@ impl RuntimeStateStore {
         let placement = placement.clone();
         let reservation = self
             .executor
-            .reserve(MemoryClass::Bulk, 1)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .change_context(RuntimePersistenceError::StorageAdmission)?;
         let installed = self

@@ -12,6 +12,21 @@ use crate::{
     Reservation, StorageClass, WorkerClassSnapshot, memory::MemoryBudget, workers::WorkerPool,
 };
 
+/// What admits a job whose memory its caller cannot charge up front, such as code a library
+/// generates and keeps, or a write that streams what its caller already holds: an admission token,
+/// not an estimate of its memory. The token waits in line behind the class's earlier charges as
+/// every charge does, so such jobs still enter in the class's order, while
+/// [`Executor::charge_nothing`], for an owner that already holds part of the class, never waits.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a reservation of no bytes takes no permit and never waits, so one byte is the \
+                  least charge that admits a job in its class's order"
+    )
+)]
+pub const ADMISSION_TOKEN_BYTES: u64 = 1;
+
 /// The node's execution and memory admission, shared by every owner that runs variable-size work.
 ///
 /// Cloning it is one refcount: every class, budget and counter lives behind the single inner
@@ -304,6 +319,16 @@ impl Executor {
         bytes: u64,
     ) -> Result<Reservation, Report<AdmissionError>> {
         self.budget(class).reserve(bytes, self.waits.as_ref()).await
+    }
+
+    /// Charge `class` the admission token, [`ADMISSION_TOKEN_BYTES`], for a job whose memory the
+    /// caller cannot charge up front, waiting behind the operations already holding the class as
+    /// [`Self::reserve`] does.
+    pub async fn reserve_admission(
+        &self,
+        class: MemoryClass,
+    ) -> Result<Reservation, Report<AdmissionError>> {
+        self.reserve(class, ADMISSION_TOKEN_BYTES).await
     }
 
     /// Charge `class` for an allocation the caller already holds, and take ownership of it. The

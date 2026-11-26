@@ -168,7 +168,7 @@ impl MappedArtifact {
 mod tests {
     use std::time::Duration;
 
-    use nervix_execution::{ExecutionConfig, Executor};
+    use nervix_execution::{ADMISSION_TOKEN_BYTES, ExecutionConfig, Executor};
 
     use super::*;
     use crate::runtime::snapshot_staging::{SnapshotStaging, SnapshotStagingLimits};
@@ -254,7 +254,7 @@ mod tests {
             expected
         );
         let working = executor
-            .try_reserve(MemoryClass::Bulk, 1)
+            .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
             .assured("inspection is admitted");
         let bytes = view
             .inspect(working, |bytes, _working, cancellation| {
@@ -348,7 +348,7 @@ mod tests {
             .await
             .assured("the immutable view is admitted");
         let working = executor
-            .try_reserve(MemoryClass::Bulk, 1)
+            .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
             .assured("inspection is admitted");
         let (started, ready) = nervix_primitives::sync::oneshot::channel();
         let (finished, done) = nervix_primitives::sync::oneshot::channel();

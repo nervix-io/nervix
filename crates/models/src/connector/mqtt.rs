@@ -230,16 +230,40 @@ pub struct MqttTopicIngestor {
 /// `NO ACK`, named as its definition in the MQTT connector names it.
 const READ_AHEAD_HEADROOM: &str = "mqtt-read-ahead-headroom";
 
-/// MQTT's largest packet: a 28-bit Remaining Length plus the five-byte fixed header.
+/// The largest Remaining Length an MQTT packet can declare. Its variable byte integer holds at most
+/// four bytes of seven value bits each.
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
         fixed,
-        reason = "MQTT 5 encodes Remaining Length in at most four seven-bit groups and its fixed \
-                  header in at most five bytes"
+        reason = "MQTT encodes Remaining Length as a variable byte integer of at most four \
+                  seven-bit groups, whose largest value is 268,435,455"
     )
 )]
-pub const MQTT_MAXIMUM_PACKET_BYTES: u64 = (1 << 28) + 4;
+pub const MQTT_MAX_REMAINING_LENGTH: u64 = (1 << 28) - 1;
+
+/// The most bytes MQTT's fixed header takes: the byte of packet type and flags, then the Remaining
+/// Length in at most four bytes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "MQTT 5 writes a fixed header as one byte of packet type and flags followed by \
+                  the Remaining Length's variable byte integer of at most four bytes"
+    )
+)]
+const MQTT_FIXED_HEADER_MAX_BYTES: u64 = 5;
+
+/// MQTT's largest packet: the largest fixed header and the largest Remaining Length after it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the largest packet MQTT 5 can frame is its largest fixed header followed by its \
+                  largest Remaining Length"
+    )
+)]
+pub const MQTT_MAXIMUM_PACKET_BYTES: u64 = MQTT_MAX_REMAINING_LENGTH + MQTT_FIXED_HEADER_MAX_BYTES;
 
 /// The largest value MQTT's Four Byte Integer, which carries the Maximum Packet Size, can hold.
 #[cfg_attr(

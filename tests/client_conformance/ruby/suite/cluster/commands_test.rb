@@ -96,7 +96,10 @@ module RubySuite
       assert_equal recovered.execution_reference, session.execute(execution).execution_reference
       # ANCHOR_END: recover
       expired = session.prepare("CREATE SCHEMA #{unique('expired')} ( value I64 );")
-      failure = assert_raises(NX::DeadlineError) { session.execute(expired, cancel: NX::Cancel.new(deadline: 0)) }
+      # The token's deadline, the shortest one accepts, passes before the call starts.
+      out_of_time = NX::Cancel.new(deadline: 0.001)
+      sleep 0.01
+      failure = assert_raises(NX::DeadlineError) { session.execute(expired, cancel: out_of_time) }
       assert_equal expired.reference, failure.execution_reference
       assert_equal NX::Disposition::COMPLETED, session.execute(expired, cancel: RubySuite.deadline).disposition
     end

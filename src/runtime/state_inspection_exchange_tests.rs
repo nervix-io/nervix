@@ -27,6 +27,7 @@ use arrow_array::{
     ArrayRef, Int64Array, StringArray, UInt32Array, cast::AsArray as _, types::Int64Type,
 };
 use futures_util::FutureExt as _;
+use nervix_execution::ADMISSION_TOKEN_BYTES;
 use nervix_interconnect::ProcessorStateRunTransfer;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, FieldName, ModelKind, ModelName, NodeRef,
@@ -844,7 +845,7 @@ impl FullBulkClass {
         let (started, has_started) = nervix_primitives::sync::oneshot::channel();
         let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
         let charge = executor
-            .try_reserve(MemoryClass::Bulk, 1)
+            .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
             .assured("the untouched bulk class has room for one byte");
         let occupier = executor.clone();
         let occupying = nervix_primitives::task::spawn(async move {
@@ -868,7 +869,7 @@ impl FullBulkClass {
             .await
             .assured("the occupying job reports once it holds the worker");
         let charge = executor
-            .try_reserve(MemoryClass::Bulk, 1)
+            .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
             .assured("the bulk class has room for one more byte");
         let queuer = executor.clone();
         let queued = nervix_primitives::task::spawn(async move {

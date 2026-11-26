@@ -90,20 +90,6 @@ nervix_primitives::unmodeled::task_local! {
     static INVOCATION_NOW: Timestamp;
 }
 
-/// What compiling one module is charged. Wasmtime allocates the code it generates itself and keeps
-/// it for as long as the processor holds the module, which no transient budget can stand for, so
-/// the charge only admits the compilation onto the bulk workers.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the charge is an admission token for the bulk workers, not a memory estimate, \
-                  since the processor keeps the code Wasmtime generates, so it is the least \
-                  nonzero reservation: a zero request takes no permit and never waits"
-    )
-)]
-const COMPILE_RESERVATION_BYTES: u64 = 1;
-
 /// The linear memories a guest module may define: the one it exports as `memory`, which holds
 /// every buffer the host and the guest exchange.
 #[cfg_attr(
@@ -743,8 +729,11 @@ impl WasmRuntime {
     ) -> StackResult<CompiledWasmProcessor, WasmProcessorError> {
         let engine = self.engine.clone();
         let wasm = wasm.as_ref().to_vec();
+        // Wasmtime allocates the code it generates itself and keeps it for as long as the
+        // processor holds the module, which no transient budget can stand for, so the compilation
+        // takes only the admission token onto the bulk workers.
         let reservation = executor
-            .reserve(MemoryClass::Bulk, COMPILE_RESERVATION_BYTES)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .change_context(WasmProcessorError::CompileExecution)?;
         let compiled = executor

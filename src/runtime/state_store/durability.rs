@@ -219,7 +219,7 @@ impl RuntimeStateStore {
         let db = self.db.clone();
         let reservation = self
             .executor
-            .reserve(MemoryClass::Bulk, 1)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .change_context(RuntimePersistenceError::StorageAdmission)?;
         self.executor
@@ -262,7 +262,9 @@ mod shuttle_tests;
 mod tests {
     use std::num::NonZeroUsize;
 
-    use nervix_execution::{ExecutionConfig, ExecutionError, Executor, WorkerCounts};
+    use nervix_execution::{
+        ADMISSION_TOKEN_BYTES, ExecutionConfig, ExecutionError, Executor, WorkerCounts,
+    };
     use nervix_primitives::{sync::oneshot, task::JoinHandle};
 
     use super::{
@@ -298,7 +300,7 @@ mod tests {
             let (release, released) = oneshot::channel::<()>();
             let holder = executor.clone();
             let charge = executor
-                .try_reserve(MemoryClass::Bulk, 1)
+                .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
                 .expect("the holding job's charge fits the bulk budget");
             let holding = nervix_primitives::task::spawn(async move {
                 holder
