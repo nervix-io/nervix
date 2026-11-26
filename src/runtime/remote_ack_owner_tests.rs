@@ -444,8 +444,8 @@ fn an_outcome_that_overtakes_the_unparked_report_resolves_an_active_share() {
         .assured("the fixture delivery fits");
     let first = ids[0].assured("the first row carries a record acknowledgement");
     let second = ids[1].assured("the second row carries a record acknowledgement");
-    owners.admit_ack(first);
-    owners.admit_ack(second);
+    owners.admit_ack(first, RECEIVER_RUN);
+    owners.admit_ack(second, RECEIVER_RUN);
     assert!(owners.progress_ack(first, 1, true));
     assert!(owners.progress_ack(second, 1, true));
     assert_eq!(
