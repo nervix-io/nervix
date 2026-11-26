@@ -323,6 +323,7 @@ async fn a_failed_handshake_reads_the_close_its_failure_earns_before_the_connect
     for case in failed_handshakes() {
         let (mut ingestor, listener) =
             tests::signaling_ingestor(case.config, compiled(case.format, case.on_connect)).await;
+        let host = tests::host();
         let answers = case.answers;
         let peer = async {
             let (stream, _) = listener.accept().await.assured("the ingestor connects");
@@ -337,7 +338,7 @@ async fn a_failed_handshake_reads_the_close_its_failure_earns_before_the_connect
             unread_connection(peer).await
         };
         let (resumed, connection) = timeout(Duration::from_secs(60), async {
-            tokio::join!(ingestor.resume(), peer)
+            tokio::join!(ingestor.resume(&host), peer)
         })
         .await
         .assured("the handshake fails and the client releases its connection within the budget");
@@ -386,6 +387,7 @@ async fn a_peer_close_during_signaling_is_answered_before_the_connection_is_rele
         on_connect.accept_data = true;
         let protocol = compiled(SignalingWireFormat::Json, on_connect);
         let (mut ingestor, listener) = tests::signaling_ingestor(Vec::new(), protocol).await;
+        let host = tests::host();
         let expected = frame.clone();
         let peer = async {
             let (stream, _) = listener.accept().await.assured("the ingestor connects");
@@ -407,7 +409,7 @@ async fn a_peer_close_during_signaling_is_answered_before_the_connection_is_rele
             unread_ending(peer).await
         };
         let (resumed, ending) = timeout(Duration::from_secs(60), async {
-            tokio::join!(ingestor.resume(), peer)
+            tokio::join!(ingestor.resume(&host), peer)
         })
         .await
         .assured("the client answers the Close and releases the connection within the budget");
@@ -454,6 +456,7 @@ async fn a_handshake_whose_peer_ended_tcp_first_is_released_without_a_close() {
         subscribing("{op: \"subscribe\"}", &[], None, "5s"),
     );
     let (mut ingestor, listener) = tests::signaling_ingestor(Vec::new(), protocol).await;
+    let host = tests::host();
     let peer = async {
         let (stream, _) = listener.accept().await.assured("the ingestor connects");
         let mut peer = tokio_tungstenite::accept_async(stream)
@@ -467,7 +470,7 @@ async fn a_handshake_whose_peer_ended_tcp_first_is_released_without_a_close() {
         unread_ending(peer).await
     };
     let (resumed, ending) = timeout(Duration::from_secs(60), async {
-        tokio::join!(ingestor.resume(), peer)
+        tokio::join!(ingestor.resume(&host), peer)
     })
     .await
     .assured("the handshake fails and the client releases its connection within the budget");
@@ -501,6 +504,7 @@ async fn a_failed_handshake_discards_the_frames_it_accepted() {
     let (mut ingestor, listener) =
         tests::signaling_ingestor(Vec::new(), compiled(SignalingWireFormat::Json, on_connect))
             .await;
+    let host = tests::host();
     let refusing = async {
         let (stream, _) = listener.accept().await.assured("the ingestor connects");
         let mut peer = tokio_tungstenite::accept_async(stream)
@@ -514,7 +518,7 @@ async fn a_failed_handshake_discards_the_frames_it_accepted() {
         unread_ending(peer).await
     };
     let (refused, ending) = timeout(Duration::from_secs(60), async {
-        tokio::join!(ingestor.resume(), refusing)
+        tokio::join!(ingestor.resume(&host), refusing)
     })
     .await
     .assured("the handshake fails and the client releases its connection within the budget");
@@ -548,7 +552,7 @@ async fn a_failed_handshake_discards_the_frames_it_accepted() {
         peer
     };
     let (resumed, _answering_peer) = timeout(Duration::from_secs(60), async {
-        tokio::join!(ingestor.resume(), answering)
+        tokio::join!(ingestor.resume(&host), answering)
     })
     .await
     .assured("the next handshake completes within the budget");
@@ -558,6 +562,7 @@ async fn a_failed_handshake_discards_the_frames_it_accepted() {
     );
     let batch = ingestor
         .next_batch(
+            &host,
             IngestorBatchRequest {
                 max_messages: std::num::NonZeroUsize::MIN,
                 batch_timeout: None,
@@ -586,6 +591,7 @@ async fn a_failed_handshake_never_waits_for_a_transport_that_cannot_take_its_clo
         subscribing("\"x\" * 16777216", &[], None, "200ms"),
     );
     let (mut ingestor, listener) = tests::signaling_ingestor(Vec::new(), protocol).await;
+    let host = tests::host();
     let holding = async {
         let (stream, _) = listener.accept().await.assured("the ingestor connects");
         tokio_tungstenite::accept_async(stream)
@@ -593,7 +599,7 @@ async fn a_failed_handshake_never_waits_for_a_transport_that_cannot_take_its_clo
             .assured("the upgrade succeeds")
     };
     let (resumed, _unread_peer) = timeout(Duration::from_secs(60), async {
-        tokio::join!(ingestor.resume(), holding)
+        tokio::join!(ingestor.resume(&host), holding)
     })
     .await
     .assured("the failed handshake returns although its transport cannot take the Close");
@@ -623,6 +629,7 @@ async fn a_signaling_message_of_exactly_max_message_size_is_written() {
         subscribing("{op: \"subscribe\"}", &[], None, "5s"),
     );
     let (mut ingestor, listener) = tests::signaling_ingestor(config, protocol).await;
+    let host = tests::host();
     let answering = async {
         let (stream, _) = listener.accept().await.assured("the ingestor connects");
         let mut peer = tokio_tungstenite::accept_async(stream)
@@ -644,7 +651,7 @@ async fn a_signaling_message_of_exactly_max_message_size_is_written() {
         peer
     };
     let (resumed, _answering_peer) = timeout(Duration::from_secs(60), async {
-        tokio::join!(ingestor.resume(), answering)
+        tokio::join!(ingestor.resume(&host), answering)
     })
     .await
     .assured("the handshake completes within the budget");

@@ -266,6 +266,26 @@ pub const REFUSED: &[Refusal] = &[
         diagnostic: "nervix::sync_acquisition",
     },
     Refusal {
+        name: "host_services_contract_invalid",
+        diagnostic: "nervix::invalid_contract",
+    },
+    Refusal {
+        name: "host_services_metadata_use",
+        diagnostic: "nervix::undeclared_host_service",
+    },
+    Refusal {
+        name: "host_services_undeclared",
+        diagnostic: "nervix::undeclared_host_service",
+    },
+    Refusal {
+        name: "host_services_unfulfilled",
+        diagnostic: "expectation is unfulfilled",
+    },
+    Refusal {
+        name: "host_services_wide",
+        diagnostic: "covers 2 distinct operations",
+    },
+    Refusal {
         name: "hot_creates_lifecycle_task",
         diagnostic: "nervix::lifecycle_call",
     },
@@ -416,6 +436,10 @@ pub const ALLOWED: &[&str] = &[
     "error_storage_values",
     "expected_expression",
     "expected_lock",
+    "host_services_allowed",
+    "host_services_expected",
+    "host_services_metadata",
+    "host_services_metadata_allowed",
     "inherited_override",
     "lifecycle_lock",
     "lifecycle_task_body",

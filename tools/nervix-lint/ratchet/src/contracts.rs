@@ -255,6 +255,7 @@ impl ContractCompiler {
             "error_metadata_callee",
             "error_metadata_failure",
             "cross_crate_callee",
+            "host_services_metadata",
         ];
         for name in callees {
             self.compile(
@@ -301,6 +302,9 @@ impl ContractCompiler {
                 "error_metadata_caller" => Some("error_metadata_callee"),
                 "error_metadata_rejected" => Some("error_metadata_failure"),
                 "cross_crate_caller" | "cross_crate_expected" => Some("cross_crate_callee"),
+                "host_services_metadata_allowed" | "host_services_metadata_use" => {
+                    Some("host_services_metadata")
+                }
                 _ => None,
             };
             let mut arguments = Vec::new();

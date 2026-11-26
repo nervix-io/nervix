@@ -3,9 +3,11 @@
 //! Layer: test harness.
 //! - **Owns.** Loopback endpoints and proxies that answer with exact bytes, an HTTP/2 endpoint
 //!   served by hyper, resolvers with chosen answers, and the assertions that hold the emitter's
-//!   requests, routes, redirects, budgets and descriptions to its contract.
-//! - **Depends on.** The emitter, hyper's server, rustls and rcgen, and the node resolver.
-//! - **Must not know.** The host, relays, branches or acknowledgements.
+//!   requests, routes, redirects, budgets and descriptions to its contract, and that it opens only
+//!   on a node that provides its resolver.
+//! - **Depends on.** The emitter, the scripted host handle it is opened with, hyper's server,
+//!   rustls and rcgen, and the node resolver.
+//! - **Must not know.** The server's emitter host, relays, branches or acknowledgements.
 
 #![cfg_attr(
     nervix_lint,
@@ -338,6 +340,13 @@ fn a_failed_attempt_describes_its_status_or_every_cause_beneath_it() {
     );
 }
 
+/// The handle of a node that provides `dns` as its resolver, with the default outward TLS policy.
+fn host_resolving_through(dns: DnsResolver) -> EmitterHost {
+    nervix_connector_fake::FakeEmitterHost::default()
+        .with_dns(dns)
+        .host()
+}
+
 /// An emitter whose client follows `redirects` and sends through `proxy`, trusting `ca` beside the
 /// platform's roots, resolving through the host's own resolver; the tests below dial only literal
 /// loopback addresses.
@@ -374,12 +383,38 @@ async fn emitter_with(
             value: "true".to_string(),
         });
     }
-    HttpRequestEmitter::prepare_client(HttpRequestEmitterConfig {
-        tls_policy: Default::default(),
-        config: declared,
-        dns,
-    })
+    HttpRequestEmitter::prepare(
+        HttpRequestEmitterConfig { config: declared },
+        host_resolving_through(dns),
+    )
     .assured("the tests declare only valid clients")
+}
+
+/// A node without its resolver cannot open the emitter, and says so before anything the emitter's
+/// configuration says: this client lacks the `timeout_ms` every HTTP client declares.
+#[nervix_primitives::test]
+async fn an_emitter_on_a_node_without_its_resolver_fails_to_open_and_names_the_resolver() {
+    let opened = <HttpRequestEmitter as nervix_connector::EmitterConnector>::open(
+        HttpRequestEmitterConfig { config: Vec::new() },
+        nervix_connector_fake::FakeEmitterHost::default().host(),
+    )
+    .await;
+    let error = match opened {
+        Ok(_) => panic!("an emitter that dials by name needs its node's resolver"),
+        Err(error) => error,
+    };
+
+    // The failure is the node's, not the configuration's, so the host opens the emitter again.
+    assert_eq!(
+        *error.current_context(),
+        EmitterOpenError::Initialize {
+            connector: HTTP_EMITTER
+        }
+    );
+    assert_eq!(
+        error.downcast_ref::<nervix_connector::HostServiceError>(),
+        Some(&nervix_connector::HostServiceError::DnsNotInstalled)
+    );
 }
 
 /// A `POST` of `body` to `target` on `origin`.
@@ -930,14 +965,15 @@ async fn emitter_resolving_through(
     .await
     .assured("the test's resolver configuration is valid");
     let timeout_ms = timeout.as_millis().to_string();
-    let connector = HttpRequestEmitter::prepare_client(HttpRequestEmitterConfig {
-        tls_policy: Default::default(),
-        config: vec![ClientConfigEntry {
-            key: "timeout_ms".to_string(),
-            value: timeout_ms,
-        }],
-        dns,
-    })
+    let connector = HttpRequestEmitter::prepare(
+        HttpRequestEmitterConfig {
+            config: vec![ClientConfigEntry {
+                key: "timeout_ms".to_string(),
+                value: timeout_ms,
+            }],
+        },
+        host_resolving_through(dns),
+    )
     .assured("a client with a timeout is valid");
     (connector, files)
 }

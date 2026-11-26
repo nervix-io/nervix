@@ -24,7 +24,7 @@ fn bolero_branch_metadata_preserves_every_type_and_field() {
             let mut values = WasmValues::new(bytes);
             let mut init = values.branch_init();
             // Every run reaches the complete scalar vocabulary and both nested collection kinds.
-            for kind in 0..14 {
+            for kind in 0..WasmValues::SCALAR_KINDS {
                 let scalar = WasmValues::scalar(kind);
                 for ty in [
                     scalar.clone(),

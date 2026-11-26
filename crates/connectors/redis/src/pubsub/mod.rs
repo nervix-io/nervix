@@ -24,6 +24,17 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        metrics,
+        pool,
+        reason = "the Redis Pub/Sub emitter publishes through the pool its host leased for it, \
+                  whose connections dial through the node's resolver, and counts the publishes no \
+                  subscriber received"
+    )
+)]
 
 impl nervix_connector::EmitterConnector for RedisPubSubEmitter {
     const KIND: nervix_models::EmitterEntityKind = Self::KIND;
@@ -66,7 +77,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle,
     EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError, PerRecordOutcome,
-    RecordEmitter, ServiceUrl, client_tls_paths, optional_client_config_value, read_tls_file,
+    PooledClient, PooledClientHost, PooledClientLease, RecordEmitter, ServiceUrl, client_tls_paths,
+    optional_client_config_value, read_tls_file,
 };
 use nervix_dns::{DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver};
 use nervix_models::{
@@ -320,6 +332,10 @@ pub enum RedisClientError {
         host: String,
         failure: DnsLookupFailure,
     },
+    /// The node handed the command pool no resolver for its connections to dial through, which
+    /// the host's refusal beneath says.
+    #[error("the Redis command pool needs the DNS resolver of its node")]
+    MissingNodeResolver,
 }
 
 /// Open the node's shared Redis command pool for one named client, sized by its declared bounds and
@@ -505,88 +521,60 @@ fn invalid_client_config(reason: impl std::fmt::Display) -> Report<RedisClientEr
     })
 }
 
-/// The pool one Redis emitter borrows command connections from, as the host leases it.
+/// The node's shared command pool is the pooled client of a Redis `CLIENT`, which the host opens
+/// once and leases to every local emitter of that client.
+#[async_trait]
+impl PooledClient for RedisCommandPool {
+    const CONNECTOR: ConnectorKind = ConnectorKind::Redis;
+
+    type OpenError = RedisClientError;
+
+    /// Every command connection of the pool dials through the node's resolver, which is all the
+    /// pool takes from its node. A node without its resolver opens no pool.
+    async fn open(
+        config: &[ClientConfigEntry],
+        bounds: ClientPoolBounds,
+        host: &PooledClientHost,
+    ) -> Result<Self, Report<RedisClientError>> {
+        let dns = host
+            .dns()
+            .change_context(RedisClientError::MissingNodeResolver)?;
+        open_redis_command_pool(config, bounds, dns).await
+    }
+}
+
+/// What one Redis emitter publishes to: the channel it writes.
 ///
-/// The host owns the interest that keeps the pool open and the wait it records while a connection
-/// is handed over; this handle holds both for as long as the emitter publishes through them.
-#[cfg_attr(
-    nervix_lint,
-    nervix::context(
-        recurring,
-        reason = "the retained host service is invoked by each admitted driver operation"
-    )
-)]
-pub trait RedisPoolServices: Send + Sync + 'static {
-    /// The shared command pool this emitter's client opened on this node.
-    fn pool(&self) -> RedisCommandPool;
-
-    /// Records this emitter's wait for a free connection until the returned guard is dropped.
-    fn begin_pool_wait(&self) -> RedisPoolWait;
-}
-
-/// An opaque record of one emitter's wait for a pooled connection, ended when it is dropped.
-pub struct RedisPoolWait {
-    /// Held until the pool hands this emitter a connection; dropping it ends the recorded wait.
-    _wait: Box<dyn Send>,
-}
-
-impl RedisPoolWait {
-    pub fn new(wait: impl Send + 'static) -> Self {
-        Self {
-            _wait: Box::new(wait),
-        }
-    }
-}
-
-struct RedisPoolInner {
-    services: Box<dyn RedisPoolServices>,
-}
-
-/// A handle to the host-leased pool, shared by the emitter and whatever else the host hands it to.
-#[derive(Clone)]
-pub struct RedisPoolHandle {
-    inner: Arc<RedisPoolInner>,
-}
-
-impl RedisPoolHandle {
-    pub fn new(services: impl RedisPoolServices) -> Self {
-        Self {
-            inner: Arc::new(RedisPoolInner {
-                services: Box::new(services),
-            }),
-        }
-    }
-
-    fn pool(&self) -> RedisCommandPool {
-        self.inner.services.pool()
-    }
-
-    fn begin_pool_wait(&self) -> RedisPoolWait {
-        self.inner.services.begin_pool_wait()
-    }
-}
-
-/// What one Redis emitter publishes to: the pool it borrows from and the channel it writes.
+/// The pool it borrows command connections from reaches the emitter through its host handle,
+/// which carries the lease its host took on the node's instance of the emitter's client.
 pub struct RedisPubSubEmitterConfig {
-    pub pool: RedisPoolHandle,
     pub channel: RedisChannelName,
 }
 
 pub struct RedisPubSubEmitter {
-    pool: RedisPoolHandle,
+    /// The lease its host took on the shared command pool this emitter's client opened on this
+    /// node. The host owns the interest that keeps the pool open and the wait it records while a
+    /// connection is handed over; the lease holds both for as long as the emitter publishes
+    /// through them.
+    pool: PooledClientLease<RedisCommandPool>,
     channel: RedisChannelName,
     published_without_subscribers: nervix_connector::ConnectorEventCounter,
 }
 
 impl RedisPubSubEmitter {
     fn prepare(config: RedisPubSubEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
+        // An emitter whose host leased it no pool cannot open at all, so that is reported before
+        // anything else.
+        let pool = host
+            .pool::<RedisCommandPool>()
+            .change_context(nervix_connector::EmitterOpenError::Initialize { connector: REDIS })?;
         let published_without_subscribers = host
             .event_counter(nervix_models::ConnectorEvent::PublishedWithoutSubscribers)
             .change_context(nervix_connector::EmitterOpenError::InvalidConfiguration {
                 connector: Self::KIND.connector().keyword(),
             })?;
         Ok(Self {
-            pool: config.pool,
+            pool,
             channel: config.channel,
             published_without_subscribers,
         })
@@ -595,13 +583,15 @@ impl RedisPubSubEmitter {
     /// Borrow a command connection for one publish, reporting the wait until the pool hands one
     /// over. The connection returns to the pool as soon as the publish completes, and a pool that
     /// hands none over within the client's `connect_timeout_ms` fails the publish naming it.
+    ///
+    /// The wait is published through `lease` and ends when its record is dropped.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the bb8 driver owns polling the pool future")
     )]
     async fn connection<'pool>(
         pool: &'pool RedisCommandPool,
-        handle: &RedisPoolHandle,
+        lease: &PooledClientLease<RedisCommandPool>,
     ) -> Result<RedisPooledConnection<'pool>, Report<EmitterWriteError>> {
         let commands = &pool.shared.commands;
         let mut borrow = std::pin::pin!(commands.connections.get());
@@ -609,7 +599,7 @@ impl RedisPubSubEmitter {
         let connection = std::future::poll_fn(|context| {
             let result = borrow.as_mut().poll(context);
             if result.is_pending() && waiting.is_none() {
-                waiting = Some(handle.begin_pool_wait());
+                waiting = Some(lease.begin_wait());
             }
             result
         })
@@ -689,12 +679,12 @@ impl EmitterLifecycle for RedisPubSubEmitter {
 impl RecordEmitter for RedisPubSubEmitter {
     async fn publish(&mut self, records: Vec<EmitterRecord>) -> PerRecordOutcome<EmitterRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
-        let pool = self.pool.pool();
+        let pool = self.pool.client();
         for record in records {
             nervix_primitives::task::consume_budget().await;
             // Borrowed per publish and returned with the guard: an emitter between publishes, or
             // waiting out a flush interval, holds no connection at all.
-            let mut connection = match Self::connection(&pool, &self.pool).await {
+            let mut connection = match Self::connection(pool, &self.pool).await {
                 Ok(connection) => connection,
                 Err(error) => {
                     outcome.fail(error);
@@ -1375,6 +1365,67 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn a_pool_on_a_node_without_its_resolver_fails_to_open_and_names_the_resolver() {
+        let config = [ClientConfigEntry {
+            key: "addr".to_string(),
+            value: "redis://127.0.0.1:1".to_string(),
+        }];
+        let host = PooledClientHost::new(None, nervix_execution::Executor::default());
+
+        let error = <RedisCommandPool as PooledClient>::open(&config, bounds(0, 1), &host)
+            .await
+            .expect_err("a pool whose connections dial by name needs its node's resolver");
+
+        assert!(
+            matches!(
+                error.current_context(),
+                RedisClientError::MissingNodeResolver
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.downcast_ref::<nervix_connector::HostServiceError>(),
+            Some(&nervix_connector::HostServiceError::DnsNotInstalled)
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_pool_its_host_opens_dials_through_the_resolver_of_its_node() {
+        let fixture = Fixture::start().await;
+        let name = "missing.nervix.test";
+        fixture.authority.set(
+            name,
+            DnsAnswer::NameNotFound {
+                negative_ttl: Duration::from_secs(1),
+            },
+        );
+        let config = [ClientConfigEntry {
+            key: "addr".to_string(),
+            value: format!("redis://{name}:6379"),
+        }];
+        let host = PooledClientHost::new(
+            Some(fixture.dns.clone()),
+            nervix_execution::Executor::default(),
+        );
+
+        let error = <RedisCommandPool as PooledClient>::open(&config, bounds(1, 4), &host)
+            .await
+            .expect_err("a missing name cannot open the pool's minimum");
+
+        assert!(
+            matches!(
+                error.current_context(),
+                RedisClientError::Resolve {
+                    host,
+                    failure: DnsLookupFailure::NameNotFound
+                } if host == name
+            ),
+            "{error:?}"
+        );
+        assert!(fixture.authority.questions_for(name) > 0);
+    }
+
+    #[nervix_primitives::test]
     async fn dropping_the_pool_stops_its_keeper_and_closes_its_connections() {
         let fixture = Fixture::start().await;
         let redis = CountingRedis::start().await;
@@ -1462,5 +1513,93 @@ mod tests {
             .expect("the stand-in answers both commands of the pipeline");
         assert_eq!(answers, ("PONG".to_string(), "PONG".to_string()));
         assert_eq!(connection.get_db(), 0);
+    }
+
+    fn emitter_config() -> RedisPubSubEmitterConfig {
+        RedisPubSubEmitterConfig {
+            channel: RedisChannelName::parse("events").expect("a plain channel name parses"),
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_whose_host_leased_no_pool_fails_to_open_and_names_the_lease() {
+        let host = nervix_connector_fake::FakeEmitterHost::declaring(
+            RedisPubSubEmitter::KIND.capabilities().events,
+        );
+        let opened = <RedisPubSubEmitter as nervix_connector::EmitterConnector>::open(
+            emitter_config(),
+            host.host(),
+        )
+        .await;
+        let error = match opened {
+            Ok(_) => panic!("a pooled emitter publishes only through the pool its host leased"),
+            Err(error) => error,
+        };
+
+        // The failure is the host's, not the configuration's, so the host opens the emitter again.
+        assert_eq!(
+            *error.current_context(),
+            nervix_connector::EmitterOpenError::Initialize { connector: REDIS }
+        );
+        assert_eq!(
+            error
+                .frames()
+                .find_map(|frame| frame.downcast_ref::<nervix_connector::HostServiceError>()),
+            Some(&nervix_connector::HostServiceError::PooledClientNotLeased)
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_checks_out_of_the_pool_its_host_leased_and_publishes_the_wait() {
+        let fixture = Fixture::start().await;
+        // Nothing listens on the address, so the checkout waits out the client's deadline.
+        let pool = open_unconnected_pool(&fixture, &[("connect_timeout_ms", "200")])
+            .await
+            .expect("a pool with no minimum opens without a connection");
+        let waits = nervix_connector_fake::FakePooledClientWaits::default();
+        let lease = PooledClientLease::new(Arc::new(pool), waits.clone(), ());
+        let host = nervix_connector_fake::FakeEmitterHost::declaring(
+            RedisPubSubEmitter::KIND.capabilities().events,
+        );
+        let mut emitter = <RedisPubSubEmitter as nervix_connector::EmitterConnector>::open(
+            emitter_config(),
+            host.leasing(lease),
+        )
+        .await
+        .expect("the host leased this connector's pool");
+
+        let outcome = emitter
+            .publish(vec![EmitterRecord::new(
+                EmitterRecordId::new(0),
+                None,
+                b"event".to_vec(),
+                Vec::new(),
+                nervix_models::Timestamp::from_unix_nanos(0),
+            )])
+            .await
+            .into_parts();
+
+        assert!(outcome.delivered.is_empty());
+        assert!(outcome.rejected.is_empty());
+        let failure = outcome
+            .infrastructure_error
+            .expect("a publish the pool hands no connection fails");
+        assert!(matches!(
+            failure.current_context(),
+            EmitterWriteError::Publish { connector: REDIS }
+        ));
+        let elapsed = failure
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<DeadlineElapsed>())
+            .expect("the deadline the checkout ran out of stays beneath the publish failure");
+        assert_eq!(elapsed.key, DeadlineKey::ConnectTimeout);
+        assert_eq!(elapsed.bound, Duration::from_millis(200));
+        let published = waits.observations();
+        assert_eq!(
+            (published.begun, published.ended),
+            (1, 1),
+            "the checkout the pool did not answer at once published one wait and ended it"
+        );
+        assert_eq!(published.waiting_since, None);
     }
 }

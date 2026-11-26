@@ -10,7 +10,7 @@
 
 use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass};
+use nervix_execution::{ADMISSION_TOKEN_BYTES, ChargedBytes, CpuClass, Executor, MemoryClass};
 use nervix_recovery::Discarded as _;
 
 use crate::{PoolClass, request::RequestEnvelope};
@@ -134,7 +134,7 @@ async fn nested_decode_cancellation_keeps_its_own_input_charge() {
     let (release, released) = oneshot::channel();
     let occupied = executor.clone();
     let occupying_charge = executor
-        .try_reserve(MemoryClass::Bulk, 1)
+        .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
         .assured("the occupying job holds one byte beside its worker");
     let occupying = nervix_primitives::task::spawn(async move {
         occupied
@@ -384,10 +384,10 @@ impl FullBulkClass {
     async fn fill(executor: &Executor) -> Self {
         let (started, has_started) = nervix_primitives::sync::oneshot::channel();
         let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
-        // Each holding job carries a byte of charge, because a model checker's semaphore cannot
+        // Each holding job takes the admission token, because a model checker's semaphore cannot
         // grant zero permits.
         let charge = executor
-            .try_reserve(MemoryClass::Bulk, 1)
+            .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
             .assured("the untouched bulk class has room for one byte");
         let occupier = executor.clone();
         let occupying = nervix_primitives::task::spawn(async move {
@@ -407,7 +407,7 @@ impl FullBulkClass {
             .await
             .assured("the occupying job reports once it holds the worker");
         let charge = executor
-            .try_reserve(MemoryClass::Bulk, 1)
+            .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
             .assured("the bulk class has room for one more byte");
         let queuer = executor.clone();
         let queued = nervix_primitives::task::spawn(async move {

@@ -290,7 +290,11 @@ impl IngestorConnector for GatheringIngestor {
 
     type Plan = ();
 
-    async fn open(_plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
+    async fn open(
+        _plan: &Self::Plan,
+        _host: &nervix_connector::IngestorHost,
+        _instance_index: u64,
+    ) -> IngestorResult<Self> {
         panic!("the tests install their ingestor directly")
     }
 
@@ -322,6 +326,7 @@ impl BrokerIngestorConnector for GatheringIngestor {
 
     async fn next_batch(
         &mut self,
+        _host: &nervix_connector::IngestorHost,
         request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {
@@ -457,6 +462,10 @@ pub(super) struct RecordingHost {
     flush_due: Option<Instant>,
     reported_errors: Arc<Mutex<Vec<String>>>,
     allowance: Option<Arc<ScriptedAllowance>>,
+    /// The handle the loop hands its connector, with the end of the instance it serves, for a
+    /// check of what a connector does through its handle. Absent where a test's connector takes
+    /// nothing from its node.
+    connector: Option<crate::runtime::ingestors::connector_host::IngestorConnectorHost>,
 }
 
 impl RecordingHost {
@@ -468,7 +477,19 @@ impl RecordingHost {
             flush_due: None,
             reported_errors: Arc::new(Mutex::new(Vec::new())),
             allowance: None,
+            connector: None,
         }
+    }
+
+    /// The host of a connector that is driven with `connector`'s handle and whose instance ends
+    /// when this host is dropped, as the runtime's host ends it.
+    #[cfg(feature = "shuttle")]
+    pub(super) fn driving(
+        mut self,
+        connector: crate::runtime::ingestors::connector_host::IngestorConnectorHost,
+    ) -> Self {
+        self.connector = Some(connector);
+        self
     }
 
     /// The host of an ingestor whose `RATE LIMIT` allowance `allowance` sizes every read.
@@ -497,10 +518,15 @@ impl RecordingHost {
     }
 }
 
-impl nervix_connector::ConnectorEventProvider for RecordingHost {}
-
 #[async_trait]
-impl IngestorHostServices for RecordingHost {
+impl IngestorLoopServices for RecordingHost {
+    fn connector_host(&self) -> nervix_connector::IngestorHost {
+        match &self.connector {
+            Some(connector) => connector.handle().clone(),
+            None => nervix_connector_fake::FakeIngestorHost::default().host(),
+        }
+    }
+
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
     fn record_read_payloads(&self, _payloads: usize, _bytes: u64) {}
 
@@ -695,7 +721,7 @@ impl RunningLoop {
         let (shutdown, shutdown_rx) = watch::channel(false);
         let task = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
             connector,
-            IngestorHost::new(host),
+            IngestorLoopHost::new(host),
             policy,
             shutdown_rx,
             nervix_connector::RetryBackoffSettings::default(),
@@ -1028,7 +1054,7 @@ async fn an_interruption_the_host_did_not_ask_for_is_reported_and_its_messages_t
 #[nervix_primitives::test(start_paused = true)]
 async fn only_a_read_the_host_did_not_cancel_waits_out_a_retry_delay() {
     let Fixture { host, .. } = Fixture::new();
-    let mut host = IngestorHost::new(host);
+    let mut host = IngestorLoopHost::new(host);
     let (_shutdown, mut shutdown_rx) = watch::channel(false);
     let delay = Duration::from_secs(3600);
 
@@ -1070,7 +1096,7 @@ async fn payloads_an_ingestor_dropped_for_their_size_are_counted_and_nothing_is_
     let Fixture {
         host, observers, ..
     } = Fixture::new();
-    let host = IngestorHost::new(host);
+    let host = IngestorLoopHost::new(host);
     let payloads = NonZeroUsize::new(3).assured("three is nonzero");
     let read = BrokerRead::<GatheredMessage> {
         batch: Ok(IngestorBatch::Oversized { payloads }),

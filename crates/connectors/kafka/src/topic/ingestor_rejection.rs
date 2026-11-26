@@ -22,6 +22,7 @@
 
 use std::collections::BTreeMap;
 
+use nervix_connector::DomainOffsetPosition;
 use nervix_primitives::sync::blocking::Mutex;
 use rdkafka::{
     ClientContext,
@@ -31,8 +32,6 @@ use rdkafka::{
     types::RDKafkaRespErr,
 };
 use tracing::warn;
-
-use super::KafkaOffsetPosition;
 
 /// The consumer of every Kafka ingestor and partition inspector.
 pub(super) type KafkaConsumer = StreamConsumer<KafkaConsumerContext>;
@@ -61,7 +60,7 @@ pub(super) struct RejectionFloors {
 impl RejectionFloors {
     /// Records each of `starts`, the offset of a partition's earliest rejected record. A partition
     /// that already has a floor keeps the earlier one, which an earlier rejection left unread.
-    pub(super) fn record(&mut self, starts: &[KafkaOffsetPosition]) {
+    pub(super) fn record(&mut self, starts: &[DomainOffsetPosition]) {
         for start in starts {
             let partition = RejectedPartition {
                 topic: start.topic.clone(),
@@ -77,7 +76,7 @@ impl RejectionFloors {
 
     /// Forgets the floor of every partition that `committed`, the next offsets a commit stored,
     /// moved past its earliest rejected record.
-    pub(super) fn confirm(&mut self, committed: &[KafkaOffsetPosition]) {
+    pub(super) fn confirm(&mut self, committed: &[DomainOffsetPosition]) {
         for position in committed {
             let partition = RejectedPartition {
                 topic: position.topic.clone(),
@@ -160,13 +159,13 @@ impl KafkaConsumerContext {
     /// Records `starts`, the earliest rejected record of each partition of a rejected batch, before
     /// the ingestor rewinds the partitions it is still assigned, so a partition the group assigns
     /// from then on starts at its floor.
-    pub(super) fn record_rejection(&self, starts: &[KafkaOffsetPosition]) {
+    pub(super) fn record_rejection(&self, starts: &[DomainOffsetPosition]) {
         self.floors.lock().record(starts);
     }
 
     /// Forgets the floors that `committed`, the next offsets a commit stored, passed, and returns
     /// whether any rejection is still outstanding.
-    pub(super) fn confirm_commit(&self, committed: &[KafkaOffsetPosition]) -> bool {
+    pub(super) fn confirm_commit(&self, committed: &[DomainOffsetPosition]) -> bool {
         let mut floors = self.floors.lock();
         floors.confirm(committed);
         !floors.is_empty()

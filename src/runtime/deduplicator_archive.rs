@@ -719,7 +719,7 @@ mod tests {
         error_stack::Result<(), DeduplicatorArchiveError>,
     ) {
         let charge = executor
-            .reserve(MemoryClass::Bulk, 1)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .assured("a one-byte test charge is admitted");
         executor
@@ -740,7 +740,7 @@ mod tests {
         keys.admit_encoding()
             .assured("a bounded keyspace's conversion is admitted");
         let charge = executor
-            .reserve(MemoryClass::Bulk, 1)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .assured("a one-byte test charge is admitted");
         executor

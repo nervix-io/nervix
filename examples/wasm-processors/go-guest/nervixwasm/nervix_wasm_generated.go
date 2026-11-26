@@ -26,6 +26,7 @@ const (
 	ProcessorTypeKindArray    ProcessorTypeKind = 13
 	ProcessorTypeKindVec      ProcessorTypeKind = 14
 	ProcessorTypeKindBytes    ProcessorTypeKind = 15
+	ProcessorTypeKindDuration ProcessorTypeKind = 16
 )
 
 var EnumNamesProcessorTypeKind = map[ProcessorTypeKind]string{
@@ -45,6 +46,7 @@ var EnumNamesProcessorTypeKind = map[ProcessorTypeKind]string{
 	ProcessorTypeKindArray:    "Array",
 	ProcessorTypeKindVec:      "Vec",
 	ProcessorTypeKindBytes:    "Bytes",
+	ProcessorTypeKindDuration: "Duration",
 }
 
 var EnumValuesProcessorTypeKind = map[string]ProcessorTypeKind{
@@ -64,6 +66,7 @@ var EnumValuesProcessorTypeKind = map[string]ProcessorTypeKind{
 	"Array":    ProcessorTypeKindArray,
 	"Vec":      ProcessorTypeKindVec,
 	"Bytes":    ProcessorTypeKindBytes,
+	"Duration": ProcessorTypeKindDuration,
 }
 
 func (v ProcessorTypeKind) String() string {
@@ -103,27 +106,30 @@ func (v ColumnSource) String() string {
 type MessagePayload byte
 
 const (
-	MessagePayloadNONE           MessagePayload = 0
-	MessagePayloadBranchInit     MessagePayload = 1
-	MessagePayloadInputEnvelope  MessagePayload = 2
-	MessagePayloadOutputEnvelope MessagePayload = 3
-	MessagePayloadGuestSnapshot  MessagePayload = 4
+	MessagePayloadNONE             MessagePayload = 0
+	MessagePayloadBranchInit       MessagePayload = 1
+	MessagePayloadInputEnvelope    MessagePayload = 2
+	MessagePayloadOutputEnvelope   MessagePayload = 3
+	MessagePayloadGuestSnapshot    MessagePayload = 4
+	MessagePayloadStateDescription MessagePayload = 5
 )
 
 var EnumNamesMessagePayload = map[MessagePayload]string{
-	MessagePayloadNONE:           "NONE",
-	MessagePayloadBranchInit:     "BranchInit",
-	MessagePayloadInputEnvelope:  "InputEnvelope",
-	MessagePayloadOutputEnvelope: "OutputEnvelope",
-	MessagePayloadGuestSnapshot:  "GuestSnapshot",
+	MessagePayloadNONE:             "NONE",
+	MessagePayloadBranchInit:       "BranchInit",
+	MessagePayloadInputEnvelope:    "InputEnvelope",
+	MessagePayloadOutputEnvelope:   "OutputEnvelope",
+	MessagePayloadGuestSnapshot:    "GuestSnapshot",
+	MessagePayloadStateDescription: "StateDescription",
 }
 
 var EnumValuesMessagePayload = map[string]MessagePayload{
-	"NONE":           MessagePayloadNONE,
-	"BranchInit":     MessagePayloadBranchInit,
-	"InputEnvelope":  MessagePayloadInputEnvelope,
-	"OutputEnvelope": MessagePayloadOutputEnvelope,
-	"GuestSnapshot":  MessagePayloadGuestSnapshot,
+	"NONE":             MessagePayloadNONE,
+	"BranchInit":       MessagePayloadBranchInit,
+	"InputEnvelope":    MessagePayloadInputEnvelope,
+	"OutputEnvelope":   MessagePayloadOutputEnvelope,
+	"GuestSnapshot":    MessagePayloadGuestSnapshot,
+	"StateDescription": MessagePayloadStateDescription,
 }
 
 func (v MessagePayload) String() string {
@@ -220,7 +226,6 @@ func ProcessorTypeAddArrayLen(builder *flatbuffers.Builder, arrayLen uint32) {
 func ProcessorTypeEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type ProcessorField struct {
 	_tab flatbuffers.Table
 }
@@ -304,7 +309,6 @@ func ProcessorFieldAddOptional(builder *flatbuffers.Builder, optional bool) {
 func ProcessorFieldEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type ProcessorSchema struct {
 	_tab flatbuffers.Table
 }
@@ -383,7 +387,6 @@ func ProcessorSchemaStartFieldsVector(builder *flatbuffers.Builder, numElems int
 func ProcessorSchemaEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type BranchInit struct {
 	_tab flatbuffers.Table
 }
@@ -529,7 +532,6 @@ func BranchInitStartOutputSchemasVector(builder *flatbuffers.Builder, numElems i
 func BranchInitEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type OutputRow struct {
 	_tab flatbuffers.Table
 }
@@ -620,7 +622,6 @@ func OutputRowAddSourceToken(builder *flatbuffers.Builder, sourceToken uint64) {
 func OutputRowEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type AckTokenSet struct {
 	_tab flatbuffers.Table
 }
@@ -694,7 +695,6 @@ func AckTokenSetStartTokensVector(builder *flatbuffers.Builder, numElems int) fl
 func AckTokenSetEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type NackSet struct {
 	_tab flatbuffers.Table
 }
@@ -779,7 +779,6 @@ func NackSetAddReason(builder *flatbuffers.Builder, reason flatbuffers.UOffsetT)
 func NackSetEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type MessageErrorSet struct {
 	_tab flatbuffers.Table
 }
@@ -864,7 +863,6 @@ func MessageErrorSetAddReason(builder *flatbuffers.Builder, reason flatbuffers.U
 func MessageErrorSetEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type AckSidecar struct {
 	_tab flatbuffers.Table
 }
@@ -1010,7 +1008,6 @@ func AckSidecarStartMessageErrorsVector(builder *flatbuffers.Builder, numElems i
 func AckSidecarEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type InputEnvelope struct {
 	_tab flatbuffers.Table
 }
@@ -1108,7 +1105,6 @@ func InputEnvelopeAddAcks(builder *flatbuffers.Builder, acks flatbuffers.UOffset
 func InputEnvelopeEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type OutputColumnRef struct {
 	_tab flatbuffers.Table
 }
@@ -1180,7 +1176,6 @@ func OutputColumnRefAddColumnIndex(builder *flatbuffers.Builder, columnIndex uin
 func OutputColumnRefEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type RoutedOutput struct {
 	_tab flatbuffers.Table
 }
@@ -1275,7 +1270,6 @@ func RoutedOutputAddAcks(builder *flatbuffers.Builder, acks flatbuffers.UOffsetT
 func RoutedOutputEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type OutputEnvelope struct {
 	_tab flatbuffers.Table
 }
@@ -1383,7 +1377,6 @@ func OutputEnvelopeStartOutputsVector(builder *flatbuffers.Builder, numElems int
 func OutputEnvelopeEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type GuestSnapshot struct {
 	_tab flatbuffers.Table
 }
@@ -1505,12 +1498,175 @@ func GuestSnapshotStartApplicationStateVector(builder *flatbuffers.Builder, numE
 func GuestSnapshotEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
+type StateSection struct {
+	_tab flatbuffers.Table
+}
 
+func GetRootAsStateSection(buf []byte, offset flatbuffers.UOffsetT) *StateSection {
+	n := flatbuffers.GetUOffsetT(buf[offset:])
+	x := &StateSection{}
+	x.Init(buf, n+offset)
+	return x
+}
+
+func FinishStateSectionBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+	builder.Finish(offset)
+}
+
+func GetSizePrefixedRootAsStateSection(buf []byte, offset flatbuffers.UOffsetT) *StateSection {
+	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+	x := &StateSection{}
+	x.Init(buf, n+offset+flatbuffers.SizeUint32)
+	return x
+}
+
+func FinishSizePrefixedStateSectionBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+	builder.FinishSizePrefixed(offset)
+}
+
+func (rcv *StateSection) Init(buf []byte, i flatbuffers.UOffsetT) {
+	rcv._tab.Bytes = buf
+	rcv._tab.Pos = i
+}
+
+func (rcv *StateSection) Table() flatbuffers.Table {
+	return rcv._tab
+}
+
+func (rcv *StateSection) Schema(obj *ProcessorSchema) *ProcessorSchema {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
+	if o != 0 {
+		x := rcv._tab.Indirect(o + rcv._tab.Pos)
+		if obj == nil {
+			obj = new(ProcessorSchema)
+		}
+		obj.Init(rcv._tab.Bytes, x)
+		return obj
+	}
+	return nil
+}
+
+func (rcv *StateSection) ArrowIpcBatch(j int) byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.GetByte(a + flatbuffers.UOffsetT(j*1))
+	}
+	return 0
+}
+
+func (rcv *StateSection) ArrowIpcBatchLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *StateSection) ArrowIpcBatchBytes() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func (rcv *StateSection) MutateArrowIpcBatch(j int, n byte) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		a := rcv._tab.Vector(o)
+		return rcv._tab.MutateByte(a+flatbuffers.UOffsetT(j*1), n)
+	}
+	return false
+}
+
+func StateSectionStart(builder *flatbuffers.Builder) {
+	builder.StartObject(2)
+}
+func StateSectionAddSchema(builder *flatbuffers.Builder, schema flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(schema), 0)
+}
+func StateSectionAddArrowIpcBatch(builder *flatbuffers.Builder, arrowIpcBatch flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(arrowIpcBatch), 0)
+}
+func StateSectionStartArrowIpcBatchVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(1, numElems, 1)
+}
+func StateSectionEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+	return builder.EndObject()
+}
+type StateDescription struct {
+	_tab flatbuffers.Table
+}
+
+func GetRootAsStateDescription(buf []byte, offset flatbuffers.UOffsetT) *StateDescription {
+	n := flatbuffers.GetUOffsetT(buf[offset:])
+	x := &StateDescription{}
+	x.Init(buf, n+offset)
+	return x
+}
+
+func FinishStateDescriptionBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+	builder.Finish(offset)
+}
+
+func GetSizePrefixedRootAsStateDescription(buf []byte, offset flatbuffers.UOffsetT) *StateDescription {
+	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+	x := &StateDescription{}
+	x.Init(buf, n+offset+flatbuffers.SizeUint32)
+	return x
+}
+
+func FinishSizePrefixedStateDescriptionBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+	builder.FinishSizePrefixed(offset)
+}
+
+func (rcv *StateDescription) Init(buf []byte, i flatbuffers.UOffsetT) {
+	rcv._tab.Bytes = buf
+	rcv._tab.Pos = i
+}
+
+func (rcv *StateDescription) Table() flatbuffers.Table {
+	return rcv._tab
+}
+
+func (rcv *StateDescription) Sections(obj *StateSection, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *StateDescription) SectionsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func StateDescriptionStart(builder *flatbuffers.Builder) {
+	builder.StartObject(1)
+}
+func StateDescriptionAddSections(builder *flatbuffers.Builder, sections flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(sections), 0)
+}
+func StateDescriptionStartSectionsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func StateDescriptionEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+	return builder.EndObject()
+}
 type Message struct {
 	_tab flatbuffers.Table
 }
 
-const MessageIdentifier = "NVWY"
+const MessageIdentifier = "NVWZ"
 
 func GetRootAsMessage(buf []byte, offset flatbuffers.UOffsetT) *Message {
 	n := flatbuffers.GetUOffsetT(buf[offset:])

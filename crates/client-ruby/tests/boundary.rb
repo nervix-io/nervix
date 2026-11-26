@@ -135,7 +135,8 @@ module RubyBoundary
     server.close
 
     NX::Cancel.new(deadline: nil)
-    NX::Cancel.new(deadline: 0)
+    NX::Cancel.new(deadline: 0.001)
+    failure(NX::InvalidArgumentError) { NX::Cancel.new(deadline: 0) }
     failure(NX::InvalidArgumentError) { NX::Cancel.new(deadline: -1) }
     failure(NX::InvalidArgumentError) { NX::Cancel.new(deadline: Float::INFINITY) }
   end

@@ -581,7 +581,9 @@ never calls Python from a thread of its own; its session runs on two threads of 
 
 A `Cancel` token bounds the calls it is passed to. Trigger it from any thread to end every call
 waiting on it with `CancelledError`, or create it with a `deadline` in seconds, after which it ends
-them with `DeadlineError`. Cancelling a wait never rolls back admitted work.
+them with `DeadlineError`. A deadline is at least one millisecond and at most one day, the
+deadlines the Rust client accepts; any other raises `InvalidArgumentError`. Cancelling a wait never
+rolls back admitted work.
 
 ```python
 {{#include ../../tests/client_conformance/python/suite/boundary/test_cancellation.py:cancel_from_another_thread}}

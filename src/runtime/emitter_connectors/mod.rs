@@ -5,7 +5,8 @@
 //!   and pairing the connector it opens with the input the host prepares for its contract. It is
 //!   the only place that names every emitter crate.
 //! - **Depends on.** The emitter start plan, the connector crates and their contract, the host's
-//!   values projection, record encoding and request preparation, and the pooled client leases.
+//!   values projection, record encoding and request preparation, and the lease a pooled emitter's
+//!   host takes for it, which the composition root asks for by its connector's pooled client.
 //! - **Must not know.** When the emitter publishes, how it buffers or retries, or how a batch is
 //!   encoded or mapped.
 
@@ -39,9 +40,11 @@ use nervix_connector_clickhouse::{ClickHouseTableEmitter, ClickHouseTableEmitter
 use nervix_connector_http::{HttpRequestEmitter, HttpRequestEmitterConfig};
 use nervix_connector_iceberg::{IcebergTableEmitter, IcebergTableEmitterConfig};
 use nervix_connector_kafka::{KafkaTopicEmitter, KafkaTopicEmitterConfig};
-use nervix_connector_mongodb::{MongoDbCollectionEmitter, MongoDbCollectionEmitterConfig};
+use nervix_connector_mongodb::{
+    MongoDbClient, MongoDbCollectionEmitter, MongoDbCollectionEmitterConfig,
+};
 use nervix_connector_mqtt::{MqttTopicEmitter, MqttTopicEmitterConfig};
-use nervix_connector_mysql::{MySqlTableEmitter, MySqlTableEmitterConfig};
+use nervix_connector_mysql::{MySqlPool, MySqlTableEmitter, MySqlTableEmitterConfig};
 use nervix_connector_nats::{
     NatsStreamEmitter, NatsStreamEmitterConfig, NatsSubjectEmitter, NatsSubjectEmitterConfig,
 };
@@ -49,13 +52,13 @@ use nervix_connector_otel::{
     OtelExportConfig, OtelLogsEmitter, OtelLogsEmitterConfig, OtelMetricsEmitter,
     OtelMetricsEmitterConfig, OtelTracesEmitter, OtelTracesEmitterConfig,
 };
-use nervix_connector_postgres::{PostgresTableEmitter, PostgresTableEmitterConfig};
+use nervix_connector_postgres::{PostgresPool, PostgresTableEmitter, PostgresTableEmitterConfig};
 use nervix_connector_pulsar::{PulsarTopicEmitter, PulsarTopicEmitterConfig};
 use nervix_connector_rabbitmq::{
     RabbitMqExchangeEmitter, RabbitMqExchangeEmitterConfig, RabbitMqQueueEmitter,
     RabbitMqQueueEmitterConfig,
 };
-use nervix_connector_redis::{RedisPubSubEmitter, RedisPubSubEmitterConfig};
+use nervix_connector_redis::{RedisCommandPool, RedisPubSubEmitter, RedisPubSubEmitterConfig};
 use nervix_connector_sentry::{SentryEventEmitter, SentryEventEmitterConfig};
 use nervix_connector_sqs::{SqsQueueEmitter, SqsQueueEmitterConfig};
 use nervix_connector_syslog::{SyslogCollectorEmitter, SyslogCollectorEmitterConfig};
@@ -64,7 +67,6 @@ use nervix_models::EmitterBatchPolicy;
 
 use super::{
     emitter_http_requests::{HttpRequestBody, PreparedRequestEmitter},
-    pooled_emitter_clients::PooledEmitterClient,
     *,
 };
 

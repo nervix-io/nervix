@@ -158,7 +158,8 @@ impl SessionServiceImpl {
 impl SessionServiceImpl {
     /// `DESCRIBE PARAMETRIZER`: the branch's declaration, the partition epoch it executes in and, while
     /// keys placed under its previous count may lie outside their partition, that count and how
-    /// far moving them has come.
+    /// far moving them has come. Its last line holds the parametrizer's labels, as every Model
+    /// description shows its entity's.
     pub(in crate::application) async fn describe_branch(
         &self,
         domain: &DomainName,
@@ -223,30 +224,36 @@ impl SessionServiceImpl {
         } else {
             lines.push(format!("partitions: {}", declaration.partitions));
         }
-        let Some(domain_schedule) = domain_schedule else {
-            lines.push(format!("partition epoch: {}", PartitionEpochNumber::FIRST));
-            return command_ok(lines.join("\n"));
-        };
-        let epoch = domain_schedule.partition_epoch_of(&describe.parametrizer);
-        lines.push(format!("partition epoch: {epoch}"));
-        if let Some(transition) = domain_schedule.partition_transition_of(&describe.parametrizer) {
-            lines.push(format!(
-                "previous partitions: {}",
-                transition.previous.count()
-            ));
-            match self
-                .branch_transition_holdings(domain_schedule, &describe.parametrizer, epoch)
-                .await
-            {
-                Ok(holdings) => {
-                    lines.push(format!("keys pending: {}", holdings.pending));
-                    lines.push(format!("keys claimed: {}", holdings.claimed));
-                }
-                Err(error) => {
-                    lines.push(format!("keys pending: unavailable ({error:#})"));
+        match domain_schedule {
+            None => {
+                lines.push(format!("partition epoch: {}", PartitionEpochNumber::FIRST));
+            }
+            Some(domain_schedule) => {
+                let epoch = domain_schedule.partition_epoch_of(&describe.parametrizer);
+                lines.push(format!("partition epoch: {epoch}"));
+                if let Some(transition) =
+                    domain_schedule.partition_transition_of(&describe.parametrizer)
+                {
+                    lines.push(format!(
+                        "previous partitions: {}",
+                        transition.previous.count()
+                    ));
+                    match self
+                        .branch_transition_holdings(domain_schedule, &describe.parametrizer, epoch)
+                        .await
+                    {
+                        Ok(holdings) => {
+                            lines.push(format!("keys pending: {}", holdings.pending));
+                            lines.push(format!("keys claimed: {}", holdings.claimed));
+                        }
+                        Err(error) => {
+                            lines.push(format!("keys pending: unavailable ({error:#})"));
+                        }
+                    }
                 }
             }
         }
+        super::describe_output::append_entity_label_lines(&mut lines, &declaration.labels);
         command_ok(lines.join("\n"))
     }
 }

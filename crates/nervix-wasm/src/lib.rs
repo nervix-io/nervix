@@ -90,20 +90,6 @@ nervix_primitives::unmodeled::task_local! {
     static INVOCATION_NOW: Timestamp;
 }
 
-/// What compiling one module is charged. Wasmtime allocates the code it generates itself and keeps
-/// it for as long as the processor holds the module, which no transient budget can stand for, so
-/// the charge only admits the compilation onto the bulk workers.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the charge is an admission token for the bulk workers, not a memory estimate, \
-                  since the processor keeps the code Wasmtime generates, so it is the least \
-                  nonzero reservation: a zero request takes no permit and never waits"
-    )
-)]
-const COMPILE_RESERVATION_BYTES: u64 = 1;
-
 /// The linear memories a guest module may define: the one it exports as `memory`, which holds
 /// every buffer the host and the guest exchange.
 #[cfg_attr(
@@ -743,8 +729,11 @@ impl WasmRuntime {
     ) -> StackResult<CompiledWasmProcessor, WasmProcessorError> {
         let engine = self.engine.clone();
         let wasm = wasm.as_ref().to_vec();
+        // Wasmtime allocates the code it generates itself and keeps it for as long as the
+        // processor holds the module, which no transient budget can stand for, so the compilation
+        // takes only the admission token onto the bulk workers.
         let reservation = executor
-            .reserve(MemoryClass::Bulk, COMPILE_RESERVATION_BYTES)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .change_context(WasmProcessorError::CompileExecution)?;
         let compiled = executor
@@ -888,6 +877,7 @@ pub enum WasmProcessorType {
     String,
     Bytes,
     Datetime,
+    Duration,
     F32,
     F64,
     Array {
@@ -978,6 +968,7 @@ impl WasmProcessorType {
             protocol::ProcessorType::String => Self::String,
             protocol::ProcessorType::Bytes => Self::Bytes,
             protocol::ProcessorType::Datetime => Self::Datetime,
+            protocol::ProcessorType::Duration => Self::Duration,
             protocol::ProcessorType::F32 => Self::F32,
             protocol::ProcessorType::F64 => Self::F64,
             protocol::ProcessorType::Array { element, len } => Self::Array {
@@ -1008,6 +999,7 @@ impl TryFrom<&WasmProcessorType> for ParseAsType {
             WasmProcessorType::String => Self::String,
             WasmProcessorType::Bytes => Self::Bytes,
             WasmProcessorType::Datetime => Self::Datetime,
+            WasmProcessorType::Duration => Self::Duration,
             WasmProcessorType::F32 => Self::F32,
             WasmProcessorType::F64 => Self::F64,
             WasmProcessorType::Array { element, len } => {
@@ -1027,54 +1019,28 @@ impl TryFrom<&WasmProcessorType> for ParseAsType {
     }
 }
 
-impl TryFrom<&nervix_models::CreateSchema> for WasmProcessorSchema {
-    type Error = WasmTypeRefusal;
-
-    fn try_from(schema: &nervix_models::CreateSchema) -> Result<Self, Self::Error> {
-        let mut fields = Vec::with_capacity(schema.fields.len());
-        for field in &schema.fields {
-            fields.push(WasmProcessorField::try_from(field)?);
-        }
-        Ok(Self {
+impl From<&nervix_models::CreateSchema> for WasmProcessorSchema {
+    fn from(schema: &nervix_models::CreateSchema) -> Self {
+        Self {
             name: schema.name.as_str().to_string(),
-            fields,
-        })
+            fields: schema.fields.iter().map(WasmProcessorField::from).collect(),
+        }
     }
 }
 
-/// Why a schema type has no type in the guest protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-#[cfg_attr(
-    nervix_lint,
-    nervix::error_boundary(
-        outcome,
-        reason = "a schema type the guest protocol cannot carry is a pure conversion refusal"
-    )
-)]
-pub enum WasmTypeRefusal {
-    /// A `DURATION`, which the guest protocol carries no type for; the registry refuses a WASM
-    /// processor whose schemas hold one before any of its plans exists.
-    #[error("a WASM guest does not read or write a DURATION")]
-    Duration,
-}
-
-impl TryFrom<&nervix_models::SchemaField> for WasmProcessorField {
-    type Error = WasmTypeRefusal;
-
-    fn try_from(field: &nervix_models::SchemaField) -> Result<Self, Self::Error> {
-        Ok(Self {
+impl From<&nervix_models::SchemaField> for WasmProcessorField {
+    fn from(field: &nervix_models::SchemaField) -> Self {
+        Self {
             name: field.name.as_str().to_string(),
-            ty: WasmProcessorType::try_from(&field.ty)?,
+            ty: WasmProcessorType::from(&field.ty),
             optional: field.optional,
-        })
+        }
     }
 }
 
-impl TryFrom<&ParseAsType> for WasmProcessorType {
-    type Error = WasmTypeRefusal;
-
-    fn try_from(ty: &ParseAsType) -> Result<Self, Self::Error> {
-        let ty = match ty {
+impl From<&ParseAsType> for WasmProcessorType {
+    fn from(ty: &ParseAsType) -> Self {
+        match ty {
             ParseAsType::U8 => Self::U8,
             ParseAsType::I8 => Self::I8,
             ParseAsType::U16 => Self::U16,
@@ -1087,18 +1053,17 @@ impl TryFrom<&ParseAsType> for WasmProcessorType {
             ParseAsType::String => Self::String,
             ParseAsType::Bytes => Self::Bytes,
             ParseAsType::Datetime => Self::Datetime,
-            ParseAsType::Duration => return Err(WasmTypeRefusal::Duration),
+            ParseAsType::Duration => Self::Duration,
             ParseAsType::F32 => Self::F32,
             ParseAsType::F64 => Self::F64,
             ParseAsType::Array { element, len } => Self::Array {
-                element: Box::new(Self::try_from(element.as_ref())?),
+                element: Box::new(Self::from(element.as_ref())),
                 len: len.get(),
             },
             ParseAsType::Vec { element } => Self::Vec {
-                element: Box::new(Self::try_from(element.as_ref())?),
+                element: Box::new(Self::from(element.as_ref())),
             },
-        };
-        Ok(ty)
+        }
     }
 }
 
@@ -1284,6 +1249,7 @@ impl WasmProcessorType {
             Self::String => protocol::ProcessorType::String,
             Self::Bytes => protocol::ProcessorType::Bytes,
             Self::Datetime => protocol::ProcessorType::Datetime,
+            Self::Duration => protocol::ProcessorType::Duration,
             Self::F32 => protocol::ProcessorType::F32,
             Self::F64 => protocol::ProcessorType::F64,
             Self::Array { element, len } => protocol::ProcessorType::Array {
@@ -2916,32 +2882,48 @@ mod tests {
 
     use super::*;
 
-    /// The guest protocol schema of a test schema, which holds no `DURATION`.
+    /// The guest protocol schema of a test schema.
     fn guest_schema(schema: &nervix_models::CreateSchema) -> WasmProcessorSchema {
-        WasmProcessorSchema::try_from(schema).assured("a test schema holds no DURATION")
+        WasmProcessorSchema::from(schema)
     }
 
+    /// A `DURATION`, alone and as a nested list element, reaches the guest as the protocol's
+    /// duration kind, and the type a guest declares back names the `DURATION` again.
     #[test]
-    fn a_duration_has_no_guest_protocol_type() {
-        for ty in [
-            ParseAsType::Duration,
-            ParseAsType::Vec {
-                element: Box::new(ParseAsType::Duration),
-            },
+    fn duration_schema_type_reaches_wasm_protocol_and_returns_as_duration() {
+        let two = std::num::NonZeroU32::new(2).assured("two is not zero");
+        for (schema_type, protocol_type) in [
+            (ParseAsType::Duration, protocol::ProcessorType::Duration),
+            (
+                ParseAsType::Vec {
+                    element: Box::new(ParseAsType::Array {
+                        element: Box::new(ParseAsType::Duration),
+                        len: two,
+                    }),
+                },
+                protocol::ProcessorType::Vec {
+                    element: Box::new(protocol::ProcessorType::Array {
+                        element: Box::new(protocol::ProcessorType::Duration),
+                        len: 2,
+                    }),
+                },
+            ),
         ] {
+            let ty = WasmProcessorType::from(&schema_type);
+            assert_eq!(ty.to_protocol(), protocol_type);
+            let declared = WasmProcessorType::from_protocol(protocol_type);
             assert_eq!(
-                WasmProcessorType::try_from(&ty),
-                Err(WasmTypeRefusal::Duration)
+                ParseAsType::try_from(&declared).assured("a duration names a Nervix type"),
+                schema_type
             );
         }
     }
 
     #[test]
     fn bytes_schema_type_reaches_wasm_protocol_without_text_conversion() {
-        let ty = WasmProcessorType::try_from(&ParseAsType::Vec {
+        let ty = WasmProcessorType::from(&ParseAsType::Vec {
             element: Box::new(ParseAsType::Bytes),
-        })
-        .assured("the guest protocol carries BYTES");
+        });
         assert_eq!(
             ty.to_protocol(),
             protocol::ProcessorType::Vec {
@@ -5344,9 +5326,13 @@ mod tests {
         );
     }
 
-    /// A bundled guest saves its row ordinal as exactly eight bytes and refuses any other
-    /// application state, with its own reason.
-    async fn guest_rejects_application_state_that_is_not_a_row_ordinal(path: &Path) {
+    /// A bundled guest saves its row ordinal in eight bytes, which the Rust guest follows with
+    /// a total wait when its input has one, and refuses any other application state with its
+    /// own `reason`.
+    async fn guest_rejects_application_state_that_is_not_a_row_ordinal(
+        path: &Path,
+        expected_reason: &str,
+    ) {
         let guest = read_guest(path);
         let snapshot = protocol::GuestSnapshot {
             init_metadata: init().to_protocol().encode(),
@@ -5366,7 +5352,7 @@ mod tests {
             matches!(
                 failure,
                 WasmGuestError::ApplicationStateRejected { reason: Some(reason) }
-                    if reason == "saved row ordinal must be exactly 8 bytes"
+                    if reason == expected_reason
             ),
             "the guest's own restore error is the reason: {failure:?}"
         );
@@ -5374,12 +5360,21 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn the_rust_guest_rejects_application_state_its_processor_cannot_restore() {
-        guest_rejects_application_state_that_is_not_a_row_ordinal(&rust_guest_path()).await;
+        guest_rejects_application_state_that_is_not_a_row_ordinal(
+            &rust_guest_path(),
+            "saved state must be an 8-byte row ordinal, optionally followed by an 8-byte total \
+             wait",
+        )
+        .await;
     }
 
     #[nervix_primitives::test]
     async fn the_go_guest_rejects_application_state_it_cannot_restore() {
-        guest_rejects_application_state_that_is_not_a_row_ordinal(&go_guest_path()).await;
+        guest_rejects_application_state_that_is_not_a_row_ordinal(
+            &go_guest_path(),
+            "saved row ordinal must be exactly 8 bytes",
+        )
+        .await;
     }
 
     #[nervix_primitives::test]

@@ -207,7 +207,7 @@ impl Runtime {
             .now();
         let executor = executor.clone();
         let memory = executor
-            .reserve(MemoryClass::Bulk, 1)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .change_context(ProcessorStatePageError::Admission)?;
         let runtime = self.clone();
@@ -375,6 +375,7 @@ fn sealed_publication(
 #[cfg(test)]
 mod tests {
     use arrow_schema::DataType;
+    use nervix_execution::ADMISSION_TOKEN_BYTES;
 
     use super::*;
     use crate::{
@@ -403,7 +404,7 @@ mod tests {
         let excluded = BTreeSet::from([first.fingerprint()]);
         let expected_catalog = BTreeSet::from([first.fingerprint(), second.fingerprint()]);
         let memory = executor
-            .try_reserve(MemoryClass::Bulk, 1)
+            .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
             .assured("bounded fixture admission");
         let captured = executor
             .run_cpu(CpuClass::Bulk, memory, move |memory, cancellation| {

@@ -18,7 +18,7 @@
 use std::{collections::BTreeSet, time::Duration};
 
 use error_stack::Report;
-use nervix_execution::{CpuClass, Executor, MemoryClass};
+use nervix_execution::{ADMISSION_TOKEN_BYTES, CpuClass, Executor, MemoryClass};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainName, NodeEndpoint,
     PrerequisiteMismatch, PrerequisiteTimings, RelayName, RemoteAckOutcome, RemoteAckRegistration,
@@ -88,7 +88,7 @@ impl HeldCpuClass {
             let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
             releases.push(release);
             let charge = executor
-                .try_reserve(MemoryClass::Bulk, 1)
+                .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
                 .expect("the test's bulk class has room for one byte per held job");
             let occupier = executor.clone();
             jobs.push(nervix_primitives::task::spawn(async move {
@@ -180,7 +180,7 @@ impl OccupiedWorkers {
         self.releases.push(release);
         let charge = self
             .executor
-            .try_reserve(MemoryClass::Bulk, 1)
+            .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
             .expect("the test's bulk class has room for one byte per held job");
         let occupier = self.executor.clone();
         let class = self.class;
@@ -207,7 +207,7 @@ impl OccupiedWorkers {
         let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
         let charge = self
             .executor
-            .try_reserve(MemoryClass::Bulk, 1)
+            .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
             .expect("the test's bulk class has room for one byte per held job");
         let holder = self.executor.clone();
         let class = self.class;

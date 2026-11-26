@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestorBatch,
-    IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
+    IngestorBatchRequest, IngestorConnector, IngestorError, IngestorHost, IngestorMessage,
     IngestorReadCancellation, IngestorResult, IngestorResume, NoIngestHeaders, client_config_value,
     optional_bool_client_config_value,
 };
@@ -157,7 +157,11 @@ impl IngestorConnector for ZeroMqPullIngestor {
 
     type Plan = ZeroMqPullIngestorPlan;
 
-    async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
+    async fn open(
+        plan: &Self::Plan,
+        _host: &IngestorHost,
+        _instance_index: u64,
+    ) -> IngestorResult<Self> {
         Ok(Self {
             plan: plan.clone(),
             socket: None,
@@ -174,7 +178,7 @@ impl IngestorConnector for ZeroMqPullIngestor {
         Ok(())
     }
 
-    async fn resume(&mut self) -> IngestorResult<IngestorResume> {
+    async fn resume(&mut self, _host: &IngestorHost) -> IngestorResult<IngestorResume> {
         if self.socket.is_none() {
             let socket = self
                 .plan
@@ -201,6 +205,7 @@ impl BrokerIngestorConnector for ZeroMqPullIngestor {
     /// to ingest and is skipped.
     async fn next_batch(
         &mut self,
+        _host: &IngestorHost,
         _request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {

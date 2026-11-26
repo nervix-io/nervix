@@ -1,5 +1,6 @@
 //! Layer: vocabulary.
-//! Owns: setting classes, definition metadata and construction of validated setting values.
+//! Owns: setting classes, definition metadata, construction of validated setting values and the
+//! shortest positive duration their derivations floor at.
 //! Depends on: primitive values and the defining owner's typed validation report.
 //! Must not know: command-line parsing, machines, gossip, consensus or running services.
 
@@ -8,7 +9,7 @@
     nervix::layer(vocabulary, reason = "owns typed setting definitions and values")
 )]
 
-use std::{fmt, marker::PhantomData};
+use std::{fmt, marker::PhantomData, time::Duration};
 
 pub(crate) mod archive;
 
@@ -44,6 +45,19 @@ impl SettingClass for ClusterParameters {
 impl SettingClass for NodeCapabilities {
     const NAME: &'static str = "node capability";
 }
+
+/// The shortest positive duration. A wait, cadence, grace or deadline a derivation computes from a
+/// positive budget, by dividing it or by rounding a conversion, is never shorter, so a budget too
+/// short to divide still derives one that waits rather than spinning or ending at once.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a Duration counts whole nanoseconds, so one nanosecond is the shortest positive \
+                  duration"
+    )
+)]
+pub const SHORTEST_POSITIVE_DURATION: Duration = Duration::from_nanos(1);
 
 /// One setting's class, name, single default, derivation and validation owner.
 ///

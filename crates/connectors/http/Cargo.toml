@@ -10,7 +10,11 @@ workspace = true
 
 [features]
 default = []
-shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
+shuttle = [
+  "nervix-connector/shuttle",
+  "nervix-connector-fake/shuttle",
+  "nervix-primitives/shuttle",
+]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -38,6 +42,7 @@ url = { workspace = true }
 [dev-dependencies]
 base64 = { workspace = true }
 bolero = { workspace = true }
+nervix-connector-fake = { workspace = true }
 nervix-crypto = { workspace = true }
 # HTTP/2 negotiation is exercised against a real HTTP/2 server.
 hyper = { workspace = true, features = ["client", "http1", "http2", "server"] }

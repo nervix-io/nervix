@@ -358,6 +358,8 @@ pub struct FakeEmitter<F: EmitterFamily> {
     pub resume_started: Option<Arc<nervix_primitives::sync::Notify>>,
     pub resume_gate: Option<Arc<nervix_primitives::sync::Notify>>,
     staging: Option<Staging>,
+    /// The handle the emitter was opened with, which it keeps for as long as it lives.
+    host: Option<EmitterHost>,
     family: PhantomData<F>,
 }
 
@@ -373,12 +375,20 @@ impl<F: EmitterFamily> FakeEmitter<F> {
             resume_results: VecDeque::new(),
             resume_started: None,
             resume_gate: None,
+            host: None,
             family: PhantomData,
         }
     }
 
     pub fn observations(&self) -> Arc<Mutex<EmitterObservations<F::Write>>> {
         self.observations.clone()
+    }
+
+    /// The handle this emitter was opened with.
+    pub fn host(&self) -> &EmitterHost {
+        self.host
+            .as_ref()
+            .assured("an emitter keeps the handle its host opened it with")
     }
 
     pub fn staging(mut self, cadence: Duration, size_boundary: u64) -> Self {
@@ -423,12 +433,14 @@ impl<F: EmitterFamily> EmitterConnector for FakeEmitter<F> {
     const KIND: EmitterEntityKind = F::KIND;
     type Plan = Self;
 
-    async fn open(plan: Self::Plan, _host: EmitterHost) -> EmitterStartResult<Self> {
+    async fn open(plan: Self::Plan, host: EmitterHost) -> EmitterStartResult<Self> {
         plan.observations
             .lock()
             .lifecycle
             .push(EmitterLifecycleOperation::Open);
-        Ok(plan)
+        let mut emitter = plan;
+        emitter.host = Some(host);
+        Ok(emitter)
     }
 }
 

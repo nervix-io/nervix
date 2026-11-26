@@ -255,7 +255,8 @@ Feature: Every emitter entity gives up its rows once GIVE UP AFTER passes
           ENCODE USING syslog_codec
         SET facility = 1 AS U8, severity = 3 AS U8, message = input.id
         FLUSH IMMEDIATE
-        ON MESSAGE ERROR LOG
+        ON MESSAGE ERROR SEND TO failed_events
+          SET id = input.id, node = error.node, error_code = error.class, operation = error.operation
         ON GENERAL ERROR LOG;
       CREATE ICEBERG TABLE EMITTER iceberg_stranded FROM events
         TO s3_down TABLE 'Stranded' NAMESPACE '{{domain}}' LOCATION 's3://warehouse/stranded'
@@ -294,24 +295,8 @@ Feature: Every emitter entity gives up its rows once GIVE UP AFTER passes
       "id":"stranded-{{test_id}}" | "node":"mysql_stranded" | "error_code":"unavailable" | "operation":"publish"
       "id":"stranded-{{test_id}}" | "node":"clickhouse_stranded" | "error_code":"unavailable" | "operation":"publish"
       "id":"stranded-{{test_id}}" | "node":"mongodb_stranded" | "error_code":"unavailable" | "operation":"publish"
+      "id":"stranded-{{test_id}}" | "node":"syslog_stranded" | "error_code":"unavailable" | "operation":"publish"
       "id":"stranded-{{test_id}}" | "node":"iceberg_stranded" | "error_code":"unavailable" | "operation":"publish"
-      """
-    # The Syslog collector's route builds a record of another schema, so its given-up row is
-    # observed through its LOG policy's error counter rather than an error relay.
-    And within "30s" DESCRIBE EMITTER "syslog_stranded" on the leader node contains
-      """
-      mode: NO ACK RETRY POLICY BACKOFF 100ms MAX 500ms GIVE UP AFTER 1s
-      """
-    And the last command output owner is saved as placeholder "syslog_owner"
-    And node "{{syslog_owner}}" observability metric "nervix_message_errors_total" with labels eventually reaches at least 1
-      """
-      node="syslog_stranded"
-      class="unavailable"
-      operation="publish"
-      """
-    And node "{{syslog_owner}}" observability metric "nervix_emitter_give_ups_total" with labels eventually reaches at least 1
-      """
-      emitter="syslog_stranded"
       """
 
     Examples:
@@ -328,7 +313,9 @@ Feature: Every emitter entity gives up its rows once GIVE UP AFTER passes
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
+      CREATE SCHEMA failed_order (id STRING, amount I64, error_code STRING, operation STRING);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
+      CREATE RELAY failed_orders SCHEMA failed_order UNBRANCHED;
       CREATE CLIENT PRODUCER INGESTOR orders_in
         FROM SCHEMA incoming
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
@@ -347,8 +334,10 @@ Feature: Every emitter entity gives up its rows once GIVE UP AFTER passes
         SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB
         FLUSH IMMEDIATE
-        ON MESSAGE ERROR LOG
+        ON MESSAGE ERROR SEND TO failed_orders
+          SET id = input.id, amount = input.amount, error_code = error.class, operation = error.operation
         ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION failed_orders_subscription TO failed_orders;
       START;
       """
     And client "app" is connected to the leader node
@@ -359,9 +348,13 @@ Feature: Every emitter entity gives up its rows once GIVE UP AFTER passes
       | o-2 | 7      |
     And consumer "only" reads output batch "first attempt"
     And output batch "first attempt" is retried
-    # The emitter's route builds a record of its own output schema, so the given-up row is observed
-    # through its LOG policy: the producer learns the row failed, and the error counter names it.
-    Then batch "first input" fails processing because "rejected"
+    # The given-up row follows the error route, which reads the source row's amount that the record
+    # the emitter's route built does not carry, so the producer learns the row was handled.
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "id":"o-2" | "amount":7 | "error_code":"unavailable" | "operation":"publish"
+      """
+    And batch "first input" completes
     And within "30s" DESCRIBE EMITTER "app_output" on the leader node contains
       """
       transient error: gave up after 0s of retries: the consumer asked to receive the delivery again

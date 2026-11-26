@@ -25,6 +25,14 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        tls_policy,
+        reason = "the Pulsar topic emitter prepares its client's TLS handshakes under its node's \
+                  outward TLS policy"
+    )
+)]
 
 mod connection;
 mod ingestor;
@@ -220,8 +228,10 @@ impl From<PulsarError> for PulsarSendFailure {
 }
 
 /// What one Pulsar emitter publishes through: its client entries, topic and publishing mode.
+///
+/// The outward TLS policy its client's handshakes take reaches the emitter through its host
+/// handle.
 pub struct PulsarTopicEmitterConfig {
-    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
     pub topic: PulsarTopicName,
     pub mode: BrokerPublishingMode,
@@ -499,8 +509,11 @@ where
 impl PulsarTopicEmitter {
     async fn prepare(
         config: PulsarTopicEmitterConfig,
-        _host: EmitterHost,
+        host: EmitterHost,
     ) -> EmitterStartResult<Self> {
+        // The node's outward TLS policy is taken first, before anything the configuration says is
+        // read.
+        let tls_policy = host.tls_policy();
         if let BrokerPublishingMode::Ack(settings) = config.mode
             && Instant::now().checked_add(settings.timeout).is_none()
         {
@@ -528,7 +541,7 @@ impl PulsarTopicEmitter {
             BrokerPublishingMode::Ack(settings) => Some(settings.timeout),
         };
         let connection =
-            PulsarClientConnection::new(&config.config, operation_timeout, &config.tls_policy)
+            PulsarClientConnection::new(&config.config, operation_timeout, &tls_policy)
                 .prepare()
                 .map_err(Self::client_error)?;
         let topic_name = qualified_topic(&config.config, &config.topic);
@@ -778,6 +791,7 @@ mod tests {
     use futures_util::SinkExt as _;
     use meticulous::ResultExt as _;
     use nervix_connector::RecordEnvelope;
+    use nervix_connector_fake::FakeEmitterHost;
     use nervix_primitives::{
         net::{TcpListener, TcpStream},
         sync::{CancellationToken, mpsc},
@@ -1316,66 +1330,20 @@ mod tests {
         }
     }
 
-    /// A host that ignores what the emitter reports, for tests that only read its publish outcomes.
-    struct SilentHost;
-
-    impl nervix_connector::EmitterReadiness for SilentHost {
-        fn mark_ready(&self) {}
-        fn mark_unready(&self) {}
-    }
-
-    impl nervix_connector::EmitterTransientErrorStatus for SilentHost {
-        fn record_transient_error(&self, _reason: String, _retry_after: Duration) {}
-
-        fn clear_transient_error(&self) {}
-    }
-
-    impl nervix_connector::EmitterEventReporter for SilentHost {
-        fn report_error(&self, _message: String) {}
-    }
-
-    impl nervix_connector::ConnectorEventProvider for SilentHost {}
-
-    impl nervix_connector::EmitterPayloadObserver for SilentHost {
-        fn record_prepared_payload(
-            &self,
-            _measurement: nervix_connector::EmitterPayloadMeasurement,
-        ) {
-        }
-        fn record_payload_subdivisions(&self, _subdivisions: u64) {}
-    }
-
-    impl nervix_connector::EmitterStagingDirectory for SilentHost {
-        fn staging_directory(&self) -> std::path::PathBuf {
-            std::env::temp_dir()
-        }
-    }
-
-    impl nervix_connector::EmitterBoundedExecution for SilentHost {
-        fn executor(&self) -> nervix_execution::Executor {
-            nervix_execution::Executor::default()
-        }
-    }
-
-    impl nervix_connector::EmitterGeneralErrorHandler for SilentHost {
-        fn handle_general_error(
-            &self,
-            _acks: &nervix_connector::EmitterRecordAcknowledgements,
-            _class: nervix_models::MessageErrorClass,
-            _reason: String,
-        ) {
-        }
+    /// The handle of a node whose outward TLS policy is the default one, for tests that only read
+    /// the emitter's publish outcomes. The emitter takes nothing else from its host.
+    fn host() -> EmitterHost {
+        FakeEmitterHost::default().host()
     }
 
     async fn connector(broker: &FakeBroker, mode: BrokerPublishingMode) -> PulsarTopicEmitter {
         let config = PulsarTopicEmitterConfig {
-            tls_policy: Default::default(),
             partition_from_branch: false,
             config: vec![entry("addr", &broker.service_url)],
             topic: PulsarTopicName::parse("limited").expect("the test topic is a valid topic name"),
             mode,
         };
-        let mut emitter = PulsarTopicEmitter::open(config, EmitterHost::new(SilentHost))
+        let mut emitter = PulsarTopicEmitter::open(config, host())
             .await
             .assured("the fake broker configuration is valid");
         emitter
@@ -1492,7 +1460,6 @@ mod tests {
     async fn a_timeout_past_the_clock_range_is_refused_before_the_driver_uses_it() {
         let broker = FakeBroker::start(None, AnswerOrder::OnArrival).await;
         let config = PulsarTopicEmitterConfig {
-            tls_policy: Default::default(),
             partition_from_branch: false,
             config: vec![entry("addr", &broker.service_url)],
             topic: PulsarTopicName::parse("limited").assured("the fixture topic is a valid name"),
@@ -1501,8 +1468,7 @@ mod tests {
                 timeout: Duration::MAX,
             }),
         };
-        let Err(failure) = PulsarTopicEmitter::open(config, EmitterHost::new(SilentHost)).await
-        else {
+        let Err(failure) = PulsarTopicEmitter::open(config, host()).await else {
             panic!("the driver's timer must not receive a timeout past the clock range");
         };
         assert_eq!(

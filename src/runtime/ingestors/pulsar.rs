@@ -26,6 +26,7 @@ use super::{
     super::*,
     IngestorConnectorStartError, IngestorStartError,
     connector::{BrokerIngestorStart, IngestorStart},
+    connector_host::IngestorEntityServices,
 };
 
 const _: () = assert!(matches!(
@@ -46,14 +47,16 @@ impl PulsarTopicIngestorStartPlan {
                 &self.client.config,
             )
             .change_context_lazy(|| ingestor.initialize_failure())?;
+        let host = runtime.ingestor_connector_host(ingestor, IngestorEntityServices::default());
         let connector = PulsarTopicIngestorPlan::connect(
             self.settings(&resolved.entries, ingestor),
-            runtime.outward_tls(),
+            host.handle(),
         )
         .await
         .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerIngestorStart {
             connector,
+            host,
             instances: self.instances,
             acknowledgement: self.mode.acknowledgement(),
             buffered_intake: false,
@@ -105,7 +108,10 @@ impl PulsarTopicIngestorStartPlan {
                 return Ok(());
             }
         }
-        PulsarTopicIngestorPlan::remove_subscription(settings, runtime.outward_tls())
+        // The removal reaches this node as the retired ingestor's own connector does: through a
+        // handle of that ingestor, which ends with the removal.
+        let host = runtime.ingestor_connector_host(ingestor, IngestorEntityServices::default());
+        PulsarTopicIngestorPlan::remove_subscription(settings, host.handle())
             .await
             .change_context_lazy(context)
     }

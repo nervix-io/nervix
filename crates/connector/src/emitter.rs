@@ -8,8 +8,9 @@
 //!   position — the requests a row request emitter prepares from mapped rows, the outcome it answers
 //!   with, and the opaque handles through which an emitter reports to its host or keeps host-owned
 //!   acknowledgements alive.
-//! - **Depends on.** Arrow batches, vocabulary values, `error-stack`, Tokio's monotonic instant,
-//!   and trait-object support.
+//! - **Depends on.** Arrow batches, vocabulary values, `error-stack`, the node's resolver,
+//!   bounded executor, outward TLS policy and pooled clients a host hands over, the primitive
+//!   boundary's monotonic instant and cancellation token, and trait-object support.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, error-policy
 //!   implementations, or any connector driver.
 
@@ -35,16 +36,24 @@ use arrow_array::RecordBatch;
 use async_trait::async_trait;
 use error_stack::Report;
 use meticulous::OptionExt as _;
+use nervix_dns::DnsResolver;
 use nervix_execution::Executor;
 use nervix_models::{
     ExternalErrorCode, FieldPath, HttpApplicationHeaders, HttpMethod, HttpTarget,
     MessageErrorClass, MessageErrorOperation, PropertyType, RaisedMessageError, RejectedErrorClass,
     Timestamp,
 };
-use nervix_primitives::{sync::Arc, time::Instant};
+use nervix_primitives::{
+    sync::{Arc, CancellationToken},
+    time::Instant,
+};
+use nervix_tls::OutwardTlsPolicy;
 use thiserror::Error;
 
-use crate::{EmitterPayloadMeasurement, EmitterPayloadObserver};
+use crate::{
+    EmitterPayloadMeasurement, EmitterPayloadObserver, HostServiceError, PooledClient,
+    PooledClientLease, pooled_client::ErasedPooledClientLease,
+};
 
 /// How many publishes may await confirmation at once, and how long each one may take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1231,6 +1240,45 @@ pub trait EmitterReadiness: Send + Sync + 'static {
     fn mark_unready(&self);
 }
 
+/// The node's resolver, through which an emitter dials every host it names.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "a connector takes the node's resolver while it opens or resumes"
+    )
+)]
+pub trait EmitterNameResolution: Send + Sync + 'static {
+    /// The resolver, or `None` on a node that runs without one.
+    fn dns(&self) -> Option<DnsResolver>;
+}
+
+/// The node's committed outward TLS policy, which every TLS client an emitter builds captures for
+/// its handshakes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "a connector takes the node's outward TLS policy while it opens or resumes"
+    )
+)]
+pub trait EmitterOutwardTls: Send + Sync + 'static {
+    fn tls_policy(&self) -> OutwardTlsPolicy;
+}
+
+/// The end of the host task that drives this exact emitter instance.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "a connector takes the end of its instance's task while it opens or resumes"
+    )
+)]
+pub trait EmitterTaskEnd: Send + Sync + 'static {
+    /// A token cancelled once the task has ended.
+    fn cancellation(&self) -> CancellationToken;
+}
+
 /// Every service exposed through one emitter host handle.
 #[cfg_attr(
     nervix_lint,
@@ -1246,6 +1294,9 @@ pub trait EmitterHostServices:
     + EmitterStagingDirectory
     + EmitterGeneralErrorHandler
     + EmitterBoundedExecution
+    + EmitterNameResolution
+    + EmitterOutwardTls
+    + EmitterTaskEnd
     + EmitterPayloadObserver
     + crate::ConnectorEventProvider
     + Send
@@ -1261,6 +1312,9 @@ impl<T> EmitterHostServices for T where
         + EmitterStagingDirectory
         + EmitterGeneralErrorHandler
         + EmitterBoundedExecution
+        + EmitterNameResolution
+        + EmitterOutwardTls
+        + EmitterTaskEnd
         + EmitterPayloadObserver
         + crate::ConnectorEventProvider
         + Send
@@ -1274,28 +1328,69 @@ struct EmitterHostInner {
 }
 
 /// The task-scoped host services a connector may retain without learning a runtime type.
+///
+/// The handle is the only way an emitter reaches its node: its plan carries configuration and no
+/// service. Every method hands over one named service, and the code that calls it declares that
+/// service in a `nervix::host_services` contract.
 #[derive(Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::value(
+        host_handle,
+        reason = "the handle an emitter host gives the connector it drives"
+    )
+)]
 pub struct EmitterHost {
     inner: Arc<EmitterHostInner>,
-}
-
-impl EmitterReadiness for EmitterHost {
-    fn mark_ready(&self) {
-        self.inner.services.mark_ready();
-    }
-
-    fn mark_unready(&self) {
-        self.inner.services.mark_unready();
-    }
+    /// The pooled client the host leased for this emitter before it opened, for an entity whose
+    /// client pools.
+    pooled_client: Option<ErasedPooledClientLease>,
 }
 
 impl EmitterHost {
+    pub fn new(services: impl EmitterHostServices) -> Self {
+        Self {
+            inner: Arc::new(EmitterHostInner {
+                services: Box::new(services),
+            }),
+            pooled_client: None,
+        }
+    }
+
+    /// A handle that also carries the pooled client the host leased for its emitter, which the
+    /// emitter takes with [`EmitterHost::pool`].
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "the host installs one retained lease when it composes a pooled emitter"
+        )
+    )]
+    pub fn leasing<K: PooledClient>(
+        services: impl EmitterHostServices,
+        lease: PooledClientLease<K>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(EmitterHostInner {
+                services: Box::new(services),
+            }),
+            pooled_client: Some(lease.erased()),
+        }
+    }
+
     /// Resolves one declared observation at connector construction.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
             lifecycle,
             reason = "resolves a declared event once before publication"
+        )
+    )]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(
+            metrics,
+            reason = "hands over the recorder of one event the emitter's entity declares"
         )
     )]
     pub fn event_counter(
@@ -1305,58 +1400,160 @@ impl EmitterHost {
         self.inner.services.event_counter(event)
     }
 
-    pub fn new(services: impl EmitterHostServices) -> Self {
-        Self {
-            inner: Arc::new(EmitterHostInner {
-                services: Box::new(services),
-            }),
-        }
-    }
-
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(
+            status,
+            reason = "publishes the transient status of the instance's retained client"
+        )
+    )]
     pub fn record_transient_error(&self, reason: String, retry_after: Duration) {
         self.inner
             .services
             .record_transient_error(reason, retry_after);
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(
+            status,
+            reason = "withdraws the transient status of the instance's retained client"
+        )
+    )]
     pub fn clear_transient_error(&self) {
         self.inner.services.clear_transient_error();
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(readiness, reason = "publishes that the exact instance is ready")
+    )]
     pub fn mark_ready(&self) {
         self.inner.services.mark_ready();
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(readiness, reason = "publishes that the exact instance is not ready")
+    )]
     pub fn mark_unready(&self) {
         self.inner.services.mark_unready();
     }
 
     /// Records a native payload once its encoder or file writer has prepared it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(metrics, reason = "records one prepared native payload")
+    )]
     pub fn record_prepared_payload(&self, measurement: EmitterPayloadMeasurement) {
         self.inner.services.record_prepared_payload(measurement);
     }
 
     /// Reports the existing size divider's candidate halvings, excluding count boundaries.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(metrics, reason = "records the size divider's subdivisions")
+    )]
     pub fn record_payload_subdivisions(&self, subdivisions: u64) {
         self.inner
             .services
             .record_payload_subdivisions(subdivisions);
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(status, reason = "reports an error event of the emitter")
+    )]
     pub fn report_error(&self, message: String) {
         self.inner.services.report_error(message);
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(
+            staging,
+            reason = "hands over the directory a connector stages local files in"
+        )
+    )]
     pub fn staging_directory(&self) -> PathBuf {
         self.inner.services.staging_directory()
     }
 
     /// The node's bounded executor. A connector keeps the handle it is given for as long as it
     /// stages work through it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(executor, reason = "hands over the node's bounded executor")
+    )]
     pub fn executor(&self) -> Executor {
         self.inner.services.executor()
     }
 
+    /// The node's resolver, through which a connector dials every host it names.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(dns, reason = "hands over the node's resolver")
+    )]
+    pub fn dns(&self) -> Result<DnsResolver, Report<HostServiceError>> {
+        match self.inner.services.dns() {
+            Some(dns) => Ok(dns),
+            None => Err(Report::new(HostServiceError::DnsNotInstalled)),
+        }
+    }
+
+    /// The node's committed outward TLS policy, which every TLS client a connector builds captures
+    /// for its handshakes.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(
+            tls_policy,
+            reason = "hands over the node's committed outward TLS policy"
+        )
+    )]
+    pub fn tls_policy(&self) -> OutwardTlsPolicy {
+        self.inner.services.tls_policy()
+    }
+
+    /// A token cancelled once the host task that drives this exact instance has ended, so work a
+    /// connector started beside its publishes can end with it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(
+            cancellation,
+            reason = "hands over the end of the host task that drives the instance"
+        )
+    )]
+    pub fn cancellation(&self) -> CancellationToken {
+        self.inner.services.cancellation()
+    }
+
+    /// The pooled client the host leased for this emitter, as the pool type `K` of its connector.
+    ///
+    /// The host leases the node's shared instance before it opens the emitter, so taking the lease
+    /// performs no I/O. The lease gives the interest back when its last clone is dropped.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(
+            pool,
+            reason = "hands over the pooled client the host leased for the emitter"
+        )
+    )]
+    pub fn pool<K: PooledClient>(&self) -> Result<PooledClientLease<K>, Report<HostServiceError>> {
+        match &self.pooled_client {
+            Some(lease) => lease.typed(),
+            None => Err(Report::new(HostServiceError::PooledClientNotLeased)),
+        }
+    }
+
+    /// Applies the node's general error policy to acknowledgements this connector retained, for a
+    /// failure of `class` that it describes in `reason`.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(
+            general_errors,
+            reason = "applies the node's general error policy to retained acknowledgements"
+        )
+    )]
     pub fn handle_general_error(
         &self,
         acks: &EmitterRecordAcknowledgements,

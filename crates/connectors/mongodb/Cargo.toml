@@ -12,6 +12,7 @@ workspace = true
 default = []
 shuttle = [
   "nervix-connector/shuttle",
+  "nervix-connector-fake/shuttle",
   "nervix-execution/shuttle",
   "nervix-primitives/shuttle",
 ]
@@ -36,4 +37,5 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
+nervix-connector-fake = { workspace = true }
 rcgen = { workspace = true }

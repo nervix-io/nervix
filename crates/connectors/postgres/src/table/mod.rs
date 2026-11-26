@@ -24,6 +24,15 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        metrics,
+        pool,
+        reason = "the Postgres table emitter writes through the pool its host leased for it and \
+                  records the inserts it prepares"
+    )
+)]
 
 use std::{ops::Range, time::Duration};
 
@@ -42,8 +51,9 @@ use nervix_connector::{
     ClientConfigError, ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost,
     EmitterLifecycle, EmitterOpenError, EmitterRecordPosition, EmitterStartResult,
     EmitterWriteError, EmitterWriteResult, MappedEmitterMember, MappedEmitterRows, MeasuredRequest,
-    PerRecordOutcome, RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits,
-    client_tls_paths, optional_bool_client_config_value, optional_client_config_value,
+    PerRecordOutcome, PooledClient, PooledClientHost, PooledClientLease, RejectedEmitterMember,
+    RowEmitter, RowRequest, RowRequestLimits, client_tls_paths, optional_bool_client_config_value,
+    optional_client_config_value,
 };
 use nervix_models::{
     ClientConfigEntry, ClientDeadline, ClientPoolBounds, ConnectorKind, EmitterBatchPolicy,
@@ -112,16 +122,50 @@ pub(crate) struct PostgresConnectionOptions {
     statement: Option<PostgresStatementDeadline>,
 }
 
-/// The node-owned pool this emitter borrows connections from while its host holds the lease.
+/// Where this emitter checks its connections out: the pool its host leased for it, or the stand-in
+/// of a test that opens no connection.
 #[async_trait]
-pub trait PostgresConnections: Send + Sync + 'static {
-    /// Borrow one connection for one operation, with the host's pool wait recorded around it.
+trait ConnectionCheckout: Send + Sync + 'static {
+    /// Borrow one connection for one operation, with the wait published while the pool hands no
+    /// connection over.
     async fn connection(&self) -> EmitterWriteResult<PostgresConnection>;
 }
 
+#[async_trait]
+impl ConnectionCheckout for PooledClientLease<PostgresPool> {
+    /// Borrow a connection for one insert, publishing the wait until the pool hands one over.
+    ///
+    /// The borrow covers one bounded insert, together with the write's metadata lookup on its first
+    /// insert and the isolation of the rows of an insert the database refused, and no more: between
+    /// inserts, and across a flush interval or a retry backoff, this emitter holds no connection.
+    async fn connection(&self) -> EmitterWriteResult<PostgresConnection> {
+        self.checkout(self.client().connection()).await
+    }
+}
+
+/// The node's shared pool is the pooled client of a Postgres `CLIENT`, which the host opens once
+/// and leases to every local emitter of that client.
+#[async_trait]
+impl PooledClient for PostgresPool {
+    const CONNECTOR: ConnectorKind = ConnectorKind::Postgres;
+
+    type OpenError = EmitterOpenError;
+
+    /// The driver resolves and dials the server itself, so the pool takes nothing from its node.
+    async fn open(
+        config: &[ClientConfigEntry],
+        bounds: ClientPoolBounds,
+        _host: &PooledClientHost,
+    ) -> EmitterStartResult<Self> {
+        Self::open(config, bounds).await
+    }
+}
+
 /// What one Postgres emitter inserts with, from its typed emitter plan.
+///
+/// The pool it borrows its connections from reaches the emitter through its host handle, which
+/// carries the lease its host took on the node's instance of the emitter's client.
 pub struct PostgresTableEmitterConfig {
-    pub connections: Box<dyn PostgresConnections>,
     pub table: PostgresTableName,
     pub conflict_action: PostgresConflictAction,
     /// The emitter's `BATCH` limits, which bound the rows and the measured bytes of every insert.
@@ -139,7 +183,7 @@ pub enum PostgresConflictAction {
 /// The Postgres emitter, which binds each mapped column as one text array of an `unnest` insert.
 pub struct PostgresTableEmitter {
     host: EmitterHost,
-    connections: Box<dyn PostgresConnections>,
+    connections: Box<dyn ConnectionCheckout>,
     table: PostgresTableName,
     conflict_action: PostgresConflictAction,
     /// The emitter's `BATCH` limits, narrowed to the longest protocol message the Postgres server
@@ -572,13 +616,17 @@ impl PostgresTableEmitter {
     )]
     fn prepare(config: PostgresTableEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
         let PostgresTableEmitterConfig {
-            connections,
             table,
             conflict_action,
             batch,
         } = config;
+        let pool = host
+            .pool::<PostgresPool>()
+            .change_context(EmitterOpenError::Initialize {
+                connector: POSTGRES,
+            })?;
         Ok(Self {
-            connections,
+            connections: Box::new(pool),
             table,
             conflict_action,
             limits: RowRequestLimits::from(batch)
@@ -2028,7 +2076,7 @@ mod tests {
     struct NoConnections;
 
     #[async_trait]
-    impl PostgresConnections for NoConnections {
+    impl ConnectionCheckout for NoConnections {
         async fn connection(&self) -> EmitterWriteResult<PostgresConnection> {
             Err(Report::new(EmitterWriteError::NotInitialized {
                 connector: POSTGRES,
@@ -2098,6 +2146,104 @@ mod tests {
             panic!("a write without a connection fails as a whole");
         };
         assert!(format!("{error:?}").contains("pool-acquire-detail"));
+    }
+
+    /// A pool that opened no connection, whose every checkout the port it names refuses until the
+    /// checkout runs out of its deadline.
+    fn refused_pool() -> PostgresPool {
+        let config = client_config(&[("pool_acquire_timeout_ms", "200")]);
+        let PostgresConnectionOptions { driver, statement } = connect_options(
+            "postgres://nervix@127.0.0.1:1/nervix?sslmode=disable",
+            &config,
+        )
+        .expect("the address is a valid Postgres URL");
+        let policy =
+            PostgresPoolPolicy::read(&config).expect("the declared checkout deadline is valid");
+        let bounds =
+            ClientPoolBounds::new(0, NonZeroU32::MIN).expect("an empty minimum fits any maximum");
+        PostgresPool {
+            connections: policy.pool_options(bounds).connect_lazy_with(driver),
+            checkout: policy.checkout,
+            statement,
+        }
+    }
+
+    fn table_config() -> PostgresTableEmitterConfig {
+        PostgresTableEmitterConfig {
+            table: PostgresTableName::parse("events").expect("the test table name is valid"),
+            conflict_action: PostgresConflictAction::None,
+            batch: EmitterBatchPolicy {
+                max_messages: nervix_models::BatchMessageLimit::try_from(3_u32)
+                    .expect("three is a valid message limit"),
+                max_size: "1KiB".parse().expect("1KiB is a valid size"),
+            },
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_whose_host_leased_no_pool_fails_to_open_and_names_the_lease() {
+        let opened = <PostgresTableEmitter as nervix_connector::EmitterConnector>::open(
+            table_config(),
+            nervix_connector_fake::FakeEmitterHost::default().host(),
+        )
+        .await;
+        let error = match opened {
+            Ok(_) => panic!("a pooled emitter writes only through the pool its host leased"),
+            Err(error) => error,
+        };
+
+        // The failure is the host's, not the configuration's, so the host opens the emitter again.
+        assert_eq!(
+            *error.current_context(),
+            EmitterOpenError::Initialize {
+                connector: POSTGRES
+            }
+        );
+        assert_eq!(
+            error
+                .frames()
+                .find_map(|frame| frame.downcast_ref::<nervix_connector::HostServiceError>()),
+            Some(&nervix_connector::HostServiceError::PooledClientNotLeased)
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_checks_out_of_the_pool_its_host_leased_and_publishes_the_wait() {
+        let waits = nervix_connector_fake::FakePooledClientWaits::default();
+        let lease = PooledClientLease::new(
+            nervix_primitives::sync::Arc::new(refused_pool()),
+            waits.clone(),
+            (),
+        );
+        let connector = <PostgresTableEmitter as nervix_connector::EmitterConnector>::open(
+            table_config(),
+            nervix_connector_fake::FakeEmitterHost::default().leasing(lease),
+        )
+        .await
+        .expect("the host leased this connector's pool");
+
+        let Err(error) = connector.borrow().await else {
+            panic!("a checkout from a port that refuses connections must fail");
+        };
+
+        assert!(matches!(error.current_context(), PostgresWriteError::Pool));
+        assert!(
+            error.contains::<EmitterWriteError>(),
+            "the pool's own failure stays beneath the emitter's: {error:?}"
+        );
+        // SQLx tries a refused connection again until the checkout's deadline.
+        let elapsed = error
+            .downcast_ref::<DeadlineElapsed>()
+            .expect("the deadline the checkout ran out of stays beneath the pool's failure");
+        assert_eq!(elapsed.key, DeadlineKey::PoolAcquireTimeout);
+        assert_eq!(elapsed.bound, Duration::from_millis(200));
+        let published = waits.observations();
+        assert_eq!(
+            (published.begun, published.ended),
+            (1, 1),
+            "the checkout the pool did not answer at once published one wait and ended it"
+        );
+        assert_eq!(published.waiting_since, None);
     }
 
     #[test]

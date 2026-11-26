@@ -8,7 +8,7 @@
 use meticulous::OptionExt as _;
 
 use super::*;
-use crate::ClusterParameters;
+use crate::{ClusterParameters, SHORTEST_POSITIVE_DURATION};
 
 pub struct RemoteAckAliveInterval;
 impl RemoteAckAliveInterval {
@@ -148,25 +148,14 @@ pub struct RemoteAckTiming {
     pub remote_relay_instantiation_wait: Duration,
 }
 impl RemoteAckTiming {
-    /// The shortest retry and instantiation poll cadence, which keeps a deadline too short to
-    /// divide into two hundred opportunities from rounding its cadence to zero.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "a Duration counts whole nanoseconds, so one nanosecond is the shortest \
-                      cadence that is not zero"
-        )
-    )]
-    const CADENCE_FLOOR: Duration = Duration::from_nanos(1);
-
-    /// At most two hundred poll opportunities in one owning deadline. A one-nanosecond floor
-    /// keeps sub-microsecond policies from rounding the internal retry cadence to zero.
+    /// At most two hundred poll opportunities in one owning deadline. The shortest positive
+    /// duration floors it, so a deadline too short to divide into two hundred opportunities never
+    /// rounds the internal retry cadence to zero.
     pub fn retry_interval(self) -> Duration {
-        (self.remote_ack_dispatch_timeout / 200).max(Self::CADENCE_FLOOR)
+        (self.remote_ack_dispatch_timeout / 200).max(SHORTEST_POSITIVE_DURATION)
     }
     pub fn instantiation_poll(self) -> Duration {
-        (self.remote_relay_instantiation_wait / 200).max(Self::CADENCE_FLOOR)
+        (self.remote_relay_instantiation_wait / 200).max(SHORTEST_POSITIVE_DURATION)
     }
 
     /// How long a sender leaves a relay channel without a batch before its next batch opens a

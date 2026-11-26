@@ -75,7 +75,7 @@ impl Entropy<'_> {
     fn web_console_wait(&mut self) -> Duration {
         let shortest = u64::try_from(BROWSER_TIMER_RESOLUTION.as_millis())
             .assured("a millisecond counted in milliseconds fits u64");
-        let longest = u64::try_from(LONGEST_WEB_CONSOLE_WAIT.as_millis())
+        let longest = u64::try_from(LONGEST_CLIENT_WAIT.as_millis())
             .assured("a day counted in milliseconds fits u64");
         Duration::from_millis(self.boundary_biased(shortest..=longest))
     }
@@ -87,7 +87,7 @@ impl Entropy<'_> {
         let restoration_backoff = self.web_console_wait();
         let floor = u64::try_from(retry_backoff.max(restoration_backoff).as_millis())
             .assured("a first wait of at most a day counted in milliseconds fits u64");
-        let longest = u64::try_from(LONGEST_WEB_CONSOLE_WAIT.as_millis())
+        let longest = u64::try_from(LONGEST_CLIENT_WAIT.as_millis())
             .assured("a day counted in milliseconds fits u64");
         let retry_max_backoff = Duration::from_millis(self.boundary_biased(floor..=longest));
         let frames = self.boundary_biased(1..=u64::from(WebConsoleRestoreFrameCapacity::MAXIMUM));

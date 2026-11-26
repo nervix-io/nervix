@@ -23,6 +23,14 @@
         reason = "owns the engines and infrastructure boundary declared above"
     )
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        reason = "the SQS queue ingestor builds its client over its node's resolver when its host \
+                  composes its plan"
+    )
+)]
 
 use std::{borrow::Cow, fmt::Debug, future::Future, num::NonZeroUsize, pin::pin, time::Duration};
 
@@ -41,9 +49,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow,
     IngestMetadataValues, IngestRowHeaders, IngestorBatch, IngestorBatchRequest, IngestorConnector,
-    IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult, IngestorResume,
+    IngestorError, IngestorHost, IngestorMessage, IngestorReadCancellation, IngestorResult,
+    IngestorResume,
 };
-use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, ConnectorKind, SqsQueueName, SqsReceiveMax, Timestamp};
 use nervix_primitives::time::{Instant, timeout};
 use thiserror::Error;
@@ -115,6 +123,10 @@ const QUEUE_DOES_NOT_EXIST: &str = "QueueDoesNotExist";
 pub enum SqsQueueIngestorError {
     #[error("invalid SQS client configuration")]
     ClientConfig,
+    /// The ingestor's host handle handed over no node resolver for the client's connections to
+    /// resolve the endpoint host through; the refusal beneath it says why.
+    #[error("no node resolver for the SQS client to resolve its endpoint host through")]
+    NodeResolverUnavailable,
     #[error("failed to resolve SQS queue '{queue}'")]
     ResolveQueue { queue: String },
     #[error("SQS queue '{queue}' does not exist")]
@@ -163,9 +175,9 @@ type SqsQueueIngestorResult<T> = Result<T, Report<SqsQueueIngestorError>>;
 
 /// One SQS ingestor's client and the queue every instance polls.
 ///
-/// The client is built once, from configuration and TLS material alone, the same way an SQS
-/// emitter builds its own, and each instance polls through a clone. Building the plan sends no
-/// request: each instance looks the queue up when it resumes.
+/// The client is built once, from configuration, TLS material and the node resolver its host's
+/// handle hands over, the same way an SQS emitter builds its own, and each instance polls through
+/// a clone. Building the plan sends no request: each instance looks the queue up when it resumes.
 #[derive(Clone)]
 pub struct SqsQueueIngestorPlan {
     client: SqsServiceClient,
@@ -174,12 +186,17 @@ pub struct SqsQueueIngestorPlan {
 
 impl SqsQueueIngestorPlan {
     /// The client `config` declares, whose every connection resolves the endpoint host through
-    /// `dns`, polling `queue`.
+    /// the node resolver `host` hands over, polling `queue`.
     pub async fn new(
         config: &[ClientConfigEntry],
         queue: SqsQueueName,
-        dns: DnsResolver,
+        host: &IngestorHost,
     ) -> SqsQueueIngestorResult<Self> {
+        // A node without its resolver cannot build the client at all, so that is reported before
+        // anything its configuration says.
+        let dns = host
+            .dns()
+            .change_context(SqsQueueIngestorError::NodeResolverUnavailable)?;
         let client = SqsClientConfig::parse(config)
             .change_context(SqsQueueIngestorError::ClientConfig)?
             .client(dns)
@@ -844,7 +861,11 @@ impl IngestorConnector for SqsQueueIngestor {
 
     type Plan = SqsQueueIngestorPlan;
 
-    async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
+    async fn open(
+        plan: &Self::Plan,
+        _host: &IngestorHost,
+        _instance_index: u64,
+    ) -> IngestorResult<Self> {
         Ok(Self {
             client: plan.client.clone(),
             queue: plan.queue.clone(),
@@ -860,7 +881,7 @@ impl IngestorConnector for SqsQueueIngestor {
     /// Looks the queue up the first time the instance resumes. A service that cannot be reached
     /// and a queue the service does not have both fail the resume, which the host retries on the
     /// ingestor's policy; neither creates the queue.
-    async fn resume(&mut self) -> IngestorResult<IngestorResume> {
+    async fn resume(&mut self, _host: &IngestorHost) -> IngestorResult<IngestorResume> {
         if self.queue_url.is_some() {
             return Ok(IngestorResume::Ready);
         }
@@ -883,6 +904,7 @@ impl BrokerIngestorConnector for SqsQueueIngestor {
     /// read before it sends a receive.
     async fn next_batch(
         &mut self,
+        _host: &IngestorHost,
         request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {

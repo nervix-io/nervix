@@ -372,6 +372,15 @@ impl Runtime {
         self.inner.domains.get(domain)?.stop_teardown
     }
 
+    /// How the branched routes of `domain` end when its execution stops: at once when an enforced
+    /// stop tears the domain down, and by finishing what they hold for every other teardown.
+    pub(in crate::runtime) fn domain_route_stop(&self, domain: &DomainName) -> RouteStop {
+        match self.stop_teardown(domain) {
+            Some(teardown) if teardown.enforced => RouteStop::Now,
+            Some(_) | None => RouteStop::Finish,
+        }
+    }
+
     /// Records what the teardown of every domain whose stop `domains` ended is about to cut, while
     /// the domain's tasks still run: the committed revision that carries the ending also installs
     /// the stopped domain clock, which ends a processor's branch on its own and with it the count

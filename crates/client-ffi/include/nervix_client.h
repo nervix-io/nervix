@@ -544,7 +544,9 @@ void nx_error_free(nx_error *error);
 /* ---- Cancellation ------------------------------------------------------------------------- */
 
 nx_cancel *nx_cancel_new(void);
-/* A token that also expires `deadline_millis` milliseconds from now. */
+/* A token that also expires `deadline_millis` milliseconds from now. The deadline is from 1
+   through 86,400,000 milliseconds (one day), the deadlines the Rust client accepts; any other is
+   NX_ERROR_INVALID_ARGUMENT. */
 nx_error *nx_cancel_with_deadline(uint64_t deadline_millis, nx_cancel **out);
 /* Cancels every call waiting on the token, now and later. Safe from any thread. */
 void nx_cancel_trigger(const nx_cancel *cancel);

@@ -22,6 +22,14 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        executor,
+        reason = "the NATS subject emitter runs its client's credential work on its node's \
+                  bounded executor"
+    )
+)]
 
 mod ingestor;
 impl nervix_connector::EmitterConnector for NatsSubjectEmitter {

@@ -3,15 +3,15 @@
 //! Layer: edges.
 //! - **Owns.** The token a host triggers from any thread, its optional deadline, and bounding a
 //!   blocking call by both.
-//! - **Depends on.** Selected cancellation, monotonic instant and timer primitives, and the Rust
-//!   client's longest deadline.
+//! - **Depends on.** Selected cancellation, monotonic instant and timer primitives, the Rust
+//!   client's shortest deadline and the longest wait a client takes.
 //! - **Must not know.** What the bounded call does, or what cancelling it means for admitted
 //!   work; the session decides that.
 
 use std::{future::Future, time::Duration};
 
-// The longest deadline a token accepts is the longest deadline the Rust client accepts, one day.
-use nervix_client_core::capabilities::LONGEST_DEADLINE as MAX_DEADLINE;
+use nervix_client_core::capabilities::SHORTEST_DEADLINE;
+use nervix_models::LONGEST_CLIENT_WAIT;
 use nervix_primitives::{sync::CancellationToken, time::Instant};
 
 use crate::failure::Failure;
@@ -33,12 +33,14 @@ impl Cancel {
         }
     }
 
-    /// A token that also expires `deadline` from now.
+    /// A token that also expires `deadline` from now. It accepts the deadlines the Rust client
+    /// accepts, from its shortest deadline, one millisecond, through the longest wait a client
+    /// takes, one day, and refuses every other as an invalid argument.
     pub fn with_deadline(deadline: Duration) -> Result<Self, Failure> {
-        if deadline > MAX_DEADLINE {
+        if deadline < SHORTEST_DEADLINE || deadline > LONGEST_CLIENT_WAIT {
             return Err(Failure::invalid_argument(
                 "deadline",
-                "exceeds the one-day limit",
+                "must be between one millisecond and one day",
             ));
         }
         let expires = Instant::now()
@@ -78,7 +80,8 @@ impl Cancel {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_models::SHORTEST_POSITIVE_DURATION;
 
     use super::*;
     use crate::failure::FailureKind;
@@ -149,5 +152,28 @@ mod tests {
                 .kind(),
             FailureKind::InvalidArgument
         );
+    }
+
+    #[test]
+    fn a_token_accepts_exactly_the_deadlines_the_rust_client_accepts() {
+        let just_short = SHORTEST_DEADLINE
+            .checked_sub(SHORTEST_POSITIVE_DURATION)
+            .assured("the shortest deadline is longer than the shortest positive duration");
+        for too_short in [Duration::ZERO, just_short] {
+            let refused = Cancel::with_deadline(too_short)
+                .expect_err("a deadline shorter than the Rust client's shortest is refused");
+            assert_eq!(refused.kind(), FailureKind::InvalidArgument);
+        }
+        let just_long = LONGEST_CLIENT_WAIT
+            .checked_add(SHORTEST_POSITIVE_DURATION)
+            .assured("a day and a nanosecond fit a Duration");
+        let refused = Cancel::with_deadline(just_long)
+            .expect_err("a deadline longer than the Rust client's longest is refused");
+        assert_eq!(refused.kind(), FailureKind::InvalidArgument);
+        for accepted in [SHORTEST_DEADLINE, LONGEST_CLIENT_WAIT] {
+            let token = Cancel::with_deadline(accepted)
+                .assured("a deadline the Rust client accepts is accepted");
+            assert!(token.deadline.is_some());
+        }
     }
 }

@@ -117,7 +117,7 @@ impl WasmCheckpointBenchmark {
             let store = self.store.clone();
             let reservation = self
                 .executor
-                .reserve(MemoryClass::Bulk, 1)
+                .reserve_admission(MemoryClass::Bulk)
                 .await
                 .assured("a benchmark write is admitted by an idle executor");
             self.executor

@@ -97,7 +97,7 @@ mod properties;
 #[cfg(test)]
 mod properties_tests;
 
-const RABBITMQ: &str = "rabbitmq";
+pub(crate) const RABBITMQ: &str = "rabbitmq";
 
 /// An AMQP reply code as `error.external_code` holds it: its decimal value, such as `312` for
 /// `NO_ROUTE`.
@@ -184,11 +184,10 @@ impl RabbitMqDestination {
     }
 }
 
-/// What one RabbitMQ emitter publishes through: its client entries, the node resolver its broker host
-/// resolves through, where its messages go and its publishing mode.
+/// What one RabbitMQ emitter publishes through: its client entries, where its messages go and its
+/// publishing mode.
 pub(crate) struct RabbitMqPublisherConfig {
     pub(crate) config: Vec<ClientConfigEntry>,
-    pub(crate) dns: DnsResolver,
     pub(crate) destination: RabbitMqDestination,
     pub(crate) mode: BrokerPublishingMode,
 }
@@ -203,10 +202,15 @@ pub(crate) struct RabbitMqPublisher {
 }
 
 impl RabbitMqPublisher {
-    pub(crate) fn open(config: RabbitMqPublisherConfig) -> EmitterStartResult<Self> {
+    /// The publisher `config` describes, whose broker host every connection resolves through
+    /// `dns`, the node resolver its emitter took from its host handle.
+    pub(crate) fn open(
+        config: RabbitMqPublisherConfig,
+        dns: DnsResolver,
+    ) -> EmitterStartResult<Self> {
         let round_trip = ConfiguredDeadline::timeout(&config.config)
             .map_err(RabbitMqChannel::configuration_error)?;
-        let broker = RabbitMqBroker::from_config(&config.config, config.dns)
+        let broker = RabbitMqBroker::from_config(&config.config, dns)
             .map_err(RabbitMqChannel::connect_error)?;
         Ok(Self {
             broker,

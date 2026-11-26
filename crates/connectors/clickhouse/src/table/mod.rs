@@ -32,6 +32,16 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        metrics,
+        tls_policy,
+        reason = "the ClickHouse table emitter dials through its node's resolver under the node's \
+                  outward TLS policy and records the insert bodies it prepares"
+    )
+)]
 
 use std::{ops::Range, time::Duration};
 
@@ -67,12 +77,12 @@ const CLICKHOUSE: &str = "clickhouse";
 const MEASURED_REQUEST: &str = "ClickHouse JSONEachRow body";
 
 /// What one ClickHouse emitter inserts through, from its typed emitter plan.
+///
+/// The node resolver every connection of the client resolves the host of `addr` through, and the
+/// outward TLS policy its handshakes take, reach the emitter through its host handle.
 pub struct ClickHouseTableEmitterConfig {
-    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
     pub table: ClickHouseTableName,
-    /// The node resolver every connection of the client resolves the host of `addr` through.
-    pub dns: DnsResolver,
     /// The emitter's `BATCH` limits, which bound the rows and the body bytes of every insert.
     pub batch: EmitterBatchPolicy,
 }
@@ -319,12 +329,16 @@ impl ClickHouseTableEmitter {
         host: EmitterHost,
     ) -> EmitterStartResult<Self> {
         let ClickHouseTableEmitterConfig {
-            tls_policy,
             config,
             table,
-            dns,
             batch,
         } = config;
+        // A node without its resolver cannot open the emitter at all, so that is reported before
+        // anything its configuration says.
+        let dns = host.dns().change_context(EmitterOpenError::Initialize {
+            connector: CLICKHOUSE,
+        })?;
+        let tls_policy = host.tls_policy();
         let (client, request_timeout) = Self::client_from_config(&config, dns, &tls_policy)?;
         // ClickHouse streams an insert body without a limit of its own, so the emitter's limits
         // are the only ones an insert keeps to.
@@ -662,6 +676,64 @@ mod tests {
                 value: timeout_ms.to_string(),
             },
         ]
+    }
+
+    fn batch_limits() -> EmitterBatchPolicy {
+        EmitterBatchPolicy {
+            max_messages: nervix_models::BatchMessageLimit::try_from(3_u32)
+                .expect("three is a valid message limit"),
+            max_size: "1KiB".parse().expect("1KiB is a valid size"),
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_on_a_node_without_its_resolver_fails_to_open_and_names_the_resolver() {
+        let opened = <ClickHouseTableEmitter as nervix_connector::EmitterConnector>::open(
+            ClickHouseTableEmitterConfig {
+                config: client_config("http://127.0.0.1:8123", "5000"),
+                table: ClickHouseTableName::parse("events").expect("valid table name"),
+                batch: batch_limits(),
+            },
+            nervix_connector_fake::FakeEmitterHost::default().host(),
+        )
+        .await;
+        let error = match opened {
+            Ok(_) => panic!("an emitter that dials by name needs its node's resolver"),
+            Err(error) => error,
+        };
+
+        // The failure is the node's, not the configuration's, so the host opens the emitter again.
+        assert_eq!(
+            *error.current_context(),
+            EmitterOpenError::Initialize {
+                connector: CLICKHOUSE
+            }
+        );
+        assert_eq!(
+            error
+                .frames()
+                .find_map(|frame| frame.downcast_ref::<nervix_connector::HostServiceError>()),
+            Some(&nervix_connector::HostServiceError::DnsNotInstalled)
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_takes_its_resolver_and_tls_policy_from_the_handle_it_is_opened_with() {
+        let fixture = Fixture::start().await;
+        let opened = <ClickHouseTableEmitter as nervix_connector::EmitterConnector>::open(
+            ClickHouseTableEmitterConfig {
+                config: client_config("http://127.0.0.1:8123", "275"),
+                table: ClickHouseTableName::parse("events").expect("valid table name"),
+                batch: batch_limits(),
+            },
+            nervix_connector_fake::FakeEmitterHost::default()
+                .with_dns(fixture.dns())
+                .host(),
+        )
+        .await
+        .expect("the node provides the resolver the client dials through");
+
+        assert_eq!(opened.request_timeout, Duration::from_millis(275));
     }
 
     #[test]

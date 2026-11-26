@@ -2,7 +2,8 @@
 //!
 //! Layer: vocabulary.
 //! - **Owns.** Immutable control-plane, session, client-link, trace export and web console
-//!   capability declarations and claims.
+//!   capability declarations and claims, and the fixed bounds every client shares: the longest
+//!   wait a client takes and the largest restore chunk.
 //! - **Depends on.** Setting classes, scalar values and validated serialization.
 //! - **Must not know.** Machines, command lines, consensus, transports or graph execution.
 
@@ -22,6 +23,31 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::{NodeCapabilities, Setting, SettingDefinition, settings::archive};
+
+/// The longest wait a client takes: a deadline or backoff of the Rust client, the deadline of a
+/// host library's cancellation token, and every wait of the web console.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client library and node settings chapters bound every client deadline, \
+                  backoff and wait at 24 hours"
+    )
+)]
+pub const LONGEST_CLIENT_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The most archive bytes a client sends in one restore frame. A stream's chunk is the smaller of
+/// this and half the session frame limit the leader announced, from the Rust client and the web
+/// console alike, and the console counts the restore frames it keeps queued in chunks this large.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the backup and restore chapter's limits cap restore chunks from the Rust client \
+                  and the console alike at 256 KiB, or half the session frame when that is smaller"
+    )
+)]
+pub const LARGEST_RESTORE_CHUNK_BYTES: u32 = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NodeOperationalError {

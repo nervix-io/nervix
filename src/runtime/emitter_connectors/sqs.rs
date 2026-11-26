@@ -36,7 +36,6 @@ impl EmitterConnectorStarter {
                     config: connector.client.config.entries.clone(),
                     queue: connector.queue.clone(),
                     send: connector.send,
-                    dns: context.dns()?,
                 },
                 context.emitter_host(),
             )

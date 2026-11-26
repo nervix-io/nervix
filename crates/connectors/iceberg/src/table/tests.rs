@@ -466,6 +466,80 @@ fn commit_policy(interval_millis: u64, max_size: u64) -> IcebergCommitPolicy {
     }
 }
 
+/// What an emitter of the fixture table opens with. Opening sends no request, so neither the
+/// catalog nor the bucket it names has to exist.
+fn table_emitter_config() -> IcebergTableEmitterConfig {
+    IcebergTableEmitterConfig {
+        backend: IcebergStorageBackend::S3,
+        storage_config: Vec::new(),
+        catalog_name: "fixture".to_string(),
+        catalog_config: vec![ClientConfigEntry {
+            key: "uri".to_string(),
+            value: "http://127.0.0.1:1".to_string(),
+        }],
+        namespace: nervix_models::IcebergNamespace::parse("events")
+            .assured("the fixture namespace is a valid catalog namespace"),
+        table: IcebergTableName::parse("orders")
+            .assured("the fixture table is a valid catalog table name"),
+        location: "s3://bucket/table".to_string(),
+        mapped_schema: StdArc::new(arrow_schema::Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )])),
+        batch: None,
+        commit: commit_policy(100, 1_024),
+        writer: "fixture".to_string(),
+    }
+}
+
+#[nervix_primitives::test]
+async fn an_emitter_on_a_node_without_its_resolver_fails_to_open_and_names_the_resolver() {
+    let opened = <IcebergTableEmitter as nervix_connector::EmitterConnector>::open(
+        table_emitter_config(),
+        nervix_connector_fake::FakeEmitterHost::default().host(),
+    )
+    .await;
+    let error = match opened {
+        Ok(_) => panic!("an emitter that dials by name needs its node's resolver"),
+        Err(error) => error,
+    };
+
+    // The failure is the node's, not the configuration's, so the host opens the emitter again.
+    assert_eq!(
+        *error.current_context(),
+        EmitterOpenError::Initialize { connector: ICEBERG }
+    );
+    assert_eq!(
+        error
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<nervix_connector::HostServiceError>()),
+        Some(&nervix_connector::HostServiceError::DnsNotInstalled)
+    );
+}
+
+#[nervix_primitives::test]
+async fn an_emitter_takes_its_resolver_and_tls_policy_from_the_handle_it_is_opened_with() {
+    let dns = DnsResolver::load(
+        DnsConfiguration::system(),
+        nervix_dns::DnsSettings::default(),
+    )
+    .await
+    .assured("the host's resolver configuration loads");
+    let mut opened = <IcebergTableEmitter as nervix_connector::EmitterConnector>::open(
+        table_emitter_config(),
+        nervix_connector_fake::FakeEmitterHost::on(Executor::default())
+            .with_dns(dns)
+            .host(),
+    )
+    .await
+    .expect("the node provides the resolver the clients dial through");
+
+    // Opening prepares both clients and reaches neither the catalog nor the bucket.
+    assert!(opened.needs_resume());
+    assert!(opened.prepared.is_some());
+}
+
 /// What one acknowledgement handover was resolved as, counted by the test that shares it.
 #[derive(Default)]
 struct RecordedAcknowledgements {

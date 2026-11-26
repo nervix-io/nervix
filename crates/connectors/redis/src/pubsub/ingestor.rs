@@ -21,6 +21,15 @@
         reason = "owns the engines and infrastructure boundary declared above"
     )
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        tls_policy,
+        reason = "the Redis Pub/Sub ingestor dials its subscription through its node's resolver \
+                  under the node's outward TLS policy"
+    )
+)]
 
 mod subscription;
 
@@ -31,9 +40,9 @@ use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
     BrokerIngestorConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMessageMetadata,
     IngestMetadataRow, IngestMetadataValues, IngestRowHeaders, IngestorBatch, IngestorBatchRequest,
-    IngestorConnector, IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult,
-    IngestorResume, NoIngestHeaders, RustlsClientConfigProvider, client_config_value,
-    optional_client_config_value,
+    IngestorConnector, IngestorError, IngestorHost, IngestorMessage, IngestorReadCancellation,
+    IngestorResult, IngestorResume, NoIngestHeaders, RustlsClientConfigProvider,
+    client_config_value, optional_client_config_value,
 };
 use nervix_dns::{DnsLookupFailure, DnsResolver, LookupShare, OperationBudget};
 use nervix_models::{ClientConfigEntry, ConnectorKind, RedisSubscriptionTarget};
@@ -102,12 +111,15 @@ pub enum RedisPubSubIngestorError {
 
 type RedisPubSubIngestorResult<T> = Result<T, Report<RedisPubSubIngestorError>>;
 
-/// What one Redis Pub/Sub ingestor subscribes to: its configured client, node resolver, channel or
-/// pattern, and the deadline its subscription is established within.
+/// What one Redis Pub/Sub ingestor subscribes to: its configured client, channel or pattern, and
+/// the deadline its subscription is established within.
+///
+/// The node resolver its subscription dials through reaches the ingestor through its host handle
+/// each time it resumes. The TLS configuration of a `rediss://` client is built when the plan is,
+/// under the outward TLS policy of the node whose handle the plan is built with.
 #[derive(Debug, Clone)]
 pub struct RedisPubSubIngestorPlan {
     client: RedisClient,
-    dns: DnsResolver,
     tls: Option<StdArc<rustls::ClientConfig>>,
     subscription: RedisSubscriptionTarget,
     connect_timeout: ConfiguredDeadline,
@@ -120,11 +132,12 @@ impl<T: AsyncRead + AsyncWrite> RedisStream for T {}
 type ConnectedStream = Box<dyn RedisStream + Send + Unpin>;
 
 impl RedisPubSubIngestorPlan {
+    /// The plan of `subscription` through the client `config` declares, built while the host
+    /// composes the ingestor that `host` is the handle of.
     pub fn new(
         config: Vec<ClientConfigEntry>,
         subscription: RedisSubscriptionTarget,
-        dns: DnsResolver,
-        tls_policy: &nervix_connector::OutwardTlsPolicy,
+        host: &IngestorHost,
     ) -> RedisPubSubIngestorResult<Self> {
         let addr = client_config_value(&config, "addr", "Redis")
             .change_context(RedisPubSubIngestorError::ClientConfig)?;
@@ -144,7 +157,7 @@ impl RedisPubSubIngestorPlan {
         let buffer_messages = Self::buffer_messages(&config)?;
         let tls = match client.get_connection_info().addr() {
             ConnectionAddr::TcpTls { .. } => {
-                let config = RustlsClientConfigProvider::new(&config, tls_policy)
+                let config = RustlsClientConfigProvider::new(&config, &host.tls_policy())
                     .build_with_replacement_ca()
                     .change_context(RedisPubSubIngestorError::BuildClient)?;
                 Some(config)
@@ -153,7 +166,6 @@ impl RedisPubSubIngestorPlan {
         };
         Ok(Self {
             client,
-            dns,
             tls,
             subscription,
             connect_timeout,
@@ -198,9 +210,10 @@ impl RedisPubSubIngestorPlan {
             .change_context(RedisPubSubIngestorError::NotEstablished)
     }
 
-    async fn subscribe(&self) -> RedisPubSubIngestorResult<RedisSubscription> {
+    /// Establishes the subscription, dialling a named server through `dns`, the node's resolver.
+    async fn subscribe(&self, dns: &DnsResolver) -> RedisPubSubIngestorResult<RedisSubscription> {
         let budget = self.budget();
-        let stream = self.connect_with_budget(&budget).await?;
+        let stream = self.connect_with_budget(dns, &budget).await?;
         let subscribed = timeout(
             budget.remaining(),
             RedisSubscription::open(
@@ -225,17 +238,20 @@ impl RedisPubSubIngestorPlan {
     /// Open a fresh stream for every resume. Redis's Pub/Sub convenience method uses its default
     /// system resolver, so the connector owns the transport used by the subscription reader.
     #[cfg(test)]
-    async fn connect(&self) -> RedisPubSubIngestorResult<ConnectedStream> {
+    async fn connect(&self, dns: &DnsResolver) -> RedisPubSubIngestorResult<ConnectedStream> {
         let budget = self.budget();
-        self.connect_with_budget(&budget).await
+        self.connect_with_budget(dns, &budget).await
     }
 
     async fn connect_with_budget(
         &self,
+        dns: &DnsResolver,
         budget: &OperationBudget,
     ) -> RedisPubSubIngestorResult<ConnectedStream> {
         match self.client.get_connection_info().addr() {
-            ConnectionAddr::Tcp(host, port) => self.connect_tcp(host, *port, None, budget).await,
+            ConnectionAddr::Tcp(host, port) => {
+                self.connect_tcp(dns, host, *port, None, budget).await
+            }
             ConnectionAddr::TcpTls {
                 host,
                 port,
@@ -246,7 +262,7 @@ impl RedisPubSubIngestorPlan {
                     return Err(Report::new(RedisPubSubIngestorError::BuildClient)
                         .attach_printable("insecure Redis TLS is not supported"));
                 }
-                self.connect_tcp(host, *port, self.tls.as_ref(), budget)
+                self.connect_tcp(dns, host, *port, self.tls.as_ref(), budget)
                     .await
             }
             #[cfg(unix)]
@@ -270,13 +286,14 @@ impl RedisPubSubIngestorPlan {
 
     async fn connect_tcp(
         &self,
+        dns: &DnsResolver,
         host: &str,
         port: u16,
         tls: Option<&StdArc<rustls::ClientConfig>>,
         budget: &OperationBudget,
     ) -> RedisPubSubIngestorResult<ConnectedStream> {
         let addresses = {
-            let mapping_input = self.dns.resolve(host, port, budget.lookup()).await;
+            let mapping_input = dns.resolve(host, port, budget.lookup()).await;
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(error) => Err({
@@ -392,7 +409,11 @@ impl IngestorConnector for RedisPubSubIngestor {
 
     type Plan = RedisPubSubIngestorPlan;
 
-    async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
+    async fn open(
+        plan: &Self::Plan,
+        _host: &IngestorHost,
+        _instance_index: u64,
+    ) -> IngestorResult<Self> {
         Ok(Self {
             plan: plan.clone(),
             stream: None,
@@ -413,11 +434,16 @@ impl IngestorConnector for RedisPubSubIngestor {
         Ok(())
     }
 
-    async fn resume(&mut self) -> IngestorResult<IngestorResume> {
+    async fn resume(&mut self, host: &IngestorHost) -> IngestorResult<IngestorResume> {
         if self.stream.is_none() {
+            // Every subscription this instance establishes dials through the node's resolver, as
+            // the handle it is resumed with hands it over.
+            let dns = host
+                .dns()
+                .change_context(IngestorError::Resume { connector: REDIS })?;
             let stream = self
                 .plan
-                .subscribe()
+                .subscribe(&dns)
                 .await
                 .change_context(IngestorError::Resume { connector: REDIS })?;
             self.stream = Some(stream);
@@ -443,6 +469,7 @@ impl BrokerIngestorConnector for RedisPubSubIngestor {
 
     async fn next_batch(
         &mut self,
+        _host: &IngestorHost,
         _request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {
@@ -535,15 +562,14 @@ mod tests {
         }
     }
 
-    fn plan(addr: &str, dns: DnsResolver) -> RedisPubSubIngestorPlan {
-        plan_subscribing(addr, events(), dns)
+    fn plan(addr: &str) -> RedisPubSubIngestorPlan {
+        plan_subscribing(addr, events())
     }
 
     /// A plan of `subscription` through the Redis server at `addr`.
     fn plan_subscribing(
         addr: &str,
         subscription: RedisSubscriptionTarget,
-        dns: DnsResolver,
     ) -> RedisPubSubIngestorPlan {
         RedisPubSubIngestorPlan::new(
             vec![
@@ -552,10 +578,15 @@ mod tests {
                 entry("idle_timeout_ms", "30000"),
             ],
             subscription,
-            dns,
-            &Default::default(),
+            &composing_host(),
         )
         .expect("the Redis address is valid")
+    }
+
+    /// The handle of a host that composes an ingestor's plan on a node whose outward TLS policy is
+    /// the default one. Building a plan takes nothing else from its node.
+    fn composing_host() -> IngestorHost {
+        nervix_connector_fake::FakeIngestorHost::default().host()
     }
 
     fn entry(key: &str, value: &str) -> ClientConfigEntry {
@@ -698,9 +729,8 @@ mod tests {
         );
     }
 
-    #[nervix_primitives::test]
-    async fn an_invalid_connect_timeout_refuses_the_plan() {
-        let fixture = Fixture::start().await;
+    #[test]
+    fn an_invalid_connect_timeout_refuses_the_plan() {
         for value in ["0", "1.5", "soon"] {
             let error = RedisPubSubIngestorPlan::new(
                 vec![
@@ -710,8 +740,7 @@ mod tests {
                     entry("idle_timeout_ms", "30000"),
                 ],
                 events(),
-                fixture.dns.clone(),
-                &Default::default(),
+                &composing_host(),
             )
             .expect_err("an invalid deadline cannot plan a subscription");
             assert!(
@@ -748,11 +777,11 @@ mod tests {
                 entry("idle_timeout_ms", "30000"),
             ],
             events(),
-            fixture.dns,
-            &Default::default(),
+            &composing_host(),
         )
         .expect("the Redis address and deadline are valid");
-        let error = nervix_primitives::time::timeout(Duration::from_secs(10), plan.subscribe())
+        let subscribing = plan.subscribe(&fixture.dns);
+        let error = nervix_primitives::time::timeout(Duration::from_secs(10), subscribing)
             .await
             .expect("connect_timeout_ms bounds the subscription")
             .expect_err("a server that never answers cannot be subscribed to");
@@ -769,11 +798,9 @@ mod tests {
         silent.abort();
     }
 
-    #[nervix_primitives::test]
-    async fn the_plan_requires_the_address_before_it_subscribes() {
-        let fixture = Fixture::start().await;
-        let dns = fixture.dns;
-        let error = RedisPubSubIngestorPlan::new(Vec::new(), events(), dns, &Default::default())
+    #[test]
+    fn the_plan_requires_the_address_before_it_subscribes() {
+        let error = RedisPubSubIngestorPlan::new(Vec::new(), events(), &composing_host())
             .expect_err("a missing Redis address must fail");
         assert!(matches!(
             error.current_context(),
@@ -799,9 +826,9 @@ mod tests {
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
             ],
         );
-        let plan = plan(&format!("redis://{name}:{port}"), fixture.dns.clone());
+        let plan = plan(&format!("redis://{name}:{port}"));
         let stream = plan
-            .connect()
+            .connect(&fixture.dns)
             .await
             .expect("the second address accepts the subscription stream");
         let (_accepted, _) =
@@ -846,12 +873,8 @@ mod tests {
             nervix_models::RedisChannelPattern::parse("orders.*")
                 .assured("a glob pattern is within the bound"),
         );
-        let plan = plan_subscribing(
-            &format!("redis://127.0.0.1:{port}"),
-            subscription.clone(),
-            fixture.dns,
-        );
-        let error = match plan.subscribe().await {
+        let plan = plan_subscribing(&format!("redis://127.0.0.1:{port}"), subscription.clone());
+        let error = match plan.subscribe(&fixture.dns).await {
             Ok(_) => panic!("the server refused the pattern subscription"),
             Err(error) => error,
         };
@@ -879,8 +902,8 @@ mod tests {
                 negative_ttl: Duration::from_secs(1),
             },
         );
-        let plan = plan(&format!("redis://{name}:6379"), fixture.dns);
-        let error = match plan.connect().await {
+        let plan = plan(&format!("redis://{name}:6379"));
+        let error = match plan.connect(&fixture.dns).await {
             Ok(_) => panic!("the missing name cannot open a subscription stream"),
             Err(error) => error,
         };
@@ -901,8 +924,8 @@ mod tests {
                 negative_ttl: Duration::from_secs(1),
             },
         );
-        let plan = plan(&format!("redis://{name}:6379"), fixture.dns);
-        let error = match plan.connect().await {
+        let plan = plan(&format!("redis://{name}:6379"));
+        let error = match plan.connect(&fixture.dns).await {
             Ok(_) => panic!("an empty answer cannot open a subscription stream"),
             Err(error) => error,
         };
@@ -920,8 +943,9 @@ mod tests {
         let fixture = Fixture::start().await;
         let name = "silent.nervix.test";
         fixture.authority.set(name, DnsAnswer::Silent);
-        let plan = plan(&format!("redis://{name}:6379"), fixture.dns);
-        let error = nervix_primitives::time::timeout(Duration::from_secs(5), plan.connect())
+        let plan = plan(&format!("redis://{name}:6379"));
+        let connecting = plan.connect(&fixture.dns);
+        let error = nervix_primitives::time::timeout(Duration::from_secs(5), connecting)
             .await
             .expect("the resolver bounds a silent authority")
             .err()
@@ -950,10 +974,11 @@ mod tests {
             .port();
         let name = "changing.nervix.test";
         fixture.authority.set(name, DnsAnswer::Silent);
-        let plan = plan(&format!("redis://{name}:{port}"), fixture.dns.clone());
+        let plan = plan(&format!("redis://{name}:{port}"));
         let attempting = nervix_primitives::task::spawn({
             let plan = plan.clone();
-            async move { plan.connect().await }
+            let dns = fixture.dns.clone();
+            async move { plan.connect(&dns).await }
         });
         nervix_primitives::time::timeout(Duration::from_secs(2), async {
             while fixture.authority.questions_for(name) == 0 {
@@ -970,7 +995,8 @@ mod tests {
         };
         assert!(stopped.is_cancelled());
         fixture.answer(name, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
-        let stream = nervix_primitives::time::timeout(Duration::from_secs(3), plan.connect())
+        let connecting = plan.connect(&fixture.dns);
+        let stream = nervix_primitives::time::timeout(Duration::from_secs(3), connecting)
             .await
             .expect("a new connection is not held by the cancelled lookup")
             .expect("the new answer accepts a connection");
@@ -988,9 +1014,9 @@ mod tests {
             .local_addr()
             .expect("listener has an address")
             .port();
-        let plan = plan(&format!("redis://[::1]:{port}"), fixture.dns);
+        let plan = plan(&format!("redis://[::1]:{port}"));
         let stream = plan
-            .connect()
+            .connect(&fixture.dns)
             .await
             .expect("the literal IPv6 address connects");
         let (_accepted, _) = listener
@@ -1009,8 +1035,11 @@ mod tests {
         let path = directory.path().join("redis.sock");
         let listener = nervix_primitives::net::UnixListener::bind(&path)
             .expect("the Unix socket listener can bind");
-        let plan = plan(&format!("redis+unix://{}", path.display()), fixture.dns);
-        let stream = plan.connect().await.expect("the Unix socket connects");
+        let plan = plan(&format!("redis+unix://{}", path.display()));
+        let stream = plan
+            .connect(&fixture.dns)
+            .await
+            .expect("the Unix socket connects");
         let (_accepted, _) = listener
             .accept()
             .await
@@ -1019,17 +1048,87 @@ mod tests {
         assert_eq!(fixture.authority.total_questions(), 0);
     }
 
-    #[nervix_primitives::test]
-    async fn a_subscription_keeps_the_clients_auth_database_and_protocol_settings() {
-        let fixture = Fixture::start().await;
-        let plan = plan(
-            "redis://alice:secret@redis.nervix.test:6379/4?protocol=3",
-            fixture.dns,
-        );
+    #[test]
+    fn a_subscription_keeps_the_clients_auth_database_and_protocol_settings() {
+        let plan = plan("redis://alice:secret@redis.nervix.test:6379/4?protocol=3");
         let settings = plan.client.get_connection_info().redis_settings();
         assert_eq!(settings.username(), Some("alice"));
         assert_eq!(settings.password(), Some("secret"));
         assert_eq!(settings.db(), 4);
         assert_eq!(settings.protocol(), redis::ProtocolVersion::RESP3);
+    }
+
+    #[nervix_primitives::test]
+    async fn an_ingestor_on_a_node_without_its_resolver_fails_to_resume_and_names_the_resolver() {
+        let host = nervix_connector_fake::FakeIngestorHost::default().host();
+        let plan = plan("redis://redis.nervix.test:6379");
+        let mut ingestor = RedisPubSubIngestor::open(&plan, &host, 0)
+            .await
+            .expect("opening the ingestor takes nothing from its node");
+        assert!(ingestor.needs_resume());
+
+        let error = ingestor
+            .resume(&host)
+            .await
+            .expect_err("an ingestor that dials by name needs its node's resolver");
+
+        assert_eq!(
+            *error.current_context(),
+            IngestorError::Resume { connector: REDIS }
+        );
+        assert_eq!(
+            error.downcast_ref::<nervix_connector::HostServiceError>(),
+            Some(&nervix_connector::HostServiceError::DnsNotInstalled)
+        );
+        assert!(
+            ingestor.needs_resume(),
+            "an ingestor that established no subscription still needs its resume"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn an_ingestor_dials_through_the_resolver_of_the_handle_it_is_resumed_with() {
+        let fixture = Fixture::start().await;
+        let name = "missing.nervix.test";
+        fixture.authority.set(
+            name,
+            DnsAnswer::NameNotFound {
+                negative_ttl: Duration::from_secs(1),
+            },
+        );
+        let host = nervix_connector_fake::FakeIngestorHost::default()
+            .with_dns(fixture.dns.clone())
+            .host();
+        let plan = plan(&format!("redis://{name}:6379"));
+        let mut ingestor = RedisPubSubIngestor::open(&plan, &host, 0)
+            .await
+            .expect("opening the ingestor takes nothing from its node");
+
+        let error = ingestor
+            .resume(&host)
+            .await
+            .expect_err("the missing name cannot be subscribed to");
+
+        assert_eq!(
+            *error.current_context(),
+            IngestorError::Resume { connector: REDIS }
+        );
+        assert!(matches!(
+            error.downcast_ref::<DnsLookupError>(),
+            Some(lookup) if lookup.name() == name
+                && lookup.failure() == DnsLookupFailure::NameNotFound
+        ));
+        assert!(fixture.authority.questions_for(name) > 0);
+    }
+
+    #[test]
+    fn a_plan_builds_the_tls_configuration_of_a_secure_client_when_it_is_built() {
+        let secure = plan("rediss://redis.nervix.test:6380");
+        assert!(
+            secure.tls.is_some(),
+            "a rediss:// plan carries the configuration built under its node's outward TLS policy"
+        );
+        let plaintext = plan("redis://redis.nervix.test:6379");
+        assert!(plaintext.tls.is_none());
     }
 }

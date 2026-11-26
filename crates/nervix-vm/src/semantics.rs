@@ -174,10 +174,14 @@ impl ExpressionSemantics {
         !self.has_side_effects && !self.can_error && self.volatility != Volatility::Volatile
     }
 
+    /// Whether the compiler may compute the expression once, from its literals. An expression
+    /// that can fail qualifies too: the folder computes an operation that can fail through the
+    /// lane contract its kernel applies, and declines exactly where that contract fails the lane,
+    /// so the expression then executes and reports its error for every row that evaluates it.
     pub fn supports_constant_folding(self) -> bool {
-        self.supports_common_subexpression_elimination()
+        !self.has_side_effects
+            && self.volatility != Volatility::Volatile
             && self.dependency_scope == DependencyScope::Constant
-            && !self.can_error
     }
 }
 
@@ -313,8 +317,10 @@ impl CaseMapping {
 mod catalog;
 mod list_arithmetic;
 mod list_statistics;
+mod temporal;
 pub use catalog::builtin_descriptor;
 pub use list_arithmetic::ListArithmetic;
+pub use temporal::{TemporalArithmetic, is_temporal_arithmetic};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuiltinLowering {
@@ -515,6 +521,8 @@ impl RegexpFunction {
 enum DatetimeOperand {
     /// A `DATETIME` value.
     Datetime,
+    /// A `DURATION` value.
+    Duration,
     /// A count of units, at any integer type.
     UnitCount,
     /// A `STRING` value.
@@ -533,20 +541,25 @@ impl DatetimeFunction {
                 &[DatetimeOperand::Datetime, DatetimeOperand::Datetime]
             }
             Self::DateAdd { .. } => &[DatetimeOperand::UnitCount, DatetimeOperand::Datetime],
-            Self::FromUnix(_) => &[DatetimeOperand::UnitCount],
+            Self::FromUnix(_) | Self::ToDuration(_) => &[DatetimeOperand::UnitCount],
             Self::ParseDatetime(_) => &[DatetimeOperand::Text],
+            Self::DurationUnits { .. } => &[DatetimeOperand::Duration],
         }
     }
 
     fn output_type(&self) -> DataType {
         match self {
-            Self::DatePart { .. } | Self::DateDiff { .. } | Self::ToUnix(_) => DataType::Int64,
+            Self::DatePart { .. }
+            | Self::DateDiff { .. }
+            | Self::ToUnix(_)
+            | Self::DurationUnits { .. } => DataType::Int64,
             Self::DateTrunc { .. }
             | Self::DateBin(_)
             | Self::DateAdd { .. }
             | Self::FromUnix(_)
             | Self::ParseDatetime(_) => RegisterType::Datetime.data_type(),
             Self::FormatDatetime { .. } => DataType::Utf8,
+            Self::ToDuration(_) => RegisterType::Duration.data_type(),
         }
     }
 
@@ -554,25 +567,35 @@ impl DatetimeFunction {
     const fn can_error(&self) -> bool {
         match self {
             // Every DATETIME has every local date part and a text in every format, and a count of
-            // whole units since the epoch is never larger than the nanoseconds it counts.
-            Self::DatePart { .. } | Self::ToUnix(_) | Self::FormatDatetime { .. } => false,
+            // whole units since the epoch, or in a duration, is never larger than the nanoseconds
+            // it counts, whichever way it rounds.
+            Self::DatePart { .. }
+            | Self::ToUnix(_)
+            | Self::FormatDatetime { .. }
+            | Self::DurationUnits { .. } => false,
             // A truncated, binned, moved or converted instant can fall outside the DATETIME range, a
-            // difference in nanoseconds can exceed I64, and a text can name no instant.
+            // difference in nanoseconds can exceed I64, a text can name no instant, and a count of
+            // units can be longer than a DURATION holds.
             Self::DateTrunc { .. }
             | Self::DateBin(_)
             | Self::DateAdd { .. }
             | Self::DateDiff { .. }
             | Self::FromUnix(_)
-            | Self::ParseDatetime(_) => true,
+            | Self::ParseDatetime(_)
+            | Self::ToDuration(_) => true,
         }
     }
 
-    /// How a conditional arm executes this builtin. Binning and unit conversion are checked
-    /// integer arithmetic; every other function walks each row through a calendar, a zone, a
-    /// format or a parser.
+    /// How a conditional arm executes this builtin. Binning and unit conversion, of an instant or
+    /// of a duration, are checked integer arithmetic; every other function walks each row through
+    /// a calendar, a zone, a format or a parser.
     const fn arm_execution(&self) -> ArmExecution {
         match self {
-            Self::DateBin(_) | Self::ToUnix(_) | Self::FromUnix(_) => ArmExecution::WholeBatch,
+            Self::DateBin(_)
+            | Self::ToUnix(_)
+            | Self::FromUnix(_)
+            | Self::DurationUnits { .. }
+            | Self::ToDuration(_) => ArmExecution::WholeBatch,
             Self::DatePart { .. }
             | Self::DateTrunc { .. }
             | Self::DateAdd { .. }
@@ -592,6 +615,8 @@ impl UnaryDescriptor {
     pub fn output_type(self, input_type: &DataType) -> Option<DataType> {
         match (self.semantics.can_error, input_type) {
             (true, ty) if is_signed_numeric_type(ty) => Some(input_type.clone()),
+            // A negated duration is as long as the duration and points the other way.
+            (true, DataType::Duration(TimeUnit::Nanosecond)) => Some(input_type.clone()),
             (false, DataType::Boolean) => Some(DataType::Boolean),
             _ => None,
         }
@@ -1942,6 +1967,18 @@ fn builtin_output_type(
                             }));
                         }
                     }
+                    DatetimeOperand::Duration => {
+                        if input != RegisterType::Duration {
+                            return Err(Report::new(CompileError {
+                                code: CompileErrorCode::UnsupportedFunction,
+                                message: format!(
+                                    "function '{}' requires Duration input, found {input}",
+                                    function.as_str()
+                                ),
+                                span: span.into(),
+                            }));
+                        }
+                    }
                     DatetimeOperand::UnitCount => {
                         require_integral_arg(function, input, span.clone())?;
                     }
@@ -1960,6 +1997,9 @@ pub fn binary_output_type(
     left_type: &DataType,
     right_type: &DataType,
 ) -> Option<DataType> {
+    if let Some(arithmetic) = TemporalArithmetic::of_types(op, left_type, right_type) {
+        return Some(arithmetic.output().data_type());
+    }
     let descriptor = binary_descriptor(op);
     let output = descriptor.output_type(left_type, right_type)?;
     if matches!(
@@ -2704,7 +2744,7 @@ mod tests {
     }
 
     #[test]
-    fn erroring_operations_block_constant_folding() {
+    fn an_operation_that_can_fail_leaves_folding_to_the_folder_and_is_never_shared() {
         let expr = spanned(Expr::Cast {
             expr: Box::new(spanned(Expr::Literal(Literal::String("bad".to_string())))),
             data_type: arrow_schema::DataType::Int64,
@@ -2723,7 +2763,11 @@ mod tests {
                 null_propagation: NullPropagation::NeverNull,
             }
         );
-        assert!(!semantics.supports_constant_folding());
+        // The folder computes an operation that can fail only through its kernel's lane contract
+        // and declines where that contract fails, so a constant operation that can fail is
+        // eligible; a cast has no folding arm, so it still executes and reports its error.
+        assert!(semantics.supports_constant_folding());
+        assert!(!semantics.supports_common_subexpression_elimination());
     }
 
     #[test]

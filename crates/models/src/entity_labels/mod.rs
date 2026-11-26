@@ -1,4 +1,5 @@
-//! Exact metadata carried by every domain Model.
+//! Exact metadata carried by every label owner: a domain Model, a domain, a logical resource or
+//! a cluster user.
 //!
 //! Layer: vocabulary.
 //! - **Owns.** Label syntax, unique ordered maps, mutations, complete-set limits and inspection.
@@ -331,7 +332,8 @@ fn check_limit(
     Ok(())
 }
 
-/// The metadata projection implemented by every current Model payload.
+/// The metadata projection implemented by every Model payload and by the creation bodies of
+/// domains, users and logical resources.
 pub trait EntityMetadata {
     fn labels(&self) -> &EntityLabels;
     fn labels_mut(&mut self) -> &mut EntityLabels;

@@ -1097,7 +1097,10 @@ refusal, which keeps the transport's refusal attached for typed inspection and p
 subprotocol, since an offer can carry a credential. None is a record rejection, and a DNS result
 by itself never marks a Syslog record delivered.
 
-Redis command connections receive the node resolver through the driver's DNS hook. A failed
+Redis command connections receive the node resolver through the driver's DNS hook. The command
+pool takes that resolver from the node when its host opens it, and a node that runs without one
+fails the open with `RedisClientError::MissingNodeResolver` above the host handle's
+`HostServiceError::DnsNotInstalled`. A failed
 initial or later pool connection keeps the resolver's typed failure in
 `RedisClientError::Resolve`; a later failure sits beneath `EmitterWriteError::Publish` for the
 emitter host to retry. No caller waits on the connections a pool opens to restore its
@@ -1119,8 +1122,8 @@ A Redis client's command-pool lifetimes, `pool_idle_timeout_ms` and `pool_max_li
 refused at `CREATE CLIENT` unless they are positive, schedulable whole milliseconds. The pool reads
 them from the client's effective entries and checks them again: an invalid value fails opening the
 pool with `RedisClientError::InvalidPoolLifetime`, naming the key above the schema's
-`ClientConfigSchemaError::InvalidValue`, which the node reports as
-`OpenClientError::InvalidPoolLifetime`. It is a configuration failure, not a record rejection.
+`ClientConfigSchemaError::InvalidValue`, which the node keeps, typed, beneath the client it could
+not open (`SharedClientError::Open`). It is a configuration failure, not a record rejection.
 
 A Postgres client's pool keys are refused at `CREATE CLIENT` unless `pool_acquire_timeout_ms`,
 `pool_idle_timeout_ms` and `pool_max_lifetime_ms` are positive, schedulable whole milliseconds and
@@ -2349,6 +2352,16 @@ of its batch as `IngestorIntakeError::RateLimit`, which the host reports as an i
 the batch is presented again.
 
 ### Emitter And Emitter Rejections
+
+Every row error an emitter raises, whether its route, its codec, its destination or application,
+a publish that fails for good or its `GIVE UP AFTER` ended the row, hands the emitter's error route
+the row's original source record as `input`, the record the emitter's route built, if it built
+one, as the all-optional `partial_output`, and the materialized-state snapshot its batch was
+admitted with, as [The Message Error Record](#the-message-error-record) promises. The error route
+is checked against the emitter's input schema and, for `partial_output`, its codec's or client
+consumer's `TO SCHEMA` schema, so it builds its record from what it was written against;
+[Error routes](./emitters.md#error-routes) describes what an emitter keeps to answer a row that
+fails after its route ran.
 
 A batch payload's rejection becomes one message error per member, each a copy of the emitter's
 structured error: the members share its reference, so an operator can see that they failed

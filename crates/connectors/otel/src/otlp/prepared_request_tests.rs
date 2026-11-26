@@ -18,53 +18,6 @@ fn config(entries: &[(&str, &str)]) -> Vec<ClientConfigEntry> {
         .collect()
 }
 
-/// Host services ignored by tests that inspect the prepared request bytes.
-struct SilentHost;
-
-impl nervix_connector::EmitterReadiness for SilentHost {
-    fn mark_ready(&self) {}
-    fn mark_unready(&self) {}
-}
-
-impl nervix_connector::EmitterTransientErrorStatus for SilentHost {
-    fn record_transient_error(&self, _reason: String, _retry_after: Duration) {}
-
-    fn clear_transient_error(&self) {}
-}
-
-impl nervix_connector::EmitterEventReporter for SilentHost {
-    fn report_error(&self, _message: String) {}
-}
-
-impl nervix_connector::ConnectorEventProvider for SilentHost {}
-
-impl nervix_connector::EmitterPayloadObserver for SilentHost {
-    fn record_prepared_payload(&self, _measurement: nervix_connector::EmitterPayloadMeasurement) {}
-    fn record_payload_subdivisions(&self, _subdivisions: u64) {}
-}
-
-impl nervix_connector::EmitterStagingDirectory for SilentHost {
-    fn staging_directory(&self) -> std::path::PathBuf {
-        std::env::temp_dir()
-    }
-}
-
-impl nervix_connector::EmitterBoundedExecution for SilentHost {
-    fn executor(&self) -> nervix_execution::Executor {
-        nervix_execution::Executor::default()
-    }
-}
-
-impl nervix_connector::EmitterGeneralErrorHandler for SilentHost {
-    fn handle_general_error(
-        &self,
-        _acks: &nervix_connector::EmitterRecordAcknowledgements,
-        _class: nervix_models::MessageErrorClass,
-        _reason: String,
-    ) {
-    }
-}
-
 const MAPPED_COLUMNS: [&str; 2] = ["time", "body"];
 
 /// A logs emitter mapping `time` and `body`, with one resource attribute and a scope, that sends to
@@ -96,9 +49,7 @@ async fn logs_emitter(
     ]));
     OtlpEncoder::new(
         OtlpEncoderConfig {
-            tls_policy: Default::default(),
             config: config(&entries),
-            dns,
             signal: OtlpSignal::Logs,
             batch,
             values: MAPPED_COLUMNS.map(String::from).to_vec(),
@@ -113,7 +64,9 @@ async fn logs_emitter(
             }),
             mapped_schema,
         },
-        EmitterHost::new(SilentHost),
+        nervix_connector_fake::FakeEmitterHost::default()
+            .with_dns(dns)
+            .host(),
     )
     .unwrap_or_else(|error| panic!("the test logs emitter configuration is valid: {error:?}"))
 }
@@ -853,14 +806,42 @@ fn a_grpc_answer_is_classified_by_the_otlp_retryable_codes() {
     ));
 }
 
+/// What every entity opens with in the tests that open it through its own constructor: a valid
+/// client and no mapped column.
+fn entity_export() -> crate::OtelExportConfig {
+    crate::OtelExportConfig {
+        config: config(&[
+            ("endpoint", "http://127.0.0.1:9"),
+            ("protocol", "http/protobuf"),
+            ("timeout_ms", "5000"),
+        ]),
+        batch: None,
+        values: Vec::new(),
+        attributes: Vec::new(),
+        resource: Vec::new(),
+        scope: None,
+        mapped_schema: StdArc::new(arrow_schema::Schema::empty()),
+    }
+}
+
+/// The gauge the metrics entity exports in those tests.
+fn entity_metric() -> OtelMetric {
+    OtelMetric {
+        name: "requests".to_string(),
+        unit: "1".to_string(),
+        description: None,
+        kind: OtelMetricKind::Gauge,
+    }
+}
+
 #[nervix_primitives::test]
 async fn entity_constructors_keep_their_kind_through_the_lifecycle_contract() {
     use nervix_connector::EmitterLifecycle;
     use nervix_models::{EmitterEntityKind, OtelEmitterEntity};
 
     use crate::{
-        OtelExportConfig, OtelLogsEmitter, OtelLogsEmitterConfig, OtelMetricsEmitter,
-        OtelMetricsEmitterConfig, OtelTracesEmitter, OtelTracesEmitterConfig,
+        OtelLogsEmitter, OtelLogsEmitterConfig, OtelMetricsEmitter, OtelMetricsEmitterConfig,
+        OtelTracesEmitter, OtelTracesEmitterConfig,
     };
 
     let dns = nervix_dns::DnsResolver::load(
@@ -869,27 +850,15 @@ async fn entity_constructors_keep_their_kind_through_the_lifecycle_contract() {
     )
     .await
     .expect("the host resolver loads");
-    let export = || OtelExportConfig {
-        tls_policy: Default::default(),
-        config: config(&[
-            ("endpoint", "http://127.0.0.1:9"),
-            ("protocol", "http/protobuf"),
-            ("timeout_ms", "5000"),
-        ]),
-        dns: dns.clone(),
-        batch: None,
-        values: Vec::new(),
-        attributes: Vec::new(),
-        resource: Vec::new(),
-        scope: None,
-        mapped_schema: StdArc::new(arrow_schema::Schema::empty()),
-    };
+    let node = nervix_connector_fake::FakeEmitterHost::default().with_dns(dns);
     let mut emitters: [(Box<dyn EmitterLifecycle>, OtelEmitterEntity); 3] = [
         (
             Box::new(
                 OtelLogsEmitter::open(
-                    OtelLogsEmitterConfig { export: export() },
-                    EmitterHost::new(SilentHost),
+                    OtelLogsEmitterConfig {
+                        export: entity_export(),
+                    },
+                    node.host(),
                 )
                 .await
                 .expect("logs opens"),
@@ -899,8 +868,10 @@ async fn entity_constructors_keep_their_kind_through_the_lifecycle_contract() {
         (
             Box::new(
                 OtelTracesEmitter::open(
-                    OtelTracesEmitterConfig { export: export() },
-                    EmitterHost::new(SilentHost),
+                    OtelTracesEmitterConfig {
+                        export: entity_export(),
+                    },
+                    node.host(),
                 )
                 .await
                 .expect("traces opens"),
@@ -911,15 +882,10 @@ async fn entity_constructors_keep_their_kind_through_the_lifecycle_contract() {
             Box::new(
                 OtelMetricsEmitter::open(
                     OtelMetricsEmitterConfig {
-                        export: export(),
-                        metric: OtelMetric {
-                            name: "requests".to_string(),
-                            unit: "1".to_string(),
-                            description: None,
-                            kind: OtelMetricKind::Gauge,
-                        },
+                        export: entity_export(),
+                        metric: entity_metric(),
                     },
-                    EmitterHost::new(SilentHost),
+                    node.host(),
                 )
                 .await
                 .expect("metrics opens"),
@@ -934,4 +900,65 @@ async fn entity_constructors_keep_their_kind_through_the_lifecycle_contract() {
             Ok(EmitterFinish::NothingHeld)
         ));
     }
+}
+
+/// Asserts that an emitter opened on a node without its resolver failed as the node's failure, not
+/// its configuration's, and named the resolver beneath it.
+fn assert_names_the_missing_resolver<Emitter>(opened: EmitterStartResult<Emitter>) {
+    let error = match opened {
+        Ok(_) => panic!("an emitter that dials by name needs its node's resolver"),
+        Err(error) => error,
+    };
+
+    // The failure is the node's, not the configuration's, so the host opens the emitter again.
+    assert_eq!(
+        *error.current_context(),
+        EmitterOpenError::Initialize { connector: OTEL }
+    );
+    assert_eq!(
+        error
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<nervix_connector::HostServiceError>()),
+        Some(&nervix_connector::HostServiceError::DnsNotInstalled)
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_logs_emitter_on_a_node_without_its_resolver_fails_to_open_and_names_the_resolver() {
+    let opened = crate::OtelLogsEmitter::open(
+        crate::OtelLogsEmitterConfig {
+            export: entity_export(),
+        },
+        nervix_connector_fake::FakeEmitterHost::default().host(),
+    )
+    .await;
+
+    assert_names_the_missing_resolver(opened);
+}
+
+#[nervix_primitives::test]
+async fn a_traces_emitter_on_a_node_without_its_resolver_fails_to_open_and_names_the_resolver() {
+    let opened = crate::OtelTracesEmitter::open(
+        crate::OtelTracesEmitterConfig {
+            export: entity_export(),
+        },
+        nervix_connector_fake::FakeEmitterHost::default().host(),
+    )
+    .await;
+
+    assert_names_the_missing_resolver(opened);
+}
+
+#[nervix_primitives::test]
+async fn a_metrics_emitter_on_a_node_without_its_resolver_fails_to_open_and_names_the_resolver() {
+    let opened = crate::OtelMetricsEmitter::open(
+        crate::OtelMetricsEmitterConfig {
+            export: entity_export(),
+            metric: entity_metric(),
+        },
+        nervix_connector_fake::FakeEmitterHost::default().host(),
+    )
+    .await;
+
+    assert_names_the_missing_resolver(opened);
 }

@@ -693,7 +693,10 @@ records the command, clients can recover under the same execution reference. Ner
 applying the saved decision or returns the recorded outcome. If the service already processed
 creation, Nervix adopts the matching activation through an authenticated refresh.
 `REFRESH LICENSE` runs immediately on the leader, outside domain transactions, and completes when
-the newer signed decision commits or the service or cluster returns a typed refusal.
+the newer signed decision commits or the service or cluster returns a typed refusal. The leader
+sends one licensing request at a time, so a refresh waits for a request in flight, an automatic
+refresh that retries an unreachable service included. A release that commits while the refresh
+waits ends it with `the cluster no longer holds the activation this refresh was for`.
 
 ```plexus
 ROTATE LICENSE CLUSTER KEY;
@@ -709,8 +712,12 @@ service refusal abandons the pending key. Free and released clusters rotate loca
 service access or service-issued trust documents.
 
 `RELEASE LICENSE` commits the free target policy before contacting the service. It returns after
-that local commit; `DESCRIBE LICENSE` reports `mode: released`, `policy: releasing` and
-`release: awaiting service confirmation` while the leader retries notification. Existing grants
+that local commit and waits for no other licensing request, not even an automatic refresh that
+retries an unreachable service; `DESCRIBE LICENSE` reports `mode: released`, `policy: releasing`
+and `release: awaiting service confirmation` while the leader retries notification. A refresh of
+the released activation ends when the release commits, and its answer, should one arrive after
+the commit, applies nothing. Only a key rotation still pending is finished with the service first,
+so a release waits for that rotation. Existing grants
 retain their deadlines, reported as the typed `grants_until` timestamp. Confirmation does not
 restart or extend them. Once confirmation arrives and no grant remains, the mode becomes free.
 An expired ephemeral activation refuses release with `Expired`. Activation in released mode
@@ -1280,7 +1287,8 @@ handshake and its wire forms.
 
 ## Entity Label Limits
 
-Domain Models share four committed metadata limits: `ENTITY_LABELS_MAX_COUNT` (64),
+Every label owner, a domain Model, a domain, a logical resource or a cluster user, shares four
+committed metadata limits: `ENTITY_LABELS_MAX_COUNT` (64),
 `ENTITY_LABELS_MAX_KEY_BYTES` (128 B), `ENTITY_LABELS_MAX_VALUE_BYTES` (1024 B), and
 `ENTITY_LABELS_MAX_BYTES` (16384 B). Their declarations also supply the first-bootstrap options
 `--entity-labels-max-count`, `--entity-labels-max-key-bytes`, `--entity-labels-max-value-bytes`, and
@@ -1726,6 +1734,20 @@ assigns, the frame header and the table and traversal budgets of rule F-3 of the
 table depths the session schema's frame layouts fix, and the 64 KiB below which its gRPC decoder
 copies a frame out of the read buffer (rule F-9). It takes each session limit's default and bounds
 from that limit's own setting definition rather than restating them.
+
+Fixed values that must agree have one definition, and the others derive from it or are checked
+against it when the code compiles. Every wait, cadence, grace and deadline a derivation divides
+from a positive budget floors at the shortest positive duration, one nanosecond, which
+`nervix-models` defines once for the vocabulary, the interconnect and the runtime. The longest
+wait a client takes, one day, bounds the Rust client's deadlines and backoffs, a host library's
+cancellation token and every web console wait, and the token also takes the Rust client's
+shortest deadline, one millisecond. The largest restore chunk, 256 KiB, is one value as well:
+`nervix-client-wire` applies its rule, the smaller of it and half the session frame, for the Rust
+client and the console alike, and the console's restore frame capacity is counted in it. MQTT's
+largest packet derives from its largest Remaining Length and its largest fixed header. A job whose
+memory its caller cannot charge up front, such as a compilation whose library keeps the code it
+generates, takes the executor's admission token, one byte of its memory class: the least charge
+that still waits in the class's order, where a charge of nothing never waits.
 
 The `nervix::hidden_tunable` compiler diagnostic enforces this section. It refuses a numeric
 constant of a governed type, such as `Duration`, an unsigned or signed integer, `f64`, `NonZero`

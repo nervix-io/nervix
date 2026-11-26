@@ -6,7 +6,8 @@
 //!   the connection handoff and listener lifecycle that retain frames and established connections,
 //!   the deadlines of an accepted connection, and the oversized datagram a listener drops.
 //! - **Depends on.** The production stream frame decoder, connection reader, TLS acceptance and UDP
-//!   listener, the execution clock's paused test mode, and a generated TLS server identity.
+//!   listener, the scripted host handle an ingestor is opened and resumed with, the execution
+//!   clock's paused test mode, and a generated TLS server identity.
 //! - **Must not know.** Codecs, runtime collectors or graph placement.
 
 #![cfg_attr(
@@ -693,14 +694,15 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
             },
         ],
         |_| bind_addr,
-        Default::default(),
         SyslogListenerSettings::default(),
     )
     .expect("the TCP plan is valid");
-    let mut ingestor = SyslogListenerIngestor::open(&plan, 0)
+    // A TCP listener takes nothing from its node: only a TLS listener reads the outward TLS policy.
+    let host = nervix_connector_fake::FakeIngestorHost::default().host();
+    let mut ingestor = SyslogListenerIngestor::open(&plan, &host, 0)
         .await
         .expect("the ingestor opens");
-    ingestor.resume().await.expect("the listener binds");
+    ingestor.resume(&host).await.expect("the listener binds");
     let peer_addr = SocketAddr::from(([127, 0, 0, 1], 6514));
     let (mut client, server) = tokio::io::duplex(128);
     let Some(SyslogListener::Stream(listener)) = ingestor.listener.as_mut() else {
@@ -731,7 +733,7 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
         .await
         .expect("another listener claims the retired socket's port");
     let retry_failure = ingestor
-        .resume()
+        .resume(&host)
         .await
         .expect_err("rebinding must report a transient error while the port is busy");
     assert!(retry_failure.contains::<SyslogListenerError>());
@@ -751,7 +753,7 @@ async fn a_failed_accept_keeps_an_established_connection_and_rebinds() {
         .expect("the connection keeps its intake channel");
     assert_eq!(frame.payload, b"second");
     drop(blocker);
-    ingestor.resume().await.expect("the listener rebinds");
+    ingestor.resume(&host).await.expect("the listener rebinds");
     assert!(!ingestor.needs_resume());
     ingestor.close().await.expect("the ingestor closes");
 }

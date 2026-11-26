@@ -161,7 +161,7 @@ impl Runtime {
             .clone();
         let executor = executor.clone();
         let memory = executor
-            .reserve(MemoryClass::Bulk, 1)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .change_context(StatePageReadError::Admission)?;
         let captured_routing = routing.clone();

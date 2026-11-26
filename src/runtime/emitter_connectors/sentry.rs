@@ -33,9 +33,7 @@ impl EmitterConnectorStarter {
             batch,
             SentryEventEmitter::open(
                 SentryEventEmitterConfig {
-                    tls_policy: context.runtime.outward_tls().clone(),
                     config: connector.client.config.entries.clone(),
-                    dns: context.dns()?,
                     platform: connector.platform.clone(),
                 },
                 context.emitter_host(),

@@ -24,6 +24,7 @@
 use super::{ingestor_start::RetiringIngestorInput, *};
 
 mod connector;
+mod connector_host;
 pub(in crate::runtime) mod endpoint;
 pub(in crate::runtime) mod http;
 pub(in crate::runtime) mod kafka;
@@ -780,6 +781,10 @@ mod tests {
                 .expect("each global unit has its plan");
             let start = connector::BrokerIngestorStart {
                 connector,
+                host: runtime.ingestor_connector_host(
+                    &plan.ingestor,
+                    connector_host::IngestorEntityServices::default(),
+                ),
                 instances: nonzero_ext::nonzero!(3u64),
                 acknowledgement: nervix_models::IngestAcknowledgement::Unacknowledged,
                 buffered_intake: true,

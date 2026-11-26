@@ -2160,9 +2160,26 @@ routes it reads, which the local schedule swap makes. A coordinated hold (an alt
 change or an ownership handoff) waits for the relays to empty before any node changes a route, so it
 holds producers only and the relays empty by delivering. A fan-out that meets the swap's engagement
 waits for it and then reads the routes the swap published; nothing the swap waits for waits for that
-fan-out, so the wait cannot deadlock. The hand-on flag follows the same protocol as the producer
-flag: an engagement stores it before its fence reads the dispatch count with a read-modify-write,
-and a hand-on raises the count with a read-modify-write before it reads the flag.
+fan-out, so the wait cannot deadlock. A producer keeps it so: its batch enters the relay's gates
+only once the owner's buffer has room for it, and inside them it never waits for that room. The
+owner frees room by taking its next batch, which waits while the swap holds its hand-on back, so a
+producer that waited for room under its permit would hold back the swap's fence until the fence's
+deadline ended the swap. The producer waits for room outside the gates, keeping none of it, then
+takes its permits and reserves the room without waiting; when another producer took the room first,
+it gives its permits back and waits again, building the batch's acknowledgement share only once the
+room is its own. The hand-on flag follows the same protocol as the producer flag: an engagement
+stores it before its fence reads the dispatch count with a read-modify-write, and a hand-on raises
+the count with a read-modify-write before it reads the flag.
+
+A local schedule swap engages its holds upstream first, because every part it stops delivers what
+it holds before it ends, with no limit of its own. Before any engagement it stops the generator
+units it replaces and the ingestor units whose rows reach a relay it holds. It then engages one hold
+per reingestor it replaces, in the order rows flow, on that reingestor's input relays, and stops the
+reingestor once that hold is fenced. Its main engagement covers every relay it holds. Each
+engagement stays engaged until the swap publishes or puts the previous execution back; two
+engagements of one gate coexist and release on their own. A stopping part therefore delivers only
+into relays no engagement of its own swap holds yet, and since a domain's graph has no loops, no
+stop waits for a hold its own swap engaged ([Execution Plans](./execution-plans.md)).
 
 A fan-out takes the permits of its partition's gate and of the whole relay's gate together and
 holds neither while it waits, so a fence on one gate never waits for a fan-out waiting at the other.
@@ -2504,9 +2521,9 @@ An unrelated trait module default cannot replace an implementation body's lexica
 An engine that receives validated plans also declares `nervix::input(plans, ...)`; general
 infrastructure is not presumed to execute graph plans.
 
-`nervix::value(model|name|cluster_access, ...)` classifies exact semantic ADTs or traits. The current
-configuration Model union, shared name vocabulary and cluster observation capability carry those
-roles. `nervix::model_in_data_plane` rejects the configuration union in data-plane and plan-consuming
+`nervix::value(model|name|cluster_access|host_handle, ...)` classifies exact semantic ADTs or traits.
+The current configuration Model union, shared name vocabulary, cluster observation capability and
+the two connector host handles carry those roles. `nervix::model_in_data_plane` rejects the configuration union in data-plane and plan-consuming
 interfaces or bodies, including normalized generic containers, aliases, constructors and patterns.
 An ordinary user type called Model has its own meaning. These checks do not treat every vocabulary
 field or schema descriptor as a configuration Model.
@@ -2535,9 +2552,24 @@ contract; opaque external future implementations, arbitrary stored-future relati
 whole-program effects are not inferred. Execution graphs and recurring reachability are conservative
 within the declared local graph; annotations are reviewed architectural assertions.
 
+`nervix::undeclared_host_service` diagnoses a call, a qualified call or a function reference that
+resolves to a method carrying `nervix::host_service(<service>, ...)` when the narrowest
+`nervix::host_services(...)` contract of the calling owner does not list that service, or when no
+such contract covers the owner. The narrowest contracted function, impl, type, module or crate
+decides, and a narrower contract replaces a wider one instead of extending it. An owner whose
+nearest `nervix::layer` contract is `harness` is outside the rule and declares nothing. A method of an
+unrelated type with the same name carries no contract and reaches no host service. A public method
+with a receiver on a type marked `nervix::value(host_handle, ...)` must name its service, which
+`nervix::invalid_contract` enforces at the method. The rule follows resolved definitions through
+aliases, re-exports and crate metadata; it does not follow a service value after its accessor
+returned it, so a connector that passes the resolver it took to a helper has already declared the
+reach where it took it. [Host handles and declared
+services](./connector-contract.md#host-handles-and-declared-services) owns the handles, their
+services and where a connector declares them.
+
 `nervix::node_identity`, `nervix::installed_state` and `nervix::state_contract` implement the exact
 identity and representation contracts in [Typed States](./typed-states.md#source-owned-identity-and-installation-contracts).
-All six architecture diagnostics use the same normal lint levels, exact-operation expectations and
+All seven architecture diagnostics use the same normal lint levels, exact-operation expectations and
 complete current configuration evidence as synchronization and failure rules. No count, product
 owner catalog or source-review hash grants permission.
 
@@ -3795,6 +3827,14 @@ attempt's first retry keeps its backoff against a notification it already repres
 control-plane ordering check without a memory-ordering claim. The turn, the watch and the
 notification are asynchronous and outside Deloxide's tracked-lock detection; the owner tests beside
 the turn replay the found order step by step.
+An operator's release commits without the turn. The commits that end or depend on the activation,
+the release, the start of a key rotation and a refreshed decision, take the same owner's
+`activation_commit` order, an async mutex held only around their consensus writes. A holder of the
+turn takes it after the turn and gives it back before asking the service anything, so the order
+never waits for a request and adds no wakeup to the turn's protocol; the checks above still model
+every wait and notification of the turn. The order is outside Deloxide's tracked-lock detection,
+and the owner tests beside the turn show that a release's commit takes it while a refresh holds the
+turn.
 
 Consensus storage admits each Commands or Bulk working set through independent class-specific
 turns before asking its memory class, and a working set returns its bytes before its turn passes.
@@ -3830,7 +3870,7 @@ A family of names means each member runs independently through the recipe.
 | Broker ingestor read interruption (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestors/connector_read.rs`, `src/runtime/ingestors/connector.rs`) | `shuttle_an_interrupted_broker_read_hands_the_host_every_message_it_took` lets a stop, or a suspension of intake, meet the broker loop at any point while its ingestor gathers a batch of up to three messages from a transport that delivers two. The host cancels the read and awaits it rather than dropping it: every message the ingestor took reaches the host's intake exactly once, and before the ingestor is suspended or closed, and the ingestor is never asked to read, suspend or close while a read the host dropped is still in flight. The check fails under a loop that drops the read it stops waiting for. |
 | Broker ingestor rate-limit hold (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestors/connector_read.rs`, `src/runtime/ingestors/connector.rs`) | `shuttle_a_spent_allowance_holds_the_broker_loop_back_through_a_quiesce_until_it_returns_or_the_ingestor_stops` runs the production broker loop while the allowance is spent and a message waits in the transport. The connector services the transport without taking the message. A quiesce change cancels that service, brings the loop back to ask for its budget again and starts fresh maintenance while the allowance remains spent. After the allowance returns, the service ends and the loop reads the waiting message. A stop cancels maintenance and closes the connector before the hold's deadline. The check observes the order of maintenance, read and close across those transitions. |
 | Relay dispatch gate and fan-out (`src/runtime/relay_channel_shuttle_tests.rs`) | `shuttle_dispatch_permits_never_overlap_a_quiescent_lease_and_release_frees_every_waiter`, `shuttle_overlapping_gate_leases_all_release_before_dispatch_resumes`, `shuttle_expired_gate_fence_frees_every_waiter_without_reporting_quiescence`, `shuttle_canceled_dispatch_returns_its_permit_to_the_gate_fence`, and `shuttle_dispatches_parked_behind_a_lease_wake_only_on_its_release` hold the fence, lease, expiry, cancellation, and waiter contract; in-flight dispatches drain before quiescence. `shuttle_capacity_shrink_keeps_buffered_batches_and_wakes_publishers_after_the_drain`, `shuttle_capacity_growth_admits_waiting_publishers_without_a_take`, `shuttle_publishers_wait_for_the_slowest_consumer_and_skip_consumers_that_leave`, and `shuttle_losing_every_consumer_delivers_or_returns_the_waiting_batch` keep queued batches across capacity changes, release waiting publishers, and return or deliver each batch when receivers leave. |
-| Relay owner fan-out (`src/runtime/relay_boundary_shuttle_tests.rs`) | `shuttle_owner_fanout_waits_for_an_attached_consumer_move_and_is_acknowledged` races an owner's fan-out against a swap that moves one of two attached consumers: the fan-out completes before the fence and reaches both, or waits for the swap and reaches the staying sibling, and the ingestor ACK completes either way; the batch is never refused. `shuttle_a_routed_batch_racing_a_joining_consumer_reserves_a_share_for_every_delivery` races a batch another node routed here against an attached consumer registering here: every consumer the batch reaches holds a share of its own, so one that fails the batch fails the ingestor ACK. |
+| Relay owner fan-out (`src/runtime/relay_boundary_shuttle_tests.rs`) | `shuttle_owner_fanout_waits_for_an_attached_consumer_move_and_is_acknowledged` races an owner's fan-out against a swap that moves one of two attached consumers: the fan-out completes before the fence and reaches both, or waits for the swap and reaches the staying sibling, and the ingestor ACK completes either way; the batch is never refused. `shuttle_a_routed_batch_racing_a_joining_consumer_reserves_a_share_for_every_delivery` races a batch another node routed here against an attached consumer registering here: every consumer the batch reaches holds a share of its own, so one that fails the batch fails the ingestor ACK. `shuttle_a_swap_fence_never_waits_for_a_producer_that_waits_for_the_owner_buffer` races three producers into a relay whose owner buffer holds one batch, its owner handing batches on one at a time, and a swap that holds producers and hand-on: the swap's fence always completes, because a producer waits for room outside the gates, and every batch then reaches the consumer exactly once and is acknowledged. |
 | Local drain observation (`src/runtime/local_drain_shuttle_tests.rs`) | `shuttle_a_batch_published_while_a_drain_observes_is_never_missing_from_it`, `shuttle_a_batch_a_consumer_takes_while_a_drain_observes_is_never_missing_from_it`, and `shuttle_a_batch_its_owner_hands_on_while_a_drain_observes_is_never_missing_from_it` race a batch moving from a node into a relay, from a relay into a consumer's node, and from a relay's transit into its consumer's queue against one drain observation of the production read order: the observation shows the batch, or the relay's admission when the move went against the order of its reads. `shuttle_a_message_a_flush_resumed_is_seen_by_a_drain_that_sees_the_flush_complete` races a force flush that resumes a parked message and completes its obligation against the observation: one that sees the obligation complete sees the message as admitted work. |
 | Relay subscription definitions (`src/runtime/relay_subscription.rs`) | `shuttle_an_attachment_racing_a_redefinition_is_refused_or_closed_by_it` races a subscriber's attachment against a redeclaration of the relay with a field that became sensitive: the attachment is refused, or the redeclaration closes the receiver it attached, so no subscriber describes rows by a replaced definition. |
 | Materialized dependency waits (`src/runtime/materialized_read.rs`) | `shuttle_a_parked_message_is_woken_by_the_materialized_state_it_waits_for` races the arrival of the state a `REQUIRED WAIT` message is parked on against the processor branch reading it and parking: the wait registers before the read, and again before every retry, so the arrival always wakes it. |

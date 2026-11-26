@@ -29,6 +29,22 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        executor,
+        metrics,
+        staging,
+        status,
+        tls_policy,
+        reason = "the Iceberg table emitter dials its catalog and object store through its node's \
+                  resolver under the node's outward TLS policy, stages its files in the node's \
+                  staging directory through the bounded executor, shows a commit's wait for \
+                  memory as its transient status and records the staged files it divides and the \
+                  data files it writes"
+    )
+)]
 
 mod catalog_table;
 mod offline_config;
@@ -120,10 +136,11 @@ impl IcebergCommitPolicy {
 }
 
 /// What one Iceberg emitter stages and commits through, from its typed emitter plan.
+///
+/// The node resolver its catalog and object-store clients dial through and the outward TLS policy
+/// their handshakes take reach the emitter through its host handle.
 pub struct IcebergTableEmitterConfig {
-    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub backend: IcebergStorageBackend,
-    pub dns: DnsResolver,
     pub storage_config: Vec<ClientConfigEntry>,
     pub catalog_name: String,
     pub catalog_config: Vec<ClientConfigEntry>,
@@ -140,19 +157,6 @@ pub struct IcebergTableEmitterConfig {
     /// How generated staging and data files name the writer that produced them.
     pub writer: String,
 }
-
-/// What one staging append or staged-file measurement job is charged: a token that admits the job
-/// onto the filesystem workers, not an estimate of its memory.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the charge is an admission token for the filesystem workers, not a memory \
-                  estimate, so it is the least nonzero reservation: a zero request takes no \
-                  permit and never waits"
-    )
-)]
-const STAGED_WRITE_RESERVATION_BYTES: u64 = 1;
 
 /// The Iceberg emitter, which appends each mapped batch to a local Arrow IPC staging file and
 /// appends every staged batch to its table in one catalog commit.
@@ -563,9 +567,7 @@ impl IcebergTableEmitter {
         host: EmitterHost,
     ) -> EmitterStartResult<Self> {
         let IcebergTableEmitterConfig {
-            tls_policy,
             backend,
-            dns,
             storage_config,
             catalog_name,
             catalog_config,
@@ -577,6 +579,12 @@ impl IcebergTableEmitter {
             commit,
             writer,
         } = config;
+        // A node without its resolver cannot open the emitter at all, so that is reported before
+        // anything its configuration says.
+        let dns = host
+            .dns()
+            .change_context(EmitterOpenError::Initialize { connector: ICEBERG })?;
+        let tls_policy = host.tls_policy();
         let staged_schema = Self::staged_arrow_schema(&mapped_schema)?;
         let staging_dir = Self::create_staging_dir(&host)?;
         let executor = host.executor();
@@ -987,8 +995,10 @@ impl IcebergTableEmitter {
         schema: StdArc<arrow_schema::Schema>,
         batches: Vec<RecordBatch>,
     ) -> EmitterWriteResult<staging::Staged> {
+        // The append allocates nothing beyond the batches it streams, so it takes only the
+        // admission token onto the filesystem workers.
         let reservation = executor
-            .reserve(MemoryClass::Bulk, STAGED_WRITE_RESERVATION_BYTES)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .change_context(EmitterWriteError::Publish { connector: ICEBERG })?;
         let target = target.clone();
@@ -1326,9 +1336,11 @@ impl IcebergTableEmitter {
         let projected = projection
             .project(staged)
             .map_err(IcebergColumnError::publish_failure)?;
+        // Measuring the staged file allocates nothing the caller can charge up front, so it takes
+        // only the admission token onto the filesystem workers.
         let reservation = self
             .executor
-            .reserve(MemoryClass::Bulk, STAGED_WRITE_RESERVATION_BYTES)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .change_context(EmitterWriteError::Publish { connector: ICEBERG })?;
         self.executor

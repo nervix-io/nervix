@@ -59,6 +59,8 @@ pub(super) enum LicensingRequestError {
     Shutdown,
     #[error("the pending release yielded to a foreground licensing command")]
     Foreground,
+    #[error("the cluster no longer holds the activation this refresh was for")]
+    Superseded,
     #[error("licensing event stream has an invalid content type")]
     ContentType,
 }
@@ -236,6 +238,29 @@ impl<'a> LicensingClient<'a> {
         }
         let mut topology = self.service.inner.consensus.observer().subscribe_topology();
         let yields_to_foreground = matches!(operation, Operation::Release { .. });
+        // An adoption refresh asks about an activation the cluster does not hold yet.
+        let refreshed = match &operation {
+            Operation::Refresh {
+                activation_id,
+                state: RefreshState::Committed(_),
+            } => Some(*activation_id),
+            Operation::Refresh {
+                state: RefreshState::Adoption,
+                ..
+            }
+            | Operation::Create { .. }
+            | Operation::RotateKey { .. }
+            | Operation::Release { .. } => None,
+        };
+        // An operator's release commits without the request turn, so a refresh of the committed
+        // activation can outlive it; it then ends at once instead of asking the service about a
+        // released one.
+        let mut superseded = std::pin::pin!(async {
+            match refreshed {
+                Some(activation_id) => self.activation_ended(activation_id).await,
+                None => std::future::pending::<()>().await,
+            }
+        });
         let mut work = std::pin::pin!(self.perform_request(cluster, operation, request_id));
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -243,11 +268,35 @@ impl<'a> LicensingClient<'a> {
                 result = &mut work => return result,
                 _ = self.service.inner.drain_support_shutdown.cancelled() => return Err(Report::new(LicensingRequestError::Shutdown)),
                 _ = self.service.inner.licensing_requests.foreground_requested(), if yields_to_foreground => return Err(Report::new(LicensingRequestError::Foreground)),
+                () = &mut superseded => return Err(Report::new(LicensingRequestError::Superseded)),
                 changed = topology.changed() => {
                     if !changed || self.service.inner.consensus.current_leader_tenure().as_ref() != Some(&tenure) {
                         return Err(Report::new(LicensingRequestError::Leadership));
                     }
                 },
+            }
+        }
+    }
+
+    /// Completes once the committed licensing state no longer holds `activation_id` as the
+    /// cluster's activation.
+    async fn activation_ended(&self, activation_id: Uuid) {
+        let observer = self.service.inner.consensus.observer();
+        // Subscribing before the first read leaves no commit between a read and the next wait
+        // unseen.
+        let mut applied = observer.subscribe_applied();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let committed = observer.licensing_snapshot();
+            if !super::notifications::holds_activation(
+                committed.initialized.as_ref(),
+                activation_id,
+            ) {
+                return;
+            }
+            if applied.changed().await.is_err() {
+                // The state machine stopped with its node; shutdown or leadership ends the request.
+                std::future::pending::<()>().await;
             }
         }
     }
@@ -611,7 +660,7 @@ fn failed_attempt(error: &LicensingRequestError) -> (bool, Option<crate::licensi
         | LicensingRequestError::LicenseKey
         | LicensingRequestError::Leadership
         | LicensingRequestError::Shutdown => (false, None),
-        LicensingRequestError::Foreground => (false, None),
+        LicensingRequestError::Foreground | LicensingRequestError::Superseded => (false, None),
     }
 }
 

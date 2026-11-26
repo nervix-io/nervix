@@ -163,12 +163,12 @@ mod tests {
         let mut state = EmitterLifecycleState::new(false);
         assert_eq!(
             state
-                .resume(&mut connector, &host)
+                .resume(&mut connector, &fixture)
                 .await
                 .assured("initial resume"),
             EmitterResume::Ready
         );
-        state.recover(&host);
+        state.recover(&fixture);
         connector.resume_results.extend([
             Err(Report::new(EmitterLifecycleError::Resume {
                 connector: "scripted",
@@ -178,10 +178,10 @@ mod tests {
             }),
             Ok(EmitterResume::Ready),
         ]);
-        assert!(state.resume(&mut connector, &host).await.is_err());
+        assert!(state.resume(&mut connector, &fixture).await.is_err());
         assert_eq!(
             state
-                .resume(&mut connector, &host)
+                .resume(&mut connector, &fixture)
                 .await
                 .assured("waiting resume"),
             EmitterResume::Waiting {
@@ -191,7 +191,7 @@ mod tests {
         assert!(state.needs_resume(&mut connector));
         assert_eq!(
             state
-                .resume(&mut connector, &host)
+                .resume(&mut connector, &fixture)
                 .await
                 .assured("recovered"),
             EmitterResume::Ready
@@ -201,7 +201,10 @@ mod tests {
             .finish(&mut connector, deadline)
             .await
             .assured("finished");
-        state.close(&mut connector, &host).await.assured("closed");
+        state
+            .close(&mut connector, &fixture)
+            .await
+            .assured("closed");
         let observed = observations.lock();
         assert_eq!(
             observed.lifecycle,
@@ -225,26 +228,35 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn cancellation_during_resume_keeps_the_suspension_completed_and_owner_retained() {
-        let host = FakeEmitterHost::default().host();
+        let fixture = FakeEmitterHost::default();
+        let host = fixture.host();
         let plan = FakeEmitter::<Records>::new([PublishAnswer::ConfirmAll]);
         let observations = plan.observations();
         let mut connector = FakeEmitter::open(plan, host.clone())
             .await
             .assured("the fixture opens");
         let mut state = EmitterLifecycleState::new(true);
-        state.recover(&host);
+        state.recover(&fixture);
         connector.resume_gate = Some(Arc::new(Notify::new()));
-        assert!(state.resume(&mut connector, &host).now_or_never().is_none());
+        assert!(
+            state
+                .resume(&mut connector, &fixture)
+                .now_or_never()
+                .is_none()
+        );
         connector.resume_gate = None;
         state
-            .resume(&mut connector, &host)
+            .resume(&mut connector, &fixture)
             .await
             .assured("same owner resumes after cancellation");
         state
             .finish(&mut connector, Instant::now())
             .await
             .assured("finished");
-        state.close(&mut connector, &host).await.assured("closed");
+        state
+            .close(&mut connector, &fixture)
+            .await
+            .assured("closed");
         assert_eq!(
             observations.lock().lifecycle,
             [
@@ -282,14 +294,15 @@ mod shuttle_tests {
     fn shuttle_cancelling_resume_retains_one_owner_until_finish_then_close() {
         check_interleavings(|| {
             shuttle::future::block_on(async {
-                let host = FakeEmitterHost::default().host();
+                let fixture = FakeEmitterHost::default();
+                let host = fixture.host();
                 let plan = FakeEmitter::<Records>::new([PublishAnswer::ConfirmAll]);
                 let observations = plan.observations();
                 let mut connector = FakeEmitter::open(plan, host.clone())
                     .await
                     .assured("fixture opens");
                 let mut state = EmitterLifecycleState::new(true);
-                state.recover(&host);
+                state.recover(&fixture);
                 let started = Arc::new(Notify::new());
                 let gate = Arc::new(Notify::new());
                 connector.resume_started = Some(started.clone());
@@ -304,17 +317,17 @@ mod shuttle_tests {
                 nervix_primitives::select! {
                     // The scheduler explores event order; DFS requires deterministic polling.
                     biased;
-                    resumed = state.resume(&mut connector, &host) => { resumed.assured("resume completes"); },
+                    resumed = state.resume(&mut connector, &fixture) => { resumed.assured("resume completes"); },
                     cancelled = cancelled => { cancelled.assured("cancellation arrives"); },
                 }
                 controller.await.assured("controller completes");
                 connector.resume_gate = None;
                 state
-                    .resume(&mut connector, &host)
+                    .resume(&mut connector, &fixture)
                     .await
                     .assured("retained owner is ready");
                 assert!(
-                    state.close(&mut connector, &host).await.is_err(),
+                    state.close(&mut connector, &fixture).await.is_err(),
                     "a cancelled resume cannot authorize close before its finish outcome"
                 );
                 state
@@ -322,7 +335,7 @@ mod shuttle_tests {
                     .await
                     .assured("finish precedes close");
                 state
-                    .close(&mut connector, &host)
+                    .close(&mut connector, &fixture)
                     .await
                     .assured("exact instance closes");
                 let observed = observations.lock();

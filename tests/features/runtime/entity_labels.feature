@@ -1126,3 +1126,164 @@ Feature: Domain entity labels
       | 3            | RESOURCE orders_schema | RESOURCE absent_schema |
       | 1            | USER orders_reader     | USER absent_reader     |
       | 3            | USER orders_reader     | USER absent_reader     |
+
+  @entity_labels_descriptions
+  Scenario Outline: Every description of a domain Model shows the labels its entity carries
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-1" has ONNX fixture resource directory "onnx_model"
+    And node "node-1" has WASM processor fixture resource directory "wasm_processor"
+    And node "node-1" has resource directory "lookup_dir" containing
+      """
+      {
+        "lookup.jsonl": "{\"id\":\"one\",\"value\":1}\n"
+      }
+      """
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE RESOURCE score_model;
+      UPLOAD RESOURCE score_model VERSION '{{onnx_model}}';
+      CREATE RESOURCE wasm_filter;
+      UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
+      CREATE RESOURCE lookup_bundle;
+      UPLOAD RESOURCE lookup_bundle VERSION '{{lookup_dir}}';
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( region STRING, sequence I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( region string, sequence integer );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA region_key ( region STRING );
+      CREATE PARAMETRIZER by_region SCHEMA region_key TTL 5m
+        LABELS { 'kind' = 'parametrizer' };
+      CREATE RELAY incoming SCHEMA event BRANCHED BY by_region
+        LABELS { 'kind' = 'relay' };
+      CREATE RELAY settlements SCHEMA event BRANCHED BY by_region;
+      CREATE RELAY ordered SCHEMA event BRANCHED BY by_region;
+      CREATE RELAY settled SCHEMA event BRANCHED BY by_region;
+      CREATE RELAY routed SCHEMA event BRANCHED BY by_region;
+      CREATE RELAY unique_events SCHEMA event BRANCHED BY by_region;
+      CREATE RELAY counted SCHEMA event BRANCHED BY by_region;
+      CREATE RELAY unkeyed SCHEMA event UNBRANCHED;
+      CREATE RELAY regrouped SCHEMA event BRANCHED BY by_region;
+      CREATE VHOST edge described-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events'
+        LABELS { 'kind' = 'endpoint' };
+      CREATE HTTP ENDPOINT INGESTOR intake FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
+        TO incoming INHERIT ALL BRANCHED BY by_region SET region = message.region
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+        LABELS { 'kind' = 'ingestor' };
+      CREATE REORDERER reorder FROM incoming BY input.sequence MAX TIME 10m
+        BRANCHED BY by_region
+        TO ordered INHERIT ALL FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        LABELS { 'kind' = 'reorderer' };
+      CREATE CORRELATOR settle
+        LEFT FROM incoming
+        RIGHT FROM settlements
+        CORRELATE WHERE left.sequence = right.sequence
+        MATCH EARLIEST
+        MAX TIME 10m
+        ON CORRELATION TIMEOUT DROP, DROP
+        BRANCHED BY by_region
+        TO settled SET region = left.region, sequence = left.sequence
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        LABELS { 'kind' = 'correlator' };
+      CREATE JUNCTION route FROM incoming BRANCHED BY by_region
+        TO routed INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        LABELS { 'kind' = 'junction' };
+      CREATE DEDUPLICATOR deduplicate FROM incoming
+        DEDUPLICATE ON input.sequence
+        MAX TIME 10m
+        BRANCHED BY by_region
+        TO unique_events INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        LABELS { 'kind' = 'deduplicator' };
+      CREATE WINDOW PROCESSOR count_events FROM incoming
+        WIDTH 3 MESSAGES
+        STEP 3 MESSAGES
+        BRANCHED BY by_region
+        TO counted SET region = FIRST(input.region), sequence = COUNT(input.sequence)
+          ON MESSAGE ERROR LOG
+        LABELS { 'kind' = 'window processor' };
+      CREATE REINGESTOR regroup FROM unkeyed
+        TO regrouped INHERIT ALL BRANCHED BY by_region SET region = message.region
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        LABELS { 'kind' = 'reingestor' };
+      CREATE HTTP CLIENT api CONFIG { 'endpoint' = 'http://127.0.0.1:1', 'timeout_ms' = 5000 }
+        LABELS { 'kind' = 'client' };
+      CREATE HTTP REQUEST EMITTER publish FROM routed
+        ATTACHED
+        TO api METHOD 'POST' PATH concat('/events/', input.region)
+          MODE ACK RETRY POLICY BACKOFF 1s MAX 1m WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+        LABELS { 'kind' = 'emitter' };
+      CREATE UDF add_one WITH ROTO_0_13 ARGS (value I64) RETURNS I64
+        CODE $roto$ fn add_one(value: I64Column) -> I64Column { value.add_s(1) } $roto$
+        LABELS { 'kind' = 'udf' };
+      CREATE PLACEMENT domain_policy DOMAIN WIDE PREFER COLOCATION
+        LABELS { 'kind' = 'placement' };
+      CREATE SCHEMA lookup_entry ( id STRING, value I64 );
+      CREATE WIRE JSON SCHEMA lookup_entry_wire MODE STRICT ( id string, value integer );
+      CREATE WIRE JSON CODEC lookup_entry_codec
+        FROM WIRE SCHEMA lookup_entry_wire TO SCHEMA lookup_entry;
+      CREATE HASH MAP lookup_by_id
+        KEY id
+        FROM RESOURCE lookup_bundle VERSION 1
+        PATH 'lookup.jsonl'
+        DECODE USING lookup_entry_codec
+        LABELS { 'kind' = 'hash map' };
+      CREATE SCHEMA features ( vector <vector_type> );
+      CREATE SCHEMA scored ( score <score_type> );
+      CREATE RELAY features SCHEMA features UNBRANCHED;
+      CREATE RELAY scored SCHEMA scored UNBRANCHED;
+      CREATE INFERENCER score FROM features
+        USING RESOURCE score_model VERSION 1
+        FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
+        INPUTS { 'features' <tensor_type>[2] = input.vector }
+        OUTPUT SCHEMA { 'score' <tensor_type>[1] }
+        UNBRANCHED
+        TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        LABELS { 'kind' = 'inferencer' };
+      CREATE SCHEMA metric ( value I32 );
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
+      CREATE WASM PROCESSOR filter_even FROM raw_metrics
+        USING RESOURCE wasm_filter VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
+        UNBRANCHED
+        TO filtered_metrics SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG
+        LABELS { 'kind' = 'wasm processor' };
+      """
+    Then every one of these descriptions shows its entity's labels
+      | description                            | labels                              |
+      | DESCRIBE PARAMETRIZER by_region        | labels: {"kind":"parametrizer"}     |
+      | DESCRIBE RELAY incoming                | labels: {"kind":"relay"}            |
+      | DESCRIBE ENDPOINT ingress              | labels: {"kind":"endpoint"}         |
+      | DESCRIBE CLIENT api                    | labels: {"kind":"client"}           |
+      | DESCRIBE INGESTOR intake               | labels: {"kind":"ingestor"}         |
+      | DESCRIBE EMITTER publish               | labels: {"kind":"emitter"}          |
+      | DESCRIBE JUNCTION route                | labels: {"kind":"junction"}         |
+      | DESCRIBE DEDUPLICATOR deduplicate      | labels: {"kind":"deduplicator"}     |
+      | DESCRIBE REORDERER reorder             | labels: {"kind":"reorderer"}        |
+      | DESCRIBE CORRELATOR settle             | labels: {"kind":"correlator"}       |
+      | DESCRIBE REINGESTOR regroup            | labels: {"kind":"reingestor"}       |
+      | DESCRIBE WINDOW PROCESSOR count_events | labels: {"kind":"window processor"} |
+      | DESCRIBE HASH MAP lookup_by_id         | labels: {"kind":"hash map"}         |
+      | DESCRIBE INFERENCER score              | 'kind' = 'inferencer'               |
+      | DESCRIBE WASM PROCESSOR filter_even    | labels: {"kind":"wasm processor"}   |
+      | DESCRIBE UDF add_one                   | labels: {"kind":"udf"}              |
+      | DESCRIBE PLACEMENT domain_policy       | labels: {"kind":"placement"}        |
+
+    Examples:
+      | cluster_size | tensor_type       | vector_type   | score_type    |
+      | 1            | DENSE TENSOR<F32> | ARRAY<F32, 2> | ARRAY<F32, 1> |
+      | 3            | DENSE TENSOR<F32> | ARRAY<F32, 2> | ARRAY<F32, 1> |

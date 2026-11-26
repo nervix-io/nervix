@@ -175,21 +175,22 @@ use crate::{
         BranchedProcessorOperationSpec, BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec,
         BranchedProcessorSpec, ClientIngestorStartPlan, DomainActivationPlan,
         DynamicExecutionUpdate, EndpointIntakeStartPlan, EndpointRequestPlan, EntitySwapExecution,
-        EntrypointPlans, ExecutionDelta, ExecutionNode, ExecutionRevision, GeneratorExecutionPlan,
-        GeneratorRoutePlan, HttpEndpointIngestorStartPlan, HttpIngestorStartPlan,
-        HttpRequestIngestorStartPlan, IngestorConnectorPlan, IngestorInputPlan, IngestorSpec,
-        IngestorStartPlan, KafkaDomainOffsetPlacement, KafkaIngestorStartPlan, KafkaOffsetPlan,
-        KafkaTopicIngestorStartPlan, LookupResourcePlan, LoweredConstruction,
-        MessageErrorCompileSchemas, MessageErrorRouteKey, MessageErrorRouteSpecs,
-        MqttIngestorStartPlan, MqttTopicIngestorStartPlan, NatsIngestorStartPlan,
-        NatsStreamIngestorStartPlan, NatsSubjectIngestorStartPlan, PlannedClusterRevision,
-        PlannedCodec, PlannedCodecWireFormat, PlannedEntryRoute, PlannedRouteBranch,
-        PlannedSignalingProtocol, PrometheusIngestorStartPlan, PrometheusQueryIngestorStartPlan,
-        PulsarIngestorStartPlan, PulsarTopicIngestorStartPlan, RabbitMqIngestorStartPlan,
-        RabbitMqQueueIngestorStartPlan, RedisIngestorStartPlan, RedisPubSubIngestorStartPlan,
-        ReingestorInputPlan, ReingestorPlan, SqsIngestorStartPlan, SqsQueueIngestorStartPlan,
-        SyslogIngestorStartPlan, SyslogListenerIngestorStartPlan, TransportInputPlan,
-        WasmModulePlan, WebsocketsConnectionIngestorStartPlan, WebsocketsEndpointIngestorStartPlan,
+        EntrypointPlans, ExecutionDelta, ExecutionNode, ExecutionRevision, ExecutionUnit,
+        GeneratorExecutionPlan, GeneratorRoutePlan, HttpEndpointIngestorStartPlan,
+        HttpIngestorStartPlan, HttpRequestIngestorStartPlan, IngestorConnectorPlan,
+        IngestorInputPlan, IngestorSpec, IngestorStartPlan, KafkaDomainOffsetPlacement,
+        KafkaIngestorStartPlan, KafkaOffsetPlan, KafkaTopicIngestorStartPlan, LookupResourcePlan,
+        LoweredConstruction, MessageErrorCompileSchemas, MessageErrorRouteKey,
+        MessageErrorRouteSpecs, MqttIngestorStartPlan, MqttTopicIngestorStartPlan,
+        NatsIngestorStartPlan, NatsStreamIngestorStartPlan, NatsSubjectIngestorStartPlan,
+        PlannedClusterRevision, PlannedCodec, PlannedCodecWireFormat, PlannedEntryRoute,
+        PlannedRouteBranch, PlannedSignalingProtocol, PrometheusIngestorStartPlan,
+        PrometheusQueryIngestorStartPlan, PulsarIngestorStartPlan, PulsarTopicIngestorStartPlan,
+        RabbitMqIngestorStartPlan, RabbitMqQueueIngestorStartPlan, RedisIngestorStartPlan,
+        RedisPubSubIngestorStartPlan, ReingestorInputPlan, ReingestorPlan, SqsIngestorStartPlan,
+        SqsQueueIngestorStartPlan, SwapStopOrder, SyslogIngestorStartPlan,
+        SyslogListenerIngestorStartPlan, TransportInputPlan, WasmModulePlan,
+        WebsocketsConnectionIngestorStartPlan, WebsocketsEndpointIngestorStartPlan,
         WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan, ZeroMqPullIngestorStartPlan,
     },
     resource::ResourceStore,
@@ -376,6 +377,7 @@ mod schedule_apply;
 mod snapshot_staging;
 pub(crate) mod state_inspection_exchange;
 mod state_inspection_read;
+mod swap_stops;
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
 pub mod task_handle_benchmark;
@@ -421,7 +423,7 @@ use branch_lru_state::{
 };
 use branch_runtime::{
     BranchRuntime, BranchRuntimeMetrics, IngestorRouteRuntime, MaterializedBatchWaitContext,
-    MaterializedDomainHandles, ParkedMaterializedBatch, PendingMaterializedBatch,
+    MaterializedDomainHandles, ParkedMaterializedBatch, PendingMaterializedBatch, RouteStop,
     branch_lru_placement, flush_branch_junction, internal_processor_error_policies,
     persist_branch_instance_lru_snapshot, publish_branch_instance_lru_snapshot,
 };
@@ -467,7 +469,7 @@ use domain_execution::{
 use domain_rebuild::branch_relays_from_plans;
 use emitter_buffer::{
     DeliveredAcknowledgements, EmitterBatchBuffer, EmitterBufferedMessages, EmitterPublication,
-    EmitterPublishBatch, PublishReport, RowToPack,
+    EmitterPublishBatch, ErrorRouteInputs, PublishReport, RouteSourceRows, RowToPack,
 };
 use emitter_client::{ClientConsumerConnector, ClientPayload};
 use emitter_connectors::EmitterConnectorStarter;
@@ -492,7 +494,7 @@ use emitter_supervision::{
 };
 use emitter_task::{
     EmitterConnectorContext, EmitterRuntimeError, EmitterRuntimeResult, emitter_error_message,
-    emitter_init_error, emitter_publish_error_is_retryable, emitter_report,
+    emitter_publish_error_is_retryable, emitter_report,
 };
 use emitter_task_programs::EmitterTaskPrograms;
 use emitter_values::{
@@ -529,7 +531,7 @@ use force_flush::{
     DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant,
     IngestorAckRootTrackers,
 };
-use generator::GeneratorTaskSpec;
+use generator::{GeneratorTask, GeneratorTaskSpec};
 use http_request_fields::{
     AcceptedHttpRequests, AdmittedHttpRequests, CompiledHttpRequestFields, HttpRequestEvaluation,
     HttpRequestFields, HttpRequestInput, HttpRequestSchemas, SourceRecords,
@@ -589,7 +591,7 @@ use message_error_delivery::{
 use message_error_plan::{
     BoundMessageErrorRoute, BoundMessageErrorRoutes, MessageErrorRouteBindingContext,
 };
-use nervix_connector_kafka::KafkaOffsetPosition;
+use nervix_connector::DomainOffsetPosition;
 pub(in crate::runtime) use nervix_models::IngestorMetadataDeclaration;
 use nervix_models::{DeduplicatorName, ReingestorName};
 pub(in crate::runtime) use node::RuntimeInner;
@@ -644,7 +646,9 @@ use processors::{
 };
 pub(in crate::runtime) use reconnect_backoff::{AcknowledgementKeepalive, RuntimeReconnectBackoff};
 use record_metadata::RecordMetadataColumns;
-use reingestor::{PlannedReingestorInput, ReingestorInputConsumer, ReingestorRuntimes};
+use reingestor::{
+    PlannedReingestorInput, ReingestorInputConsumer, ReingestorRuntimes, ReingestorTask,
+};
 pub(in crate::runtime) use relay_batch::RelayDispatchResult;
 use relay_batch::build_stream_record_batch_preserving_acks;
 #[cfg(any(test, feature = "benchmarks"))]
@@ -677,7 +681,7 @@ use scheduled_node::{
     EmitterTaskBuildDeps, EmitterTaskDeps, ExecutionBuildDeps, PlacedNodeState, PlacementTasks,
     ScheduledNodePlacement, ScheduledNodeTask,
 };
-pub(in crate::runtime) use shared_clients::{SharedClientError, SharedClientLease};
+pub(in crate::runtime) use shared_clients::SharedClientError;
 use snapshot_staging::{SnapshotStaging, SnapshotStagingLimits};
 pub(crate) use snapshot_staging::{
     SnapshotStagingError, StagedArtifact, StagedArtifactReader, StagedSnapshotWriter,

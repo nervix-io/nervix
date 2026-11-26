@@ -20,9 +20,9 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator as ModelBinaryOperator,
-    CaseBranch as ModelCaseBranch, Expression as ModelExpression, FieldName, FieldReference,
-    FieldScope, Inheritance, JsonPath, Literal as ModelLiteral, MembershipOperator, ParseAsType,
-    RangeOperator, RouteConstruction, UnaryOperator as ModelUnaryOperator,
+    CaseBranch as ModelCaseBranch, DurationValue, Expression as ModelExpression, FieldName,
+    FieldReference, FieldScope, Inheritance, JsonPath, Literal as ModelLiteral, MembershipOperator,
+    ParseAsType, RangeOperator, RouteConstruction, UnaryOperator as ModelUnaryOperator,
 };
 use strum::VariantNames as _;
 use thiserror::Error;
@@ -33,9 +33,9 @@ use crate::{
     list_statistics::ListStatisticName,
     program::{
         BinaryOp, CalendarUnit, CaseArm, CastFailure, DateBinWidth, DatePart, DatetimeFunction,
-        DatetimeFunctionName, DatetimeUnit, Disambiguation, Expr, FieldRef, FixedTimeUnit,
-        FunctionName, Invocation, Literal, Program, Span, SpannedExpr, SpannedInvocation,
-        SpannedNode, UnaryOp, Zone, spanned,
+        DatetimeFunctionName, DatetimeUnit, Disambiguation, DurationUnit, Expr, FieldRef,
+        FixedTimeUnit, FunctionName, Invocation, Literal, Program, Span, SpannedExpr,
+        SpannedInvocation, SpannedNode, UnaryOp, UnitRounding, Zone, spanned,
     },
 };
 
@@ -237,6 +237,8 @@ pub enum FrontendErrorKind {
     UnknownDatePart { part: String },
     #[error("function 'date_bin' requires a positive width, found {width}")]
     NonPositiveDateBinWidth { width: i64 },
+    #[error("function 'date_bin' requires a positive width, found {width}")]
+    NonPositiveDateBinDuration { width: DurationValue },
     #[error(
         "function 'date_bin' width of {count} {unit}s is longer than {longest} nanoseconds",
         longest = i64::MAX
@@ -274,6 +276,8 @@ pub enum DatetimeLiteral {
     DatePart,
     #[strum(serialize = "width to be an integer literal")]
     Width,
+    #[strum(serialize = "width to be a DURATION literal")]
+    DurationWidth,
     #[strum(serialize = "time zone to be a STRING literal")]
     TimeZone,
     #[strum(serialize = "format to be a STRING literal")]
@@ -1688,11 +1692,22 @@ impl DatetimeFunctionName {
                 let zone = self.zone(zone.as_ref(), span)?;
                 (DatetimeFunction::DateTrunc { unit, zone }, vec![value])
             }
+            // `date_bin(unit, width, value, origin)` counts its width in a unit, and
+            // `date_bin(width, value, origin)` writes it as a DURATION; their arities differ, so a
+            // call names one form.
             Self::DateBin => {
-                let ([unit, width, value, origin], []) = self.arguments(args, span)?;
-                let unit = self.fixed_unit(&unit, span)?;
-                let width = self.bin_width(&width, unit, span)?;
-                (DatetimeFunction::DateBin(width), vec![value, origin])
+                let ([first, second, third], [fourth]) = self.arguments(args, span)?;
+                match fourth {
+                    Some(origin) => {
+                        let unit = self.fixed_unit(&first, span)?;
+                        let width = self.bin_width(&second, unit, span)?;
+                        (DatetimeFunction::DateBin(width), vec![third, origin])
+                    }
+                    None => {
+                        let width = self.bin_duration(&first, span)?;
+                        (DatetimeFunction::DateBin(width), vec![second, third])
+                    }
+                }
             }
             Self::DateAdd => {
                 let ([unit, amount, value], [zone]) = self.arguments(args, span)?;
@@ -1735,11 +1750,35 @@ impl DatetimeFunctionName {
                 let parser = self.parser(&format, zone.as_ref(), disambiguation.as_ref(), span)?;
                 (DatetimeFunction::ParseDatetime(parser), vec![text])
             }
+            Self::DurationFloor => self.duration_units(args, UnitRounding::Floor, span)?,
+            Self::DurationCeil => self.duration_units(args, UnitRounding::Ceil, span)?,
+            Self::DurationRound => self.duration_units(args, UnitRounding::Round, span)?,
+            Self::ToDuration => {
+                let ([unit, count], []) = self.arguments(args, span)?;
+                let unit = self.duration_unit(&unit, span)?;
+                (DatetimeFunction::ToDuration(unit), vec![count])
+            }
         };
         Ok(Expr::Call {
             function: FunctionName::Datetime(function),
             args: operands,
         })
+    }
+
+    /// A call of `duration_floor`, `duration_ceil` or `duration_round`, which differ only in the
+    /// way they round: its unit, and the duration it converts.
+    fn duration_units(
+        self,
+        args: Vec<SpannedExpr>,
+        rounding: UnitRounding,
+        span: Span,
+    ) -> FrontendResult<(DatetimeFunction, Vec<SpannedExpr>)> {
+        let ([unit, value], []) = self.arguments(args, span)?;
+        let unit = self.duration_unit(&unit, span)?;
+        Ok((
+            DatetimeFunction::DurationUnits { unit, rounding },
+            vec![value],
+        ))
     }
 
     /// The written arguments of a call that takes `REQUIRED` of them followed by up to `OPTIONAL`
@@ -1789,6 +1828,9 @@ impl DatetimeFunctionName {
             | Self::FromUnix
             | Self::FormatDatetime
             | Self::ParseDatetime => FixedTimeUnit::VARIANTS.join(", "),
+            Self::DurationFloor | Self::DurationCeil | Self::DurationRound | Self::ToDuration => {
+                DurationUnit::VARIANTS.join(", ")
+            }
         }
     }
 
@@ -1822,6 +1864,12 @@ impl DatetimeFunctionName {
 
     /// A unit of fixed length, which `date_bin`, `to_unix` and `from_unix` count in.
     fn fixed_unit(self, argument: &SpannedExpr, span: Span) -> FrontendResult<FixedTimeUnit> {
+        let unit = self.string_literal(argument, DatetimeLiteral::TimeUnit, span)?;
+        unit.parse().map_err(|_| self.unknown_unit(unit, span))
+    }
+
+    /// A unit from a nanosecond to a day, which the duration conversions count in.
+    fn duration_unit(self, argument: &SpannedExpr, span: Span) -> FrontendResult<DurationUnit> {
         let unit = self.string_literal(argument, DatetimeLiteral::TimeUnit, span)?;
         unit.parse().map_err(|_| self.unknown_unit(unit, span))
     }
@@ -1985,6 +2033,44 @@ impl DatetimeFunctionName {
                 FrontendErrorKind::DateBinWidthOutOfRange { count, unit },
             )
         })
+    }
+
+    /// The width of `date_bin`'s bins written as a positive DURATION literal, such as `15m`.
+    fn bin_duration(self, argument: &SpannedExpr, span: Span) -> FrontendResult<DateBinWidth> {
+        let nanoseconds = match &argument.inner {
+            Expr::Literal(Literal::Duration(nanoseconds)) => *nanoseconds,
+            // A written `-5s` is a negated literal. Reading it as the negative width it names
+            // reports the width itself instead of calling a duration that is not a literal.
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                expr,
+            } if let Expr::Literal(Literal::Duration(magnitude)) = &expr.inner => magnitude
+                .checked_neg()
+                .assured("a duration literal is at most i64::MAX, whose negation fits i64"),
+            _ => {
+                return Err(FrontendError::report(
+                    span,
+                    FrontendErrorKind::NonLiteralDatetimeArgument {
+                        function: self,
+                        argument: DatetimeLiteral::DurationWidth,
+                    },
+                ));
+            }
+        };
+        let positive = match u64::try_from(nanoseconds) {
+            Ok(nanoseconds) => NonZeroU64::new(nanoseconds),
+            Err(_) => None,
+        };
+        let Some(count) = positive else {
+            return Err(FrontendError::report(
+                span,
+                FrontendErrorKind::NonPositiveDateBinDuration {
+                    width: DurationValue::from_nanoseconds(nanoseconds),
+                },
+            ));
+        };
+        Ok(DateBinWidth::new(count, FixedTimeUnit::Nanosecond)
+            .assured("a positive DURATION is at most i64::MAX nanoseconds, the longest width"))
     }
 }
 

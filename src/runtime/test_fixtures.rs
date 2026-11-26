@@ -1472,6 +1472,7 @@ pub(super) fn emitter_context() -> EmitterConnectorContext {
             nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic),
         ),
         remote_ack_timing: runtime.remote_ack_timing().clone(),
+        task_end: nervix_primitives::sync::CancellationToken::new(),
         runtime,
         clock: test_domain_clock(&domain),
         domain,
@@ -1645,14 +1646,21 @@ impl FilledCpuClass {
         Self::fill_with_charge(executor, class, nervix_execution::MemoryClass::Relay, 0).await
     }
 
-    /// The modeled semaphore requires positive acquisitions. These dummy jobs take a byte of
-    /// Bulk memory each, leaving the real branch's Relay accounting independently observable.
+    /// The modeled semaphore requires positive acquisitions. These dummy jobs take the admission
+    /// token of Bulk memory each, leaving the real branch's Relay accounting independently
+    /// observable.
     #[cfg(feature = "shuttle")]
     pub(crate) async fn fill_with_bulk_charge(
         executor: &Executor,
         class: nervix_execution::CpuClass,
     ) -> Self {
-        Self::fill_with_charge(executor, class, nervix_execution::MemoryClass::Bulk, 1).await
+        Self::fill_with_charge(
+            executor,
+            class,
+            nervix_execution::MemoryClass::Bulk,
+            nervix_execution::ADMISSION_TOKEN_BYTES,
+        )
+        .await
     }
 
     async fn fill_with_charge(
