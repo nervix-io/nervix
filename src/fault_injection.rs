@@ -66,6 +66,8 @@ mod entity_drain;
 #[cfg(test)]
 mod entity_drain_tests;
 mod entity_swap;
+#[cfg(test)]
+mod entity_swap_tests;
 mod execution;
 mod explicit_commit;
 mod forced_recovery;

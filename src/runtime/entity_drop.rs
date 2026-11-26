@@ -464,8 +464,9 @@ impl Runtime {
         let released = self
             .discard_reingestor_tasks(domain, entity, tasks.len())
             .await;
-        for mut task in tasks {
+        for task in tasks {
             nervix_primitives::task::consume_budget().await;
+            let mut task = task.into_task();
             if nervix_primitives::time::timeout(self.task_stop_grace(), &mut task)
                 .await
                 .is_err()
@@ -475,9 +476,9 @@ impl Runtime {
             }
         }
         // The reingestor's routes publish what they already built, as an entry point's routes do
-        // when it ends.
+        // when it ends, with no limit of their own.
         for route in routes.into_iter().flatten() {
-            route.shutdown(self.task_stop_grace()).await;
+            route.stop(RouteStop::Finish).await;
         }
         released
     }
@@ -508,6 +509,7 @@ impl Runtime {
         // A generator's records come from no source, so ending it leaves no share to release.
         for task in tasks {
             nervix_primitives::task::consume_budget().await;
+            let task = task.into_task();
             task.abort();
             task.join_after_shutdown("dropped generator").await;
         }
@@ -547,7 +549,12 @@ impl Runtime {
                     control.counters().buffered_records.arch_into(),
                 );
             }
-            if let Err(error) = self.stop_ingestor_unit(domain, &ingestor, unit).await {
+            // What the unit already admitted travels on: its routes finish with no limit of their
+            // own.
+            if let Err(error) = self
+                .stop_ingestor_unit(domain, &ingestor, unit, RouteStop::Finish)
+                .await
+            {
                 warn!(
                     domain = domain.as_str(),
                     ingestor = ingestor.as_str(),

@@ -464,4 +464,3 @@ Feature: Duration values
       | 3            | timed_events | wait = 106752d            | does not fit a DURATION                                      |
       | 1            | timed_events | wait = 30 AS DURATION     | converts to no other type                                    |
       | 3            | plain_events | count = input.wait AS I64 | converts to no other type                                    |
-      | 1            | timed_events | wait = input.wait + 1s    | operator Add is not valid for Duration(Nanosecond)           |

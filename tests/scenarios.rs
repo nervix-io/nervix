@@ -236,6 +236,7 @@ mod emitter_lifecycle;
 mod emitter_metrics;
 mod endpoint_intake;
 mod engine_settings;
+mod entity_label_descriptions;
 mod entity_swap_failure;
 mod generated_http_payloads;
 mod http_transport;
@@ -33623,6 +33624,58 @@ async fn when_http_payload_is_posted_to_node(
         .publish_http(&node_id, &host, &path, &payload)
         .await
         .expect("failed to post http payload");
+}
+
+/// How long a post the endpoint answered as temporarily unavailable waits before it asks again.
+const UNAVAILABLE_HTTP_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Posts one payload to a no-acknowledgement endpoint until the endpoint accepts it, within `wait`.
+///
+/// An endpoint whose ingestor is being replaced answers `503 Service Unavailable` until the
+/// replacement binds, which a client retries, as this step does. Any other answer, and a wait that
+/// outlasts its bound, fails the step.
+#[when(
+    expr = "http payload is accepted within {string} by node {string} with host {string} path \
+            {string}"
+)]
+async fn when_http_payload_is_accepted_within(
+    world: &mut ScenarioWorld,
+    wait: String,
+    node_id: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let wait =
+        parse_duration_text(&wait).assured("the scenario declares a valid HTTP acceptance bound");
+    let node_id = expand_placeholders(world, &node_id);
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    append_cucumber_log_line(&format!(
+        "http publish until accepted: node={node_id} host={host} path={path} payload={payload} \
+         wait={wait:?}"
+    ));
+    let posted_at = Instant::now();
+    world.last_publish_at = Some(posted_at);
+    world.first_http_post_at.get_or_insert(posted_at);
+    let deadline = posted_at + wait;
+    loop {
+        let outcome = world
+            .cluster()
+            .publish_http(&node_id, &host, &path, &payload)
+            .await;
+        let unavailable = match outcome {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => error,
+            Err(error) => panic!("the endpoint refused the http payload: {error}"),
+        };
+        assert!(
+            Instant::now() < deadline,
+            "the endpoint stayed unavailable for {wait:?}: {unavailable}"
+        );
+        nervix_primitives::time::sleep(UNAVAILABLE_HTTP_RETRY_INTERVAL).await;
+    }
 }
 
 #[when(
