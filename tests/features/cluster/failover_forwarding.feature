@@ -153,7 +153,7 @@ Feature: A relay owner fails over while another node forwards to it
       key={"tenant":"beta"} payload={"sequence":2,"tenant":"beta"}
       """
 
-  Scenario: An alteration that stops the forwarding ingestor while its post waits for the failover route completes without that route
+  Scenario: An alteration draining the forwarding ingestor when the relay owner stops leaves the post to the failover route
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
@@ -213,26 +213,23 @@ Feature: A relay owner fails over while another node forwards to it
       {"tenant":"beta","sequence":2}
       """
     Then a relay payload for domain "{{domain}}" is waiting before its grant request
-    # The alteration replaces the ingestor. The forwarder installs it while it is the newest
-    # revision, so that installation stops the ingestor unit whose route holds the post's delivery,
-    # and it ends only once that unit has stopped.
-    When runtime installation on node "{{forwarder}}" is paused
-    And these Plexus commands begin executing in the background
+    # The alteration replaces the ingestor. Before it commits anything, it holds the ingestor's
+    # intake on every node and drains the work the ingestor already took in, the post's delivery
+    # among it, while no installation runs on the forwarder.
+    When these Plexus commands begin executing in the background
       """
       ALTER HTTP ENDPOINT INGESTOR wire_ingestor SET MODE ACK MAX 16 ACK TIMEOUT 30s;
       """
-    Then node "{{forwarder}}" reaches its runtime installation pause
-    When runtime installation on node "{{forwarder}}" is released
     And node "{{owner}}" is stopped
     Then node "{{forwarder}}" stops counting node "{{owner}}" as a live peer
-    # The delivery finds its owner gone while the stop of its unit is under way. It hands its rows
-    # over to the relay rather than hold that stop until the route failover publishes arrives,
-    # which the forwarder installs only after the alteration.
+    # The owner's stop ends the alteration, which cannot hold a node that is gone. The delivery
+    # finds that owner gone and waits for the route that failover publishes, which nothing on the
+    # forwarder holds back.
     When relay payload grant requests for domain "{{domain}}" are released
-    Then within "60s" the background Plexus execution reaches a successful outcome
-    And within "60s" node "{{leader}}" reports no scheduled work on "{{owner}}"
+    Then within "60s" node "{{leader}}" reports no scheduled work on "{{owner}}"
     And the background http publish succeeds
     And within "10s" client "subscriber" receives a subscription payload
       """
       key={"tenant":"beta"} payload={"sequence":2,"tenant":"beta"}
       """
+    And within "60s" the background Plexus execution reaches a terminal outcome
