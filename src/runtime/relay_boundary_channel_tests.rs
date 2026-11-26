@@ -51,6 +51,59 @@ fn forced_routing_fence_ends_changed_channels_until_publication(#[case] move_own
     assert!(retained.cancellation().is_cancelled());
 }
 
+/// A drop withdraws the destinations it destroyed without a new routing generation, so the
+/// channels of what stays keep their lifetime. Only a withdrawal is installed: a destination it
+/// would add, or one it would make attached, waits for the schedule application that fences it.
+#[test]
+fn a_drop_withdraws_destinations_without_ending_the_channels_that_stay() {
+    let attached = |node: &str| RemoteRuntimeConsumer {
+        node_id: named(node),
+        relay: named("events"),
+        mode: Some(AckMode::Attached),
+        unit_modes: BTreeMap::new(),
+    };
+    let detached = |node: &str| RemoteRuntimeConsumer {
+        mode: Some(AckMode::Detached),
+        ..attached(node)
+    };
+    let installed = vec![attached("node-2"), attached("node-3"), detached("node-4")];
+    let services = RelayBoundaryServices::new(
+        RelayBoundaryFanout::direct_with_capacity(NonZeroUsize::MIN),
+        0,
+        0,
+        installed.clone(),
+        None,
+        RelayBranchPresences::single(Arc::new(BranchPresence::new())),
+        Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    );
+    services.replace_owner_routes(RelayOwnerRoutes::single(named("node-1")));
+    let ingress = services.ingress_slot(&None, Unit::SINGLE);
+    let staying = services.outbound_slot(
+        &named("node-2"),
+        &named("events"),
+        RelayPayloadKind::Routed,
+        &None,
+        Unit::SINGLE,
+    );
+
+    services.withdraw_dropped_remote_runtime_consumers(vec![
+        attached("node-2"),
+        attached("node-3"),
+        detached("node-4"),
+        attached("node-5"),
+    ]);
+    assert_eq!(*services.remote_runtime_consumers.load_full(), installed);
+    services
+        .withdraw_dropped_remote_runtime_consumers(vec![attached("node-2"), attached("node-4")]);
+    assert_eq!(*services.remote_runtime_consumers.load_full(), installed);
+
+    let remaining = vec![detached("node-2"), detached("node-4")];
+    services.withdraw_dropped_remote_runtime_consumers(remaining.clone());
+    assert_eq!(*services.remote_runtime_consumers.load_full(), remaining);
+    assert!(!ingress.cancellation().is_cancelled());
+    assert!(!staying.cancellation().is_cancelled());
+}
+
 #[test]
 fn idle_relay_channel_reopens_with_a_fresh_incarnation() {
     let rotation = default_idle_rotation();

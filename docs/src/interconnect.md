@@ -427,6 +427,15 @@ names the domain and the start version the stop ended it at; the answer is what 
 cut, entity by entity and by kind, that the teardown has not ended the domain's tasks yet, or that
 the node holds no report for that stop because it restarted or never ran the domain.
 
+A change that drops entities collects what every node discarded with one management-pool request
+from the leader that committed it, `entity_drop_report`, carrying the coordinator's identity, which
+a node answers only while its sender leads. It names the domain and the runtime revision that
+published the drop. The answer is what the node discarded for that domain from that revision on,
+entity by entity and by kind; that the node has not applied the revision yet, which the coordinator
+asks again until the domain drain timeout passes; or that the node holds no report for it because
+an earlier run of the node applied it. The coordinator names every node that did not report, has
+left or restarted in the statement's answer.
+
 A stopping node moves its own scheduled work with one typed commands-pool request to the current
 leader, `stopping_node_drain`. It names no node and carries one of two actions: drain, which cordons
 the sender, carries what remains of its shutdown timeout, and moves its scheduled work through planned
@@ -578,6 +587,7 @@ the revision, branch incarnation, tensor shapes and float bits. The interconnect
 bounded frame through the existing snapshot bulk quota; the inferencer codec validates its shape.
 The current fingerprint also covers materialized inspection page requests and their typed
 descriptors, so checkpoint identity and inspection operations advance as one wire contract.
+It also covers the drop report request and its answers with the kinds of discarded work.
 
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
@@ -1141,7 +1151,11 @@ For an attached acknowledgement, progress also carries a monotonic sequence and 
 remaining handoff shares are parked, on `REQUIRED WAIT` or in a window that retains their rows. Each upstream node parks or reactivates its
 own attached share in sequence order, so a domain drain excludes a parked chain across relay hops.
 The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
-ingestor or persist an acknowledgement. Admission progress carries no parked state.
+ingestor or persist an acknowledgement. A terminal acknowledgement can reach the upstream node while
+it still holds its share parked, when the receiver released the share and resolved it before
+reporting the release, as a dropped entity's release of what it held does. The upstream node then
+reactivates its share before resolving it, as every holder does. Admission progress carries no
+parked state.
 
 Before admission the receiver reports nothing about a delivery's records: their acknowledgement
 watches start only once it has admitted them. Until then the sending node holds the records on their

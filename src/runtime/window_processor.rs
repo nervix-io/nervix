@@ -196,6 +196,18 @@ impl WindowProcessorState {
         self.rows_with_pending_acknowledgements
     }
 
+    /// Releases as done every row the window retains, as the drop that destroys the window
+    /// processor does, and answers how many of them still held acknowledgement shares. The window
+    /// keeps no row afterwards.
+    pub(super) fn release_retained_as_done(&mut self) -> u64 {
+        let released: u64 = self.rows_with_pending_acknowledgements.arch_into();
+        for entry in std::mem::take(&mut self.entries) {
+            entry.acknowledge();
+        }
+        self.rows_with_pending_acknowledgements = 0;
+        released
+    }
+
     /// Counts a row entering the window.
     fn count_entered(&mut self, entry: &WindowEntry) {
         if entry.message.acks.is_empty() {

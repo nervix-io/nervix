@@ -144,10 +144,13 @@ just docker-build-debian
 just docker-build-cuda
 ```
 
-Both recipes require the repository's remote compiler-cache configuration: `KACHE_S3_BUCKET`,
-`KACHE_S3_REGION`, `KACHE_S3_ENDPOINT`, `KACHE_S3_ACCESS_KEY`, and `KACHE_S3_SECRET_KEY`. They build
-and load a local image by default; the existing tag, platform, push, and BuildKit cache arguments
-are available for publishing builds.
+The repository's remote compiler-cache configuration is optional: `KACHE_S3_BUCKET`,
+`KACHE_S3_REGION`, `KACHE_S3_ENDPOINT`, `KACHE_S3_ACCESS_KEY`, and `KACHE_S3_SECRET_KEY`. With all
+five, the builder reads and publishes the shared remote cache; with none, kache still wraps every
+compilation but keeps its cache in the builder's local store alone, so a first build compiles
+everything; with only some of them, the build is refused. The recipes build and load a local image
+by default; the existing tag, platform, push, and BuildKit cache arguments are available for
+publishing builds.
 
 The `builder` stage installs its build tools at the exact versions that `ARG`s in
 `Dockerfile.debian` pin, and every image build runs that step. kache and trunk come from their

@@ -355,6 +355,28 @@ until its own branch ends. An independently expiring owner branch permits a stil
 to bind a fresh channel after invalidation. The producer's own ending moves it to `Ended` and
 prevents rebinding. Domain terminal teardown cancels the relay publication itself.
 
+A drop takes a runtime consumer out of a relay in two steps, in this order. The node first
+removes the consumer's registration from the relay's consumer count, so no later publication
+counts a consumer it can no longer find and fails the batch as the dispatch otherwise does when
+the count exceeds its receivers. The consumer's task then leaves the fan-out releasing its share:
+it marks its queue as released on departure, leaves the consumer list, closes its queue and takes
+back every batch delivered to it, whose shares it releases as done. A publication that selected
+the consumer before it left either delivered before the close, and the consumer releases that
+share, or finds the queue closed, by a failed push or a refused admission, and reads the mark the
+close published, so the publisher releases that share as done instead. Each share is therefore
+resolved exactly once, by whichever side holds the batch when the queue closes; a consumer that
+leaves without the mark keeps today's outcome, which fails the share. A batch the relay's owner on
+another node routed here for consumers a drop destroyed before that owner applied the drop finds
+no attached consumer; while the last change to the node's attached consumers of that relay is
+such a drop, the routed delivery answers as delivered, so the routed share this node holds counts
+as done, and any later registration or removal clears that mark. The owner withdraws such
+consumers from the destinations of its relays when it applies the drop, computed from the revision
+it has installed so that nothing else of the dropping revision takes effect early. It installs
+only a withdrawal (a destination it would add, or one it would make attached, waits for the
+schedule application that fences it) and replaces no routing generation, so no channel of a
+destination that stays is interrupted, and a fan-out that already holds a withdrawn destination's
+channel delivers there and is answered as above.
+
 Channel gates serialize encode, sequence assignment and dispatch for that channel only. Gate waits
 select cancellation, and transport admission retains its existing physical deadline. They do not
 serialize unrelated branches or peers. A subscription snapshot selects only live advertised peers,

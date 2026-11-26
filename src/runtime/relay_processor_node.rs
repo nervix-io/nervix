@@ -6,6 +6,7 @@
 //! - **Must not know.** Plexus parsing, semantic Models or cluster scheduling policy.
 
 use error_stack::{Report, ResultExt as _};
+use nervix_models::DiscardedWorkKind;
 
 use super::*;
 
@@ -316,6 +317,76 @@ impl RelayProcessorNode {
                     ack.no_ack(reason.to_string());
                 }
             }
+        }
+    }
+
+    /// Releases as done every message this branch's processor holds, as the drop that destroys
+    /// the processor does, and counts what it released by kind: collected input and output
+    /// waiting in a route's buffer, `REQUIRED WAIT` messages, rows resting in a window, rows a
+    /// reorderer holds, records a correlator holds and messages a WASM guest holds.
+    pub(super) fn release_held_work_as_done(
+        &mut self,
+        released: &mut entity_drop::DiscardedWorkCounts,
+    ) {
+        for collector in self.input_collectors.values_mut() {
+            for batch in collector.take_pending() {
+                released.release_batch(DiscardedWorkKind::UnprocessedMessages, batch);
+            }
+        }
+        for pending in std::mem::take(&mut self.pending_materialized) {
+            let ParkedMaterializedBatch {
+                batch,
+                required_wait,
+                ..
+            } = pending.into_parked();
+            // A parked share becomes active again before it is acknowledged.
+            drop(required_wait);
+            released.release_batch(DiscardedWorkKind::WaitingMessages, batch);
+        }
+        for route in &mut self.operation.output_routes_mut().routes {
+            route.clear_flush_timer();
+            for batch in std::mem::take(&mut route.pending) {
+                released.release_batch(DiscardedWorkKind::UnprocessedMessages, batch);
+            }
+        }
+        match &mut self.operation {
+            RelayProcessorOperationNode::WindowProcessor { state, .. } => {
+                let rows = state.release_retained_as_done();
+                released.add(DiscardedWorkKind::WindowRows, rows);
+            }
+            RelayProcessorOperationNode::Reorderer { output_buffers, .. } => {
+                for buffer in output_buffers.iter_mut() {
+                    for acks in buffer.acks() {
+                        acks.ack_success();
+                    }
+                    released.add(DiscardedWorkKind::HeldRows, buffer.held_rows());
+                    buffer.clear();
+                }
+            }
+            RelayProcessorOperationNode::Correlator { state, .. } => {
+                for pending in std::mem::take(&mut state.pending_left) {
+                    pending.message.acks.ack_success();
+                    released.add(DiscardedWorkKind::WaitingRecords, 1);
+                }
+                for pending in std::mem::take(&mut state.pending_right) {
+                    pending.message.acks.ack_success();
+                    released.add(DiscardedWorkKind::WaitingRecords, 1);
+                }
+            }
+            RelayProcessorOperationNode::WasmProcessor {
+                ack_map, pending, ..
+            } => {
+                for (_, held) in ack_map.drain() {
+                    held.acks.ack_success();
+                    released.add(DiscardedWorkKind::UnprocessedMessages, 1);
+                }
+                for batch in std::mem::take(pending) {
+                    released.release_batch(DiscardedWorkKind::UnprocessedMessages, batch);
+                }
+            }
+            RelayProcessorOperationNode::Deduplicator { .. }
+            | RelayProcessorOperationNode::Junction { .. }
+            | RelayProcessorOperationNode::Inferencer { .. } => {}
         }
     }
 

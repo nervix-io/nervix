@@ -1467,6 +1467,11 @@ impl Runtime {
         services: &RelayBoundaryServices,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
+        // A producer on another node sent this batch before it applied the drop that removed the
+        // relay, with every producer and consumer of it: the batch counts as done.
+        if services.is_dropped() {
+            return Ok(());
+        }
         let unit = match services.unit_of(&batch.key) {
             Ok(unit) => unit,
             Err(refusal) => {

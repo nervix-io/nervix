@@ -27,7 +27,7 @@ use nervix_consensus::{
 use nervix_interconnect::EntityGatePurpose;
 use nervix_models::{
     DomainName, DomainSchedule, DomainStatus, ExecutionStepImpactReport, ImpactDiagnosticKind,
-    ModelKind, ModelName, OperationImpactReason, OperationImpactReport, PauseRequirement,
+    ModelKind, ModelName, NodeRef, OperationImpactReason, OperationImpactReport, PauseRequirement,
     QuiesceLevel, RequestedResourceVersion, ResourceBindingImpact, Statement, TransactionOperation,
     TransactionOperationNumber,
 };
@@ -40,6 +40,7 @@ use super::{
     command_result::{CommandDiagnostic, CommandDisposition, CommandResult},
     completion::CompletionError,
     domain_lifecycle::DomainAlterError,
+    entity_drop::DropReport,
     entity_gate::{ClusterEntityGateScope, EntityGateParticipants},
     ownership_handoff::{mark_complete_ownership_transitions, planned_ownership_moves},
     schedule_planning::DomainSchedulePlanningSnapshot,
@@ -76,6 +77,8 @@ struct AppliedModelMutation {
     index: usize,
     model: ModelName,
     message: AppliedModelMutationMessage,
+    /// The entity a `DROP` statement removed, whose answer reports what was discarded.
+    dropped: Option<NodeRef>,
 }
 
 enum AppliedModelMutationMessage {
@@ -226,6 +229,8 @@ struct ModelMutationOutcome<'a> {
     planned_relocations: usize,
     /// The resolved `VERSION LATEST` messages of the applied batch.
     latest_resolutions: &'a [String],
+    /// What the nodes discarded for the entities the batch's `DROP` statements removed.
+    drop_report: Option<&'a DropReport>,
 }
 
 fn model_mutation_success_result(
@@ -237,6 +242,7 @@ fn model_mutation_success_result(
         classified_level,
         planned_relocations,
         latest_resolutions,
+        drop_report,
     } = outcome;
     let mut results = existing_results.to_vec();
     let mut first_applied = true;
@@ -275,6 +281,11 @@ fn model_mutation_success_result(
                 }
             }
             first_applied = false;
+        }
+        if let (Some(report), Some(entity)) = (drop_report, &mutation.dropped)
+            && entity.kind.is_schedulable()
+        {
+            append_command_output(&mut message, &report.entity_text(entity));
         }
         results[mutation.index] = Some(command_ok(message));
     }
@@ -486,6 +497,7 @@ impl SessionServiceImpl {
                             domain.as_str()
                         )
                         .into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::Labels { entity, mutation });
                 }
@@ -528,6 +540,7 @@ impl SessionServiceImpl {
                         index,
                         model: model_id.clone(),
                         message: String::new().into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::Create(model));
                 }
@@ -542,6 +555,7 @@ impl SessionServiceImpl {
                             domain.as_str()
                         )
                         .into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::AlterSchema(alter));
                 }
@@ -556,6 +570,7 @@ impl SessionServiceImpl {
                             domain.as_str()
                         )
                         .into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::AlterWireJsonSchema(alter));
                 }
@@ -570,6 +585,7 @@ impl SessionServiceImpl {
                             domain.as_str()
                         )
                         .into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::AlterWireCborSchema(alter));
                 }
@@ -584,6 +600,7 @@ impl SessionServiceImpl {
                             domain.as_str()
                         )
                         .into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::AlterWireAvroSchema(alter));
                 }
@@ -598,6 +615,7 @@ impl SessionServiceImpl {
                             domain.as_str()
                         )
                         .into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::AlterRelay(alter));
                 }
@@ -612,6 +630,7 @@ impl SessionServiceImpl {
                             domain.as_str()
                         )
                         .into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::AlterParametrizer(alter));
                 }
@@ -626,6 +645,7 @@ impl SessionServiceImpl {
                             domain.as_str()
                         )
                         .into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::AlterJunction(alter));
                 }
@@ -640,6 +660,7 @@ impl SessionServiceImpl {
                             domain.as_str()
                         )
                         .into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::AlterDeduplicator(alter));
                 }
@@ -654,6 +675,7 @@ impl SessionServiceImpl {
                             domain.as_str()
                         )
                         .into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::AlterReorderer(alter));
                 }
@@ -668,6 +690,7 @@ impl SessionServiceImpl {
                             domain.as_str()
                         )
                         .into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::AlterEmitter(alter));
                 }
@@ -682,6 +705,7 @@ impl SessionServiceImpl {
                             domain.as_str()
                         )
                         .into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::AlterIngestor(alter));
                 }
@@ -696,6 +720,7 @@ impl SessionServiceImpl {
                             domain.as_str()
                         )
                         .into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::AlterReingestor(alter));
                 }
@@ -710,6 +735,7 @@ impl SessionServiceImpl {
                             domain.as_str()
                         )
                         .into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::AlterGenerator(alter));
                 }
@@ -724,6 +750,7 @@ impl SessionServiceImpl {
                             domain.as_str(),
                         )
                         .into(),
+                        dropped: None,
                     });
                     mutations.push(RegistryMutation::AlterPlacement(alter));
                 }
@@ -738,6 +765,7 @@ impl SessionServiceImpl {
                             domain.as_str()
                         )
                         .into(),
+                        dropped: Some(NodeRef::new(drop.kind, model_id.clone())),
                     });
                     mutations.push(RegistryMutation::Drop(drop));
                 }
@@ -765,6 +793,7 @@ impl SessionServiceImpl {
                                 "a REBIND statement's unified plan carries its rebind operation",
                             ),
                         ),
+                        dropped: None,
                     });
                 }
                 _ => unreachable!("model mutation batch contains a non-mutation statement"),
@@ -1608,6 +1637,7 @@ impl SessionServiceImpl {
                             classified_level,
                             planned_relocations,
                             latest_resolutions: &latest_resolutions,
+                            drop_report: None,
                         },
                     );
                     let effect = TransactionStepEffect::ReplaceDomainSchedule {
@@ -2062,6 +2092,22 @@ impl SessionServiceImpl {
                     );
                 }
             }
+            // Every node destroyed the entities the batch dropped as it applied the revision the
+            // batch published, so their reports are collected once that revision is applied.
+            let mut drops_runtime = false;
+            for mutation in &applied {
+                if let Some(entity) = &mutation.dropped
+                    && entity.kind.is_schedulable()
+                {
+                    drops_runtime = true;
+                }
+            }
+            let drop_report = match listener_revision {
+                Some(revision) if drops_runtime => {
+                    Some(Box::pin(self.collect_drop_report(&domain, revision)).await)
+                }
+                Some(_) | None => None,
+            };
             completed_result = Some(model_mutation_success_result(
                 &results,
                 &applied,
@@ -2069,6 +2115,7 @@ impl SessionServiceImpl {
                     classified_level,
                     planned_relocations,
                     latest_resolutions: &latest_resolutions,
+                    drop_report: drop_report.as_ref(),
                 },
             ));
         }
@@ -2083,6 +2130,7 @@ impl SessionServiceImpl {
                     classified_level: QuiesceLevel::Dynamic,
                     planned_relocations: 0,
                     latest_resolutions: &[],
+                    drop_report: None,
                 },
             )
         };

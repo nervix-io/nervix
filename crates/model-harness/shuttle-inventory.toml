@@ -293,6 +293,7 @@ checks = [
   "runtime::relay_boundary::shuttle_tests::shuttle_a_routed_batch_racing_a_joining_consumer_reserves_a_share_for_every_delivery",
   "runtime::relay_boundary::shuttle_tests::shuttle_emitter_instances_receive_only_their_partitions_while_a_sibling_moves",
   "runtime::relay_boundary::shuttle_tests::shuttle_owner_fanout_waits_for_an_attached_consumer_move_and_is_acknowledged",
+  "runtime::relay_channel::shuttle_tests::shuttle_a_released_departure_racing_a_delivery_accounts_each_share_once",
   "runtime::relay_channel::shuttle_tests::shuttle_canceled_dispatch_returns_its_permit_to_the_gate_fence",
   "runtime::relay_channel::shuttle_tests::shuttle_capacity_growth_admits_waiting_publishers_without_a_take",
   "runtime::relay_channel::shuttle_tests::shuttle_capacity_shrink_keeps_buffered_batches_and_wakes_publishers_after_the_drain",

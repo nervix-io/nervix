@@ -1356,3 +1356,55 @@ fn drop_batch_rejects_delete_of_deduplicator_output_stream() {
 
     let _ = fs::remove_dir_all(path);
 }
+
+#[test]
+fn a_drop_of_a_parametrizer_a_relay_still_names_is_refused_and_succeeds_once_nothing_names_it() {
+    let path = temp_db_path();
+    let registry = Registry::open(&path).expect("registry should open");
+    let domain = DomainName::parse("default").expect("valid domain");
+    registry
+        .apply_batch(
+            &domain,
+            vec![
+                schema("event_schema"),
+                branch_schema("tenant_key", &["tenant"]),
+                crate::registry::test_fixtures::branch("by_tenant", "tenant_key"),
+                crate::registry::test_fixtures::relay_branched_by(
+                    "events",
+                    "event_schema",
+                    "by_tenant",
+                ),
+            ],
+        )
+        .expect("the branched graph should build");
+    let drop_parametrizer = DropModel {
+        kind: ModelKind::Parametrizer,
+        name: named("by_tenant"),
+    };
+
+    let refused = registry
+        .drop_batch(&domain, vec![drop_parametrizer.clone()])
+        .expect_err("a relay still branches by the parametrizer");
+    assert!(matches!(
+        refused.current_context(),
+        RegistryError::DeleteInUse { .. }
+    ));
+
+    registry
+        .drop_batch(
+            &domain,
+            vec![
+                DropModel {
+                    kind: ModelKind::Relay,
+                    name: named("events"),
+                },
+                drop_parametrizer,
+            ],
+        )
+        .expect("the parametrizer drops with the relay that named it");
+    let graph = registry
+        .active_graph(&domain)
+        .expect("the graph keeps its schemas");
+    assert_eq!(graph.node_count(), 2);
+    let _ = fs::remove_dir_all(path);
+}

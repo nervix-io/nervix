@@ -40,7 +40,7 @@ use error_stack::Report;
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use indexmap::IndexMap;
 use meticulous::OptionExt as _;
-use nervix_models::{RelayName, Unit};
+use nervix_models::{DiscardedWorkKind, RelayName, Unit};
 use nervix_primitives::sync::{Arc, CancellationToken, mpsc, watch};
 use thiserror::Error;
 
@@ -49,6 +49,7 @@ use super::{
     DomainForceFlushParticipant, NodeQuiesceCounters, NodeQuiesceWorkGuard, RelayRecordBatch,
     RelayRuntimeFanIn, RelayTryRecv, RuntimeInputCollectPolicy, RuntimeInputCollector,
     branch_buffering::{BranchBufferDeadline, RuntimeWake, wait_for_branch_buffer_deadline},
+    entity_drop,
 };
 use crate::runtime_ack::AckSet;
 
@@ -418,6 +419,58 @@ impl RelayInputCollection {
                 .values()
                 .map(RuntimeInputCollector::merged_acks),
         )
+    }
+}
+
+impl RelayInputCollection {
+    /// Releases as done every batch this collection holds, as the drop that destroys its
+    /// consumer does, and counts their rows as `kind`.
+    fn release_as_done(
+        &mut self,
+        kind: DiscardedWorkKind,
+        released: &mut entity_drop::DiscardedWorkCounts,
+    ) {
+        if let Some(counters) = &self.quiesce_counters {
+            counters.withdraw_admitted(self.pending_batches);
+        }
+        self.pending_batches = 0;
+        for (_, mut collection) in std::mem::take(&mut self.pending) {
+            for batch in collection.take_pending() {
+                released.release_batch(kind, batch);
+            }
+        }
+    }
+}
+
+impl RelayInteractionSource {
+    /// Leaves the relay's fan-out as the drop that destroys its consumer does, and releases as
+    /// done every batch this source collected or the relay delivered to it, counting their rows
+    /// as `kind`. The consumer's registration was removed before, so no publication counts it.
+    fn release_as_done(
+        &mut self,
+        kind: DiscardedWorkKind,
+        released: &mut entity_drop::DiscardedWorkCounts,
+    ) {
+        self.collection.release_as_done(kind, released);
+        for batch in self.receiver.depart_releasing() {
+            released.release_batch(kind, batch);
+        }
+        self.closed = true;
+    }
+}
+
+impl<C: RelayInteractionCommand> RelayInteraction<C> {
+    /// Leaves every relay this interaction reads and releases as done every batch it took from
+    /// them and has not handed on, as the drop that destroys its owner does, counting their rows
+    /// as `kind`.
+    pub(super) fn release_held_input_as_done(
+        &mut self,
+        kind: DiscardedWorkKind,
+        released: &mut entity_drop::DiscardedWorkCounts,
+    ) {
+        for source in &mut self.inputs.sources {
+            source.release_as_done(kind, released);
+        }
     }
 }
 

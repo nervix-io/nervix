@@ -965,6 +965,46 @@ A relocation `<selection>` is a kind-qualified list, `<kind> <name>[, ...]`, or 
 For a wire schema, `<kind>` is the exact multi-word kind: `WIRE JSON SCHEMA`, `WIRE CBOR SCHEMA`,
 or `WIRE AVRO SCHEMA`. The same exact kind is required by `DROP`.
 
+Drop statements:
+
+```plexus,ignore
+DROP <kind> <name>;
+DROP WINDOW PROCESSOR counted;
+DROP HASH MAP zip_codes;
+```
+
+`DROP` removes one entity of the selected domain. `<kind>` is the kind phrase of the entity's
+`CREATE` head without its connector, as one item: `SCHEMA`, `PARAMETRIZER`, `WIRE JSON SCHEMA`,
+`WIRE CBOR SCHEMA`, `WIRE AVRO SCHEMA`, `CODEC`, `CLIENT`, `VHOST`, `ENDPOINT`,
+`SIGNALING PROTOCOL`, `GENERATOR`, `INGESTOR`, `REINGESTOR`, `REORDERER`, `INFERENCER`,
+`WASM PROCESSOR`, `RELAY`, `HASH MAP`, `JUNCTION`, `DEDUPLICATOR`, `CORRELATOR`,
+`WINDOW PROCESSOR`, `EMITTER`, `PLACEMENT` or `UDF`. A drop that would leave a reference behind is
+refused: a relay a processor still reads, a parametrizer a relay or route still names, a signaling
+protocol an endpoint still binds or a hash map an expression still reads.
+
+A drop is a hard operation: it waits for nothing and takes no clause. Every node that runs the
+entity first disconnects it from the relays it reads, so no further message reaches it and the
+relays' other consumers keep their pace, then destroys it at once with everything it holds: records
+an emitter buffered, retried or staged, rows a reorderer or a window holds, records a correlator
+holds for a partner, `REQUIRED WAIT` messages, payloads an ingestor retained, and messages a relay
+or a processor took in and had not passed on. The entity's share of each such message is released
+as done, as it is for a message that arrives after the drop: a source whose message the relay's
+other consumers delivered hears it acknowledged, and no error record is written. Its stored state
+is removed on every node, a node that applies the drop later included, so an entity created later
+under the same name starts empty. Parametrizers, signaling protocols and the other kinds that run
+nowhere by themselves remove no runtime.
+
+A model run that only drops entities pauses, drains and rebuilds nothing, and every other entity
+keeps running (see [Transaction Quiescence And Impact
+Inspection](transaction-quiescence.md)). When the same run also changes an entity in a way that
+pauses it or its domain, an entity it drops inside that pause is drained with the pause first and
+then destroyed as above.
+
+The answer reports, for every dropped entity that runs on nodes, what the nodes discarded, summed
+by kind, and that its state was removed, such as `emitter 'published' discarded undelivered
+records (2), state removed` or `deduplicator 'dedup_txns' discarded nothing, state removed`. A node
+that did not report in time, has left, or restarted after the drop is named as not reporting.
+
 `ACTIVATE LICENSE PERSISTENT WITH KEY '<credential>';` and
 `ACTIVATE LICENSE EPHEMERAL WITH KEY '<credential>';` activate a cluster on its leader without
 a selected domain. `REFRESH LICENSE;` requests a current signed decision.

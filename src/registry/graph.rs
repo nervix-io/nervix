@@ -1158,22 +1158,7 @@ pub(in crate::registry) fn schedulable_depth(
 }
 
 pub(in crate::registry) fn is_schedulable_model(model: &Model) -> bool {
-    matches!(
-        model,
-        Model::Generator(_)
-            | Model::Inferencer(_)
-            | Model::Ingestor(_)
-            | Model::Reingestor(_)
-            | Model::Relay(_)
-            | Model::Lookup(_)
-            | Model::Deduplicator(_)
-            | Model::Correlator(_)
-            | Model::Reorderer(_)
-            | Model::Junction(_)
-            | Model::WindowProcessor(_)
-            | Model::WasmProcessor(_)
-            | Model::Emitter(_)
-    )
+    model.kind().is_schedulable()
 }
 
 pub(in crate::registry) fn expect_kind(

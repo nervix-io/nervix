@@ -496,7 +496,11 @@ stop's answer as `discarded with the ingestor session`. The stopping domain's en
 withdrawn, so a request that arrives later is answered `404`; one that reached an endpoint without
 being admitted is answered `503`, and a request admitted before the stop gets its real answer once
 its message finishes. A stop that is called off publishes the endpoints again. `STOP` and
-`DROP INGESTOR` terminate the ingestor session. Unexpected
+`DROP INGESTOR` terminate the ingestor session. A `DROP INGESTOR` ends it at once and discards
+what the ingestor retained without admitting it, such as the payloads a `BUFFER` mode kept for a
+pause, which the drop's answer reports as retained payloads; what it already admitted travels on,
+and the acknowledgements it still owes its transport are left to the transport as its connector
+declares. Unexpected
 owner loss also terminates it immediately; volatile quiesce buffers and in-memory ACK state do not
 survive, so recovery depends on the external system's retention and redelivery contract.
 

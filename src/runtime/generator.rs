@@ -1239,7 +1239,8 @@ impl GeneratorTask {
         task.join_after_shutdown("generator").await;
     }
 
-    /// The task alone, for a domain stop that ends it through the domain's shutdown signal.
+    /// The task alone, for a stop that does not use the unit's own: a domain stop ends it through
+    /// the domain's shutdown signal, and a drop destroys it at once with what it holds.
     pub(in crate::runtime) fn into_task(self) -> JoinHandle<()> {
         self.task
     }
