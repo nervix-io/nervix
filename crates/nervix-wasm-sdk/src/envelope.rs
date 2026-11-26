@@ -186,6 +186,7 @@ impl ProcessorTypeArrow for ProcessorType {
             Self::String => DataType::Utf8,
             Self::Bytes => DataType::Binary,
             Self::Datetime => DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+            Self::Duration => DataType::Duration(TimeUnit::Nanosecond),
             Self::F32 => DataType::Float32,
             Self::F64 => DataType::Float64,
             Self::Array { element, len } => DataType::FixedSizeList(
@@ -366,6 +367,22 @@ mod tests {
         assert_eq!(
             ProcessorType::Datetime.arrow_data_type().expect("must map"),
             DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into()))
+        );
+        assert_eq!(
+            ProcessorType::Duration.arrow_data_type().expect("must map"),
+            DataType::Duration(TimeUnit::Nanosecond)
+        );
+        assert_eq!(
+            ProcessorType::Vec {
+                element: Box::new(ProcessorType::Duration),
+            }
+            .arrow_data_type()
+            .expect("must map"),
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Duration(TimeUnit::Nanosecond),
+                false
+            )))
         );
         assert_eq!(
             ProcessorType::Array {

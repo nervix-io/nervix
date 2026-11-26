@@ -257,41 +257,6 @@ pub(in crate::registry) fn ensure_window_processor_output_schemas(
     Ok(())
 }
 
-/// Refuses a WASM processor whose input or output relay schema holds a `DURATION`, alone or as the
-/// element of a list, naming the first such field: the guest receives every one of those schemas,
-/// and its protocol has no `DURATION` type.
-pub(in crate::registry) fn ensure_wasm_processor_schemas_carry_no_duration(
-    domain: &DomainName,
-    identifier: &ModelName,
-    models: &ModelIndex,
-    processor: &nervix_models::CreateWasmProcessor,
-    input_schemas: &[(&RelayName, &CreateSchema)],
-) -> Result<(), Report<RegistryError>> {
-    let refusal = |field: &SchemaField| {
-        Report::new(RegistryError::WasmDurationField {
-            domain: domain.clone(),
-            processor: identifier.clone(),
-            field: field.name.clone(),
-        })
-    };
-    for (_, schema) in input_schemas {
-        for field in &schema.fields {
-            if field.ty.holds_duration() {
-                return Err(refusal(field));
-            }
-        }
-    }
-    for output in processor.output_routes.outputs() {
-        let schema = schema_for_ack_model(domain, identifier, models, &output.relay)?;
-        for field in &schema.fields {
-            if field.ty.holds_duration() {
-                return Err(refusal(field));
-            }
-        }
-    }
-    Ok(())
-}
-
 pub(in crate::registry) fn ensure_wasm_processor_output_schemas(
     domain: &DomainName,
     identifier: &ModelName,

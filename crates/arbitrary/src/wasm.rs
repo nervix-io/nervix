@@ -84,22 +84,35 @@ impl<'a> WasmValues<'a> {
         ProcessorSchema { name, fields }
     }
 
+    /// How many scalar kinds [`WasmValues::scalar`] selects among.
+    pub const SCALAR_KINDS: u8 = 15;
+    /// The selector of an `ARRAY`, the first kind after the scalars.
+    pub const ARRAY_KIND: u8 = Self::SCALAR_KINDS;
+    /// The selector of a `VEC`, the last kind.
+    pub const VEC_KIND: u8 = Self::SCALAR_KINDS + 1;
+
     pub fn processor_type(&mut self, depth: u8) -> ProcessorType {
-        let kind = self.entropy().byte() % if depth == 0 { 14 } else { 16 };
+        let kinds = if depth == 0 {
+            Self::SCALAR_KINDS
+        } else {
+            Self::VEC_KIND + 1
+        };
+        let kind = self.entropy().byte() % kinds;
         match kind {
-            14 => ProcessorType::Array {
+            Self::ARRAY_KIND => ProcessorType::Array {
                 element: Box::new(self.processor_type(depth - 1)),
                 len: u32::try_from(self.entropy().boundary_biased(0..=u64::from(u32::MAX)))
                     .verified("the range ends at u32::MAX"),
             },
-            15 => ProcessorType::Vec {
+            Self::VEC_KIND => ProcessorType::Vec {
                 element: Box::new(self.processor_type(depth - 1)),
             },
             _ => Self::scalar(kind),
         }
     }
 
-    /// The fourteen scalar kinds, in schema order with BYTES last.
+    /// The [`WasmValues::SCALAR_KINDS`] scalar kinds, in schema order with BYTES and DURATION
+    /// last.
     pub fn scalar(kind: u8) -> ProcessorType {
         match kind {
             0 => ProcessorType::U8,
@@ -116,7 +129,8 @@ impl<'a> WasmValues<'a> {
             11 => ProcessorType::F32,
             12 => ProcessorType::F64,
             13 => ProcessorType::Bytes,
-            _ => panic!("a scalar selector must be below fourteen"),
+            14 => ProcessorType::Duration,
+            _ => panic!("a scalar selector must be below SCALAR_KINDS"),
         }
     }
 

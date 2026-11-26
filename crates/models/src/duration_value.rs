@@ -24,6 +24,7 @@
 use std::fmt;
 
 use error_stack::{Report, ResultExt as _};
+use meticulous::ResultExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator as _;
@@ -70,6 +71,15 @@ impl DurationValue {
     /// and the session protocol carry it.
     pub const fn nanoseconds(self) -> i64 {
         self.0
+    }
+
+    /// The `DURATION` of `count` whole `unit`s, below zero when `count` is negative, or `None`
+    /// when that length lies beyond the 64-bit nanosecond range.
+    pub fn of_whole_units(count: i64, unit: DurationLiteralUnit) -> Option<Self> {
+        let unit_nanoseconds = i64::try_from(unit.nanoseconds())
+            .assured("the longest unit, a day, is 86,400,000,000,000 nanoseconds");
+        let nanoseconds = count.checked_mul(unit_nanoseconds)?;
+        Some(Self(nanoseconds))
     }
 
     /// The length of time the parts of one literal name together, as `1h 30m` names ninety
@@ -316,6 +326,40 @@ mod tests {
         ]))
         .assured("these parts add up to exactly the longest DURATION");
         assert_eq!(longest, DurationValue::MAX);
+    }
+
+    #[test]
+    fn whole_units_name_their_nanoseconds_and_nothing_beyond_the_range() {
+        for (count, unit, nanoseconds) in [
+            (30, DurationLiteralUnit::Second, Some(30_000_000_000)),
+            (-250, DurationLiteralUnit::Millisecond, Some(-250_000_000)),
+            (7, DurationLiteralUnit::Microsecond, Some(7_000)),
+            (2, DurationLiteralUnit::Minute, Some(120_000_000_000)),
+            (-3, DurationLiteralUnit::Hour, Some(-10_800_000_000_000)),
+            (0, DurationLiteralUnit::Day, Some(0)),
+            (i64::MAX, DurationLiteralUnit::Nanosecond, Some(i64::MAX)),
+            (i64::MIN, DurationLiteralUnit::Nanosecond, Some(i64::MIN)),
+            (
+                106_751,
+                DurationLiteralUnit::Day,
+                Some(9_223_286_400_000_000_000),
+            ),
+            (
+                -106_751,
+                DurationLiteralUnit::Day,
+                Some(-9_223_286_400_000_000_000),
+            ),
+            (106_752, DurationLiteralUnit::Day, None),
+            (-106_752, DurationLiteralUnit::Day, None),
+            (i64::MAX, DurationLiteralUnit::Microsecond, None),
+            (i64::MIN, DurationLiteralUnit::Second, None),
+        ] {
+            assert_eq!(
+                DurationValue::of_whole_units(count, unit),
+                nanoseconds.map(DurationValue::from_nanoseconds),
+                "{count} of {unit:?}"
+            );
+        }
     }
 
     #[test]

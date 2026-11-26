@@ -30,6 +30,7 @@ fn assert_type(model: &ParseAsType, actual: &protocol::ProcessorType) {
         | (ParseAsType::String, P::String)
         | (ParseAsType::Bytes, P::Bytes)
         | (ParseAsType::Datetime, P::Datetime)
+        | (ParseAsType::Duration, P::Duration)
         | (ParseAsType::F32, P::F32)
         | (ParseAsType::F64, P::F64) => {}
         (
@@ -57,25 +58,8 @@ fn bolero_host_schema_preserves_the_complete_abi_projection() {
         .for_each(|bytes| {
             let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
             let schema = arbitrary.create_schema();
-            let holds_duration = schema
-                .fields
-                .iter()
-                .any(|field| *field.ty.innermost_element() == ParseAsType::Duration);
-            let host = match WasmProcessorSchema::try_from(&schema) {
-                Ok(host) => {
-                    assert!(!holds_duration, "a DURATION has no guest protocol type");
-                    host
-                }
-                Err(refusal) => {
-                    assert!(holds_duration, "only a DURATION is refused: {refusal}");
-                    assert_eq!(refusal, WasmTypeRefusal::Duration);
-                    return;
-                }
-            };
-            let output = arbitrary.create_schema();
-            let Ok(output) = WasmProcessorSchema::try_from(&output) else {
-                return;
-            };
+            let host = WasmProcessorSchema::from(&schema);
+            let output = WasmProcessorSchema::from(&arbitrary.create_schema());
             let mut values = WasmValues::new(bytes);
             let host_init = WasmBranchInit {
                 domain_name: arbitrary.name_text(),
@@ -100,7 +84,7 @@ fn bolero_host_schema_preserves_the_complete_abi_projection() {
             for field in &mut promoted.fields {
                 field.sensitive = true;
             }
-            assert_eq!(WasmProcessorSchema::try_from(&promoted), Ok(host.clone()));
+            assert_eq!(WasmProcessorSchema::from(&promoted), host);
             // A schema a guest sends back, as a state description section does, is the host schema
             // it was projected from, and every declared type names the exact Nervix type again.
             assert_eq!(
@@ -137,6 +121,7 @@ fn declares_an_empty_array(ty: &WasmProcessorType) -> bool {
         | WasmProcessorType::String
         | WasmProcessorType::Bytes
         | WasmProcessorType::Datetime
+        | WasmProcessorType::Duration
         | WasmProcessorType::F32
         | WasmProcessorType::F64 => false,
     }
@@ -161,9 +146,8 @@ fn bolero_host_state_descriptions_preserve_sections_and_refuse_empty_arrays() {
                     match ParseAsType::try_from(&field.ty) {
                         Ok(parsed) => {
                             assert!(!declares_an_empty_array(&field.ty));
-                            // No guest type names a DURATION, so every type a guest declares
-                            // projects back to itself.
-                            assert_eq!(WasmProcessorType::try_from(&parsed), Ok(field.ty.clone()));
+                            // Every type a guest declares projects back to itself.
+                            assert_eq!(WasmProcessorType::from(&parsed), field.ty);
                         }
                         Err(refusal) => {
                             assert!(matches!(

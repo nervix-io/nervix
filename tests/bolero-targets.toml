@@ -2173,7 +2173,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-protocol/src/__fuzz__/properties__bolero_malformed_messages_fail_typed_within_bounds/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "wasm-protocol-malformed"
 invariant = "Short and arbitrary current guest messages return the owning typed error or a completely decoded value without panic."
@@ -2203,7 +2203,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-protocol/tests/__fuzz__/bolero_branch_metadata_preserves_every_type_and_field/corpus"
-domain_version = 22
+domain_version = 23
 features = []
 id = "wasm-branch-metadata"
 invariant = "Every current schema type, optional field, branch identity and schema order survives both production encoders and verified decoding."
@@ -2218,7 +2218,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-protocol/tests/__fuzz__/bolero_envelopes_preserve_borrowed_bytes_sidecars_and_order/corpus"
-domain_version = 22
+domain_version = 23
 features = []
 id = "wasm-envelopes"
 invariant = "Input and output envelopes preserve complete opaque bytes, token sidecars, typed absence, routes and column order across verified borrowed and owned views."
@@ -2233,7 +2233,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-protocol/tests/__fuzz__/bolero_snapshots_preserve_opaque_state_and_init_bytes/corpus"
-domain_version = 22
+domain_version = 23
 features = []
 id = "wasm-snapshots"
 invariant = "Current snapshot envelopes preserve every init and opaque application-state byte, including empty state."
@@ -2248,7 +2248,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-protocol/tests/__fuzz__/bolero_state_descriptions_preserve_sections_schemas_and_rows/corpus"
-domain_version = 5
+domain_version = 6
 features = []
 id = "wasm-state-descriptions"
 invariant = "Current state descriptions, including one of no sections, preserve every section's schema, its nested field types, nullability and order, and its opaque row bytes across the owned decoder and the borrowed view, which lends the rows from the message."
@@ -2278,7 +2278,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm/src/__fuzz__/properties__bolero_host_schema_preserves_the_complete_abi_projection/corpus"
-domain_version = 25
+domain_version = 26
 features = []
 id = "wasm-host-schema"
 invariant = "The host ABI schema projection preserves names, exact nested types, nullability and order, and the schema and types a guest sends back convert to exactly the projected host schema and Nervix types; sensitivity stays an explicit host execution rule."
@@ -2293,7 +2293,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm/src/__fuzz__/properties__bolero_host_state_descriptions_preserve_sections_and_refuse_empty_arrays/corpus"
-domain_version = 5
+domain_version = 6
 features = []
 id = "wasm-host-state-descriptions"
 invariant = "A decoded state description reaches the host with every section's schema, nested types, nullability, order and row bytes, and each declared type either names exactly the Nervix type it projects back to or, for an ARRAY of zero elements at any depth, is refused as such."
@@ -2308,7 +2308,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm/src/__fuzz__/properties__bolero_host_envelopes_preserve_views_owned_bytes_and_sidecars/corpus"
-domain_version = 25
+domain_version = 26
 features = []
 id = "wasm-host-envelopes"
 invariant = "Native host envelope conversions preserve complete protocol values, sidecars and retained output bytes after dropping the decoded owner."
@@ -2323,7 +2323,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-sdk/src/__fuzz__/snapshot_properties__bolero_sdk_snapshots_restore_every_byte_and_preserve_branch_isolation/corpus"
-domain_version = 22
+domain_version = 23
 features = []
 id = "wasm-sdk-snapshots"
 invariant = "SDK saves restore every opaque byte under the same branch contract or domain rename; a different branch configuration never calls application restore."
@@ -2338,7 +2338,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-sdk/src/__fuzz__/snapshot_properties__bolero_sdk_snapshot_rejections_keep_envelope_and_application_verdicts/corpus"
-domain_version = 22
+domain_version = 23
 features = []
 id = "wasm-sdk-rejections"
 invariant = "Snapshot, init metadata and application-state rejection retain their owning typed contexts and distinct restore verdicts."
@@ -2353,7 +2353,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-sdk/src/__fuzz__/column_properties__bolero_sdk_input_preserves_complete_arrow_batches_and_sidecars/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "wasm-sdk-input"
 invariant = "SDK input preserves every Arrow schema, logical value bit, null, nested collection and sidecar through IPC and cloned buffer ownership."
@@ -2368,7 +2368,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-sdk/src/__fuzz__/column_properties__bolero_sdk_output_preserves_shared_columns_routes_and_emit_order/corpus"
-domain_version = 22
+domain_version = 23
 features = []
 id = "wasm-sdk-output"
 invariant = "SDK output preserves the complete shared generated column pool, routed references, sidecars and ordered callback emissions."
@@ -2413,7 +2413,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-protocol/src/__fuzz__/properties__bolero_corrupt_messages_validate_sizes_offsets_and_counts/corpus"
-domain_version = 23
+domain_version = 24
 features = []
 id = "wasm-protocol-corruption"
 invariant = "Truncated frames, declared-size mismatches, invalid identifiers, offsets and vector counts fail before decoding or effects for every current message family."
@@ -2428,7 +2428,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-protocol/src/__fuzz__/properties__bolero_message_tags_and_column_descriptors_fail_typed/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "wasm-protocol-tags"
 invariant = "Unknown current union, processor-type and column-source tags, missing nested types and nonzero uninitialized indices yield the owning typed protocol error."
@@ -2438,6 +2438,21 @@ package = "nervix-wasm-protocol"
 random_iterations = 256
 source = "crates/nervix-wasm-protocol/src/properties.rs"
 test = "properties::bolero_message_tags_and_column_descriptors_fail_typed"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-roto/src/__fuzz__/properties__bolero_udf_duration_columns_return_every_nanosecond_and_null/corpus"
+domain_version = 1
+features = []
+id = "udf-duration-columns"
+invariant = "A DURATION column crosses the Roto column bridge into a UDF and back, and through its nanosecond view, with every value, null and row and its exact Duration(Nanosecond) or Int64 type."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-roto"
+random_iterations = 256
+source = "crates/nervix-roto/src/properties.rs"
+test = "properties::bolero_udf_duration_columns_return_every_nanosecond_and_null"
 test_target = "lib"
 
 [[target]]
