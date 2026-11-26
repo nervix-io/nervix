@@ -101,7 +101,8 @@ so that a lost key is discovered before a ceremony needs it. One root signs it a
 trusted epoch, it names the root that signed it, and the epoch it names is trusted and holds that
 root; a root a succession carries into the next epoch may name either. It reaches no threshold,
 grants nothing and is no trust document: a trust state refuses to build from one, and the trust
-documents a holder stores never include it.
+documents a holder stores never include it. A proof of life whose signature profile or payload
+does not verify is refused as a proof of life, never as a trust document.
 
 Every production build embeds the production root ceremony's reviewed output,
 `production_trust_bundle.json`, verbatim as `PRODUCTION_TRUST_BUNDLE`, so it compares byte for byte

@@ -4,7 +4,8 @@
 //!
 //! Layer: test harness, outside the product layer order.
 //! - **Owns.** The swap faults a scenario arms for one node and domain: a pause that holds one swap
-//!   at that point, and a failure that makes every swap fail there until the scenario clears it.
+//!   at that point, and a failure that makes every swap fail there until the scenario clears it,
+//!   which it refuses for an ingestor, whose step cannot fail once its change commits.
 //! - **Depends on.** Vocabulary identities and the shared test pause.
 //! - **Must not know.** Schedules, swap ordering, execution state or the runtime.
 
@@ -13,7 +14,7 @@
     nervix::context(outside, reason = "owns test swap controls for one node and domain")
 )]
 
-use nervix_models::{ClusterNodeName, DomainName, NodeRef};
+use nervix_models::{ClusterNodeName, DomainName, ModelKind, NodeRef};
 use nervix_primitives::sync::Arc;
 
 use super::{FaultInjection, TestPause};
@@ -44,12 +45,23 @@ pub(super) struct EntitySwapReplacementPause {
 impl FaultInjection {
     /// Makes every entity swap of `domain` on `node` fail while it replaces `entity`, until
     /// [`Self::clear_entity_swap_failures_on`].
+    ///
+    /// An ingestor's step only stops its units, and nothing after a change commits may fail it,
+    /// so a failure cannot be armed for an ingestor: a scenario that arms one tests a state a
+    /// committed change never reaches.
     pub fn fail_entity_swaps_while_replacing_on(
         &self,
         node: &ClusterNodeName,
         domain: &DomainName,
         entity: NodeRef,
     ) {
+        assert_ne!(
+            entity.kind,
+            ModelKind::Ingestor,
+            "an ingestor's step of a committed change cannot fail, so no swap failure is armed \
+             for ingestor '{}'",
+            entity.identifier.as_str()
+        );
         self.inner
             .entity_swap_replacement_failures
             .insert(EntitySwapFaultKey::new(node, domain), entity);

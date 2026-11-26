@@ -117,6 +117,25 @@ impl Runtime {
         Ok(())
     }
 
+    /// A test holds the swap here, where this node has stopped the units of the ingestor `entity`
+    /// it stops. It cannot fail it: stopping an ingestor's units is all an ingestor's step does
+    /// once its change has committed, and nothing after the commit fails a change.
+    #[cfg(feature = "testing")]
+    pub(super) async fn hold_ingestor_swap(
+        &self,
+        domain: &DomainName,
+        entity: &NodeRef,
+        local_node_id: Option<&ClusterNodeName>,
+    ) {
+        let Some(local_node_id) = local_node_id else {
+            return;
+        };
+        self.inner
+            .fault_injection
+            .pause_entity_swap_while_replacing_if_armed(local_node_id, domain, entity)
+            .await;
+    }
+
     /// Finishes the deferred work of a swap once nothing else of it can fail. Every stored state
     /// is deleted before any state held in memory is dropped, so a deletion that fails leaves each
     /// deleted entity's state in memory, where its restored task reads it.
@@ -425,8 +444,8 @@ impl Runtime {
             Box::pin(self.prepare_ingestor_replacement(retirement)).await?;
         }
         #[cfg(feature = "testing")]
-        self.hold_or_fail_entity_swap(domain, entity, context.local_node_id)
-            .await?;
+        self.hold_ingestor_swap(domain, entity, context.local_node_id)
+            .await;
         Ok(())
     }
 

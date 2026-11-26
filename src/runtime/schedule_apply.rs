@@ -557,8 +557,8 @@ impl Runtime {
                 }
                 #[cfg(feature = "testing")]
                 if !previous_local_units.is_subset(&desired_local_units) {
-                    self.hold_or_fail_entity_swap(domain, entity, Some(local_node_id))
-                        .await?;
+                    self.hold_ingestor_swap(domain, entity, Some(local_node_id))
+                        .await;
                 }
                 // An instance that leaves this node while it still owes its MQTT session a
                 // retirement here has that session retired before it goes, while the swap can
