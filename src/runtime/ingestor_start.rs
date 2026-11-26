@@ -350,14 +350,16 @@ impl Runtime {
         ScheduledIngestorStart::Complete
     }
 
-    /// Stops all locally running units of a logical ingestor for a model or domain operation.
+    /// Stops all locally running units of a logical ingestor for a model or domain operation, a
+    /// planned operation that waits for each unit's branched tasks to finish what they hold.
     pub(in crate::runtime) async fn stop_ingestor(
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
     ) -> error_stack::Result<(), RuntimeError> {
         for unit in self.running_ingestor_units(domain, ingestor) {
-            self.stop_ingestor_unit(domain, ingestor, unit).await?;
+            self.stop_ingestor_unit(domain, ingestor, unit, self.planned_task_stop())
+                .await?;
         }
         Ok(())
     }
@@ -377,11 +379,15 @@ impl Runtime {
             .collect::<Vec<_>>()
     }
 
+    /// Stops `unit` of `ingestor` on this node. Its source tasks end by closing their sources, and
+    /// its branched tasks stop as `wait` says: a planned operation waits for the work they hold,
+    /// and terminal teardown gives them the task stop grace.
     pub(in crate::runtime) async fn stop_ingestor_unit(
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
         unit: Unit,
+        wait: TaskStopWait,
     ) -> error_stack::Result<(), RuntimeError> {
         let key = DomainNodeUnitRef::new(
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
@@ -416,7 +422,7 @@ impl Runtime {
                 .await;
         }
         for branched in branched {
-            branched.shutdown(self.planned_task_stop()).await;
+            branched.shutdown(wait).await;
         }
 
         let placement = RuntimeStatePlacement {
@@ -1073,6 +1079,7 @@ mod tests {
                 &domain("default"),
                 &named::<IngestorName>("mqtt_notifications"),
                 Unit::try_instance(2).assured("the fixture index fits the execution-unit range"),
+                runtime.planned_task_stop(),
             )
             .await
             .expect_err("no ingestor runs before one starts");

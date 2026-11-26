@@ -2561,7 +2561,11 @@ endpoint. A target with no usable endpoint is neither probed nor dialled, and it
 unknown until discovery publishes one. A previously established target remains eligible for probes
 and outbound connections through a Chitchat liveness loss while application health still has an
 observation of it from the node-unavailability interval, as described below. A different
-incarnation or advertised endpoint must establish a new target.
+incarnation or advertised endpoint must establish a new target. Only a node's newest incarnation
+says where it is dialled. A restarted node stays live in gossip under its earlier run until that
+run is declared dead, and Chitchat keeps probing the address the earlier run advertised for a while
+after that. Neither moves the node's target back to that run: a probe restores a target only for a
+node that has none, and otherwise reaches the node where it runs now.
 
 Each health round probes every peer together, with one probe for each peer: a peer's management
 connection reserves liveness streams of its own, so a probe never waits behind another peer's. A

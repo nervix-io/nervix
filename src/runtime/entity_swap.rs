@@ -416,7 +416,7 @@ impl Runtime {
         let step = journal.record(IngestorSwap::new(ingestor.clone()));
         for unit in self.running_ingestor_units(domain, &ingestor) {
             nervix_primitives::task::consume_budget().await;
-            self.stop_ingestor_unit(domain, &ingestor, unit)
+            self.stop_ingestor_unit(domain, &ingestor, unit, self.planned_task_stop())
                 .await
                 .change_context_lazy(build)?;
             journal.step(step).record_stopped(unit);

@@ -44,7 +44,7 @@ struct EmitterInstanceUnit {
 impl SessionServiceImpl {
     /// One summary per instance of `emitter`, in instance order: the node it is scheduled on,
     /// whether its task runs there, and the input partitions it serves. Owners are asked
-    /// concurrently, so an owner that does not answer costs one request deadline, not one per
+    /// concurrently, so a slow owner costs the reading command its latency once, not once per
     /// instance.
     pub(super) async fn emitter_instance_summaries(
         &self,

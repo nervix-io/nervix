@@ -1108,8 +1108,8 @@ impl SessionServiceImpl {
     /// Cluster nodes the cluster considers usable: gossip peers that are not marked unavailable.
     ///
     /// Scheduling and failover read liveness this way, so every leader-orchestrated hold must too.
-    /// A node marked unavailable cannot answer a gate request, and contacting it only spends the
-    /// request deadline before the hold fails.
+    /// A node marked unavailable cannot answer a gate request, and contacting it would only wait
+    /// out the gate's deadline before the hold fails.
     pub(in crate::application) async fn available_node_ids(&self) -> Vec<ClusterNodeName> {
         self.available_node_incarnations()
             .await

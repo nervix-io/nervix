@@ -1080,7 +1080,8 @@ impl Runtime {
     }
 
     pub(super) async fn abort_domain_execution_start(&self, domain: &DomainName) {
-        self.stop_domain_ingestors(domain).await;
+        self.stop_domain_ingestors(domain, self.teardown_task_stop())
+            .await;
         if let Some((_, mut execution)) = self.inner.executions.remove(domain) {
             execution.routing.deactivate();
             self.stop_domain_execution(domain, execution, self.emitter_finish_deadline())
@@ -1088,7 +1089,13 @@ impl Runtime {
         }
     }
 
-    pub(in crate::runtime) async fn stop_domain_ingestors(&self, domain: &DomainName) {
+    /// Stops every unit of `domain`'s ingestors on this node, each unit's branched tasks as `wait`
+    /// says.
+    pub(in crate::runtime) async fn stop_domain_ingestors(
+        &self,
+        domain: &DomainName,
+        wait: TaskStopWait,
+    ) {
         let ingestors = self
             .inner
             .ingestors
@@ -1103,6 +1110,7 @@ impl Runtime {
                     domain,
                     &IngestorName::from(key.entity.identifier()),
                     key.unit,
+                    wait,
                 )
                 .await
             {
@@ -1131,8 +1139,12 @@ impl Runtime {
             .iter()
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
+        // This is the terminal teardown of every execution, so a branched ingestor task gets the
+        // task stop grace: the work it still holds, such as a delivery to a peer that stopped
+        // with this node, is what the stop cuts.
         for domain in &domains {
-            self.stop_domain_ingestors(domain).await;
+            self.stop_domain_ingestors(domain, self.teardown_task_stop())
+                .await;
         }
         for domain in &domains {
             if let Some((_, mut execution)) = self.inner.executions.remove(domain) {

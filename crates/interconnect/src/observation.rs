@@ -54,7 +54,8 @@ pub enum ConnectionFailureReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr, EnumCount, EnumIter, FromRepr)]
 #[strum(serialize_all = "snake_case")]
 pub enum StreamResetReason {
-    /// The request deadline or the byte-transfer no-progress limit expired.
+    /// The deadline the exchange's caller named passed, or its connection's setup did not finish in
+    /// time.
     Deadline,
     /// A stream slot, a byte budget, or a connection permit was unavailable.
     Capacity,

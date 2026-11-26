@@ -86,6 +86,103 @@ async fn gossip_reconnects_a_known_route_after_its_outbound_target_is_retired() 
         .await;
 }
 
+/// A node that restarted is live under both its runs until its earlier run is declared dead; the
+/// routes follow its newest run alone, so they never move its target back to the earlier one.
+#[nervix_primitives::test]
+async fn gossip_routes_follow_only_the_newest_run_of_a_restarted_node() {
+    let node = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
+    let interconnect = crate::application::test_fixtures::test_interconnect("test", &node).await;
+    let address = interconnect.local_addr();
+    let gossip = InterconnectGossipTransport::build(
+        interconnect.clone(),
+        address,
+        BTreeMap::new(),
+        node.clone(),
+        crate::ConfiguredFaultInjection::default(),
+        MembershipSettings::default().gossip_receive_queue_capacity(),
+    )
+    .assured("the gossip handler is registered once");
+    let local = ChitchatId::new("node-1".to_owned(), 1, address);
+    let earlier = ChitchatId::new(
+        "node-2".to_owned(),
+        1,
+        SocketAddr::from(([127, 0, 0, 1], 7001)),
+    );
+    let newer = ChitchatId::new(
+        "node-2".to_owned(),
+        2,
+        SocketAddr::from(([127, 0, 0, 1], 7002)),
+    );
+    let other = ChitchatId::new(
+        "node-3".to_owned(),
+        5,
+        SocketAddr::from(([127, 0, 0, 1], 7003)),
+    );
+
+    let newest = gossip.newest_runs([&newer, &earlier, &local, &other]);
+
+    let restarted = ClusterNodeName::parse("node-2").assured("the fixture node name is valid");
+    let unrestarted = ClusterNodeName::parse("node-3").assured("the fixture node name is valid");
+    assert_eq!(newest.len(), 2, "this node is never one of its own routes");
+    assert_eq!(newest.get(&restarted), Some(&&newer));
+    assert_eq!(newest.get(&unrestarted), Some(&&other));
+
+    interconnect
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+        .await;
+}
+
+/// Chitchat probes the address a node's earlier run advertised until it forgets that run. Such a
+/// probe restores a missing target only, and never moves the node's target from the endpoint the
+/// node is reached at now back to the run that is gone.
+#[nervix_primitives::test]
+async fn a_gossip_probe_of_an_earlier_run_never_moves_a_node_that_runs_elsewhere_now() {
+    let node = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
+    let interconnect = crate::application::test_fixtures::test_interconnect("test", &node).await;
+    let address = interconnect.local_addr();
+    let peer = PeerTarget::new(address, address.ip().to_string());
+    let probed = peer.endpoint();
+    let seed = GossipRoute {
+        peer: GossipRoutePeer::Expected(BootstrapExpectation::AnyMember),
+        target: peer,
+    };
+    let gossip = InterconnectGossipTransport::build(
+        interconnect.clone(),
+        address,
+        BTreeMap::from([(address, seed)]),
+        node.clone(),
+        crate::ConfiguredFaultInjection::default(),
+        MembershipSettings::default().gossip_receive_queue_capacity(),
+    )
+    .assured("the gossip handler is registered once");
+    gossip
+        .exchange(address, vec![1])
+        .await
+        .assured("the initial authenticated exchange establishes the route");
+    let elsewhere = NodeEndpoint::new("localhost", 9001);
+    interconnect.register_outbound_target(node.clone(), elsewhere.clone());
+
+    // The probe restores its route before it waits for a stream to the node, so one poll covers
+    // everything it does to the node's target.
+    let probe = gossip.exchange(address, vec![2]);
+    let mut probe = std::pin::pin!(probe);
+    assert!(
+        futures_util::poll!(probe.as_mut()).is_pending(),
+        "the probe waits for the endpoint the node is reached at, where nothing listens"
+    );
+    drop(probe);
+
+    assert_eq!(
+        interconnect.restore_outbound_target(node.clone(), probed),
+        elsewhere,
+        "the probe left the node's target where the node runs now"
+    );
+
+    interconnect
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+        .await;
+}
+
 #[nervix_primitives::test]
 async fn the_configured_receive_queue_capacity_bounds_incoming_gossip() {
     let node = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");

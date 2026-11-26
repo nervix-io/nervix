@@ -34,9 +34,9 @@ use crate::application::{
 };
 
 /// The leader's domain drain asks every node for a domain's drain status, and the node's handler
-/// applies the committed runtime state before it answers. When the leader's request deadline
-/// passes, the leader resets the stream and the interconnect server drops the handler wherever it
-/// is. That application can be the one tearing down another domain whose stop has just ended. The
+/// applies the committed runtime state before it answers. When the drain's ceiling passes, or the
+/// connection to the node ends, the leader resets the stream and the interconnect server drops the
+/// handler wherever it is. That application can be the one tearing down another domain whose stop has just ended. The
 /// test drops it at the worst moment it can reach: its teardown is held once the stopped domain's
 /// execution is out of the node and before that execution's tasks end. The test then releases the
 /// hold and lets the node apply the committed state again, as its reconciliation does. The node

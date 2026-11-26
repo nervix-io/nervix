@@ -207,6 +207,13 @@ const _: () = assert!(
     "scenario cleanup must end well before the watchdog of a node a scenario stops itself"
 );
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// How long a credential probe gives a node, from the probe's start, to accept one of the
+/// connections it dials. The probe dials again within 50 milliseconds of each refusal, so a node
+/// that accepted its credentials would have connected it well within this window, on a loaded
+/// host too.
+const CREDENTIAL_PROBE_REFUSAL_WINDOW: Duration = Duration::from_secs(2);
+/// How long a credential probe waits for the first connection it dials to end, on a loaded host.
+const CREDENTIAL_PROBE_ATTEMPT_BUDGET: Duration = Duration::from_secs(60);
 /// How long a scenario waits for a stopped node's run to leave another node's live gossip. The
 /// failure detector declares a run dead once eight of its smoothed heartbeat intervals pass in
 /// silence. That interval never exceeds the twenty-gossip-interval cap on a sample, ten seconds at
@@ -2181,37 +2188,43 @@ impl Cluster {
             "localhost"
         };
         let peer_target = PeerTarget::new(target_addr, server_name);
-        let attempt = if let InterconnectCredentialFault::WrongNodeIdentity = fault {
-            let addressed_node = ClusterNodeName::parse("node-254").map_err(io::Error::other)?;
-            transport.register_outbound_target(addressed_node.clone(), peer_target.endpoint());
-            transport
-                .send(
-                    &addressed_node,
-                    Envelope::Control(ControlEnvelope::RuntimeErrorEvent(RuntimeErrorEvent {
-                        message: "interconnect identity probe".to_string(),
-                        error: None,
-                    })),
-                )
-                .await
-                .map_err(io::Error::other)
-        } else {
-            // The probe dials a bootstrap host of a cluster the probing credentials claim.
-            let bootstrap =
-                transport.bootstrap_target(peer_target, BootstrapExpectation::AnyMember);
-            match bootstrap.await {
-                Ok(peer_node_id) => transport
+        let attempt = async {
+            if let InterconnectCredentialFault::WrongNodeIdentity = fault {
+                let addressed_node =
+                    ClusterNodeName::parse("node-254").map_err(io::Error::other)?;
+                transport.register_outbound_target(addressed_node.clone(), peer_target.endpoint());
+                transport
                     .send(
-                        &peer_node_id,
+                        &addressed_node,
                         Envelope::Control(ControlEnvelope::RuntimeErrorEvent(RuntimeErrorEvent {
-                            message: "interconnect credential probe".to_string(),
+                            message: "interconnect identity probe".to_string(),
                             error: None,
                         })),
                     )
                     .await
-                    .map_err(io::Error::other),
-                Err(error) => Err(io::Error::other(error)),
+                    .map_err(io::Error::other)
+            } else {
+                // The probe dials a bootstrap host of a cluster the probing credentials claim.
+                let bootstrap =
+                    transport.bootstrap_target(peer_target, BootstrapExpectation::AnyMember);
+                match bootstrap.await {
+                    Ok(peer_node_id) => transport
+                        .send(
+                            &peer_node_id,
+                            Envelope::Control(ControlEnvelope::RuntimeErrorEvent(
+                                RuntimeErrorEvent {
+                                    message: "interconnect credential probe".to_string(),
+                                    error: None,
+                                },
+                            )),
+                        )
+                        .await
+                        .map_err(io::Error::other),
+                    Err(error) => Err(io::Error::other(error)),
+                }
             }
         };
+        let outcome = Self::judge_credential_probe(&transport, target_node_id, attempt).await;
         // The probe holds no stream past its one message, so a short ceiling only guards the
         // harness against a connection that never ends.
         transport
@@ -2221,7 +2234,60 @@ impl Cluster {
                 ),
             ))
             .await;
-        attempt
+        outcome
+    }
+
+    /// Waits for a credential probe's `attempt` to end, and judges it.
+    ///
+    /// A node refuses invalid credentials by refusing every connection the probe dials, which
+    /// ends no exchange: a send waits for a connection its peer accepts for as long as its caller
+    /// lets it. The probe is that caller. Once the refusal window has passed with at least one of
+    /// its connections refused and none established, the node has rejected the probe. Any
+    /// connection it established means the node accepted the probe's credentials.
+    async fn judge_credential_probe(
+        transport: &Transport,
+        target_node_id: &str,
+        attempt: impl Future<Output = io::Result<()>>,
+    ) -> io::Result<()> {
+        let started = Instant::now();
+        let mut attempt = std::pin::pin!(attempt);
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            nervix_primitives::select! {
+                result = &mut attempt => return result,
+                () = sleep(POLL_INTERVAL) => {}
+            }
+            let counters = transport.snapshot().counters;
+            let established = counters
+                .connections_established
+                .iter()
+                .any(|count| *count > 0);
+            if established {
+                return Ok(());
+            }
+            let refused = counters
+                .connection_failures
+                .iter()
+                .flatten()
+                .any(|count| *count > 0);
+            let waited = started.elapsed();
+            if refused && waited >= CREDENTIAL_PROBE_REFUSAL_WINDOW {
+                return Err(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    format!(
+                        "node '{target_node_id}' accepted none of the probe's connections within \
+                         {CREDENTIAL_PROBE_REFUSAL_WINDOW:?}; refused connections by pool class \
+                         and reason: {:?}",
+                        counters.connection_failures
+                    ),
+                ));
+            }
+            assert!(
+                waited < CREDENTIAL_PROBE_ATTEMPT_BUDGET,
+                "no connection the credential probe dialed to node '{target_node_id}' ended \
+                 within {CREDENTIAL_PROBE_ATTEMPT_BUDGET:?}"
+            );
+        }
     }
 
     /// Signals a node to exit without waiting for the process. Scenarios that observe a

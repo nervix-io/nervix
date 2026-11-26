@@ -1254,6 +1254,18 @@ impl Transport {
         self.inner.register_outbound_target(node_id, endpoint);
     }
 
+    /// Add `node_id`'s pool target at `endpoint` only when the node has no target, and return the
+    /// endpoint the node is dialled at afterwards: `endpoint`, or the one it already had. Unlike
+    /// [`Self::register_outbound_target`], this never moves a node, so restoring the route to an
+    /// address one of its earlier runs advertised cannot take its target from where it runs now.
+    pub fn restore_outbound_target(
+        &self,
+        node_id: ClusterNodeName,
+        endpoint: NodeEndpoint,
+    ) -> NodeEndpoint {
+        self.inner.restore_outbound_target(node_id, endpoint)
+    }
+
     /// Reports whether every outbound pool except bulk is ready for node traffic.
     pub fn is_connected_to(&self, node_id: &ClusterNodeName) -> bool {
         self.inner.is_connected_to(node_id)

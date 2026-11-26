@@ -1108,14 +1108,43 @@ impl InterconnectGossipTransport {
             .map_err(|_| GossipExchangeRefusal::ReceiverClosed)
     }
 
-    fn refresh_routes(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
-        for (id, state) in nodes {
+    /// The newest run of every node `ids` name, this node apart. A node that restarted is live
+    /// under its earlier run too until that run is declared dead, and only its newest run says
+    /// where the node is reached now.
+    fn newest_runs<'a>(
+        &self,
+        ids: impl IntoIterator<Item = &'a ChitchatId>,
+    ) -> BTreeMap<ClusterNodeName, &'a ChitchatId> {
+        let mut newest = BTreeMap::<ClusterNodeName, &'a ChitchatId>::new();
+        for id in ids {
             let Ok(node_id) = ClusterNodeName::parse(&id.node_id) else {
                 continue;
             };
             if &node_id == self.inner.interconnect.node_id() {
                 continue;
             }
+            match newest.entry(node_id) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(id);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if id.generation_id > entry.get().generation_id {
+                        entry.insert(id);
+                    }
+                }
+            }
+        }
+        newest
+    }
+
+    /// Dials every live node at the endpoint its newest run advertises. Registering an earlier
+    /// run's endpoint too would move the node's target back and forth, retiring its connections
+    /// each time.
+    fn refresh_routes(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
+        for (node_id, id) in self.newest_runs(nodes.keys()) {
+            let Some(state) = nodes.get(id) else {
+                continue;
+            };
             let Some(endpoint) = advertised_endpoint(state) else {
                 continue;
             };
@@ -1215,9 +1244,20 @@ impl InterconnectGossipTransport {
                 // The application-health topology can retire a peer after Chitchat declares it
                 // dead. Chitchat still probes that peer, including on a bootstrap node with no
                 // configured seeds, so restore the authenticated route before trying the probe.
-                self.inner
+                // Only a missing target is restored. A node with a target keeps it, wherever the
+                // route's endpoint is: the address an earlier run of a restarted node advertised
+                // stays a route until Chitchat forgets that run, and the probe then reaches the
+                // node's current run instead of moving the node back to the run that is gone.
+                let restored = self
+                    .inner
                     .interconnect
-                    .register_outbound_target(node_id.clone(), route.target.endpoint());
+                    .restore_outbound_target(node_id.clone(), route.target.endpoint());
+                debug!(
+                    peer = %to,
+                    node = %node_id,
+                    endpoint = %restored,
+                    "gossip probes a route through the endpoint its node is reached at"
+                );
                 node_id
             }
             GossipRoutePeer::Expected(expectation) => {

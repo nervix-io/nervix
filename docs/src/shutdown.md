@@ -585,7 +585,9 @@ cannot complete, because the schedule assigns fewer replicas than it was capture
 longer executes the processor, fails and negatively acknowledges what it held.
 
 Runtime teardown gives each processor task a stop grace, and the processor task gives each of its
-branch tasks one of its own. A processor task still stopping its branches when its grace ends is
+branch tasks one of its own. Each branched ingestor task gets the same task stop grace: a delivery
+it still holds when that grace ends, such as one to a peer that is stopping with this node, is cut
+with the task, as the save's cuts are. A processor task still stopping its branches when its grace ends is
 ended together with every branch task it holds. A branch still waiting for its checkpoint therefore
 never outlives its node: it cannot keep the node's runtime database open past terminal teardown,
 continue a checkpoint, or settle acknowledgements after the node stopped. Its unreleased
