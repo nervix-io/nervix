@@ -196,7 +196,8 @@ impl From<StorageClass> for WorkerClassName {
     }
 }
 
-/// How many jobs each class may have running at once, and how many may wait for a slot.
+/// How many jobs each class may have running at once. A job that finds every worker of its class
+/// busy waits for one, and nothing bounds how many jobs wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkerCounts {
     pub control_cpu: NonZeroUsize,
@@ -207,9 +208,6 @@ pub struct WorkerCounts {
     pub consensus_storage: NonZeroUsize,
     pub filesystem_storage: NonZeroUsize,
     pub connector_storage: Setting<ConnectorStorageWorkers>,
-    /// The number of jobs one class may hold waiting for a worker. Beyond it, a job waits for a
-    /// place rather than growing an unbounded queue in front of the pool.
-    pub pending_jobs: crate::PendingJobCounts,
 }
 
 impl Default for WorkerCounts {

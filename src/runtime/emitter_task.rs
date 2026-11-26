@@ -31,7 +31,7 @@ use nervix_connector::{
     EmitterRecordAcknowledgements, EmitterStagingDirectory, EmitterTransientErrorStatus,
     physical_time::{PhysicalDeadline, actual_utc_now},
 };
-use nervix_models::ExternalErrorCode;
+use nervix_models::{DiscardedWorkKind, ExternalErrorCode};
 
 use super::{
     emitter_publishing::{EmitterPublishAttemptKind, EmitterStopDrainOutcome},
@@ -830,6 +830,9 @@ enum EmitterEnding {
     InteractionStopped,
     /// Terminal teardown ended the loop wherever it was, possibly in the middle of a publish.
     Teardown,
+    /// The drop that destroys the emitter ended the loop wherever it was, possibly in the middle
+    /// of a publish: everything the emitter holds is released as done and nothing is finished.
+    Discard,
 }
 
 #[derive(Clone, Copy)]
@@ -1269,6 +1272,7 @@ impl EmitterTask {
                 .change_context(EmitterStartError::CollectPolicy)?;
         let (commands, command_rx) = mpsc::channel(EMITTER_COMMAND_CAPACITY);
         let (stop_signal, mut stop_rx) = watch::channel(None);
+        let (discard, task_discard) = super::emitter_supervision::emitter_discard_channel();
         let task_stop_signal = stop_signal.clone();
 
         let task = nervix_primitives::task::spawn(async move {
@@ -1301,12 +1305,21 @@ impl EmitterTask {
                     return;
                 }
             };
+            // A drop cancels the emitter's work as the domain's teardown does, so a connector
+            // still opening gives up at once and the task's loop ends at the drop.
+            let discard_requested = task_discard.cancellation();
             let work_cancel_forwarder =
                 AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
-                    if *domain_work_cancel_rx.borrow()
-                        || domain_work_cancel_rx.changed().await.is_err()
-                        || *domain_work_cancel_rx.borrow()
-                    {
+                    let domain_cancelled = async {
+                        *domain_work_cancel_rx.borrow()
+                            || domain_work_cancel_rx.changed().await.is_err()
+                            || *domain_work_cancel_rx.borrow()
+                    };
+                    let cancelled = nervix_primitives::select! {
+                        cancelled = domain_cancelled => cancelled,
+                        () = discard_requested.cancelled() => true,
+                    };
+                    if cancelled {
                         task_work_cancel.send_replace(true);
                     }
                 }));
@@ -1435,13 +1448,16 @@ impl EmitterTask {
                 stop_rx: &mut stop_rx,
                 stop_signal: &task_stop_signal,
             };
-            task_loop.run_to_end(&mut terminal_shutdown_rx).await;
+            task_loop
+                .run_to_end(&mut terminal_shutdown_rx, task_discard)
+                .await;
             drop(work_cancel_forwarder);
         });
         Ok(ScheduledEmitterTask {
             commands,
             stop_signal,
             task,
+            discard,
         })
     }
 }
@@ -1456,21 +1472,50 @@ impl EmitterTaskLoop<'_> {
     /// delivered or waiting for the attempt timeout. The emitter's transport client is then finished,
     /// by the deadline the stopping domain execution gave this task, so records a publish
     /// delivered still reach it.
-    async fn run_to_end(&mut self, terminal_shutdown_rx: &mut watch::Receiver<bool>) {
+    async fn run_to_end(
+        &mut self,
+        terminal_shutdown_rx: &mut watch::Receiver<bool>,
+        discard: super::emitter_supervision::EmitterDiscardSignal,
+    ) {
         let ending = nervix_primitives::select! {
             biased;
             _ = super::emitter_publishing::wait_for_emitter_work_cancel(terminal_shutdown_rx) => {
                 EmitterEnding::Teardown
             }
+            () = discard.requested() => EmitterEnding::Discard,
             ending = self.run() => ending,
         };
         match ending {
             EmitterEnding::Stop => {}
+            EmitterEnding::Discard => {
+                let released = self.release_held_work_as_done();
+                discard.answer(released);
+            }
             EmitterEnding::InteractionStopped | EmitterEnding::Teardown => {
                 self.finish_after_loop(ending).await;
             }
         }
         self.state.connector.close_transport(self.context).await;
+    }
+
+    /// Releases as done everything the emitter holds, as the drop that destroys it does: the
+    /// input its relays delivered that it has not buffered, the rows its buffer holds unresolved,
+    /// a publish the drop cut off included, and the rows its connector staged for a commit.
+    fn release_held_work_as_done(&mut self) -> entity_drop::DiscardedWorkCounts {
+        let mut released = entity_drop::DiscardedWorkCounts::default();
+        self.interaction
+            .release_held_input_as_done(DiscardedWorkKind::UndeliveredRecords, &mut released);
+        released.add(
+            DiscardedWorkKind::UndeliveredRecords,
+            self.state.buffer.release_as_done(),
+        );
+        released.add(
+            DiscardedWorkKind::UndeliveredRecords,
+            self.state.connector.release_staged_as_done(),
+        );
+        self.state.retry.clear();
+        self.retention.clear();
+        released
     }
 
     /// Finishes the emitter once the loop ended without a stop, by the deadline on the task's stop

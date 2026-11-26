@@ -126,6 +126,57 @@ pub(super) struct ScheduledEmitterTask {
     /// teardown ends the task.
     pub(super) stop_signal: watch::Sender<Option<Instant>>,
     pub(super) task: JoinHandle<()>,
+    /// How a drop destroys the task at once.
+    pub(super) discard: EmitterDiscardHandle,
+}
+
+/// The side of a scheduled emitter task a drop holds: the signal that ends the task's loop
+/// wherever it is, and the answer of what the task released as done.
+#[derive(Debug)]
+pub(super) struct EmitterDiscardHandle {
+    signal: CancellationToken,
+    released: oneshot::Receiver<entity_drop::DiscardedWorkCounts>,
+}
+
+/// The side of a scheduled emitter task its loop holds.
+pub(super) struct EmitterDiscardSignal {
+    signal: CancellationToken,
+    released: oneshot::Sender<entity_drop::DiscardedWorkCounts>,
+}
+
+/// A discard handle and the signal its task's loop ends at.
+pub(super) fn emitter_discard_channel() -> (EmitterDiscardHandle, EmitterDiscardSignal) {
+    let signal = CancellationToken::new();
+    let (sender, receiver) = oneshot::channel();
+    (
+        EmitterDiscardHandle {
+            signal: signal.clone(),
+            released: receiver,
+        },
+        EmitterDiscardSignal {
+            signal,
+            released: sender,
+        },
+    )
+}
+
+impl EmitterDiscardSignal {
+    /// Resolves once a drop asks to destroy the emitter.
+    pub(super) async fn requested(&self) {
+        self.signal.cancelled().await;
+    }
+
+    /// The signal itself, for a task that ends the emitter's other waits at the drop.
+    pub(super) fn cancellation(&self) -> CancellationToken {
+        self.signal.clone()
+    }
+
+    /// Answers the drop with what the emitter released as done.
+    pub(super) fn answer(self, released: entity_drop::DiscardedWorkCounts) {
+        self.released
+            .send(released)
+            .means_peer_left("emitter drop requester");
+    }
 }
 
 /// Why a scheduled emitter task did not stop. A drain the task itself failed keeps the task's own
@@ -222,6 +273,36 @@ impl ScheduledEmitterStopFailure {
 }
 
 impl ScheduledEmitterTask {
+    /// Destroys the emitter at once, as the drop that removes it does: the task's loop ends
+    /// wherever it is, a publish on the wire included, every record the emitter holds is released
+    /// as done, and its transport client closes without finishing. Answers what was released. A
+    /// task that cannot answer within `grace` is aborted and answers nothing.
+    pub(super) async fn discard(self, grace: Duration) -> Option<entity_drop::DiscardedWorkCounts> {
+        let Self {
+            commands,
+            stop_signal,
+            mut task,
+            discard,
+        } = self;
+        let EmitterDiscardHandle { signal, released } = discard;
+        signal.cancel();
+        let released = nervix_primitives::time::timeout(grace, released).await;
+        if nervix_primitives::time::timeout(grace, &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            (&mut task).join_after_shutdown("dropped emitter").await;
+        }
+        // The loop has ended, so closing its command channel and stop signal ends nothing else.
+        drop(commands);
+        drop(stop_signal);
+        match released {
+            Ok(Ok(released)) => Some(released),
+            Ok(Err(_)) | Err(_) => None,
+        }
+    }
+
     /// Gives the task the deadline by which it finishes its emitter once terminal teardown ends it.
     /// The stopping domain execution calls this before it signals the shutdown, so the task already
     /// holds the deadline when the shutdown ends its loop.
@@ -770,6 +851,7 @@ mod tests {
             commands,
             stop_signal,
             task,
+            discard: emitter_discard_channel().0,
         };
 
         let failed = scheduled
@@ -802,6 +884,7 @@ mod tests {
             commands,
             stop_signal,
             task,
+            discard: emitter_discard_channel().0,
         };
 
         let failed = scheduled
@@ -838,6 +921,7 @@ mod tests {
             commands,
             stop_signal,
             task,
+            discard: emitter_discard_channel().0,
         };
 
         let error = scheduled
@@ -880,6 +964,7 @@ mod tests {
             commands,
             stop_signal,
             task,
+            discard: emitter_discard_channel().0,
         };
 
         let error = scheduled
@@ -925,6 +1010,7 @@ mod tests {
             commands,
             stop_signal,
             task,
+            discard: emitter_discard_channel().0,
         };
 
         let error = scheduled
@@ -1009,6 +1095,7 @@ mod tests {
             commands,
             stop_signal,
             task: nervix_primitives::task::spawn(std::future::pending::<()>()),
+            discard: emitter_discard_channel().0,
         };
         let unavailable = closed
             .stop(Duration::from_secs(1))
@@ -1035,6 +1122,7 @@ mod tests {
             commands,
             stop_signal,
             task: nervix_primitives::task::spawn(std::future::pending::<()>()),
+            discard: emitter_discard_channel().0,
         };
         let unaccepted = busy
             .stop(Duration::from_millis(5))

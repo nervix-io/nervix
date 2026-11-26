@@ -92,20 +92,20 @@ async fn hold_payload_handoff(world: &mut ScenarioWorld) {
         .assured("the fixture budget fits a monotonic instant");
     loop {
         nervix_primitives::task::consume_budget().await;
-        let queued = held.nodes.iter().any(|node| {
+        let waiting = held.nodes.iter().any(|node| {
             held.faults
                 .executor_on(node)
                 .snapshot()
                 .cpu_class(CpuClass::Extension)
-                .pending
+                .waiting
                 > 0
         });
-        if queued {
+        if waiting {
             break;
         }
         assert!(
             Instant::now() < observation_deadline,
-            "the WebSocket payload never queued for its decoder"
+            "the WebSocket payload never waited for its decoder"
         );
         sleep(Duration::from_millis(20)).await;
     }

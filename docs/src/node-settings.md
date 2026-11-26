@@ -1120,11 +1120,12 @@ CPU admission total is at most the larger of CPU count and five. These are admis
 they do not promise an idle physical core. A stuck extension cannot take a data or control place.
 Consensus storage defaults to one worker; filesystem and connector storage each default to two.
 
-For each class, `--execution-<class>-workers` and `--execution-<class>-pending-jobs` override its
-workers and queue. Class names are `control-cpu`, `credentials-cpu`, `data-cpu`, `extension-cpu`,
-`bulk-cpu`, `consensus-storage`, `filesystem-storage`, and `connector-storage`. A queue defaults
-to 64 pending jobs per worker, capped at 1,024 per class. Counts must be positive and representable
-by the admission primitive; explicit CPU over-allocation is refused.
+For each class, `--execution-<class>-workers` overrides its workers. Class names are
+`control-cpu`, `credentials-cpu`, `data-cpu`, `extension-cpu`, `bulk-cpu`, `consensus-storage`,
+`filesystem-storage`, and `connector-storage`. A class's workers are all its admission: a job that
+finds every worker busy waits for one in the order it asked, and no setting bounds how many jobs
+wait. Counts must be positive and representable by the admission primitive; explicit CPU
+over-allocation is refused.
 
 Each pool has `--execution-<pool>-memory-bytes`. With known memory, defaults are:
 

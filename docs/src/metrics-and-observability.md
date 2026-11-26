@@ -442,7 +442,7 @@ Relay admission:
 
 Execution admission:
 
-Worker series include the `connector_storage` class. Its running and pending jobs show Kafka
+Worker series include the `connector_storage` class. Its running and waiting jobs show Kafka
 ingestor control calls, consumer-group commits and the destruction of retired consumers and producers
 waiting on their broker, independently of `filesystem_storage` and `consensus_storage`. A commit may
 keep its worker after its caller's thirty-second deadline; the next commit from that instance waits
@@ -457,16 +457,15 @@ a second of flushing; see [Kafka client retirement](./connector-contract.md#kafk
   class was closed. A charge that waits for room is not refused, and an optional charge that finds
   no room, such as a retained read view, is not counted.
 - `nervix_execution_operation_limit_bytes` and `nervix_execution_resident_replication_batches`: resolved relay/bulk byte ceilings and replication window.
-- `nervix_execution_queue_capacity`: configured waiting places for each worker class. Workers,
-  queues and memory capacities report the actual [resolved execution settings](node-settings.md#execution-capabilities).
-- `nervix_execution_workers`, `nervix_execution_jobs_running`, `nervix_execution_jobs_pending`: how
-  many jobs one class may have on the blocking pool at once, how many it holds, and how many wait
-- `nervix_execution_jobs_waiting`: jobs that found their class's wait queue full and wait for a
-  place in it. Every job waits this way, requests included, so a nonzero value is backpressure,
-  never loss: the jobs take the places the class frees, in the order they asked, and a caller that
-  stops waiting gives its place up
+- `nervix_execution_workers` and `nervix_execution_jobs_running`: how many jobs one class may have
+  on the blocking pool at once, and how many it holds. Workers and memory capacities report the
+  actual [resolved execution settings](node-settings.md#execution-capabilities).
+- `nervix_execution_jobs_waiting`: jobs that found every worker of their class busy and wait for
+  one. Every job waits this way, requests included, and nothing bounds how many wait, so a nonzero
+  value is backpressure, never loss: workers take the waiting jobs in the order they asked, and a
+  caller that stops waiting gives up its turn
 - `nervix_execution_jobs_total` and `nervix_execution_jobs_completed_total`: jobs admitted and jobs
-  that left a worker. No job is refused for a full queue
+  that left a worker. No job is refused for busy workers
 
 For `state_read_cache`, an optional retained view that finds no room is not retained, and the
 generator still returns a complete uncached read using `state_read` admission. Active decoded
@@ -515,7 +514,7 @@ Cluster prerequisites:
   values, as [Node Settings](./node-settings.md#prerequisites-at-join) describes
 
 These series answer two operational questions directly. A class that is saturated shows a reserved
-byte count at its capacity, or running jobs at its worker count with pending jobs behind them,
+byte count at its capacity, or running jobs at its worker count with waiting jobs behind them,
 while the other classes stay free — that is the isolation the pools exist for. A control answer
 arriving late while bulk work runs shows up as reactor delay and as request seconds rising for the
 `shared` or `liveness` operation, not as a connection failure.

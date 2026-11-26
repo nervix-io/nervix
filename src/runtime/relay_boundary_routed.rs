@@ -94,6 +94,10 @@ pub(in crate::runtime) enum RuntimeConsumerDispatch {
     /// The owner of the relay on another node routed the batch here, because its schedule places an
     /// attached consumer of the relay on this node.
     Routed,
+    /// The owner routed the batch here for attached consumers a drop destroyed on this node before
+    /// that owner applied the drop. Their share counts as done, as the share of every message they
+    /// held does, so the batch needs no attached consumer here.
+    RoutedToDroppedConsumers,
 }
 
 impl RuntimeConsumerDispatch {
@@ -106,7 +110,7 @@ impl RuntimeConsumerDispatch {
     /// completing them would report records no consumer processed.
     pub(super) fn requires_local_attached_consumer(self) -> bool {
         match self {
-            Self::Owner => false,
+            Self::Owner | Self::RoutedToDroppedConsumers => false,
             Self::Routed => true,
         }
     }

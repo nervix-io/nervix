@@ -261,6 +261,7 @@ class InventoryTests(unittest.TestCase):
             "runtime-error-event-wire",
             "backup-capture-wire",
             "domain-stop-wire",
+            "entity-drop-report-wire",
             "backup-capture-wire-malformed",
             "backup-section-mapping",
             "stopping-node-drain-wire",
@@ -626,7 +627,7 @@ class InventoryTests(unittest.TestCase):
             "registry-stored-models": 68,
             "registry-stored-models-corruption": 68,
             "cluster-identity-record-rkyv": 4,
-            "node-settings-command-line": 29,
+            "node-settings-command-line": 30,
             "node-records": 24,
             "runtime-state-replication-wire": 31,
             "runtime-state-replication-malformed": 31,
@@ -1328,6 +1329,7 @@ class ExecutionTests(unittest.TestCase):
                 self.assertEqual(bolero.build_instrumented(self.inventory, target, run), binary)
             call = commands.call_args
             self.assertIn("-C instrument-coverage", call.kwargs.get("env", {}).get("RUSTFLAGS", ""))
+            self.assertIn("-Znext-solver=coherence", call.kwargs["env"]["RUSTFLAGS"].split())
             self.assertEqual(call.kwargs["env"]["LLVM_PROFILE_FILE"], "/dev/null")
             args = call.args[0]
             self.assertEqual(args[args.index("--sanitizer") + 1], self.inventory.sanitizer)
@@ -1516,6 +1518,8 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(report["target"], target.id)
             self.assertEqual(report["test_target"], "test:representations")
             self.assertEqual(report["features"], list(target.features))
+            # The record keeps the flags cargo-bolero inherited, the sanitizer nightly's last.
+            self.assertEqual(report["rustflags"].split()[-1:], ["-Znext-solver=coherence"])
             args = next(call.args[0] for call in commands.call_args_list
                         if call.args[0][:3] == ["cargo", "bolero", "test"])
             self.assertEqual(args[args.index("--runs") + 1], "0")
@@ -1716,6 +1720,9 @@ class ExecutionTests(unittest.TestCase):
                 self.assertIn("--engine-args=-print_funcs=0", call.args[0])
                 expected_timeout = 10 if call.args[0][-1].endswith("times_out_on_marker") else 1800
                 self.assertEqual(call.kwargs["timeout"], expected_timeout)
+                # cargo-bolero appends the inherited RUSTFLAGS to its sanitizer flags.
+                flags = call.kwargs.get("env", {}).get("RUSTFLAGS", "").split()
+                self.assertEqual(flags[-1:], ["-Znext-solver=coherence"])
             generated = runs / "qualification-assertion/0/discovery-ignored/src/lib.rs"
             self.assertIn("#[ignore]\n    fn bolero_ignored()", generated.read_text())
             self.assertTrue((generated.parent.parent / "Cargo.lock").is_file())

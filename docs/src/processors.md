@@ -23,6 +23,19 @@ Ordinary multi-source processors require every `FROM` relay to reference the sam
 Model. Merely having structurally equal schemas is not enough. The relays must also use the same
 exact parametrizer, or all be unbranched.
 
+A domain's graph has no loops. Data never comes back to a relay it already passed: no chain of
+routes, `ON MESSAGE ERROR SEND TO` routes, `ON CORRELATION TIMEOUT SEND TO` actions and reads of a
+relay's materialized state, a generator's `USING MATERIALIZED STATE` source included, leads from a
+relay back to itself. A node never writes into a relay it reads or whose state it reads, and two
+nodes never feed each other. Nervix refuses a statement, a transaction or a restore that would
+close a loop before any of it applies. The refusal names the loop in the order data would travel
+it, starting at the relay whose name sorts first, and names every hop that is not an ordinary
+route as `[error route]`, `[correlation timeout]` or `[state read]`:
+
+```text
+the graph of domain 'shop' would contain a loop: RELAY 'orders' → JUNCTION 'enrich' →[error route] RELAY 'orders'
+```
+
 Relay inputs may optionally collect incoming Arrow batches before node execution:
 
 ```plexus,ignore
@@ -73,6 +86,14 @@ UNBRANCHED
 Every input and output relay must match it exactly. State, scheduling, buffers, and materialized
 views are instantiated independently for every concrete branch. Only ingestors and reingestors
 construct branch keys.
+
+`DROP <kind> <processor>` removes a processor at once and waits for nothing it holds. Every node
+that runs it first takes it out of the relays it reads, then destroys each branch with what it
+holds, without a final flush: collected input and output waiting in a route's buffer, `REQUIRED
+WAIT` messages, rows a reorderer or a window holds, records a correlator holds for a partner and
+messages a WASM guest holds. The processor's share of each is counted as done, the answer reports
+them by kind, and the processor's stored state, a deduplicator's keys or a window's rows included,
+is removed on every node, so a processor created later under the same name starts empty.
 
 ### Partitioned processing
 

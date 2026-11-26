@@ -1351,7 +1351,9 @@ remote cache appear empty.
 `kunobi-ninja/kache-action` installs kache, sets `RUSTC_WRAPPER`, the store and a job-scoped runtime
 directory, and stops the job's daemon in its post step. The action receives no S3 inputs, so its
 post step neither saves a manifest nor pushes. The configuration file `scripts/kache_remote.py`
-writes, for a job and for the Docker builder alike, lets the local store hold a quarter of the
+writes, for a job and for the Docker builder alike, names the remote when the build is given all of
+its `KACHE_S3_*` settings, names none when it is given none of them, as a local image build may be,
+and is refused for some without the rest. It lets the local store hold a quarter of the
 volume that holds the store, rounded to the nearest GiB and at least kache's own floor of 5 GiB, so
 the budget still follows the cache volume when the runner changes. Kache's own default, 5% of the
 volume and at most 100 GiB, gave a Boat runner 15 GiB, while the `checks` job's store reached 33
@@ -1436,6 +1438,7 @@ document, and an answer outside its schema is reported rather than read. The out
 | `published` | The manifest is saved and the daemon reports every upload of the job finished | Nothing |
 | `incomplete` | The budget ended with uploads queued or in flight, the manifest failed or did not finish, an upload failed for good, or the daemon stopped answering during the wait | Queued uploads go to the daemon's shutdown drain, which kache bounds at 30 seconds |
 | `read-only` | Kache made the job's remote read-only, as for a scheduled or manually dispatched run | Nothing: such a job publishes nothing |
+| `local-only` | The job's daemon has no remote, as for a local image build given no `KACHE_S3_*` setting | The build's cache, in its local store only |
 | `not-run` | The job's work failed or was cancelled, so publication returns at once | After a failure, queued uploads go to the shutdown drain of the kache action's post step. That step does not run for a cancelled job, and a job that reaches its time limit is cancelled, so its queued uploads end with the machine |
 | `unavailable` | The job has no kache command or no manifest key, or its daemon does not answer | Whatever a stopped daemon left queued: publication asks `kache --json daemon status` first because `kache stats` would start a new daemon |
 | `cancelled` | The step received `SIGINT` or `SIGTERM` | The record names the first signal and the phase in which the step received it |
@@ -2047,9 +2050,9 @@ The harness keeps these boundaries explicit.
   removes that node from the retained set. These are harness bounds for class-isolation evidence,
   not additional product deadlines.
 - **Worker class saturation.** `<class> execution is saturated on every node`, and its form for
-  one node, hold every worker and every wait-queue place of one CPU class (`control`,
-  `credentials`, `data`, `extension`, `bulk`) or storage class (`consensus storage`,
-  `filesystem storage`, `connector storage`), so the next job of that class waits for a place.
+  one node, hold every worker of one CPU class (`control`, `credentials`, `data`, `extension`,
+  `bulk`) or storage class (`consensus storage`, `filesystem storage`, `connector storage`), so the
+  next job of that class waits for a worker.
   Filling one node's class has a 60-second harness bound: it waits only for the jobs already
   running there to leave their workers. `a <class> job waits for a place on node …` (or
   `on some node`) reads the public waiting gauge, `nervix_execution_jobs_waiting`. A node's own maintenance can already wait
@@ -2303,15 +2306,22 @@ the assertion uses the delivered diagnostic rather than parsing the displayed me
 A **status wait** polls one node every 200 milliseconds until its parsed status satisfies a
 condition, within 40 seconds from the start of the wait. The waits the harness performs are a
 current leader, a specific leader or a leader other than a given node, a Raft state, the expected
-voter set, an interconnect status to a peer, an applied index at least the leader's, and a fragment
-of the status text. Two waits read every node at once: a leader the running nodes agree on, and a
-consistent leader, which requires every node to name the same leader, that leader to report itself
-`Leader`, and three consecutive polls to agree. Every request of a wait receives the wait's
-deadline, so a wait whose last request never replies still ends at its original deadline rather than
-one request timeout later. A wait that expires fails its step with the elapsed time, the last status
+voter set, an interconnect status to a peer, a peer's run in gossip that is not terminating, an
+applied index at least the leader's, and a fragment of the status text. Two waits read every node
+at once: a leader the running nodes agree on, and a consistent leader, which requires every node to
+name the same leader, that leader to report itself `Leader`, and three consecutive polls to agree.
+Every request of a wait receives the wait's deadline, so a wait whose last request never replies
+still ends at its original deadline rather than one request timeout later. A wait that expires fails its step with the elapsed time, the last status
 text it rejected, and the last typed failure it saw. The meaning of the `connected` interconnect
 status these waits read belongs to [Cluster
 Interconnect](./interconnect.md#application-health-and-availability).
+
+A node that restarted is listed in a peer's gossip by its new run, beside its earlier run that
+announced its stop, until that earlier run leaves. A peer plans against a node's newest live run, so
+`every other node's gossip eventually lists a run of node … that is not terminating` waits, one
+status wait per other node, until each of them lists the new run as not terminating. A plan any of
+them makes afterwards, a relocation run again by a new leader included, sees the restarted node as
+it now runs rather than as the earlier run that was stopping.
 
 The stopped-voter `DROP NODE` scenario waits for the public status report to show that the voter
 is no longer visible in gossip before removing it, then requires the exact remaining voter set.
@@ -2505,6 +2515,24 @@ election it started` blocks the target's consensus connectivity until the third 
 election the transfer starts can then never reach the target, and the third voter wins it. The
 connectivity returns once that voter leads, and the move must still end with every node reporting
 the target as the leader.
+
+A move armed under a held command holds the next persistent command of the node it moves
+leadership away from before its admission is proposed, after its durable admission, or before its
+outcome is recorded, and releases it once the target and that node both report the target as the
+leader. A command whose first run cannot record its outcome, because leadership moved or the
+leader's lease went unconfirmed, is run again under its execution reference by the leader that
+records it, and the client learns that later run's outcome. A loaded runner can cause either at any
+moment, so a scenario that asserts how a disruption made such a command fail, such as a relocation
+whose destination restarted, asserts only what every run can answer. It gives a later run a refusal
+of its own, as a cordon of the destination that a later plan refuses, or accepts the later run's
+answer, as `relocated 0 of 1` for a move the first run had already committed, and keeps every
+assertion about what moved. Where a cordon would change what the first run decides, as for a commit
+its planning inputs refuse, the scenario holds the outcome with `command finalization on node …
+pauses before its outcome is recorded` and cordons only once the first run has decided; it holds
+the outcome the same way until a restarted node's new run is recorded, so that a later run finds
+that node recorded. `A destination restart after preparation aborts the ownership handoff when
+leadership moves before its outcome is recorded` makes the later run happen on purpose, with the
+move held before its outcome is recorded.
 
 ## Node Tasks And Readiness
 
@@ -4862,6 +4890,7 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | --- | --- |
 | A status request ends at its deadline in the operation that stalled, and every probe outcome keeps its cause | `status_request_ends_at_its_deadline_while_the_connection_is_pending`, `status_request_ends_at_its_deadline_while_session_establishment_is_pending`, `status_request_ends_at_its_deadline_while_the_response_is_pending`, `status_request_ends_at_its_deadline_while_unrelated_responses_remain_ready`, `readiness_and_status_outcomes_retain_their_typed_cause` |
 | A wait ends at its original deadline | `status_wait_ends_at_its_original_deadline_when_the_final_request_never_replies`, `nested_deadline_never_outlives_its_phase`, `startup_readiness_failure_reports_the_timed_out_status_operation` |
+| A restarted node counts as running in a peer's gossip only once the peer lists its new run, which is not terminating, beside its terminating earlier run | `a_restarted_node_runs_once_gossip_lists_its_new_run_beside_the_terminating_one` |
 | A unit's owner written as `-` names no node, so a wait for a unit to move off a node returns only once another node owns it | `a_status_reports_no_owner_for_a_unit_no_node_owns`, `a_status_reports_the_node_that_owns_a_unit_and_its_replicas`, `a_unit_no_node_owns_has_not_moved_to_another_node`, `a_unit_another_node_owns_has_moved_to_that_node`, `a_status_lists_no_placement_for_a_unit_it_does_not_schedule`, `a_describe_output_of_a_unit_no_node_owns_names_no_owner`, `a_describe_output_names_the_owner_and_replicas_of_its_unit` |
 | Node task outcomes are distinct, the task is joined once, and its owner never aborts it | `running_task_reports_the_last_failed_probe_at_the_deadline`, `clean_application_exit_before_readiness_is_terminal`, `application_error_before_readiness_is_retained`, `panic_and_cancellation_have_distinct_terminal_outcomes`, `stop_and_keeper_paths_use_the_task_inspected_for_diagnostics`, `a_wait_past_its_deadline_leaves_the_task_running_with_its_owner` |
 | One startup budget with classified retries | `repeated_readiness_failure_spends_one_budget_across_every_attempt`, `a_node_that_does_not_stop_ends_the_startup_instead_of_being_launched_over`, `exhaustion_reports_every_attempt_with_its_typed_cause`, `ports_that_cannot_be_reallocated_end_the_startup`, `a_bound_address_is_retried_until_a_launch_becomes_ready`, `a_last_attempt_still_becomes_ready_with_what_the_budget_left`, `an_application_error_ends_the_startup_without_another_launch`, `a_panicking_node_ends_the_startup_without_another_launch`, `a_launch_failure_ends_the_startup_before_anything_is_cleaned_up`, `sequential_cluster_construction_stays_inside_its_derived_budget` |

@@ -339,6 +339,62 @@ fn a_rejected_decision_names_each_cause_once() {
     );
 }
 
+/// A decision whose signature does not verify is refused at receipt as a decision, beneath the
+/// rejection's reason, with the document's refusal and the verifier's beneath it, each once.
+#[test]
+fn a_decision_whose_signature_does_not_verify_is_refused_as_a_decision_at_receipt() {
+    use nervix_licensing_protocol::{trust::TrustError, validation::DecisionRejection};
+
+    let fixture = SignedFixture::new();
+    let mut received = fixture.received(&fixture.decision, &[]);
+    corrupt_signature(&mut received.bytes);
+    let report = LicensingRecord::free(fixture.identity.public().created_at)
+        .prepare_activation(
+            &fixture.identity.public(),
+            nervix_models::ActivationKind::Persistent,
+            "TESTABCD".to_owned(),
+            &received,
+            &fixture.environment,
+        )
+        .expect_err("a decision with a corrupted signature does not verify");
+    assert_eq!(
+        report.current_context(),
+        &LicenseDecisionError::Rejected {
+            reason: DecisionRejection::Envelope
+        }
+    );
+    assert!(matches!(
+        report.downcast_ref::<TrustError>(),
+        Some(TrustError::Decision)
+    ));
+    assert_eq!(
+        format!("{report:#}"),
+        "licensing decision was rejected: the decision envelope or signing authorization is \
+         invalid: the decision has an invalid signature profile or payload: the document \
+         signature is invalid: JWS signature verification failed: InvalidSignature"
+    );
+}
+
+/// `compact` with the first character of its signature segment replaced, as the licensing test
+/// service tampers a signature: still canonical base64url, but no longer the key's signature.
+fn corrupt_signature(compact: &mut String) {
+    let separator = compact
+        .rfind('.')
+        .assured("a signed decision is a compact JWS");
+    let position = separator
+        .checked_add(1)
+        .assured("the signature segment follows a separator inside the string");
+    let end = position
+        .checked_add(1)
+        .assured("the signature segment holds at least one character");
+    let replacement = if compact.as_bytes()[position] == b'A' {
+        "B"
+    } else {
+        "A"
+    };
+    compact.replace_range(position..end, replacement);
+}
+
 /// The stored verification keeps only the error value, without its report. A report made from
 /// that value, as `DESCRIBE LICENSE` renders it, still names the rejection and its reason once
 /// each.

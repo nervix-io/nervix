@@ -402,6 +402,28 @@ impl ModelKind {
                 | Self::WindowProcessor
         )
     }
+
+    /// Whether the schedule places entities of this kind on nodes, which run them: a relay, a
+    /// hash map, a source, a processor or an emitter. Every other kind is configuration that
+    /// runs nowhere by itself.
+    pub fn is_schedulable(self) -> bool {
+        matches!(
+            self,
+            Self::Generator
+                | Self::Inferencer
+                | Self::Ingestor
+                | Self::Reingestor
+                | Self::Relay
+                | Self::Lookup
+                | Self::Deduplicator
+                | Self::Correlator
+                | Self::Reorderer
+                | Self::Junction
+                | Self::WindowProcessor
+                | Self::WasmProcessor
+                | Self::Emitter
+        )
+    }
 }
 
 #[derive(

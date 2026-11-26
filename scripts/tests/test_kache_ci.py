@@ -437,9 +437,15 @@ class KacheWorkflowTests(unittest.TestCase):
                 with self.subTest(job=build, setting=name):
                     self.assertIn(f"{name}: {value}", jobs[build])
         for name in EU_REMOTE:
-            self.assertIn(f'--build-arg "{name}=${{{name}}}"', justfile)
-            self.assertIn(f'"${{{name}:?{name} is required}}"', justfile)
+            # A local image build may give no remote: the settings pass through empty.
+            self.assertIn(f'--build-arg "{name}=${{{name}:-}}"', justfile)
+            self.assertNotIn(f"{name} is required", justfile)
+            self.assertNotIn(f"{name} is required", dockerfile)
             self.assertIn(f"ARG {name}\n", dockerfile)
+        # Settings that all arrived empty are no remote at all, so neither the script nor kache's
+        # ambient reading sees an empty bucket.
+        unset = dockerfile.index("unset KACHE_S3_BUCKET KACHE_S3_REGION KACHE_S3_ENDPOINT")
+        self.assertLess(unset, dockerfile.index('python3 scripts/kache_remote.py configure "${KACHE_CONFIG}"'))
         self.assertIn('--build-arg "KACHE_VERSION=${KACHE_VERSION:-2.0.0}"', justfile)
 
         self.assertIn("ARG KACHE_VERSION=2.0.0", dockerfile)
@@ -639,7 +645,17 @@ class RemoteConfigurationTests(unittest.TestCase):
             kache_remote.cache_directory({}), Path(pwd.getpwuid(os.getuid()).pw_dir) / ".cache" / "kache"
         )
 
-    def test_every_remote_setting_is_required(self) -> None:
+    def test_configure_without_any_remote_setting_writes_only_the_store(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "kache.toml"
+            result = run_cli(["configure", str(config)], {"KACHE_CACHE_DIR": directory})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            parsed = tomllib.loads(config.read_text())
+            budget = quarter_of_volume_gib(Path(directory))
+
+        self.assertEqual(parsed, {"cache": {"local_max_size": f"{budget}GiB", "index_mode": "off"}})
+
+    def test_a_remote_needs_every_setting_once_any_is_given(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "kache.toml"
             for missing in REMOTE_ENVIRONMENT:
@@ -1119,6 +1135,19 @@ class PublicationTests(unittest.TestCase):
 
         self.assertEqual(publication.outcome, Outcome.UNAVAILABLE)
         self.assertIn("answered outside JSON schema 1", publication.reasons[0])
+
+    def test_a_build_without_a_remote_keeps_its_cache_local_and_publishes_nothing(self) -> None:
+        publication, kache, output = self.publish({"remote": None})
+
+        self.assertEqual(publication.outcome, Outcome.LOCAL_ONLY)
+        self.assertFalse(publication.outcome.warns)
+        self.assertIn("keeps its cache in its local store", publication.reasons[0])
+        self.assertIsNone(publication.manifest)
+        commands = kache.commands()
+        self.assertIn(["--json", "daemon", "status"], commands)
+        self.assertFalse(any("save-manifest" in command for command in commands), commands)
+        self.assertNotIn("::warning", output)
+        self.assertEqual(self.recorded()["outcome"], "local-only")
 
     def test_a_job_without_kache_or_its_remote_is_unavailable(self) -> None:
         publication, _kache, _output = self.publish({}, PATH="/nonexistent")

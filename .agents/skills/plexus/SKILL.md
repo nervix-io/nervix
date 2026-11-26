@@ -476,7 +476,11 @@ instance or attachment changes, ingestor,
 emitter source-predicate, and relay materialized-state changes gate and drain only affected
 entities. Changing emitter `FROM` membership pauses the domain because it changes topology.
 Deduplicator key and reorderer ordering changes also use entity pause; their `MAX TIME` changes are
-dynamic. Write an ingestor's `ALTER` under the stored ingestor's own head, such as
+dynamic. `DROP <kind> <name>` names the kind phrase of the entity's `CREATE` head without its
+connector (`WINDOW PROCESSOR`, `WASM PROCESSOR`, `HASH MAP`, `SIGNALING PROTOCOL`, `EMITTER`, …).
+A drop is immediate and dynamic: it waits for nothing the entity holds, discards it, counts the
+entity's share of each held message as done and reports what was discarded; warn that it is not a
+graceful stop. Write an ingestor's `ALTER` under the stored ingestor's own head, such as
 `ALTER KAFKA TOPIC INGESTOR`; an alteration never changes its connector or entity, so reading
 another one takes `DROP INGESTOR` and a new `CREATE`. Use that head's complete body after
 `SET FROM`, or change one part in place: `SET CLIENT`, `SET <locator>`, `SET|DROP <option>`,
@@ -709,6 +713,10 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - Select `BRANCHED BY <parametrizer>` or `UNBRANCHED` explicitly. Normal processors preserve their named
   branch. Use a reingestor to enter a parametrization distinct from every input relay's or to
   send records unbranched. See [Runtime Nodes](../../../docs/src/processors.md#reingestor).
+- Never design a loop: no route, `SEND TO` error route, correlation timeout or `USING MATERIALIZED
+  STATE` read may lead data back to a relay it already passed, so a node never writes into a relay
+  it reads, and a retry or feedback path goes through an outside system. Nervix refuses such a
+  graph; see [Runtime Nodes](../../../docs/src/processors.md#shared-input-and-branch-contracts).
 - Treat placement rules as path-gated overlays, not connectivity-independent groups. Use
   `REQUIRE COLOCATION` only for a hard same-cluster-node constraint; `PREFER COLOCATION` and
   `SUGGEST SEPARATION` are soft, `NEUTRAL` leaves scheduler heuristics active, and no hard

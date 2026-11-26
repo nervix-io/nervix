@@ -881,8 +881,8 @@ when a swap or `ALTER` replaces it, or when composing its emitter fails after th
 a flush keeps running on the runtime's blocking pool after its finish's caller stops waiting for it,
 until librdkafka's flush returns. Whichever of them lets the last handle go hands the client to its
 retirement and carries on at once, on an async worker, a connector worker or a blocking-pool thread
-alike. The retirement destroys the client in one connector storage job. A full queue holds that job
-until a place frees instead of refusing it, because nothing could present the client again, and the
+alike. The retirement destroys the client in one connector storage job. Busy workers hold that job
+until one frees instead of refusing it, because nothing could present the client again, and the
 job runs under a commands charge the client took before it was created, so retiring a client asks
 the node for nothing it could refuse. A client that cannot take that charge is not created: the
 ingestor's open or the inspector's start fails with the transient
@@ -904,7 +904,7 @@ A joined consumer whose coordinator does not answer holds a connector worker for
 seconds, and a producer holds one for its polling thread's last poll and up to half a second of
 flushing. A broker that stops answering while its clients retire therefore delays the node's other
 Kafka control calls queued behind them, never its async workers. The `connector_storage` class's
-`nervix_execution_jobs_running` and `nervix_execution_jobs_pending` count retirements with the other
+`nervix_execution_jobs_running` and `nervix_execution_jobs_waiting` count retirements with the other
 Kafka jobs. Node shutdown does not wait for a retirement: the process's runtime finishes or
 performs it as it stops after terminal teardown, as
 [Terminal Teardown](./shutdown.md#terminal-teardown) describes.
@@ -1110,7 +1110,7 @@ not disable verification or silently fall back when unavailable.
 The server composition root extends the existing changed-model binding boundary before standalone
 mutation or transaction commit. It renders mount templates using the resource resolver and checks
 the rendered schema and Nervix-owned file paths on an admitted filesystem worker, charged to command memory.
-A full command memory class or filesystem wait queue holds the inspection back, during request
+A full command memory class or busy filesystem workers hold the inspection back, during request
 preflight exactly as when a model step applies under an accepted transaction or restore; lack of
 room has not judged the configuration. The service task's existing shutdown cancellation ends the
 wait. A charge larger than the whole
@@ -2828,6 +2828,18 @@ the emitter's transient error that `DESCRIBE EMITTER` shows and as an error even
 | ZeroMQ | Nothing a publish reported delivered: a completed send has flushed its frame to a peer's socket, and a send that ran out of `timeout_ms` failed its record | Nothing to send |
 | RabbitMQ, Redis Pub/Sub, SQS, Sentry, OTEL, HTTP, Syslog, ClickHouse, Postgres, MySQL, MongoDB, client emitters | Nothing: a publish returns once its transport answered for or wrote each record | Nothing to send |
 | Iceberg | Rows it staged and has not committed, which only a commit publishes | Nothing to send: a stop commits the staged rows before it finishes, and teardown leaves them uncommitted, as [Shutdown And Recovery](./shutdown.md#emitters) describes |
+
+A drop destroys an emitter without a stop and without a finish. The host first removes the
+emitter's registration from every relay it reads, then ends its task's loop wherever it is, a
+publish on the wire or a retry wait included, and releases as done every record the emitter holds:
+the input its relays delivered that it had not buffered, every row of its buffer that no answer
+resolved, a row a cut-off attempt prepared included, and the rows an emitter that commits on its
+own staged. The host reaches staged rows through the lifecycle's `release_staged_as_done`, which
+an emitter that retains acknowledgements implements: it acknowledges what it retained, forgets
+the staged rows without publishing them and answers how many they were, so nothing it does
+afterwards, its own end included, resolves those acknowledgements again. Iceberg forgets its staged
+batches, and its staging directory goes with the emitter. The host then closes the transport
+without finishing it and reports the released records as the drop's undelivered records.
 
 librdkafka sends lingering records at once only while a call to its flush is waiting: each broker
 thread checks that state when it next serves its partitions. rust-rdkafka's `flush` calls

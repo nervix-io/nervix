@@ -99,10 +99,10 @@ class's count is the number of its jobs that may be on that pool at once. A clas
 share of admission; it is not guaranteed an idle thread. Apart from the classes, only work that
 waits rather than computes uses the pool: a Kafka producer's final drain and partition
 inspection, which wait on the broker, and the one read of the resolver configuration at startup.
-Each class defaults to 64 pending jobs per worker, capped at 1,024; an explicit per-class queue
-can override this bound. A full queue or memory class is backpressure on the machine's resources,
-never a reason to refuse work: every job waits for a place and every charge waits for room,
-requests included. An HTTP endpoint body, a statement or an inspection waits within its own limit
+A class is its workers and nothing more: a job that finds every worker busy waits for one, in the
+order it asked, and nothing bounds how many jobs wait. Busy workers and a full memory class are
+backpressure on the machine's resources, never a reason to refuse work: every job waits for a
+worker and every charge waits for room, requests included. An HTTP endpoint body, a statement or an inspection waits within its own limit
 (the request's lifetime or the statement's deadline) exactly as the unfolding of a payload an
 ingestor handed over, relay and subscription deliveries, the answer of an interconnect request
 whose handler already ran, checkpoints, consensus storage and lifecycle steps do. Only an operation

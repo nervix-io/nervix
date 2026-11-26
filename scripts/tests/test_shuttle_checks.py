@@ -35,14 +35,14 @@ from scripts.shuttle_checks import (
     select,
 )
 
-WAIT_QUEUE = REPLAY_CHECK_TEST
+BUSY_WORKER = REPLAY_CHECK_TEST
 CANCELLATION = "tests::shuttle_checks::shuttle_running_job_observes_cancellation"
 FLUSH = "runtime::force_flush::shuttle_tests::shuttle_stale_completions_never_clear"
 
 INVENTORY = f"""
 [[package]]
 name = "{REPLAY_CHECK_PACKAGE}"
-checks = ["{WAIT_QUEUE}", "{CANCELLATION}"]
+checks = ["{BUSY_WORKER}", "{CANCELLATION}"]
 
 [[package]]
 name = "nervix-server"
@@ -72,7 +72,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_a_check_registered_twice_is_refused(self) -> None:
         with self.assertRaisesRegex(RunnerError, "registers .* twice"):
-            parse_inventory(INVENTORY.replace(f'"{CANCELLATION}"', f'"{WAIT_QUEUE}"'))
+            parse_inventory(INVENTORY.replace(f'"{CANCELLATION}"', f'"{BUSY_WORKER}"'))
 
     def test_a_package_registered_twice_is_refused(self) -> None:
         with self.assertRaisesRegex(RunnerError, "package nervix-server is registered twice"):
@@ -96,7 +96,7 @@ class InventoryTests(unittest.TestCase):
 class SelectionTests(unittest.TestCase):
     def discoveries(
         self,
-        execution: Sequence[str] = (WAIT_QUEUE, CANCELLATION),
+        execution: Sequence[str] = (BUSY_WORKER, CANCELLATION),
         server: Sequence[str] = (FLUSH,),
         ignored: Sequence[str] = (),
     ) -> list[Discovery]:
@@ -111,11 +111,11 @@ class SelectionTests(unittest.TestCase):
 
     def test_the_whole_gate_selects_every_registered_check(self) -> None:
         selected = select(inventory(), self.discoveries(), "")
-        self.assertEqual([check.test for check in selected], [WAIT_QUEUE, CANCELLATION, FLUSH])
+        self.assertEqual([check.test for check in selected], [BUSY_WORKER, CANCELLATION, FLUSH])
 
     def test_a_registered_check_that_disappeared_fails_the_gate(self) -> None:
         with self.assertRaisesRegex(RunnerError, f"{CANCELLATION} is not discovered"):
-            select(inventory(), self.discoveries(execution=[WAIT_QUEUE]), "")
+            select(inventory(), self.discoveries(execution=[BUSY_WORKER]), "")
 
     def test_an_ignored_registered_check_fails_the_gate(self) -> None:
         with self.assertRaisesRegex(RunnerError, f"{FLUSH} is ignored"):
@@ -131,8 +131,8 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual([check.package for check in selected], ["nervix-server"])
 
     def test_a_filter_does_not_require_the_other_checks(self) -> None:
-        selected = select(inventory(), self.discoveries(execution=[WAIT_QUEUE]), "wait_queue")
-        self.assertEqual([check.test for check in selected], [WAIT_QUEUE])
+        selected = select(inventory(), self.discoveries(execution=[BUSY_WORKER]), "every_worker_busy")
+        self.assertEqual([check.test for check in selected], [BUSY_WORKER])
 
     def test_a_filter_that_selects_nothing_in_any_package_fails(self) -> None:
         with self.assertRaisesRegex(RunnerError, "no Shuttle check matching `absent` was selected"):
@@ -216,7 +216,7 @@ class RunTests(unittest.TestCase):
         if "--list" in arguments:
             if "nervix-server" in arguments:
                 return listing(FLUSH)
-            return listing(WAIT_QUEUE, CANCELLATION, "workers::tests::ordinary")
+            return listing(BUSY_WORKER, CANCELLATION, "workers::tests::ordinary")
         return environment_answers(arguments)
 
     def test_a_gate_passes_when_every_check_completes_both_runs(self) -> None:
@@ -287,7 +287,7 @@ class RunTests(unittest.TestCase):
             answer = self.listings(arguments)
             if answer is not None:
                 return answer
-            if WAIT_QUEUE in arguments and "SHUTTLE_CHECK_NONDETERMINISM" not in environment:
+            if BUSY_WORKER in arguments and "SHUTTLE_CHECK_NONDETERMINISM" not in environment:
                 directory = Path(environment["SHUTTLE_TRACE_DIR"])
                 (directory / "schedule-1").write_text("91021", encoding="utf-8")
                 return Outcome(101, "panicked: deadlock detected\n")
@@ -296,7 +296,7 @@ class RunTests(unittest.TestCase):
         status, report, target, _ = self.run_gate(respond)
         self.assertEqual(status, 1)
         self.assertIn("failed with exit status 101 in its exploration run", report)
-        evidence = target / "shuttle-failures" / REPLAY_CHECK_PACKAGE / WAIT_QUEUE
+        evidence = target / "shuttle-failures" / REPLAY_CHECK_PACKAGE / BUSY_WORKER
         metadata = json.loads((evidence / "exploration.json").read_text(encoding="utf-8"))
         self.assertEqual(metadata["schedules"], ["schedule-1"])
         self.assertEqual(metadata["replay"], [f"just test-shuttle-replay {evidence / 'schedule-1'}"])
@@ -362,7 +362,7 @@ class RunTests(unittest.TestCase):
         # overlap. Each exploration stays open for a while; its own nondeterminism run must not
         # start in that window. A longer window only strengthens the assertion.
         nondeterminism_started = {
-            test: threading.Event() for test in (WAIT_QUEUE, CANCELLATION, FLUSH)
+            test: threading.Event() for test in (BUSY_WORKER, CANCELLATION, FLUSH)
         }
         lock = threading.Lock()
         overlapping: list[str] = []
@@ -393,9 +393,9 @@ class RunTests(unittest.TestCase):
             if answer is not None:
                 return answer
             nondeterminism = "SHUTTLE_CHECK_NONDETERMINISM" in environment
-            if WAIT_QUEUE in arguments and not nondeterminism:
+            if BUSY_WORKER in arguments and not nondeterminism:
                 later_checks_ended.wait()
-            if WAIT_QUEUE not in arguments and nondeterminism:
+            if BUSY_WORKER not in arguments and nondeterminism:
                 later_checks_ended.wait()
             return Outcome(0, completed_output())
 
@@ -403,7 +403,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(status, 0, report)
         evidence = read_complete(target.parent / "models.json", "shuttle", "")
         self.assertEqual(
-            [check["test"] for check in evidence["checks"]], [WAIT_QUEUE, CANCELLATION, FLUSH]
+            [check["test"] for check in evidence["checks"]], [BUSY_WORKER, CANCELLATION, FLUSH]
         )
 
     def test_a_failing_check_beside_others_keeps_its_evidence_and_fails_the_run(self) -> None:
@@ -423,7 +423,7 @@ class RunTests(unittest.TestCase):
         evidence = target / "shuttle-failures" / REPLAY_CHECK_PACKAGE / CANCELLATION
         metadata = json.loads((evidence / "exploration.json").read_text(encoding="utf-8"))
         self.assertEqual(metadata["schedules"], ["schedule-1"])
-        self.assertFalse((target / "shuttle-failures" / REPLAY_CHECK_PACKAGE / WAIT_QUEUE).exists())
+        self.assertFalse((target / "shuttle-failures" / REPLAY_CHECK_PACKAGE / BUSY_WORKER).exists())
 
     def test_a_run_needs_at_least_one_job(self) -> None:
         with self.assertRaisesRegex(RunnerError, "0 is not a positive number of checks"):

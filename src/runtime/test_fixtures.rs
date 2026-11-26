@@ -1493,7 +1493,7 @@ pub(crate) async fn assert_no_runtime_events(events: &mut broadcast::Receiver<Ru
     );
 }
 
-/// An executor with one worker and one waiting place in every class, so a test can fill a class.
+/// An executor with one worker in every class, so a test can keep a class's only worker busy.
 pub(crate) fn single_worker_executor() -> Executor {
     let one = NonZeroUsize::MIN;
     Executor::new(nervix_execution::ExecutionConfig {
@@ -1507,7 +1507,6 @@ pub(crate) fn single_worker_executor() -> Executor {
             filesystem_storage: one,
             connector_storage: nervix_execution::ConnectorStorageWorkers::resolve(Some(one))
                 .expect("one worker fits the primitive permit bound"),
-            pending_jobs: nervix_execution::PendingJobCounts::uniform(one),
         },
         ..nervix_execution::ExecutionConfig::default()
     })
@@ -1631,8 +1630,8 @@ async fn accepted_work_with_full_cpu_class<F: std::future::Future>(
     }
 }
 
-/// The only worker and the only waiting place of one CPU class of a
-/// [`single_worker_executor`], held so that the class refuses the next job submitted to it.
+/// The only worker of one CPU class of a [`single_worker_executor`], held with one job waiting
+/// behind it, so the next job submitted to the class waits for the worker too.
 pub(crate) struct FilledCpuClass {
     executor: Executor,
     class: nervix_execution::CpuClass,
@@ -1696,14 +1695,14 @@ impl FilledCpuClass {
             assert!(futures_util::poll!(run.as_mut()).is_pending());
             queued
                 .send(())
-                .assured("the fixture waits for its occupied queue place");
+                .assured("the fixture waits for its job behind the held worker");
             run.await
                 .expect("the waiting job runs once the holder leaves");
         });
         is_queued
             .await
-            .assured("the fixture's only queue place is occupied");
-        assert_eq!(executor.snapshot().cpu_class(class).pending, 1);
+            .assured("a fixture job waits behind the held worker");
+        assert_eq!(executor.snapshot().cpu_class(class).waiting, 1);
         Self {
             executor: executor.clone(),
             class,
@@ -1717,7 +1716,7 @@ impl FilledCpuClass {
         loop {
             nervix_primitives::task::consume_budget().await;
             let state = self.executor.snapshot().cpu_class(self.class);
-            if state.running == 0 && state.pending == 0 {
+            if state.running == 0 && state.waiting == 0 {
                 return;
             }
             nervix_primitives::task::yield_now().await;

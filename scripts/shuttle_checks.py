@@ -65,7 +65,7 @@ FORCED_FAILURE = "forced Shuttle schedule replay verification"
 # The check `replay-check` fails deliberately: a small one of a package that builds without the
 # server's test dependencies.
 REPLAY_CHECK_PACKAGE = "nervix-execution"
-REPLAY_CHECK_TEST = "tests::shuttle_checks::shuttle_a_full_wait_queue_holds_the_next_job_until_a_place_frees"
+REPLAY_CHECK_TEST = "tests::shuttle_checks::shuttle_a_job_that_finds_every_worker_busy_waits_until_one_frees"
 
 _LISTED_TEST = re.compile(r"^(?P<name>\S+): test$")
 

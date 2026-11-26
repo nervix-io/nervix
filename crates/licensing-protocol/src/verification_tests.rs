@@ -141,6 +141,64 @@ fn envelope_rule_refuses_an_unauthorized_signer() {
     ));
 }
 
+/// A decision that does not verify is refused as a decision, whether its signature or its
+/// protected header fails, with the document's own refusal beneath it. A document refused as a
+/// trust document keeps that name.
+#[test]
+fn a_decision_that_does_not_verify_is_refused_as_a_decision() {
+    let fixture = Fixture::new();
+    let trust = fixture.trust();
+
+    let corrupted = flip_signature_bit(&fixture.sign(&fixture.decision()));
+    let signature_refusal = trust
+        .verify_decision(&corrupted, DecisionVerification::Apply, limits())
+        .err()
+        .assured("a decision with a changed signature bit does not verify");
+    assert!(matches!(
+        signature_refusal.current_context(),
+        TrustError::Decision
+    ));
+    assert_eq!(
+        format!("{signature_refusal:#}"),
+        "the decision has an invalid signature profile or payload: the document signature is \
+         invalid: JWS signature verification failed: InvalidSignature"
+    );
+
+    let authorization = fixture.roots[0]
+        .sign(&fixture.authorization(), limits())
+        .assured("current authorization");
+    let header_refusal = trust
+        .verify_decision(&authorization, DecisionVerification::Apply, limits())
+        .err()
+        .assured("a working-key authorization is no decision");
+    assert!(matches!(
+        header_refusal.current_context(),
+        TrustError::Decision
+    ));
+    assert_eq!(
+        format!("{header_refusal:#}"),
+        "the decision has an invalid signature profile or payload: the protected header must \
+         contain exactly ES256, the expected type and a key id"
+    );
+
+    let documents = TrustDocuments {
+        documents: vec![SignedTrustDocument::Compact(
+            fixture.sign(&fixture.decision()),
+        )],
+    };
+    let trust_refusal = TrustState::build(&fixture.embedded(), &documents, limits())
+        .err()
+        .assured("a decision is no trust document");
+    assert!(matches!(
+        trust_refusal.current_context(),
+        TrustError::Document
+    ));
+    assert_eq!(
+        format!("{trust_refusal:#}"),
+        "the trust document has an invalid signature profile or payload"
+    );
+}
+
 #[test]
 fn working_key_validity_is_inclusive_and_checked_at_the_signed_issue_time() {
     let fixture = Fixture::new();

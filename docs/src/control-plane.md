@@ -246,7 +246,9 @@ Within a transaction, each consecutive run of model mutations can mix `CREATE`,
 mutation: all operations are evaluated in written order against one candidate model map, the
 complete domain graph is revalidated, and one atomic storage batch persists the base-to-final
 result. Drop/recreate and multi-ALTER sequences are therefore classified jointly; cancelling
-changes can produce a no-op.
+changes can produce a no-op. A drop that the base-to-final diff keeps is a hard operation: it is
+`DYNAMIC`, every node destroys the dropped entity at once with what it holds, and the answer reports
+what was discarded, as the drop statements in the [Plexus Overview](plexus-overview.md) describe.
 A failure writes nothing and does
 not swap the active registry state. This supports coordinated wire-schema, internal-schema, codec,
 relay, processor, emitter, ingestor, generator, placement, and dependent-node migrations without
@@ -1052,12 +1054,17 @@ uses gate release as evidence that the durable preparation was removed.
 The surviving leader reconciles preparations after it orders all inherited schedule proposals with
 a committed consensus barrier. A destination preserves a preparation when its exact transition is
 the committed owner change, regardless of coordinator or participant restart, so normal schedule
-application can activate it. It also temporarily preserves uncommitted work from the same leader
-process while the bound source and destination incarnations remain live, the base schedule still
-owns the entity on the source, and the exact handoff gate remains held. It durably removes every
-other preparation. Replacement, discard, activation, and reconciliation compare the complete
-operation identity, so duplicate or reordered work is idempotent and cannot affect another
-operation's preparation.
+application can activate it. It also preserves uncommitted work from the same leader process while
+the domain's committed schedule is still the base the move was planned against and still assigns
+the moved unit to its source, because that leader can still commit the move. A participant's
+restart, which also ends the gate the participant held, and the end of the hold's lease do not
+remove such a preparation: when the move commits, the destination activates the copy it kept, and
+the coordinator's own cleanup removes the preparations of a move it does not commit. A participant
+that restarts is recorded again under its new run, and a commit planned against its earlier record
+is refused once that record is committed. The destination durably removes every other
+preparation. Replacement, discard, activation, and reconciliation compare the complete operation
+identity, so duplicate or reordered work is idempotent and cannot affect another operation's
+preparation.
 
 A preparation that a destination reloads at startup names the earlier run of that node. An
 activation request that matches it names that earlier run too, and the destination refuses it before

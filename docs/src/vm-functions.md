@@ -803,12 +803,13 @@ runs operator-supplied native code the node cannot bound, so its executions take
 class: one that never returns holds an extension worker and leaves the data workers, which relay
 bodies are encoded and decoded on, their whole capacity.
 
-Programs for accepted data wait when their class's queue is full. This includes processor keys,
-filters, routes and window programs; ingestor, emitter, reingestor and generator programs; inference
-inputs; WASM output routes; and error-record assignments. A full queue produces no runtime error,
-error-policy outcome or retry. The branch keeps its input and state, takes no more input while
-waiting, and passes backpressure towards its source. The owner ends the wait on teardown under its
-existing lifecycle deadline. Logical timers due meanwhile are applied in order afterwards.
+Programs for accepted data wait when every worker of their class is busy. This includes processor
+keys, filters, routes and window programs; ingestor, emitter, reingestor and generator programs;
+inference inputs; WASM output routes; and error-record assignments. Busy workers produce no
+runtime error, error-policy outcome or retry. The branch keeps its input and state, takes no more
+input while waiting, and passes backpressure towards its source. The owner ends the wait on
+teardown under its existing lifecycle deadline. Logical timers due meanwhile are applied in order
+afterwards.
 
 Request programs, including statement constants and session subscription predicates, retain
 immediate typed `RuntimeError::ExecutionNotAdmitted` refusal when they need a worker and its queue
@@ -1508,12 +1509,13 @@ way `DURATION` was added; every step lands in the same change.
    expressions and relay bindings alike, with positive, negative and completion-context tests and
    a clean `just plexus-completion-walk`.
 3. **Stored shapes and the interconnect.** A new `ParseAsType` or `Literal` variant changes the
-   registry's Model archive header, the consensus keyspace namespace, the consensus `ClusterState`
-   metadata encoding and the interconnect's `WIRE_CONTRACT` fingerprint in the same change. Every
-   other archived enum the type reaches either changes its own marker, as backup state values
-   change their record version, or appends the new variant after every earlier one, as remote
-   branch-key values and deduplicator key snapshots do, so that no stored or peer archive of an
-   earlier variant is read as the new one.
+   registry's Model archive header, the consensus keyspace namespace (its [stored-shape
+   marker](./consensus-storage-and-replication.md#keyspace-names-and-the-stored-shape-marker)), the
+   consensus `ClusterState` metadata encoding and the interconnect's `WIRE_CONTRACT` fingerprint in
+   the same change. Every other archived enum the type reaches either changes its own marker, as
+   backup state values change their record version, or appends the new variant after every earlier
+   one, as remote branch-key values and deduplicator key snapshots do, so that no stored or peer
+   archive of an earlier variant is read as the new one.
 4. **The VM.** Add its register type and `TypedArray` variant through `with_typed_registers!`, its
    comparisons, its place in the ordered types if it orders, its set elements, list item
    selection and extremes, window ordering, and the conversions it performs or refuses. Decide

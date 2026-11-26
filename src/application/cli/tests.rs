@@ -47,7 +47,7 @@ const SETTINGS_HEADINGS: [&str; 22] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 269] = [
+const SETTING_NAMES: [&str; 261] = [
     "runtime-delivery-capacity",
     "runtime-ingest-group-max-rows",
     "runtime-ingest-group-idle-flush",
@@ -172,21 +172,13 @@ const SETTING_NAMES: [&str; 269] = [
     "memory-limit",
     "node-detection-timeout",
     "execution-control-cpu-workers",
-    "execution-control-cpu-pending-jobs",
     "execution-credentials-cpu-workers",
-    "execution-credentials-cpu-pending-jobs",
     "execution-data-cpu-workers",
-    "execution-data-cpu-pending-jobs",
     "execution-extension-cpu-workers",
-    "execution-extension-cpu-pending-jobs",
     "execution-bulk-cpu-workers",
-    "execution-bulk-cpu-pending-jobs",
     "execution-consensus-storage-workers",
-    "execution-consensus-storage-pending-jobs",
     "execution-filesystem-storage-workers",
-    "execution-filesystem-storage-pending-jobs",
     "execution-connector-storage-workers",
-    "execution-connector-storage-pending-jobs",
     "execution-management-memory-bytes",
     "execution-commands-memory-bytes",
     "execution-relay-memory-bytes",

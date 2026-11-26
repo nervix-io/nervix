@@ -1464,13 +1464,28 @@ fn branch_preserving_processors_accept_unbranched() {
 fn drop_context_suggestions_do_not_leak_format_keywords() {
     let input = "DROP ";
     let suggestions = suggest_statement(input, input.len());
-    assert!(suggestions.contains(&"SCHEMA".to_string()));
-    assert!(suggestions.contains(&"WIRE".to_string()));
-    assert!(suggestions.contains(&"CODEC".to_string()));
-    assert!(suggestions.contains(&"CLIENT".to_string()));
-    assert!(suggestions.contains(&"VHOST".to_string()));
-    assert!(suggestions.contains(&"ENDPOINT".to_string()));
-    assert!(suggestions.contains(&"NODE".to_string()));
+    for phrase in [
+        "SCHEMA",
+        "WIRE JSON SCHEMA",
+        "WIRE CBOR SCHEMA",
+        "WIRE AVRO SCHEMA",
+        "CODEC",
+        "CLIENT",
+        "VHOST",
+        "ENDPOINT",
+        "WINDOW PROCESSOR",
+        "WASM PROCESSOR",
+        "GENERATOR",
+        "HASH MAP",
+        "PARAMETRIZER",
+        "SIGNALING PROTOCOL",
+        "NODE",
+    ] {
+        assert!(
+            suggestions.contains(&phrase.to_string()),
+            "{phrase} missing from {suggestions:?}"
+        );
+    }
     assert!(!suggestions.contains(&"JSON".to_string()));
     assert!(!suggestions.contains(&"AVRO".to_string()));
 }

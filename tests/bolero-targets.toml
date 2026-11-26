@@ -1332,6 +1332,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/interconnect/src/entity_drop/__fuzz__/entity_drop__wire_properties__bolero_entity_drop_report_round_trip/corpus"
+domain_version = 1
+features = []
+id = "entity-drop-report-wire"
+invariant = "A drop report's requests with zero, full-width and generated revisions and every report answer, pending, unknown, empty and with discarded work of every kind for entities of several kinds at generated and full-width counts, including every refusal, retain complete values through the declared class's production wire codec."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/entity_drop/wire_properties.rs"
+test = "entity_drop::wire_properties::bolero_entity_drop_report_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/interconnect/src/backup/__fuzz__/backup__capture_properties__bolero_backup_capture_messages_round_trip/corpus"
 domain_version = 4
 features = []
@@ -3208,7 +3223,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wire__admission_properties__bolero_receive_admission_outcomes_preserve_every_field/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "receive-admission-outcomes-wire"
 invariant = "Typed decoder admission reports and changed producer preconditions project to the exact refusal variant, traffic class, byte fields and stream status, then preserve the complete response envelope through the production encoder and decoder; dropping it returns every charge."
@@ -4408,7 +4423,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/application/cli/__fuzz__/application__cli__properties__bolero_node_settings_survive_their_command_line/corpus"
-domain_version = 29
+domain_version = 30
 features = []
 id = "node-settings-command-line"
 invariant = "Current node settings, complete positive listener bounds and optional capability requests of every group, with scalar validation, Raft timings ordered in whole milliseconds and explicit watermarks paired and ordered, render as the server's options and read back unchanged without losing omission; detected-capacity relationships are checked by their owners after detection. Generated node tags render as `--node-tags` and read back as the same tags. Every duration and byte quantity help prints reads back as the same value."

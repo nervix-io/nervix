@@ -19,8 +19,8 @@ marker = "simulation_checks"
 name = "execution"
 tests = [
   "workers::simulation_checks::cancelled_running_job_keeps_its_charge_until_exit",
-  "workers::simulation_checks::queued_jobs_take_the_worker_in_admission_order",
-  "workers::simulation_checks::saturation_and_dropped_waiters_restore_the_queue_and_charge",
+  "workers::simulation_checks::dropped_waiting_jobs_return_their_charges_and_leave_no_waiting_job",
+  "workers::simulation_checks::waiting_jobs_take_the_worker_in_the_order_they_asked",
 ]
 
 [[invocation]]
@@ -90,6 +90,7 @@ tests = [
   "transport::partition_claims::a_partition_claim_keeps_the_released_row_until_its_forget_arrives_through_loss_and_repair",
   "transport::progress::application_progress_reaches_the_leader_through_a_partition_a_held_reply_and_repair",
   "transport::stop::a_stop_waits_for_a_node_that_answers_late_and_collects_its_report_after_repair",
+  "transport::entity_drop::a_drop_report_reaches_a_node_partitioned_across_the_drop_after_repair",
   "transport::process_target::a_process_bound_request_cannot_reach_a_replacement_transport",
   "transport::production_transport_exchanges_typed_arrow_batch_and_state_frames_over_simulated_tcp",
   "transport::relay::partitioned_relay_deliveries_keep_their_units_across_lost_replies_and_reconnect",

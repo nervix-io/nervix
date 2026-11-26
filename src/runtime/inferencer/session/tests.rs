@@ -755,11 +755,10 @@ async fn messages_that_fail_because_their_jobs_outputs_cannot_be_joined_leave_th
 }
 
 #[nervix_primitives::test]
-async fn abandoning_a_full_queue_wait_keeps_the_branch_session_and_its_state() {
+async fn abandoning_a_wait_for_a_busy_worker_keeps_the_branch_session_and_its_state() {
     let mut config = ExecutionConfig::default();
     config.workers.extension_cpu = NonZeroUsize::MIN;
-    config.workers.pending_jobs = nervix_execution::PendingJobCounts::uniform(NonZeroUsize::MIN);
-    let executor = Executor::new(config).expect("one extension worker with one queue place");
+    let executor = Executor::new(config).expect("one extension worker");
     let (prepared, mut session) = checked_running(&executor).await;
     let first = session
         .run(&executor, &prepared, &features(&[[1.0, 10.0]]))
@@ -793,7 +792,7 @@ async fn abandoning_a_full_queue_wait_keeps_the_branch_session_and_its_state() {
             .run_cpu(CpuClass::Extension, queued_charge, |_charge, _| ())
             .await
     });
-    while executor.snapshot().extension_cpu.pending != 1 {
+    while executor.snapshot().extension_cpu.waiting != 1 {
         nervix_primitives::task::consume_budget().await;
         nervix_primitives::task::yield_now().await;
     }
@@ -804,7 +803,7 @@ async fn abandoning_a_full_queue_wait_keeps_the_branch_session_and_its_state() {
     let batch = features(&[[1.0, 1000.0]]);
     let mut waiting = Box::pin(session.run(&executor, &prepared, &batch));
     let pending = futures_util::poll!(waiting.as_mut()).is_pending();
-    // Abandon the full-queue wait without moving the branch's native session into a job.
+    // Abandon the wait for the busy worker without moving the branch's native session into a job.
     drop(waiting);
     release
         .send(())
@@ -817,7 +816,7 @@ async fn abandoning_a_full_queue_wait_keeps_the_branch_session_and_its_state() {
         .await
         .expect("the queued task joins")
         .expect("the queued job exits");
-    assert!(pending, "an accepted inference waits for a place");
+    assert!(pending, "an accepted inference waits for the busy worker");
     assert!(
         !session.needs_load(),
         "abandoning the wait retains the branch's native session"

@@ -1357,8 +1357,12 @@ Feature: Graceful shutdown
     And node "node-2" is started
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-2" eventually reports interconnect to "node-1" as "connected"
+    And every other node's gossip eventually lists a run of node "node-2" that is not terminating
+    And within "60s" node "node-1" eventually describes the current run of node "node-2" as recorded
     When the ownership handoff activation pause for domain "{{domain}}" is released
-    Then the background Plexus execution fails with "ownership state activation did not complete"
+    # A leader that cannot record the coordinator's outcome runs the relocation again, and that
+    # later run finds the ingestor already on node-2's new run.
+    Then the background Plexus execution either fails with "ownership state activation did not complete" or succeeds with "relocated 0 of 1 execution unit(s) onto node 'node-2'"
     When node "node-1" is stopped
     And node "node-1" is started
     And these Plexus commands are executed through the client on node "node-1"

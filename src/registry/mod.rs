@@ -27,6 +27,7 @@ mod entrypoint_plan;
 mod error;
 mod execution_revision;
 mod graph;
+mod graph_loop;
 mod inferencer_archive_plan;
 mod ingestor_plan;
 pub(crate) use inferencer_archive_plan::InferencerArchivePlan;

@@ -2,7 +2,9 @@
 """The shared kache remote of a CI job: its configuration, its daemon and its publication.
 
 `configure PATH` writes the file every kache process reads: the remote, the budget of the local
-store, a quarter of the volume that holds the cache directory, and the store's index mode.
+store, a quarter of the volume that holds the cache directory, and the store's index mode. A build
+given no remote setting at all, such as a local image build, gets the store alone and keeps its
+cache local; one given only some of the settings is refused.
 
 `start` configures that remote and store for the current GitHub Actions job, prepares the store's
 disk, exports the environment later steps need, starts the job's daemon and fails unless the daemon
@@ -131,6 +133,14 @@ class Remote:
     secret_key: str
 
     @classmethod
+    def optional_from_environment(cls, environment: Mapping[str, str]) -> Remote | None:
+        """The remote the environment names, or none when it gives no remote setting at all. Some
+        settings without the rest are refused, as a mistake rather than a choice."""
+        if not configured_remote(environment):
+            return None
+        return cls.from_environment(environment)
+
+    @classmethod
     def from_environment(cls, environment: Mapping[str, str]) -> Remote:
         for name in REMOTE_SETTINGS:
             if not environment.get(name):
@@ -193,6 +203,11 @@ class Remote:
         ]
         return "\n".join(lines) + "\n"
 
+
+
+def configured_remote(environment: Mapping[str, str]) -> bool:
+    """Whether the environment gives any of the remote's settings."""
+    return any(environment.get(name) for name in REMOTE_SETTINGS)
 
 
 def cache_directory(environment: Mapping[str, str]) -> Path:
@@ -339,12 +354,14 @@ def prepare_store(environment: Mapping[str, str]) -> list[str]:
 @dataclass(frozen=True)
 class Configuration:
     """The file every kache process of a job reads, through KACHE_CONFIG: its local store's budget
-    and its remote."""
+    and its remote, when it has one."""
 
     store: LocalStore
-    remote: Remote
+    remote: Remote | None
 
     def text(self) -> str:
+        if self.remote is None:
+            return self.store.configuration()
         return self.store.configuration() + "\n" + self.remote.configuration()
 
     def write(self, path: Path) -> None:
@@ -571,6 +588,7 @@ class Outcome(enum.StrEnum):
     published: the manifest is saved and the daemon reports every upload of the job finished.
     incomplete: publication ran, but the manifest or an upload is unconfirmed at its end.
     read-only: kache made the job's remote read-only, so the job has nothing to publish.
+    local-only: the job has no remote, so its cache stays in its local store.
     not-run: the job's work failed or was cancelled, so publication did not wait for anything.
     cancelled: the step was terminated while publication ran.
     unavailable: the job has no kache command or no daemon that answers.
@@ -579,6 +597,7 @@ class Outcome(enum.StrEnum):
     PUBLISHED = "published"
     INCOMPLETE = "incomplete"
     READ_ONLY = "read-only"
+    LOCAL_ONLY = "local-only"
     NOT_RUN = "not-run"
     CANCELLED = "cancelled"
     UNAVAILABLE = "unavailable"
@@ -833,6 +852,12 @@ class Publisher:
         if not daemon.running:
             publication.finish(Outcome.UNAVAILABLE, ["The job's kache daemon is not running."])
             return
+        if not daemon.remote:
+            publication.finish(
+                Outcome.LOCAL_ONLY,
+                ["The job's kache daemon has no remote, so the build keeps its cache in its local store and publishes nothing."],
+            )
+            return
         if daemon.remote_readonly:
             publication.finish(
                 Outcome.READ_ONLY,
@@ -1007,7 +1032,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     environment = dict(os.environ)
     try:
         if arguments.command == "configure":
-            remote = Remote.from_environment(environment)
+            remote = Remote.optional_from_environment(environment)
             store = LocalStore.from_environment(environment)
             Configuration(store=store, remote=remote).write(arguments.path)
         elif arguments.command == "start":

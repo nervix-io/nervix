@@ -65,7 +65,7 @@ them substitutes for another.
 | `crates/interconnect/tests/simulation/process_target.rs` | Harness | Exact-process requests before and after the receiver transport restarts under the same authenticated node name |
 | `crates/interconnect/src/authentication/simulation_tests.rs` | Harness | Certificate validity, expiry drain, handshake deadlines, and trace replay under the simulated clock |
 | `crates/interconnect/src/wire.rs`, module `simulation_checks` | Harness | Seeded rkyv round trips through the execution owner |
-| `crates/execution/src/workers.rs`, module `simulation_checks` | Harness | Queue slots, admission order, and charge ownership of the Turmoil CPU strategy |
+| `crates/execution/src/workers.rs`, module `simulation_checks` | Harness | Waiting jobs, admission order, and charge ownership of the Turmoil CPU strategy |
 | `crates/execution/src/workers.rs`, `HeldWorker` | Harness | The test-only owner hold that keeps a class's worker active without parking a thread, so every execution check that fills a class also completes on the simulated scheduler |
 | `crates/primitives/src/tests/simulated_host.rs` | Harness | The boundary's own check that sockets, name lookup, timers, and admitted CPU jobs belong to the simulated host whose task uses them |
 | `justfile` and the `turmoil` job in `.github/workflows/check.yaml` | Tooling | The recipes, budgets, validation, and CI artifact |
@@ -159,10 +159,10 @@ The transport encodes and decodes through `nervix-execution`, which submits ever
 through the boundary's `task::spawn_cpu`. In the Turmoil build that runs the job as a Tokio task on
 the host's scheduler instead of on the blocking pool, so the job body is one scheduling step of the
 simulation. The executor is the mechanism's only caller: the boundary check rejects it anywhere
-else, so no caller runs CPU work on the scheduler without admission. Queue slots, per-class worker reservations, memory charges,
-and cooperative cancellation follow the same policy as production. A queued caller that leaves
-releases its slot and charge; a running job keeps its worker and charge until it exits, even when
-its caller leaves.
+else, so no caller runs CPU work on the scheduler without admission. Per-class workers, the jobs
+waiting for them, memory charges and cooperative cancellation follow the same policy as production.
+A waiting caller that leaves gives up its turn and its charge; a running job keeps its worker and
+charge until it exits, even when its caller leaves.
 
 Turmoil can vary the order of tasks around a job, but not instructions inside it. Races inside a job
 need Shuttle or real threads. Storage jobs still run on a real blocking thread and are outside the
@@ -176,7 +176,7 @@ run in this build as the `execution` invocation of `just test-turmoil`, apart fr
 drain regressions of `workers::dispatch_checks` and
 `tests::a_growing_job_that_ran_short_gives_back_its_charge_waits_and_runs_again`, whose job under
 test pauses inside its own first attempt until a charge queues behind it. A check that needs a
-class's worker occupied, such as the capacity-wait checks and the full CPU queue check, therefore
+class's worker occupied, such as the capacity-wait checks and the busy CPU worker check, therefore
 holds it with the pool's test-only owner hold, `HeldWorker`, which marks the worker active without
 parking a thread and gives it back through the same transition as a job that ends. A storage job
 may still block, since it keeps its real blocking thread.
@@ -612,6 +612,7 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | stale recorded endpoint | `transport::prerequisites::a_recorded_endpoint_another_cluster_now_serves_is_a_stale_route` | 115 | 30 s / 50,000 / 90 s | A node of another cluster that shares the certificate authority serves the endpoint a returning node recorded for a departed member: bootstrapping it fails as a stale route naming the endpoint and the member, counts no prerequisite refusal and leaves the node joining, and the node then joins through a recorded member that still answers |
 | application progress through a partition and a held reply | `transport::progress::application_progress_reaches_the_leader_through_a_partition_a_held_reply_and_repair` | 131, 133 | 85 s / 100,000 / 90 s | The leader holds the reporter's first progress report; across a partition the reporter's next report and the leader's revision query each fail within their two-second deadlines; after repair, once each side's liveness probe answers again, the reporter's reply is held and the leader's query meets its deadline; once released, the query supplies the progress the failed report carried, and a newer report followed by a late older one leaves the newer progress held. This exercises the production progress shapes, their deadlines and their merge over the transport; the server's barriers, reporter and leader fencing are covered by their owner tests, the registered Shuttle checks and the public scenarios. |
 | a stop with a node that answers late | `transport::stop::a_stop_waits_for_a_node_that_answers_late_and_collects_its_report_after_repair` | 151, 153 | 85 s / 100,000 / 90 s | Three hosts: the stop's owner, a prompt node and a late one. In the releasing round the prompt node answers that it still releases a batch, and the late node's view is held, so its drain request ends unanswered within the request's coordination deadline: the round cannot find the domain at rest, and nothing waits past the deadline. Once the late node answers, the confirming round and the round after it find every node at rest with the same motion, and the late node's view arrives intact. The report request across a partition of the late node ends unanswered within its deadline; after repair it answers pending while its teardown runs, then reports exactly what its teardown cut, beside the prompt node's report. This exercises the production stop request shapes, their coordination identity and their deadlines over the transport; the owner's decisions from these answers are covered by its owner tests, the registered Shuttle checks and the public scenarios. |
+| a drop with a node partitioned across it | `transport::entity_drop::a_drop_report_reaches_a_node_partitioned_across_the_drop_after_repair` | 171, 173 | 85 s / 100,000 / 90 s | Three hosts: the drop's coordinator, a prompt node and a late one. The prompt node reports what it discarded at once. The drop report request across a partition of the late node ends unanswered within the request's coordination deadline; after repair the late node answers pending until it applies the drop, then reports exactly what it discarded. This exercises the production drop report request shape, its coordination identity and its deadline over the transport; what a node destroys and releases is covered by its owner tests, the registered Shuttle check and the public scenarios, a node down during the drop included. |
 | process-bound request across transport replacement | `transport::process_target::a_process_bound_request_cannot_reach_a_replacement_transport` | 137, 139 | 30 s / 50,000 / 90 s | An exact-process request succeeds; the receiver restarts its transport at the same address with a distinct authenticated process epoch; a request retaining the preceding epoch fails before its handler, and a request naming the replacement succeeds. The connection lease supplies the epoch fence without adding fields to each request payload. |
 
 The simulation target also holds 26 runner and driver checks, such as the supervision, bound, clock,
@@ -702,13 +703,14 @@ never answers, leaves resource streams unread, and sends a relay batch the hub h
 admitting. The healthy peer keeps exchanging shared management work, liveness, typed Arrow commands,
 whole resource streams, and admitted relay batches with the hub throughout. Every observation of a
 host checks its pool connections per peer, leased streams per connection, admissions per direction
-and subquota, worker queues, and memory budgets against their configured bounds.
+and subquota, and memory budgets against their configured bounds, and the jobs each worker class
+runs against its workers.
 
 Key transitions assert exact values. The stalled peer holds all 32 shared management streams of its
 connection while liveness, cancellation, and discovery still use the reserved streams, and one more
-shared operation waits until its own deadline. A burst fills the one bulk worker and its eight-job
-queue, the two submissions beyond them are refused without a charge, and control work is admitted in
-the same pass. Unread 2 MiB resource streams stop at one bulk receive window each, which the stalled
+shared operation waits until its own deadline. A burst of eleven requests finds the one bulk worker
+busy with its first, the other ten wait for that worker, each holding only its own charge, and
+control work is admitted in the same pass. Unread 2 MiB resource streams stop at one bulk receive window each, which the stalled
 peer backs with one `bulk_window` reservation per stream. They release their admission and memory at
 the five-second progress deadline, and the stalled peer returns every window once its streams end.
 The held relay reserves its exact body, largest decoded batch, and scratch, plus its retained grant

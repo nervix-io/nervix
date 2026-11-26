@@ -371,9 +371,11 @@ It first commits a consensus barrier and sends its log position with the reconci
 the replication pool. Each participant applies through that position before consulting its local
 committed schedule. An exact ownership transition in that schedule preserves its preparation even
 when the original coordinator or destination process has gone. An uncommitted preparation remains
-only while the original coordinator process and both bound participant incarnations are live and
-the exact ownership-handoff gate is still held; every other preparation is discarded durably. A
-second pass after the gate deadline reclaims work that was active during the first pass.
+while the original coordinator process still leads and the domain's committed schedule is still the
+move's base, with the moved unit on its source, because that coordinator can still commit the move.
+A participant's restart or the end of the hold does not remove it, and the coordinator discards the
+preparations of a move it does not commit. Every other preparation is discarded durably. A second
+pass after the gate deadline reclaims work whose move could still commit during the first pass.
 
 An ownership handoff sends engagement, drain status and release only to the hold's participants:
 the live nodes that run part of the moved unit's boundary, as
@@ -424,6 +426,15 @@ stopping record still runs its intake and reports its ingestors as admitting. `d
 names the domain and the start version the stop ended it at; the answer is what the node's teardown
 cut, entity by entity and by kind, that the teardown has not ended the domain's tasks yet, or that
 the node holds no report for that stop because it restarted or never ran the domain.
+
+A change that drops entities collects what every node discarded with one management-pool request
+from the leader that committed it, `entity_drop_report`, carrying the coordinator's identity, which
+a node answers only while its sender leads. It names the domain and the runtime revision that
+published the drop. The answer is what the node discarded for that domain from that revision on,
+entity by entity and by kind; that the node has not applied the revision yet, which the coordinator
+asks again until the domain drain timeout passes; or that the node holds no report for it because
+an earlier run of the node applied it. The coordinator names every node that did not report, has
+left or restarted in the statement's answer.
 
 A stopping node moves its own scheduled work with one typed commands-pool request to the current
 leader, `stopping_node_drain`. It names no node and carries one of two actions: drain, which cordons
@@ -576,6 +587,7 @@ the revision, branch incarnation, tensor shapes and float bits. The interconnect
 bounded frame through the existing snapshot bulk quota; the inferencer codec validates its shape.
 The current fingerprint also covers materialized inspection page requests and their typed
 descriptors, so checkpoint identity and inspection operations advance as one wire contract.
+It also covers the drop report request and its answers with the kinds of discarded work.
 
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
@@ -838,11 +850,11 @@ still receives grants and admission beside it, and cancelling the held batch ret
 reservation once the application drops the batch. Once the application has decoded a batch, it keeps
 only the batch's body and decoded columns charged while its runtime takes the batch in.
 
-A CPU class admits each job separately: one of its workers runs, a bounded number wait, and no job
-joins an unbounded queue. A typed request runs several jobs of its class in turn, encoding its
-payload and envelope and later decoding the response. A full queue holds each of them back until a
-place frees, the request's own jobs as well as its answer's: the executor's pools are backpressure
-on the node's resources, never a reason to refuse a frame. The caller's reset and the request's own
+A CPU class admits each job separately: a job runs on a free worker of its class or waits for one,
+behind the jobs that asked before it. A typed request runs several jobs of its class in turn,
+encoding its payload and envelope and later decoding the response. Busy workers hold each of them
+back until one frees, the request's own jobs as well as its answer's: the executor's pools are
+backpressure on the node's resources, never a reason to refuse a frame. The caller's reset and the request's own
 deadline end every wait, and a request that fails at one of its later stages fails with
 `RequestError::Transport`. Every other class keeps admitting independently.
 
@@ -1139,7 +1151,11 @@ For an attached acknowledgement, progress also carries a monotonic sequence and 
 remaining handoff shares are parked, on `REQUIRED WAIT` or in a window that retains their rows. Each upstream node parks or reactivates its
 own attached share in sequence order, so a domain drain excludes a parked chain across relay hops.
 The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
-ingestor or persist an acknowledgement. Admission progress carries no parked state.
+ingestor or persist an acknowledgement. A terminal acknowledgement can reach the upstream node while
+it still holds its share parked, when the receiver released the share and resolved it before
+reporting the release, as a dropped entity's release of what it held does. The upstream node then
+reactivates its share before resolving it, as every holder does. Admission progress carries no
+parked state.
 
 Before admission the receiver reports nothing about a delivery's records: their acknowledgement
 watches start only once it has admitted them. Until then the sending node holds the records on their

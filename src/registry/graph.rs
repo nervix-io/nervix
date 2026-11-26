@@ -37,6 +37,7 @@ use petgraph::{
 use crate::registry::{
     domain_state::DomainState,
     error::RegistryError,
+    graph_loop::DataHop,
     placement::{PlacementAnalysis, PlacementPlan},
     validation::branching::model_branch_selection,
 };
@@ -812,10 +813,7 @@ impl ActiveNode {
     /// materialized state rather than receiving its records, so that one edge becomes a state
     /// link instead of record flow.
     fn dataflow_edge_to(&self, target: &Self, kind: DataflowEdgeKind) -> DataflowEdge {
-        if kind == DataflowEdgeKind::Data
-            && target.kind == ModelKind::Generator
-            && target.reads_materialized_state_from(&RelayName::from(&self.identifier))
-        {
+        if kind == DataflowEdgeKind::Data && self.is_generator_source_of(target) {
             return DataflowEdge::data(
                 self.dataflow_id(),
                 target.dataflow_id(),
@@ -843,6 +841,28 @@ impl ActiveNode {
                 )
             })
             .collect()
+    }
+
+    /// Whether this node is the relay `target` samples as a generator's source. The graph joins
+    /// them by a route edge, but the generator reads the relay's materialized state rather than
+    /// receiving its records.
+    fn is_generator_source_of(&self, target: &Self) -> bool {
+        target.kind == ModelKind::Generator
+            && target.reads_materialized_state_from(&RelayName::from(&self.identifier))
+    }
+
+    /// How data moves from this node to `target` along an edge of `kind`, or `None` when nothing
+    /// travels along it. A generator's source relay reaches it as state, not as a route.
+    pub(in crate::registry) fn data_hop_to(
+        &self,
+        target: &Self,
+        kind: EdgeKind,
+    ) -> Option<DataHop> {
+        let hop = kind.data_hop()?;
+        if hop == DataHop::Route && self.is_generator_source_of(target) {
+            return Some(DataHop::StateRead);
+        }
+        Some(hop)
     }
 
     fn reads_materialized_state_from(&self, relay: &RelayName) -> bool {
@@ -1078,6 +1098,18 @@ impl EdgeKind {
         matches!(self, Self::RequiredBy | Self::MaterializedState)
     }
 
+    /// How data moves along this edge, or `None` for a configuration dependency, along which
+    /// nothing travels. A domain's graph has no loop through the edges that carry data.
+    pub(in crate::registry) const fn data_hop(self) -> Option<DataHop> {
+        match self {
+            Self::SendsTo => Some(DataHop::Route),
+            Self::MessageError => Some(DataHop::ErrorRoute),
+            Self::CorrelationTimeout => Some(DataHop::CorrelationTimeout),
+            Self::MaterializedState => Some(DataHop::StateRead),
+            Self::RequiredBy => None,
+        }
+    }
+
     pub(in crate::registry) const fn impact_kind(self) -> ImpactEdgeKind {
         match self {
             Self::RequiredBy => ImpactEdgeKind::ConfigurationDependency,
@@ -1089,25 +1121,16 @@ impl EdgeKind {
     }
 }
 
+/// How many schedulable nodes rows pass before they reach the node at `index`, following routes,
+/// error routes and correlation timeouts upstream. The graph is a validated one, which has no
+/// loops, so every walk upstream ends at the graph's sources.
 pub(in crate::registry) fn schedulable_depth(
     graph: &DiGraph<ActiveNode, EdgeKind>,
     index: NodeIndex,
     cache: &mut HashMap<NodeIndex, usize>,
 ) -> usize {
-    schedulable_depth_inner(graph, index, cache, &mut HashSet::new())
-}
-
-fn schedulable_depth_inner(
-    graph: &DiGraph<ActiveNode, EdgeKind>,
-    index: NodeIndex,
-    cache: &mut HashMap<NodeIndex, usize>,
-    visiting: &mut HashSet<NodeIndex>,
-) -> usize {
     if let Some(depth) = cache.get(&index) {
         return *depth;
-    }
-    if !visiting.insert(index) {
-        return 0;
     }
 
     let mut max_depth = 0usize;
@@ -1119,36 +1142,23 @@ fn schedulable_depth_inner(
         let source_node = graph
             .node_weight(source)
             .verified("this endpoint comes from an edge of the same graph");
+        let source_depth = schedulable_depth(graph, source, cache);
         let candidate_depth = if is_schedulable_model(source_node.config.as_ref()) {
-            schedulable_depth_inner(graph, source, cache, visiting) + 1
+            source_depth
+                .checked_add(1)
+                .assured("a depth counts the nodes of one domain's graph, far below usize::MAX")
         } else {
-            schedulable_depth_inner(graph, source, cache, visiting)
+            source_depth
         };
         max_depth = max_depth.max(candidate_depth);
     }
 
-    visiting.remove(&index);
     cache.insert(index, max_depth);
     max_depth
 }
 
 pub(in crate::registry) fn is_schedulable_model(model: &Model) -> bool {
-    matches!(
-        model,
-        Model::Generator(_)
-            | Model::Inferencer(_)
-            | Model::Ingestor(_)
-            | Model::Reingestor(_)
-            | Model::Relay(_)
-            | Model::Lookup(_)
-            | Model::Deduplicator(_)
-            | Model::Correlator(_)
-            | Model::Reorderer(_)
-            | Model::Junction(_)
-            | Model::WindowProcessor(_)
-            | Model::WasmProcessor(_)
-            | Model::Emitter(_)
-    )
+    model.kind().is_schedulable()
 }
 
 pub(in crate::registry) fn expect_kind(

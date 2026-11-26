@@ -1,5 +1,5 @@
-//! Steps that hold one worker class full on the cluster's nodes, and the public witness that the
-//! work it could not take waited for a place.
+//! Steps that hold every worker of one class on the cluster's nodes, and the public witness that
+//! the work it could not take waited for a worker.
 //!
 //! Outside the layer order: a harness module.
 //! - **Owns.** Saturating and releasing one CPU or storage worker class on every node or on one
@@ -23,13 +23,13 @@ use nervix_primitives::time::Instant;
 
 use crate::{ScenarioWorld, expand_placeholders};
 
-/// The public count of jobs waiting for a place in a class's full wait queue.
+/// The public count of jobs waiting for a worker of a class whose workers are all busy.
 const WAITING: &str = "nervix_execution_jobs_waiting";
 
 /// How often a wait for a waiting job reads the nodes' counts again.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// How long filling one node's class may take: it waits only for the jobs already running on the
+/// How long holding one node's class may take: it waits only for the jobs already running on the
 /// class to leave its workers.
 const SATURATION_BUDGET: Duration = Duration::from_secs(60);
 
@@ -60,8 +60,8 @@ fn worker_class(name: &str) -> WorkerClassName {
     }
 }
 
-/// Fill every worker and every wait-queue place of the class on every node, so the next job a
-/// node is handed for that class is refused, or waits for a place when its caller keeps it.
+/// Hold every worker of the class on every node, so the next job a node is handed for that class
+/// waits for a worker.
 #[when(
     regex = r"^(control|credentials|data|extension|bulk|consensus storage|filesystem storage|connector storage) execution is saturated on every node$"
 )]
@@ -73,7 +73,7 @@ async fn when_execution_is_saturated_on_every_node(world: &mut ScenarioWorld, cl
     }
 }
 
-/// Fill every worker and every wait-queue place of the class on one node.
+/// Hold every worker of the class on one node.
 #[when(
     regex = r#"^(control|credentials|data|extension|bulk|consensus storage|filesystem storage|connector storage) execution on node "([^"]+)" is saturated$"#
 )]
@@ -86,8 +86,8 @@ async fn when_execution_on_node_is_saturated(
     saturate(world, node_id, worker_class(&class)).await;
 }
 
-/// Give back the class's workers on every node. The jobs that held its wait-queue places then run
-/// empty, and the work that waited for a place takes the places they free, in the order it asked.
+/// Give back the class's workers on every node. The work that waited for them takes the freed
+/// workers in the order it asked.
 #[when(
     regex = r"^(control|credentials|data|extension|bulk|consensus storage|filesystem storage|connector storage) execution is released on every node$"
 )]
@@ -100,8 +100,8 @@ async fn when_execution_is_released_on_every_node(world: &mut ScenarioWorld, cla
     }
 }
 
-/// A job of the class waits for a place on the node: its caller found the class's wait queue full
-/// and keeps the work instead of having it refused.
+/// A job of the class waits for a place on the node's workers: its caller found every worker of the
+/// class busy and keeps the work instead of having it refused.
 #[then(
     regex = r#"^within "([^"]+)" a (control|credentials|data|extension|bulk|consensus storage|filesystem storage|connector storage) job waits for a place on node "([^"]+)"$"#
 )]
@@ -170,18 +170,18 @@ async fn saturate(world: &ScenarioWorld, node_id: String, class: WorkerClassName
     let node_name = crate::common::cluster::node_name(&node_id);
     nervix_primitives::time::timeout(
         SATURATION_BUDGET,
-        fault_injection.saturate_execution(&node_name, class),
+        fault_injection.occupy_execution(&node_name, class),
     )
     .await
     .unwrap_or_else(|error| {
         panic!(
-            "{} execution on '{node_id}' never filled its workers and wait queue: {error}",
+            "{} execution on '{node_id}' never held all its workers: {error}",
             class.as_str()
         )
     });
 }
 
-/// Waits until one of `nodes` reports at least `at_least` jobs of the class waiting for a place,
+/// Waits until one of `nodes` reports at least `at_least` jobs of the class waiting for a worker,
 /// and returns the count it saw there.
 async fn wait_for_waiting_jobs(
     world: &ScenarioWorld,
@@ -204,7 +204,7 @@ async fn wait_for_waiting_jobs(
         }
         assert!(
             Instant::now() < deadline,
-            "fewer than {at_least} {} jobs waited for a place on {nodes:?} within {budget:?}",
+            "fewer than {at_least} {} jobs waited for a worker on {nodes:?} within {budget:?}",
             class.as_str()
         );
         nervix_primitives::time::sleep(POLL_INTERVAL).await;
