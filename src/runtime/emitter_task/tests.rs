@@ -1226,6 +1226,154 @@ fn emitter_outcomes_follow_both_failure_owners_and_end_with_the_task_binding() {
     observed("value=0");
 }
 
+/// An error-route policy that sends every message error to the relay `failed_values`.
+fn sending_to_an_error_relay() -> ErrorPolicies {
+    ErrorPolicies {
+        message: MessageErrorPolicy::Dlq {
+            relay: RelayName::parse("failed_values").expect("a valid relay name"),
+            assignments: Vec::new(),
+        },
+        ..ErrorPolicies::handled_by_log()
+    }
+}
+
+#[test]
+fn an_emitter_keeps_what_its_error_route_reads_only_when_it_sends_to_an_error_relay() {
+    let context = emitter_context();
+    let routing = DomainRouting::new(DomainRoutingSnapshot::default());
+    let mut routing = DomainRoutingCache::new(routing.shared());
+    let output_metrics = output_metrics(&context);
+    let node = ModelName::from(&context.emitter);
+    let source_filters = HashMap::default();
+    let state = HashMap::from_iter([(
+        "relay_state.settings.label".to_string(),
+        RuntimeValue::String("north-ready".to_string()),
+    )]);
+    let at = Timestamp::from_unix_nanos(100);
+    // The route built the published row, whose value is 1, from the source row whose value is 7.
+    let source = input_batch_with(7, 0, AckSet::empty());
+    let failed_input = |batch_context: &EmitterBatchContext<'_>| {
+        batch_context
+            .with_error_route_inputs(
+                EmitterPublishBatch::from_batch(input_batch(), at),
+                Some(RouteSourceRows::new(SourceRecords::of(&source), vec![0])),
+                &state,
+            )
+            .expect("one source row for the one published row")
+            .rejected_record_input(0)
+            .expect("the published row has what its error route reads")
+    };
+
+    // LOG reads only the error, so the emitter keeps nothing more than the row it publishes.
+    {
+        let logging = batch_context(
+            &context,
+            &mut routing,
+            &output_metrics,
+            &node,
+            &source_filters,
+            &[],
+        );
+        let input = failed_input(&logging);
+        assert_eq!(
+            input.record.value("value").expect("readable value"),
+            Some(RuntimeValue::I64(1))
+        );
+        assert!(input.partial_output.is_none());
+        assert!(input.materialized_state.is_empty());
+    }
+
+    let policies = sending_to_an_error_relay();
+    let sending = EmitterBatchContext {
+        error_policies: &policies,
+        ..batch_context(
+            &context,
+            &mut routing,
+            &output_metrics,
+            &node,
+            &source_filters,
+            &[],
+        )
+    };
+    let input = failed_input(&sending);
+    assert_eq!(
+        input.record.value("value").expect("readable value"),
+        Some(RuntimeValue::I64(7)),
+        "an error route that sends to a relay reads the source row"
+    );
+    assert!(input.partial_output.is_some());
+    assert_eq!(input.materialized_state, state);
+
+    // Rows that are their own source rows, read with no state, need nothing kept.
+    let input = sending
+        .with_error_route_inputs(
+            EmitterPublishBatch::from_batch(input_batch(), at),
+            None,
+            &HashMap::default(),
+        )
+        .expect("nothing to keep is never a failure")
+        .rejected_record_input(0)
+        .expect("the published row is its own input");
+    assert_eq!(
+        input.record.value("value").expect("readable value"),
+        Some(RuntimeValue::I64(1))
+    );
+    assert!(input.materialized_state.is_empty());
+}
+
+#[nervix_primitives::test]
+async fn a_failed_batch_missing_its_kept_source_rows_follows_the_general_error_policy() {
+    let context = emitter_context();
+    let routing = DomainRouting::new(DomainRoutingSnapshot::default());
+    let mut routing = DomainRoutingCache::new(routing.shared());
+    let output_metrics = output_metrics(&context);
+    let node = ModelName::from(&context.emitter);
+    let source_filters = HashMap::default();
+    let policies = sending_to_an_error_relay();
+    let batch_context = EmitterBatchContext {
+        error_policies: &policies,
+        ..batch_context(
+            &context,
+            &mut routing,
+            &output_metrics,
+            &node,
+            &source_filters,
+            &[],
+        )
+    };
+    let (acks, completion) = AckSet::root();
+    let source = input_batch();
+    // The kept inputs name a source row the source batch does not have.
+    let batch = EmitterPublishBatch::from_batch(
+        input_batch_with(1, 0, acks),
+        Timestamp::from_unix_nanos(100),
+    )
+    .with_error_route_inputs(ErrorRouteInputs::new(
+        Some(RouteSourceRows::new(SourceRecords::of(&source), vec![4])),
+        HashMap::default(),
+    ))
+    .expect("the inputs name one source row for the one published row");
+
+    batch_context
+        .handle_publish_error_batches(
+            vec![batch],
+            "terminal publish refusal".to_owned(),
+            EmitterBatchFailure::REFUSED,
+        )
+        .await;
+
+    let AckOutcome::NoAck(reason) = completion.wait().await else {
+        panic!("the row's acknowledgement follows the general error policy");
+    };
+    assert!(
+        reason.contains("has no source row"),
+        "the general error names the missing source row: {reason}"
+    );
+    assert!(!context.interactions.describe_lines().iter().any(|line| {
+        line.starts_with("nervix_emitter_records_failed_total{") && line.ends_with("total=1")
+    }));
+}
+
 #[nervix_primitives::test]
 async fn emitter_outcomes_terminal_failure_counts_only_rows_routed_to_message_policy() {
     let context = emitter_context();
