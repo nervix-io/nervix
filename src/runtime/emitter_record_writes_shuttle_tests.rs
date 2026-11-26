@@ -117,7 +117,7 @@ fn answered(records: &[EmitterRecord]) -> PerRecordOutcome<EmitterRecordId> {
         if record.payload == CONFIRMED_PAYLOAD {
             outcome.deliver(record.id);
         } else {
-            outcome.reject(record.rejected("refused".to_string()));
+            outcome.reject(record.rejected("refused".to_string(), None));
         }
     }
     outcome
