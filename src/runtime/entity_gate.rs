@@ -16,21 +16,10 @@
     )
 )]
 
+use nervix_models::SHORTEST_POSITIVE_DURATION;
 use nervix_primitives::sync::blocking::Mutex;
 
 use super::*;
-
-/// The shortest wait a grace, recheck or wait ceiling derived from a runtime budget takes, so a
-/// budget too short to divide still waits rather than spinning or ending at once.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "Duration counts whole nanoseconds, so one nanosecond is the shortest positive \
-                  wait"
-    )
-)]
-pub(in crate::runtime) const SHORTEST_WAIT: Duration = Duration::from_nanos(1);
 
 /// A task receives one fifteenth of its domain's drain budget to finish teardown. This keeps
 /// the default two-second grace while scaling the grace with the configured drain contract.
@@ -41,7 +30,7 @@ pub(crate) const fn task_stop_grace(drain: Duration) -> Duration {
         None => unreachable!(),
     };
     if grace.is_zero() {
-        SHORTEST_WAIT
+        SHORTEST_POSITIVE_DURATION
     } else {
         grace
     }
@@ -1003,9 +992,9 @@ impl Drop for DomainAlterGuard {
 impl Runtime {
     /// How long a task whose branch ownership is frozen for a handoff waits before it looks at
     /// the freeze again: one twelve-hundredth of the entity gate deadline, 25 milliseconds at the
-    /// default, and never less than [`SHORTEST_WAIT`].
+    /// default, and never less than [`SHORTEST_POSITIVE_DURATION`].
     pub(in crate::runtime) fn ownership_freeze_recheck(&self) -> Duration {
-        (self.entity_gate_deadline() / 1200).max(SHORTEST_WAIT)
+        (self.entity_gate_deadline() / 1200).max(SHORTEST_POSITIVE_DURATION)
     }
 
     pub(crate) fn entity_pause_relays(

@@ -7,9 +7,9 @@ use meticulous::OptionExt as _;
 use ubyte::ByteUnit;
 
 use crate::{
-    AdmissionError, BudgetedBuffer, BufferGrowthError, BufferLimitExceeded, ExecutionConfig,
-    ExecutionConfigError, Executor, MemoryBudgets, MemoryClass, OperationLimits, StorageClass,
-    WorkerCounts,
+    ADMISSION_TOKEN_BYTES, AdmissionError, BudgetedBuffer, BufferGrowthError, BufferLimitExceeded,
+    ExecutionConfig, ExecutionConfigError, Executor, MemoryBudgets, MemoryClass, OperationLimits,
+    StorageClass, WorkerCounts,
 };
 
 fn one() -> NonZeroUsize {
@@ -1088,7 +1088,7 @@ async fn a_storage_job_that_finds_every_worker_busy_waits_for_one_and_runs_once_
     let (started, has_started) = nervix_primitives::sync::oneshot::channel();
     let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
     let occupying = executor
-        .try_reserve(MemoryClass::Bulk, 1)
+        .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
         .expect("the untouched bulk class has room");
     let occupied = executor.clone();
     let running = nervix_primitives::task::spawn(async move {
@@ -1108,7 +1108,7 @@ async fn a_storage_job_that_finds_every_worker_busy_waits_for_one_and_runs_once_
         .await
         .expect("the occupying job reports once it holds the one worker");
     let first_charge = executor
-        .try_reserve(MemoryClass::Bulk, 1)
+        .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
         .expect("the bulk class has room for the first waiting job");
     let first_submitter = executor.clone();
     let first = nervix_primitives::task::spawn(async move {
@@ -1122,7 +1122,7 @@ async fn a_storage_job_that_finds_every_worker_busy_waits_for_one_and_runs_once_
     }
 
     let second_charge = executor
-        .try_reserve(MemoryClass::Bulk, 1)
+        .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
         .expect("the bulk class has room for the second waiting job");
     let mut second = Box::pin(executor.run_storage(
         StorageClass::Filesystem,
@@ -1235,7 +1235,7 @@ async fn a_snapshot_reads_each_worker_class_by_its_name() {
     for class in submitted {
         nervix_primitives::task::consume_budget().await;
         let charge = executor
-            .try_reserve(MemoryClass::Bulk, 1)
+            .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
             .expect("the bulk class has room for one job at a time");
         executor
             .run_storage(class, charge, |_charge, _| ())

@@ -20,6 +20,12 @@ module RubySuite
         end
         assert_raises(NX::InvalidArgumentError) { NX::Cancel.new(deadline: invalid) }
       end
+      # A token accepts the deadlines the Rust client accepts: one millisecond through one day.
+      [0, 0.0009, 86_400.001].each do |outside|
+        error = assert_raises(NX::InvalidArgumentError) { NX::Cancel.new(deadline: outside) }
+        assert_match(/deadline/, error.message)
+      end
+      [0.001, 86_400].each { |accepted| NX::Cancel.new(deadline: accepted) }
       [0, -1, 1 << 32].each do |invalid|
         %i[stream_window_bytes connection_window_bytes].each do |option|
           error = assert_raises(NX::InvalidArgumentError) do

@@ -73,7 +73,8 @@ pub(crate) fn seconds(py: Python<'_>, argument: &'static str, seconds: f64) -> P
 
 #[pymethods]
 impl Cancel {
-    /// A token, which also expires `deadline` seconds from now when it is given.
+    /// A token, which also expires `deadline` seconds from now when it is given: from one
+    /// millisecond through one day, the deadlines the Rust client accepts.
     #[new]
     #[pyo3(signature = (*, deadline = None))]
     fn new(py: Python<'_>, deadline: Option<f64>) -> PyResult<Self> {

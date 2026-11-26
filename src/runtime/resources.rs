@@ -14,18 +14,6 @@ use nervix_execution::{CpuClass, MemoryClass};
 
 use super::*;
 
-/// What compiling one resource's protobuf sources is charged. The parser's memory is bounded by the
-/// installed sources, which the resource store's limits bound, so the charge only admits the
-/// compilation onto the bulk workers.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "one byte is an admission token for one protobuf compile job"
-    )
-)]
-const PROTOBUF_COMPILE_RESERVATION_BYTES: u64 = 1;
-
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(crate) enum RuntimeResourceError {
     #[error("protobuf descriptor configuration key '{key}' is unsupported")]
@@ -369,8 +357,10 @@ impl Runtime {
             version: id.version,
         };
         let executor = self.executor();
+        // The parser's memory is bounded by the installed sources, which the resource store's
+        // limits bound, so the compilation takes only the admission token onto the bulk workers.
         let reservation = executor
-            .reserve(MemoryClass::Bulk, PROTOBUF_COMPILE_RESERVATION_BYTES)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .change_context_lazy(not_completed)?;
         let descriptor_id = id.clone();

@@ -347,6 +347,13 @@ fn a_host_creates_triggers_and_frees_tokens_through_the_c_abi() {
             failure_kind(nx_cancel_with_deadline(u64::MAX, &mut expiring)),
             FailureKind::InvalidArgument
         );
+        // A deadline shorter than the Rust client's shortest, one millisecond, is refused too.
+        let mut refused = ptr::null_mut();
+        assert_eq!(
+            failure_kind(nx_cancel_with_deadline(0, &mut refused)),
+            FailureKind::InvalidArgument
+        );
+        assert!(refused.is_null());
         nx_cancel_free(ptr::null_mut());
     }
 }

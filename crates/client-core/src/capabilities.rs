@@ -19,13 +19,14 @@ use std::{
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
+use nervix_models::{LONGEST_CLIENT_WAIT, NodeCapabilities, Setting, SettingDefinition};
 use nervix_primitives::sync::Semaphore;
 
 use crate::{ClientError, ConnectOptions, SubscriptionEvent, wire::SessionLimits};
 
-/// The shortest deadline or backoff the native client accepts. A host binding that bounds a call
-/// itself takes its bound from here rather than restating it.
+/// The shortest deadline or backoff the native client accepts. Its longest is the longest wait a
+/// client takes, [`LONGEST_CLIENT_WAIT`]. A host library's cancellation token accepts the same
+/// deadlines and takes both bounds from their definitions rather than restating them.
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
@@ -35,17 +36,6 @@ use crate::{ClientError, ConnectOptions, SubscriptionEvent, wire::SessionLimits}
     )
 )]
 pub const SHORTEST_DEADLINE: Duration = Duration::from_millis(1);
-
-/// The longest deadline or backoff the native client accepts: one day. A host binding that bounds
-/// a call itself takes its bound from here rather than restating it.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the Rust client library refuses a deadline or backoff longer than 24 hours"
-    )
-)]
-pub const LONGEST_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
 
 macro_rules! deadline {
     ($definition:ident, $name:literal, $field:literal, $default:expr) => {
@@ -62,7 +52,7 @@ macro_rules! deadline {
             }
             fn validate(value: &Duration, _: &()) -> Result<(), Report<ClientError>> {
                 // The native client's deadline contract is one millisecond through one day.
-                if *value < SHORTEST_DEADLINE || *value > LONGEST_DEADLINE {
+                if *value < SHORTEST_DEADLINE || *value > LONGEST_CLIENT_WAIT {
                     return Err(Report::new(ClientError::InvalidDeadline { field: $field }));
                 }
                 Ok(())
@@ -809,7 +799,7 @@ mod tests {
             "{refused:?}"
         );
         let beyond_a_day = ConnectOptions {
-            restoration_max_backoff: LONGEST_DEADLINE
+            restoration_max_backoff: LONGEST_CLIENT_WAIT
                 .checked_add(Duration::from_millis(1))
                 .assured("a day and a millisecond fit Duration"),
             ..ConnectOptions::default()
@@ -884,7 +874,7 @@ mod tests {
             "a deadline shorter than one backoff still sends the call once"
         );
         assert_eq!(
-            attempts(LONGEST_DEADLINE, SHORTEST_DEADLINE),
+            attempts(LONGEST_CLIENT_WAIT, SHORTEST_DEADLINE),
             86_400_000,
             "the longest deadline over the shortest backoff fits u32"
         );

@@ -484,8 +484,9 @@ error into an application exception after copying its message and releasing its 
 ## Threads, Cancellation And Deadlines
 
 Calls that wait block the calling thread and take an optional `nx_cancel`. Trigger it from another
-host thread, or create it with a millisecond deadline. Keep the token alive until every call using
-it has returned. Cancellation does not consume a pending producer outcome or an unread delivery.
+host thread, or create it with a deadline in milliseconds, from 1 through 86,400,000 (one day), the
+deadlines the Rust client accepts; any other is `NX_ERROR_INVALID_ARGUMENT`. Keep the token alive
+until every call using it has returned. Cancellation does not consume a pending producer outcome or an unread delivery.
 
 ```c
 {{#include ../../tests/client_conformance/c/suite/contract.h:cancel_connect}}

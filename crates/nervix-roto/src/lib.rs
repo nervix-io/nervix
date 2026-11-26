@@ -1375,20 +1375,6 @@ pub struct UdfCompileLimits {
     pub budget: Duration,
 }
 
-/// What compiling a domain's UDFs is charged. Roto's compiler allocates the code it generates
-/// itself and the executor keeps it for as long as the domain does, which no transient budget can
-/// stand for, so the charge only admits the compilation onto the bulk workers.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the charge is an admission token for the bulk workers, not a memory estimate, \
-                  since the domain keeps the code Roto generates, so it is the least nonzero \
-                  reservation"
-    )
-)]
-const COMPILE_RESERVATION_BYTES: u64 = 1;
-
 impl UdfExecutor {
     /// Compile `models` on the node's bulk workers under `limits`, checking between two programs
     /// whether the caller stopped waiting.
@@ -1397,10 +1383,10 @@ impl UdfExecutor {
         models: Vec<UdfProgram>,
         limits: UdfCompileLimits,
     ) -> error_stack::Result<Self, UdfError> {
-        let reservation = match executor
-            .reserve(MemoryClass::Bulk, COMPILE_RESERVATION_BYTES)
-            .await
-        {
+        // Roto's compiler allocates the code it generates itself and the executor keeps it for as
+        // long as the domain does, which no transient budget can stand for, so the compilation
+        // takes only the admission token onto the bulk workers.
+        let reservation = match executor.reserve_admission(MemoryClass::Bulk).await {
             Ok(reservation) => reservation,
             Err(error) => return Err(error.change_context(UdfError::CompileExecution)),
         };
