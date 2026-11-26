@@ -22,7 +22,7 @@
 )]
 
 use super::{
-    relay_channel::{RelayAudience, RelayConsumerSelection, RelayPublication},
+    relay_channel::{RelayAudience, RelayConsumerSelection, RelayPublication, RelayTryBroadcast},
     *,
 };
 
@@ -53,6 +53,15 @@ mod shuttle_tests;
 struct OwnerHandOnPermits {
     _unit: Option<OwnedRelayDispatchPermit>,
     _relay: OwnedRelayDispatchPermit,
+}
+
+/// How one attempt to admit a batch to an owner buffer under the relay's gates ended.
+enum OwnerBatchAdmission {
+    /// The buffer admitted the batch, the batch counts as done, or it was refused; the delivery
+    /// answers this.
+    Done(RelayDispatchResult),
+    /// The owner's buffer was full, so the batch waits for room in it outside the gates.
+    Full(StdArc<RelayOwnerBuffer>),
 }
 
 /// Why a stopping owner hands a batch on to no consumer.
@@ -1700,11 +1709,37 @@ impl RelayBoundaryServices {
         self.channels.retire_branch(branch);
     }
 
+    /// Admits `batch` to this node's owner buffer of `unit`.
+    ///
+    /// Inside the relay's gates the batch never waits for room in the owner's buffer. The owner
+    /// frees room by taking its next batch, which waits while a swap holds the owner's hand-on back,
+    /// and the swap waits for every dispatch inside the gates: a dispatch waiting there for the owner
+    /// would wait for the swap that waits for it. A batch that finds the buffer full leaves the gates,
+    /// waits for room outside them and enters again.
     pub(super) async fn enqueue_owner_batch(
         &self,
         batch: &RelayRecordBatch,
         unit: Unit,
     ) -> RelayDispatchResult {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let full = match self.admit_owner_batch_without_waiting(batch, unit).await {
+                OwnerBatchAdmission::Done(result) => return result,
+                OwnerBatchAdmission::Full(buffer) => buffer,
+            };
+            // The gates are left: the room this batch waits for is freed by an owner that may be
+            // waiting for a swap holding those gates.
+            full.batches.publication().wait_for_room().await;
+        }
+    }
+
+    /// One attempt at [`Self::enqueue_owner_batch`] under the relay's gates, which admits the batch
+    /// when the owner's buffer has room for it now and never waits for that room.
+    async fn admit_owner_batch_without_waiting(
+        &self,
+        batch: &RelayRecordBatch,
+        unit: Unit,
+    ) -> OwnerBatchAdmission {
         let _unit_permit = match self.unit_dispatch_gate(unit) {
             Some(gate) => Some(gate.acquire_dispatch().await),
             None => None,
@@ -1716,27 +1751,37 @@ impl RelayBoundaryServices {
             // A drop that removed the relay stopped its owner after this delivery last read the
             // mark: the batch counts as done, as everything the owner held does.
             if self.is_dropped() {
-                return Ok(());
+                return OwnerBatchAdmission::Done(Ok(()));
             }
             for ack in batch.acks.iter() {
                 ack.no_ack("relay owner buffer is unavailable");
             }
-            return Err(Box::new(batch.clone()));
+            return OwnerBatchAdmission::Done(Err(Box::new(batch.clone())));
         };
         let admission = RelayOwnerAdmission::new(self.transit_for_unit(unit).clone());
-        if let Err(error) = buffer.batches.broadcast(batch.attached()).await {
-            if self.is_dropped() {
-                error.batch.ack_success();
-                return Ok(());
+        // The batch's acknowledgement share is built only once the buffer has room for it, so a
+        // batch that finds the buffer full leaves no share behind.
+        match buffer
+            .batches
+            .publication()
+            .try_broadcast_with(|| batch.attached())
+        {
+            Ok(_departures) => {}
+            Err(RelayTryBroadcast::Full) => return OwnerBatchAdmission::Full(buffer),
+            Err(RelayTryBroadcast::Closed(error)) => {
+                if self.is_dropped() {
+                    error.batch.ack_success();
+                    return OwnerBatchAdmission::Done(Ok(()));
+                }
+                for ack in error.batch.acks.iter() {
+                    ack.no_ack("relay owner buffer is unavailable");
+                }
+                return OwnerBatchAdmission::Done(Err(Box::new(batch.clone())));
             }
-            for ack in error.batch.acks.iter() {
-                ack.no_ack("relay owner buffer is unavailable");
-            }
-            return Err(Box::new(batch.clone()));
         }
         admission.accept();
         buffer.observe_length();
-        Ok(())
+        OwnerBatchAdmission::Done(Ok(()))
     }
 
     pub(super) fn begin_owner_batch_completion(&self, unit: Unit) -> RelayOwnerBatchCompletion {

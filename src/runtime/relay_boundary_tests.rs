@@ -24,7 +24,7 @@ use nervix_models::{
 };
 use nervix_primitives::{
     sync::{Arc, StdArc, watch},
-    time::{sleep, timeout},
+    time::{Instant, sleep, timeout},
 };
 use nonzero_ext::nonzero;
 
@@ -304,6 +304,216 @@ async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
             .expect("owner fanout completion should resolve the ACK"),
         AckOutcome::Ack
     );
+}
+
+/// A producer whose batch finds the owner's buffer full waits for room outside the relay's gates.
+/// When the owner ends meanwhile, the producer's next attempt finds no consumer left and answers as
+/// a producer that waited inside the gates did: refused while the relay stays, done once a drop
+/// removed it.
+#[nervix_primitives::test]
+async fn a_producer_waiting_for_room_answers_its_owner_ending_as_before() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let relay = named::<RelayName>("events");
+    let services = Arc::new(RelayBoundaryServices::new(
+        RelayBoundaryFanout::direct_with_capacity(nervix_models::default_relay_buffer()),
+        0,
+        0,
+        Vec::new(),
+        None,
+        RelayBranchPresences::single(Arc::new(BranchPresence::new())),
+        Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    ));
+    let batch = |acks| {
+        RelayRecordBatch::single(
+            test_schema(&[("value", ParseAsType::I64)]),
+            None,
+            test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]),
+            acks,
+        )
+        .expect("relay owner ending test batch should build")
+    };
+
+    for dropped in [false, true] {
+        let (owner_receiver, _owner_buffer) =
+            services.activate_owner_buffer(Unit::SINGLE, relay_metrics(&runtime, &domain, &relay));
+        let (filling, _) = AckSet::root();
+        services
+            .enqueue_owner_batch(&batch(filling), Unit::SINGLE)
+            .await
+            .expect("the one-batch owner buffer has room");
+        let (acks, completion) = AckSet::root();
+        let waiting_batch = batch(acks.clone());
+        let waiting = services.enqueue_owner_batch(&waiting_batch, Unit::SINGLE);
+        tokio::pin!(waiting);
+        assert!(
+            futures_util::poll!(waiting.as_mut()).is_pending(),
+            "a full owner buffer holds the producer"
+        );
+        if dropped {
+            services.mark_dropped();
+        }
+        // The owner ends: its receiver leaves the fan-out while its buffer is still published.
+        drop(owner_receiver);
+        let answered = waiting.await;
+        if dropped {
+            answered.expect("a batch for a dropped relay counts as done");
+            acks.ack_success();
+        } else {
+            assert!(answered.is_err(), "no consumer is left to take the batch");
+        }
+        let outcome = timeout(Duration::from_secs(1), completion.wait())
+            .await
+            .expect("the answer resolves the producer's share");
+        if dropped {
+            assert_eq!(outcome, AckOutcome::Ack);
+        } else {
+            assert!(
+                matches!(outcome, AckOutcome::NoAck(_)),
+                "the source must redeliver the record, got {outcome:?}"
+            );
+        }
+    }
+}
+
+/// A swap holds a relay's producers and its owner's hand-on, then waits for every dispatch that
+/// entered the relay before it. A producer whose batch finds the owner's buffer full waits for the
+/// owner to take the batch ahead of it, and the owner, holding the batch it took last, waits for
+/// the hand-on the swap holds. The swap's fence must not wait for that producer: nothing the swap
+/// waits for may wait for the hand-on it holds. Once the swap's hold ends, every batch reaches the
+/// relay's consumer and is acknowledged.
+#[cfg(feature = "testing")]
+#[nervix_primitives::test]
+async fn a_swap_fence_completes_while_a_producer_waits_for_room_in_the_owner_buffer() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    install_unpaced_test_domain(&runtime, &domain);
+    let relay = named::<RelayName>("events");
+    // A relay declared without CAPACITY keeps the default relay buffer of one batch.
+    let services = Arc::new(RelayBoundaryServices::new(
+        RelayBoundaryFanout::direct_with_capacity(nervix_models::default_relay_buffer()),
+        0,
+        0,
+        Vec::new(),
+        None,
+        RelayBranchPresences::single(Arc::new(BranchPresence::new())),
+        Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    ));
+    let mut consumer = services.add_local_runtime_consumer(AckMode::Attached);
+    runtime
+        .inner
+        .fault_injection
+        .pause_owner_relay_fanout(domain.as_str());
+    let owner_task = runtime
+        .spawn_relay_owner_task(
+            &domain,
+            &relay,
+            Unit::SINGLE,
+            services.clone(),
+            RelayRetention::default(),
+        )
+        .expect("a whole relay schedules its single unit");
+
+    // The owner takes the first batch and stops before its hand-on, the second fills the owner's
+    // buffer, and the third finds it full.
+    let mut completions = Vec::new();
+    let mut producers = Vec::new();
+    for value in 1..=3 {
+        let (acks, completion) = AckSet::root();
+        completions.push(completion);
+        let batch = RelayRecordBatch::single(
+            test_schema(&[("value", ParseAsType::I64)]),
+            None,
+            test_runtime_row([("value".to_string(), RuntimeValue::I64(value))]),
+            acks.clone(),
+        )
+        .expect("a one-row relay batch builds");
+        let producing = runtime.clone();
+        let producer_domain = domain.clone();
+        let producer_relay = relay.clone();
+        let producer_services = services.clone();
+        producers.push(nervix_primitives::task::spawn(async move {
+            let dispatched = producing
+                .ingest_stream_boundary_message(
+                    &producer_domain,
+                    &producer_relay,
+                    &producer_services,
+                    &batch,
+                )
+                .await;
+            // The producer's own share of the batch, as a route resolves it after its dispatch.
+            acks.ack_success();
+            dispatched.is_ok()
+        }));
+        if value == 1 {
+            timeout(
+                Duration::from_secs(5),
+                runtime
+                    .inner
+                    .fault_injection
+                    .wait_for_owner_relay_fanout_pause(domain.as_str()),
+            )
+            .await
+            .expect("the owner takes the first batch and reaches its pause");
+        }
+    }
+    let owner_buffer = services
+        .fanout
+        .owner_buffer(Unit::SINGLE)
+        .expect("the owner task published its buffer");
+    timeout(Duration::from_secs(5), async {
+        while owner_buffer.len() < 1 || owner_buffer.batches.waiting_publishers() < 1 {
+            sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the second batch fills the owner's buffer and the third waits for room");
+
+    // The swap holds producers and the owner's hand-on, as a node's local swap does, and the owner
+    // goes on to the hand-on it holds.
+    let mut hold = RelayDispatchGateLease::engage(
+        services.fanout.dispatch_gate(),
+        Instant::now() + Duration::from_secs(2),
+        "local scheduled node swap",
+    );
+    runtime
+        .inner
+        .fault_injection
+        .release_owner_relay_fanout_pause(domain.as_str());
+    assert!(
+        hold.wait_quiescent().await,
+        "the swap's fence waited for a producer that waits for the hand-on the swap holds"
+    );
+    drop(hold);
+
+    for _ in 1..=3 {
+        timeout(Duration::from_secs(5), consumer.recv())
+            .await
+            .expect("each batch reaches the consumer once the swap's hold ends")
+            .expect("the relay keeps its consumer")
+            .ack_success();
+    }
+    for producer in producers {
+        assert!(
+            timeout(Duration::from_secs(5), producer)
+                .await
+                .expect("every producer finishes once its batch is admitted")
+                .expect("the producer task joins"),
+            "the hold refuses no batch"
+        );
+    }
+    for completion in completions {
+        assert_eq!(
+            timeout(Duration::from_secs(5), completion.wait())
+                .await
+                .expect("each batch resolves its acknowledgement"),
+            AckOutcome::Ack
+        );
+    }
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should stop");
 }
 
 #[nervix_primitives::test]
