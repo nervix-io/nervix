@@ -947,6 +947,25 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   widens or relies on one; an existing one is recorded on ClickUp against its repair task and is
   never cited as precedent. A test asserts that the work is kept, never that it is refused.
 
+### Time limits belong to whole operations
+
+- A time limit bounds a whole operation, never a unit of work inside it, and how the operation
+  started decides it. An operation an operator requested waits until it completes or is cancelled,
+  or until a limit the operator wrote. A node's termination follows its termination timeout. A
+  change Nervix starts itself follows the declared setting that bounds such changes. A wait on the
+  outside world or on a peer ends at that system's declared deadline, or when failure detection
+  judges the peer gone.
+- A unit of work, such as a task, a branch, a route or the handover of a unit, has no limit of its
+  own. Told to stop, it finishes the work in its hands and then ends; an enforced operation or a
+  failure ends it at once, with no grace either. No stop aborts a unit because a grace of its own
+  ran out.
+- A stop that would wait for something only its own operation releases, such as the operation's own
+  hold, is repaired by the order of the operation, never by a timer.
+- Every limit is a setting of the operation that owns it, a fixed contract or a derivation its
+  contract fixes ([Node Settings](#node-settings)). An existing grace of a unit of work, or a limit
+  derived as a ratio of another setting, is a defect recorded on ClickUp against its repair task,
+  never extended, copied or cited as precedent.
+
 ### Observability
 
 - `info` is reserved for lifecycle, topology, startup, shutdown, administration and unusual state
@@ -991,13 +1010,16 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   a session limit at session open, a heartbeat at link open), and the peer uses the announced value,
   never its own default or an assumption that nodes agree.
 - A value computed from other settings or the machine is a named derivation on its owner, never a
-  flag of its own. Whatever mirrors a setting (the charge for a buffer it sizes, a chunk, a
-  deadline, a restated default or bound) takes it from the resolved setting or its definition, and a
-  charge covers what is allocated at every valid value. Defaults and bounds are written once, in the
-  owning definition, and dependent defaults stay `Option` at the edge until resolved against typed
-  context. An explicit value is kept exactly and refused when it does not fit, never rounded,
-  clamped or reduced. Operator-supplied relationships are validated before I/O, and transitions at
-  commit.
+  flag of its own. A derivation states a relationship its owner's contract fixes, such as a failure
+  detector's timeout following its heartbeat. A fraction, multiple or offset of another setting
+  picked to reproduce a convenient default is a hidden tunable however it is named; the
+  `nervix::hidden_tunable` diagnostic does not see arithmetic on a setting, so review owns this.
+  Whatever mirrors a setting (the charge for a buffer it sizes, a chunk, a deadline, a restated
+  default or bound) takes it from the resolved setting or its definition, and a charge covers what
+  is allocated at every valid value. Defaults and bounds are written once, in the owning definition,
+  and dependent defaults stay `Option` at the edge until resolved against typed context. An explicit
+  value is kept exactly and refused when it does not fit, never rounded, clamped or reduced.
+  Operator-supplied relationships are validated before I/O, and transitions at commit.
 - Before any listener binds or store opens, the
   [startup preflight](docs/src/node-settings.md#the-startup-preflight) checks what the node needs
   from its environment, such as memory against its budgets, its directories and its resolver, and a

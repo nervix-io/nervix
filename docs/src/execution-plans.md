@@ -394,12 +394,39 @@ contains only typed runtime instructions:
 | Unchanged | Keep the installed tasks and state when the predecessor, lifecycle, and start version still match. |
 | Entity labels only | Publish the committed metadata while retaining execution, state, allowances, bindings, connections, buffers and ACK obligations. No pause, force flush, rebuild or relocation is required. |
 | Dynamic | Apply the typed capacity, processor, WASM reset, emitter flush, VHOST TLS or retired partition transition update; bind and publish the desired processor and error plans. A retired transition gates nothing and force-flushes nothing: each local unit the schedule keeps ends its claims in its own task, and each holding unit ends with its placement tasks. |
-| Entity swap | Fence affected input relays, force-flush as required, rebind reassigned placement and selected node tasks, then publish the desired revision and release the gates. A new partition epoch first gives every relay of the branch new boundary services for the new count on the same fan-out. Unaffected nodes and their branch state stay in place. |
+| Entity swap | Stop the replaced parts upstream first, fence affected input relays, force-flush as required, rebind reassigned placement and selected node tasks, then publish the desired revision and release the gates. A new partition epoch first gives every relay of the branch new boundary services for the new count on the same fan-out. Unaffected nodes and their branch state stay in place. |
 | Rebuild | Stop the preceding domain execution and install the complete desired running or passive revision. Domain-wide changes, a domain this node does not run yet, and lifecycle changes can require this path. |
 
 The schedule classifier retains Model-based change-aspect and quiescence decisions in the
 registry. The runtime receives typed dynamic values, affected node identities, state purges,
-and gate relays. It does not reclassify the new schedule.
+gate relays and the order in which the swap stops the parts it replaces. It does not reclassify
+the new schedule.
+
+An entity swap stops the parts it replaces upstream first. Every part delivers what it holds as it
+stops, with no limit of its own, and the swap holds the input relays of every part it replaces
+until it ends, so a part that delivered into a relay the swap already holds would wait for the swap
+while the swap waited for it. The registry decides the order with the typed change, from the
+schedule the domain runs:
+
+- Before it holds any relay, the swap stops every generator unit it replaces or moves, and every
+  ingestor unit it stops whose rows reach a relay it holds, through any number of routes, error
+  routes, correlation timeouts and running nodes; a read of materialized state carries no rows. A
+  node the same change drops counts too, since a node that has not applied the change yet still runs
+  it. Each finishes the work in its hands into relays nobody holds yet. An ingestor unit whose rows
+  reach no relay the swap holds stops under the swap's hold, so its intake ends no sooner than the
+  swap needs.
+- Then the swap stops each reingestor it replaces where it runs, in the order rows flow through
+  them. It holds that reingestor's input relays and waits for what entered them; the reingestor
+  drains the input it already received and flushes its output into its routes, and its routes
+  finish their deliveries into relays the swap does not hold yet.
+- Then it engages its main hold over every relay it holds, force-flushes the domain and replaces
+  the rest of what it changes.
+
+A domain's graph has no loops, so this order always exists, and no stop waits for a hold its own
+swap engaged. A part the swap replaces or moves stops under the state identity the new revision
+gives it, as it would under the main hold, so the last branch snapshot it writes is the one its
+replacement reads. An ingestor whose unit layout changes stops under the identity installed
+before the swap, since a unit the new layout removes has none afterwards.
 
 The force flush of an entity swap covers the domain's full current execution graph, as engaging any
 entity gate does ([Transaction Quiescence](transaction-quiescence.md)), on every node that applies
@@ -418,8 +445,8 @@ contract, not a loss.
 
 An entity swap that fails on a node never rebuilds the domain there. The swap records each part of
 the running execution it stops, replaces or starts, before the operation that can fail after it.
-When a later step fails, it puts the previous execution back, last change first, while the
-entities stay gated:
+When a later step fails, a hold that cannot be fenced included, it puts the previous execution
+back, last change first, while the entities stay gated, and only then opens every hold it engaged:
 
 - a processor unit's previous task starts again from the plan the domain last published, with the
   branches it handed over; a replacement that already took them hands them back first;

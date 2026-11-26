@@ -2408,6 +2408,7 @@ impl EmitterBatchContext<'_> {
                 batch,
                 MaterializedBatchWaitContext {
                     shutdown_rx,
+                    stop: None,
                     wait_for_required_state,
                     quiesce_work,
                 },
