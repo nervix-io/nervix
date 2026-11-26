@@ -482,7 +482,10 @@ offsets.
 
 The affected relay gates remain closed through publication. An already buffered owner batch takes
 its permit before fan-out: it finishes under the prior consumer set if admitted before the fence,
-or waits for the swap and fans out to the published consumer set.
+or waits for the swap and fans out to the published consumer set. A producer whose batch finds the
+owner's buffer full waits for room before it takes its permit, so the fence never waits for a
+producer that waits for the owner, whose next fan-out waits for the swap. A node that tries a
+failed swap again while records are still in motion therefore reaches its swap at once.
 
 A forced ownership change additionally identifies the input relays of its reassigned nodes. Once
 their local dispatch gates close, installation retires the preceding channel generation of each

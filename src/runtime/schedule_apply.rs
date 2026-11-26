@@ -1047,7 +1047,8 @@ impl Runtime {
         relays.dedup();
         // The swap changes the routes an owner's fan-out reads, so it holds that hand-on back too.
         // The fan-out waits for the swap rather than being refused: nothing the swap waits for
-        // waits for that fan-out.
+        // waits for that fan-out. A producer enters the relay only once the owner's buffer has
+        // room for its batch, so the fence never waits for one that waits for the owner.
         let mut local_gate_hold = self.engage_entity_unit_gates(
             domain,
             &relays,

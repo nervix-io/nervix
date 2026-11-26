@@ -777,3 +777,122 @@ fn shuttle_a_batch_held_through_a_failed_swap_reaches_the_restored_consumer_once
         Some(512),
     );
 }
+
+/// A swap that holds a relay's producers and its owner's hand-on waits only for dispatches that
+/// can finish while it holds them. Three producers race into a relay whose owner buffer holds one
+/// batch, its owner takes and hands on one batch at a time, and a swap engages its hold among them.
+/// Whatever the interleaving, the swap's fence completes, and every batch then reaches the relay's
+/// consumer exactly once and is acknowledged: a producer that finds the owner's buffer full waits
+/// for room outside the gates, never inside them while the owner waits for the swap.
+#[test]
+fn shuttle_a_swap_fence_never_waits_for_a_producer_that_waits_for_the_owner_buffer() {
+    const BATCHES: usize = 3;
+    check_random(
+        || {
+            shuttle::future::block_on(async {
+                let owner_domain = domain("default");
+                let relay = named::<RelayName>("events");
+                // A relay declared without CAPACITY keeps the default relay buffer of one batch.
+                let services = Arc::new(RelayBoundaryServices::new(
+                    RelayBoundaryFanout::direct_with_capacity(nervix_models::default_relay_buffer()),
+                    0,
+                    0,
+                    Vec::new(),
+                    None,
+                    RelayBranchPresences::single(Arc::new(BranchPresence::new())),
+                    Arc::new(crate::runtime_ack::AckRootTracker::default()),
+                ));
+                let mut consumer = services.add_local_runtime_consumer(AckMode::Attached);
+                let metrics = crate::metrics::RuntimeMetrics::default().resolve_relay_metrics(
+                    &owner_domain,
+                    &relay,
+                    Unit::SINGLE,
+                    None,
+                    RELAY_BUFFER_DIRECTION_CONCRETE,
+                    None,
+                );
+                let (mut owner_receiver, _owner_buffer) =
+                    services.activate_owner_buffer(Unit::SINGLE, metrics);
+
+                let mut completions = Vec::with_capacity(BATCHES);
+                let mut producers = Vec::with_capacity(BATCHES);
+                for _ in 0..BATCHES {
+                    let (root, completion) = AckSet::root();
+                    completions.push(completion);
+                    let mut batch = quiesce_test_batch();
+                    batch.acks = vec![root];
+                    let producing = services.clone();
+                    producers.push(nervix_primitives::task::spawn(async move {
+                        let admitted = producing.enqueue_owner_batch(&batch, Unit::SINGLE).await;
+                        // The producer's own share, as a route resolves it after its dispatch.
+                        batch.ack_success();
+                        admitted.is_ok()
+                    }));
+                }
+
+                // The owner takes one batch at a time from its buffer and hands it on, as its task
+                // does, waiting while the swap holds its hand-on back.
+                let handing_on = services.clone();
+                let (_owner_runs, owner_stop) = watch::channel(false);
+                let owner = nervix_primitives::task::spawn(async move {
+                    for _ in 0..BATCHES {
+                        let batch = owner_receiver
+                            .recv()
+                            .await
+                            .assured("the owner buffer outlives the owner's loop");
+                        handing_on
+                            .fanout_owner_batch(
+                                &domain("default"),
+                                &named("events"),
+                                Unit::SINGLE,
+                                &batch,
+                                &ConfiguredFaultInjection::default(),
+                                &owner_stop,
+                            )
+                            .await
+                            .assured("the relay keeps its one attached consumer");
+                    }
+                });
+
+                let swapping = services.clone();
+                let swap = nervix_primitives::task::spawn(async move {
+                    let mut hold = RelayDispatchGateLease::engage(
+                        swapping.fanout.dispatch_gate(),
+                        Instant::now() + Duration::from_secs(86_400),
+                        "local scheduled node swap",
+                    );
+                    let fenced = hold.wait_quiescent().await;
+                    drop(hold);
+                    fenced
+                });
+
+                for _ in 0..BATCHES {
+                    consumer
+                        .recv()
+                        .await
+                        .assured("each batch reaches the relay's consumer")
+                        .ack_success();
+                }
+                assert!(
+                    swap.await.assured("the swap's hold ends"),
+                    "the swap's fence completes while it holds the owner's hand-on"
+                );
+                owner.await.assured("the owner hands every batch on");
+                for producer in producers {
+                    assert!(
+                        producer.await.assured("every producer finishes"),
+                        "the hold refuses no batch"
+                    );
+                }
+                assert!(
+                    matches!(consumer.try_recv(), RelayTryRecv::Empty),
+                    "every batch reaches the relay's consumer exactly once"
+                );
+                for completion in completions {
+                    assert_eq!(completion.wait().await, AckOutcome::Ack);
+                }
+            });
+        },
+        1_000,
+    );
+}
