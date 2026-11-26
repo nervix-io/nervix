@@ -433,7 +433,7 @@ async fn ownership_handoff_flushes_the_route_before_freezing_its_state() {
     let force_flush = runtime.force_flush_participant(&domain, counters.clone());
     let (branch_sender, mut branch_output) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
     let (_route_sender, route_input) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
-    let (shutdown, shutdown_rx) = watch::channel(false);
+    let (stop, stop_rx) = watch::channel(None);
     let mut route_task = IngestorRouteTask {
         remote_ack_timing: runtime.remote_ack_timing().clone(),
         runtime_handle: runtime.clone(),
@@ -512,8 +512,7 @@ async fn ownership_handoff_flushes_the_route_before_freezing_its_state() {
     })
     .await
     .expect("handoff should publish the flush before waiting for the route");
-    let task =
-        nervix_primitives::task::spawn(route_task.run(route_input, shutdown_rx, force_flush));
+    let task = nervix_primitives::task::spawn(route_task.run(route_input, stop_rx, force_flush));
     let forced = timeout(Duration::from_secs(1), branch_output.recv())
         .await
         .expect("the handoff flush must publish admitted route output before freezing")
@@ -563,7 +562,7 @@ async fn ownership_handoff_flushes_the_route_before_freezing_its_state() {
         .release_entity_gate_operation(&coordination, &domain)
         .await
         .expect("handoff releases its exact hold");
-    shutdown.send_replace(true);
+    stop.send_replace(Some(RouteStop::Finish));
     timeout(Duration::from_secs(1), task)
         .await
         .expect("route stops")
@@ -585,7 +584,7 @@ async fn force_flush_releases_held_ingestor_route_buffers() {
     let force_flush = runtime.force_flush_participant(&domain, counters.clone());
     let (branch_sender, mut branch_output) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
     let (route_sender, route_input) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
-    let (shutdown, shutdown_rx) = watch::channel(false);
+    let (stop, stop_rx) = watch::channel(None);
     let route_task = IngestorRouteTask {
         remote_ack_timing: runtime.remote_ack_timing().clone(),
         runtime_handle: runtime.clone(),
@@ -618,8 +617,7 @@ async fn force_flush_releases_held_ingestor_route_buffers() {
         pending: HashMap::default(),
         quiesce: OutputBufferQuiesceGauge::new(counters.clone()),
     };
-    let task =
-        nervix_primitives::task::spawn(route_task.run(route_input, shutdown_rx, force_flush));
+    let task = nervix_primitives::task::spawn(route_task.run(route_input, stop_rx, force_flush));
 
     route_sender
         .send(
@@ -682,7 +680,7 @@ async fn force_flush_releases_held_ingestor_route_buffers() {
     .expect("the route obligation should clear once its output is published");
     assert_eq!(counters.admitted_work(), 0);
 
-    shutdown.send_replace(true);
+    stop.send_replace(Some(RouteStop::Finish));
     timeout(Duration::from_secs(1), task)
         .await
         .expect("the route task should stop")

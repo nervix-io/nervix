@@ -1296,6 +1296,7 @@ impl Runtime {
         } = handles;
         let MaterializedBatchWaitContext {
             shutdown_rx,
+            stop,
             wait_for_required_state,
             mut quiesce_work,
         } = wait;
@@ -1368,6 +1369,16 @@ impl Runtime {
                                 return Ok(None);
                             }
                         }
+                        () = cancelled_task_stop(stop) => {
+                            for ack in batch.acks.iter() {
+                                ack.no_ack(format!(
+                                    "task stopped while waiting for required materialized state at \
+                                     relay '{}'",
+                                    input_relay
+                                ));
+                            }
+                            return Ok(None);
+                        }
                     }
                 }
             }
@@ -1395,6 +1406,14 @@ impl Runtime {
             .resolve_materialized_dependencies(routing, domain, branch, dependencies, execution_now)
             .await?;
         Ok((resolution, changed))
+    }
+}
+
+/// Resolves once `stop` is cancelled, and never for a task that has no stop of its own.
+async fn cancelled_task_stop(stop: Option<&CancellationToken>) {
+    match stop {
+        Some(stop) => stop.cancelled().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -1653,86 +1672,191 @@ mod tests {
         );
     }
 
-    #[nervix_primitives::test]
-    async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_order() {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        for relay in ["profiles", "rules"] {
-            publish_state_identity(
-                &runtime,
-                &domain,
-                ModelKind::Relay,
-                named::<ModelName>(relay),
-            );
-        }
-        let state_schema = test_optional_schema(&[
-            OptionalTestField {
-                name: "status",
-                ty: ParseAsType::String,
-                optional: false,
-            },
-            OptionalTestField {
-                name: "note",
-                ty: ParseAsType::String,
-                optional: true,
-            },
-            OptionalTestField {
-                name: "evaluated_at",
-                ty: ParseAsType::Datetime,
-                optional: true,
-            },
-        ]);
-        let (shutdown, _) = watch::channel(false);
-        let materialized_stream_specs = ["profiles", "rules"]
-            .into_iter()
-            .map(|relay| {
-                (
-                    named(relay),
-                    RuntimeMaterializedRelaySpec::new(
-                        state_schema.arrow_schema(),
-                        VmSchemaSensitivity::default(),
-                        ResolvedBranching::unbranched(),
-                    ),
-                )
-            })
-            .collect();
-        let relay_services = [(named("input"), test_relay_boundary_services())]
-            .into_iter()
-            .collect();
-        runtime.install_domain_execution(
-            &domain,
-            DomainExecution {
-                mqtt_ingestor_clients: HashMap::default(),
-                revision: test_execution_revision(&domain, Vec::new()),
-                start_version: 0,
-                domain_clock: test_domain_clock(&domain),
-                shutdown,
-                routing: runtime.stage_domain_routing(
-                    &domain,
-                    DomainRoutingSnapshot {
-                        relay_services,
-                        materialized_stream_specs,
-                        ..DomainRoutingSnapshot::default()
-                    },
-                ),
+    /// A running domain whose relays `profiles` and `rules` materialize state that holds no record
+    /// yet, beside the relay `input` the batches under test arrive on.
+    struct MaterializedDomain {
+        runtime: Runtime,
+        domain: DomainName,
+        routing: DomainRoutingCache,
+        domain_clock: DomainClock,
+        state_schema: Arc<CompiledSchema>,
+    }
 
-                branched_entrypoints: HashMap::default(),
-                endpoint_routes: HashMap::default(),
-                node_tasks: HashMap::default(),
-                emitter_tasks: HashMap::default(),
-                generator_tasks: HashMap::default(),
-                reingestor_tasks: HashMap::default(),
-                placement_tasks: HashMap::default(),
-                relay_state_tasks: BTreeMap::default(),
-                relay_owner_tasks: BTreeMap::default(),
-                tasks: Vec::new(),
+    impl MaterializedDomain {
+        fn install() -> Self {
+            let runtime = Runtime::default();
+            let domain = domain("default");
+            for relay in ["profiles", "rules"] {
+                publish_state_identity(
+                    &runtime,
+                    &domain,
+                    ModelKind::Relay,
+                    named::<ModelName>(relay),
+                );
+            }
+            let state_schema = test_optional_schema(&[
+                OptionalTestField {
+                    name: "status",
+                    ty: ParseAsType::String,
+                    optional: false,
+                },
+                OptionalTestField {
+                    name: "note",
+                    ty: ParseAsType::String,
+                    optional: true,
+                },
+                OptionalTestField {
+                    name: "evaluated_at",
+                    ty: ParseAsType::Datetime,
+                    optional: true,
+                },
+            ]);
+            let (shutdown, _) = watch::channel(false);
+            let materialized_stream_specs = ["profiles", "rules"]
+                .into_iter()
+                .map(|relay| {
+                    (
+                        named(relay),
+                        RuntimeMaterializedRelaySpec::new(
+                            state_schema.arrow_schema(),
+                            VmSchemaSensitivity::default(),
+                            ResolvedBranching::unbranched(),
+                        ),
+                    )
+                })
+                .collect();
+            let relay_services = [(named("input"), test_relay_boundary_services())]
+                .into_iter()
+                .collect();
+            runtime.install_domain_execution(
+                &domain,
+                DomainExecution {
+                    mqtt_ingestor_clients: HashMap::default(),
+                    revision: test_execution_revision(&domain, Vec::new()),
+                    start_version: 0,
+                    domain_clock: test_domain_clock(&domain),
+                    shutdown,
+                    routing: runtime.stage_domain_routing(
+                        &domain,
+                        DomainRoutingSnapshot {
+                            relay_services,
+                            materialized_stream_specs,
+                            ..DomainRoutingSnapshot::default()
+                        },
+                    ),
+
+                    branched_entrypoints: HashMap::default(),
+                    endpoint_routes: HashMap::default(),
+                    node_tasks: HashMap::default(),
+                    emitter_tasks: HashMap::default(),
+                    generator_tasks: HashMap::default(),
+                    reingestor_tasks: HashMap::default(),
+                    placement_tasks: HashMap::default(),
+                    relay_state_tasks: BTreeMap::default(),
+                    relay_owner_tasks: BTreeMap::default(),
+                    tasks: Vec::new(),
+                },
+            );
+            let routing = runtime
+                .domain_routing_cache(&domain)
+                .expect("the test domain execution publishes routing");
+            let domain_clock = test_domain_clock(&domain);
+            Self {
+                runtime,
+                domain,
+                routing,
+                domain_clock,
+                state_schema,
+            }
+        }
+
+        /// One unbranched batch of the relay `input`, with its acknowledgement's completion.
+        fn input_batch(&self) -> (RelayRecordBatch, AckCompletion) {
+            let (acks, completion) = AckSet::root();
+            let row = self
+                .state_schema
+                .batch_from_test_rows([[(
+                    "status".to_string(),
+                    RuntimeValue::String("pending".to_string()),
+                )]])
+                .expect("required-wait test Arrow batch must build")
+                .runtime_row(0, RuntimeRecordMetadata::test())
+                .expect("required-wait test Arrow row must build");
+            let batch = RelayRecordBatch::single(self.state_schema.clone(), None, row, acks)
+                .expect("required-wait test batch must build");
+            (batch, completion)
+        }
+    }
+
+    /// A task stopped on its own while one of its batches waits for required materialized state
+    /// ends the wait at once, as its domain's shutdown would: the batch is refused with the stop
+    /// as its reason, and the wait does not outlast the stop.
+    #[nervix_primitives::test]
+    async fn a_task_stop_ends_a_wait_for_required_materialized_state() {
+        let fixture = MaterializedDomain::install();
+        let (retained, completion) = fixture.input_batch();
+        let MaterializedDomain {
+            runtime,
+            domain,
+            mut routing,
+            domain_clock,
+            ..
+        } = fixture;
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let stop = CancellationToken::new();
+        let input_relay = named("input");
+        let dependencies = [nervix_models::MaterializedStateDependency {
+            relay: named("profiles"),
+            policy: nervix_models::MaterializedStatePolicy::RequiredWait,
+        }];
+        let resolution = runtime.resolve_materialized_dependencies_for_batch(
+            MaterializedDomainHandles {
+                routing: &mut routing,
+                domain_clock: &domain_clock,
+                domain: &domain,
+            },
+            &input_relay,
+            &dependencies,
+            retained,
+            MaterializedBatchWaitContext {
+                shutdown_rx: &mut shutdown_rx,
+                stop: Some(&stop),
+                wait_for_required_state: true,
+                quiesce_work: None,
             },
         );
-        let mut routing = runtime
-            .domain_routing_cache(&domain)
-            .expect("the test domain execution publishes routing");
+        tokio::pin!(resolution);
+        assert!(
+            timeout(Duration::from_millis(50), &mut resolution)
+                .await
+                .is_err(),
+            "the batch waits while its state is missing and nothing stops its task"
+        );
+        stop.cancel();
+        let resolved = timeout(Duration::from_secs(1), &mut resolution)
+            .await
+            .expect("the task's stop ends the wait")
+            .expect("the wait ends without a failure");
+        assert!(resolved.is_none(), "the stopped wait resolves nothing");
+        assert_eq!(
+            completion.wait().await,
+            AckOutcome::NoAck(
+                "task stopped while waiting for required materialized state at relay 'input'"
+                    .to_string()
+            )
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn materialized_dependencies_resolve_defaults_and_stop_in_declaration_order() {
+        let MaterializedDomain {
+            runtime,
+            domain,
+            mut routing,
+            domain_clock,
+            state_schema,
+        } = MaterializedDomain::install();
         let routing_snapshot = routing.load().clone();
-        let domain_clock = test_domain_clock(&domain);
 
         let default = nervix_models::MaterializedStateDependency {
             relay: named("profiles"),
@@ -1901,6 +2025,7 @@ mod tests {
                 retained,
                 MaterializedBatchWaitContext {
                     shutdown_rx: &mut shutdown_rx,
+                    stop: None,
                     wait_for_required_state: true,
                     quiesce_work: None,
                 },
@@ -1955,6 +2080,7 @@ mod tests {
                     retained,
                     MaterializedBatchWaitContext {
                         shutdown_rx: &mut shutdown_rx,
+                        stop: None,
                         wait_for_required_state: false,
                         quiesce_work: None,
                     },

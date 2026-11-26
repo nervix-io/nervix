@@ -85,6 +85,10 @@ pub enum SideErrorReason {
     /// A `date_diff` whose count of units does not fit its `I64` result.
     #[error("date_diff result does not fit I64")]
     DateDiffOverflow,
+    /// A duration operation whose result is longer, in either direction, than the signed 64-bit
+    /// count of nanoseconds a DURATION holds.
+    #[error("{0} result does not fit a DURATION")]
+    DurationOutOfRange(DurationOperation),
     /// A `parse_datetime` input that is not a date and time in the call's format.
     #[error("parse_datetime {0}")]
     UnreadableDatetime(UnreadableText),
@@ -160,6 +164,7 @@ impl SideErrorReason {
             Self::IntegerOverflow(_)
             | Self::DatetimeOutOfRange(_)
             | Self::DateDiffOverflow
+            | Self::DurationOutOfRange(_)
             | Self::TextTooLong(_)
             | Self::TooManySplitParts
             | Self::BytesTooLong(_)
@@ -238,7 +243,8 @@ pub enum DivisionOperation {
     Remainder,
 }
 
-/// A datetime builtin whose result is a DATETIME.
+/// An operation whose result is a DATETIME: a datetime builtin, or an operator that moves an
+/// instant by a duration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 pub enum DatetimeOperation {
     #[strum(to_string = "date_trunc")]
@@ -251,6 +257,31 @@ pub enum DatetimeOperation {
     FromUnix,
     #[strum(to_string = "parse_datetime")]
     ParseDatetime,
+    /// `DATETIME + DURATION` and `DURATION + DATETIME`.
+    #[strum(to_string = "datetime addition")]
+    Addition,
+    /// `DATETIME - DURATION`.
+    #[strum(to_string = "datetime subtraction")]
+    Subtraction,
+}
+
+/// An operation whose result is a DURATION.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum DurationOperation {
+    /// `DURATION + DURATION`.
+    #[strum(to_string = "duration addition")]
+    Addition,
+    /// `DURATION - DURATION`.
+    #[strum(to_string = "duration subtraction")]
+    Subtraction,
+    /// `-DURATION`.
+    #[strum(to_string = "duration negation")]
+    Negation,
+    /// `DATETIME - DATETIME`, the duration between two instants.
+    #[strum(to_string = "datetime subtraction")]
+    Elapsed,
+    #[strum(to_string = "to_duration")]
+    ToDuration,
 }
 
 /// A text builtin that sizes each value before it builds it, because its arguments choose how
@@ -799,8 +830,8 @@ pub enum CollectionLimit {
 #[cfg(test)]
 mod tests {
     use super::{
-        DatetimeOperation, DivisionOperation, ErrorCode, FloatOperation, IntegerOperation,
-        RowErrors, ShiftOperation, SideError, SideErrorReason, TextOperation,
+        DatetimeOperation, DivisionOperation, DurationOperation, ErrorCode, FloatOperation,
+        IntegerOperation, RowErrors, ShiftOperation, SideError, SideErrorReason, TextOperation,
     };
     use crate::ir::RegisterType;
 
@@ -957,9 +988,44 @@ mod tests {
                 DatetimeOperation::FromUnix,
                 "from_unix result is outside the DATETIME range",
             ),
+            (
+                DatetimeOperation::Addition,
+                "datetime addition result is outside the DATETIME range",
+            ),
+            (
+                DatetimeOperation::Subtraction,
+                "datetime subtraction result is outside the DATETIME range",
+            ),
         ];
         for (operation, message) in datetime_ranges {
             let reason = SideErrorReason::DatetimeOutOfRange(operation);
+            assert_eq!(reason.to_string(), message);
+            assert_eq!(reason.code(), ErrorCode::Overflow);
+        }
+        let duration_ranges = [
+            (
+                DurationOperation::Addition,
+                "duration addition result does not fit a DURATION",
+            ),
+            (
+                DurationOperation::Subtraction,
+                "duration subtraction result does not fit a DURATION",
+            ),
+            (
+                DurationOperation::Negation,
+                "duration negation result does not fit a DURATION",
+            ),
+            (
+                DurationOperation::Elapsed,
+                "datetime subtraction result does not fit a DURATION",
+            ),
+            (
+                DurationOperation::ToDuration,
+                "to_duration result does not fit a DURATION",
+            ),
+        ];
+        for (operation, message) in duration_ranges {
+            let reason = SideErrorReason::DurationOutOfRange(operation);
             assert_eq!(reason.to_string(), message);
             assert_eq!(reason.code(), ErrorCode::Overflow);
         }

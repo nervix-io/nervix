@@ -122,9 +122,17 @@ fn mixed_entities() -> Vec<NodeRef> {
     SortedSet::from_unsorted(entities).into_vec()
 }
 
-fn mixed_swap(state_purges: BTreeMap<NodeRef, Vec<StatePurge>>) -> EntitySwapExecution {
+/// The swap of every mixed entity, with the stop order the registry decides for it.
+fn mixed_swap(
+    domain: &DomainName,
+    state_purges: BTreeMap<NodeRef, Vec<StatePurge>>,
+) -> EntitySwapExecution {
+    let schedule = mixed_schedule(domain);
+    let entities = mixed_entities();
+    let held = crate::registry::entity_pause_relays_for_schedule(&schedule, &entities);
     EntitySwapExecution {
-        entities: mixed_entities(),
+        stop_order: SwapStopOrder::plan(&schedule, &entities, &held),
+        entities,
         reassignments: Vec::new(),
         dynamic_updates: Vec::new(),
         state_purges,
@@ -258,7 +266,7 @@ async fn a_swap_failing_at_any_entity_puts_back_every_entity_it_replaced() {
         let desired = ExecutionRevision::from_schedule(&mixed_schedule(&domain))
             .assured("the mixed fixture schedules a complete revision");
         let error = runtime
-            .swap_scheduled_nodes(&domain, desired, &mixed_swap(BTreeMap::new()))
+            .swap_scheduled_nodes(&domain, desired, &mixed_swap(&domain, BTreeMap::new()))
             .await
             .expect_err("the armed entity fails the swap");
         runtime
@@ -304,7 +312,11 @@ async fn a_swap_failing_at_any_entity_puts_back_every_entity_it_replaced() {
     let desired = ExecutionRevision::from_schedule(&mixed_schedule(&domain))
         .assured("the mixed fixture schedules a complete revision");
     runtime
-        .swap_scheduled_nodes(&domain, desired.clone(), &mixed_swap(BTreeMap::new()))
+        .swap_scheduled_nodes(
+            &domain,
+            desired.clone(),
+            &mixed_swap(&domain, BTreeMap::new()),
+        )
         .await
         .expect("the swap applies once nothing fails it");
     assert_eq!(
@@ -346,7 +358,7 @@ async fn a_failed_swap_keeps_the_state_its_previous_deduplicator_reads() {
         let desired = ExecutionRevision::from_schedule(&mixed_schedule(&domain))
             .assured("the mixed fixture schedules a complete revision");
         let error = runtime
-            .swap_scheduled_nodes(&domain, desired, &mixed_swap(purges.clone()))
+            .swap_scheduled_nodes(&domain, desired, &mixed_swap(&domain, purges.clone()))
             .await
             .expect_err("the armed entity fails the swap");
         assert!(
@@ -369,7 +381,7 @@ async fn a_failed_swap_keeps_the_state_its_previous_deduplicator_reads() {
     let desired = ExecutionRevision::from_schedule(&mixed_schedule(&domain))
         .assured("the mixed fixture schedules a complete revision");
     runtime
-        .swap_scheduled_nodes(&domain, desired, &mixed_swap(purges))
+        .swap_scheduled_nodes(&domain, desired, &mixed_swap(&domain, purges))
         .await
         .expect("the swap applies once nothing fails it");
     assert!(

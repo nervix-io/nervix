@@ -1097,6 +1097,15 @@ pub(in crate::runtime) struct RelayFanoutClosed<T> {
     pub(in crate::runtime) batch: T,
 }
 
+/// Why [`RelayPublication::try_broadcast_with`] delivered nothing.
+pub(in crate::runtime) enum RelayTryBroadcast<T> {
+    /// A consumer the publication counted, and that still takes batches, holds its whole capacity
+    /// now, so the publisher built no batch and waits for room before it tries again.
+    Full,
+    /// No consumer was left to take the batch the publisher built.
+    Closed(RelayFanoutClosed<T>),
+}
+
 /// One publication into a relay fan-out: the consumers registered when it began, which it both
 /// counts and delivers to. A consumer that registers later receives later publications only, so
 /// whatever a publisher prepares for each counted consumer matches the deliveries.
@@ -1293,9 +1302,119 @@ impl<T, Selection: RelayConsumerSelection<T>> RelayPublication<'_, T, Selection>
     pub(in crate::runtime) fn receivers(&self) -> usize {
         self.selection.select(&self.consumers).len()
     }
+
+    /// Waits until every consumer this publication counted can take one more batch, and keeps none
+    /// of that room once it returns. A consumer that has left, or leaves meanwhile, no longer
+    /// counts, as [`Self::try_broadcast_with`] skips it.
+    ///
+    /// A publisher that must not wait for room while it holds something a consumer's progress can
+    /// depend on, such as a relay dispatch permit a fence counts, waits here first and then delivers
+    /// with [`Self::try_broadcast_with`] once it holds it. Another publisher can take the room seen
+    /// here first; the delivery then finds the consumer full, and its publisher waits here again.
+    pub(in crate::runtime) async fn wait_for_room(self) {
+        let Self {
+            fanout,
+            consumers,
+            selection,
+        } = self;
+        let capacity = fanout.capacity.load(Ordering::Acquire);
+        let mut first_full = None;
+        for (index, consumer) in selection.select(&consumers).iter().enumerate() {
+            if !consumer.has_room(capacity) {
+                first_full = Some(index);
+                break;
+            }
+        }
+        let Some(first_full) = first_full else {
+            return;
+        };
+        // The wait reserves room in registration order, as a publication that waits does, so every
+        // consumer that frees room wakes it. Once each consumer it waited for had room, dropping
+        // the reservations gives that room back and wakes the publishers waiting for it.
+        let consumers = Guard::into_inner(consumers);
+        let remaining = &selection.select(&consumers)[first_full..];
+        let mut reserved = RelayPendingAdmissions {
+            fanout,
+            consumers: Vec::with_capacity(remaining.len()),
+        };
+        for consumer in remaining {
+            if fanout.admit(consumer).await {
+                reserved.consumers.push(consumer);
+            }
+        }
+        drop(reserved);
+    }
 }
 
 impl<T: Clone, Selection: RelayConsumerSelection<T>> RelayPublication<'_, T, Selection> {
+    /// Delivers the batch `build` makes to every consumer this publication counted when each of
+    /// them can take it now, and never waits.
+    ///
+    /// A consumer that has left is skipped, as [`Self::broadcast`] skips it. When a consumer that
+    /// still takes batches is at capacity, it gives back the room it reserved on the others, builds
+    /// nothing and answers [`RelayTryBroadcast::Full`]. Otherwise it answers as
+    /// [`Self::broadcast`] does: the batch comes back only when no consumer is left to take it, and
+    /// the answer counts the consumers that left releasing their share as done.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the batch it delivers; local callback \
+                                   bodies remain analyzed")
+    )]
+    pub(in crate::runtime) fn try_broadcast_with(
+        self,
+        build: impl FnOnce() -> T,
+    ) -> Result<RelayDepartures, RelayTryBroadcast<T>> {
+        let Self {
+            fanout,
+            consumers,
+            selection,
+        } = self;
+        let selected = selection.select(&consumers);
+        let capacity = fanout.capacity.load(Ordering::Acquire);
+        let mut first_full = None;
+        for (index, consumer) in selected.iter().enumerate() {
+            if !consumer.try_admit(capacity) {
+                first_full = Some(index);
+                break;
+            }
+        }
+        let Some(first_full) = first_full else {
+            return RelayConsumerQueue::deliver_each(
+                selected.iter(),
+                build(),
+                RelayDepartures::default(),
+            )
+            .map_err(|batch| RelayTryBroadcast::Closed(RelayFanoutClosed { batch }));
+        };
+
+        // A consumer could not take the batch now. One that has left is skipped, as a waiting
+        // publication skips it, so only a consumer that still takes batches holds the attempt
+        // back; returning then drops the reservations, which gives their room back and wakes the
+        // publishers waiting for it.
+        let (reserved, remaining) = selected.split_at(first_full);
+        let mut admitted = RelayPendingAdmissions {
+            fanout,
+            consumers: reserved.iter().collect(),
+        };
+        let mut departures = RelayDepartures::default();
+        for consumer in remaining {
+            if consumer.batches.is_closed() {
+                departures.count(consumer.departure());
+                continue;
+            }
+            if !consumer.try_admit(capacity) {
+                return Err(RelayTryBroadcast::Full);
+            }
+            admitted.consumers.push(consumer);
+        }
+        RelayConsumerQueue::deliver_each(
+            std::mem::take(&mut admitted.consumers),
+            build(),
+            departures,
+        )
+        .map_err(|batch| RelayTryBroadcast::Closed(RelayFanoutClosed { batch }))
+    }
+
     /// Delivers `batch` to every consumer this publication counted.
     ///
     /// Waits while any of those consumers is at capacity. A consumer that leaves during the wait is
@@ -1430,6 +1549,13 @@ impl<T> RelayConsumerQueue<T> {
     /// Reserves one admission, or reports that this consumer already holds `capacity`.
     fn try_admit(&self, capacity: usize) -> bool {
         self.admit_from(self.admitted.load(Ordering::Acquire), capacity)
+    }
+
+    /// Whether this consumer has left, or held less than `capacity` when it was read. It reserves
+    /// nothing and decides nothing alone: a publisher that sees room here still reserves it, and one
+    /// that sees none waits through [`RelayFanout::admit`].
+    fn has_room(&self, capacity: usize) -> bool {
+        self.batches.is_closed() || self.admitted.load(Ordering::Acquire) < capacity
     }
 
     /// Reserves one admission for a publisher whose wait has raised the waiting count, or reports
@@ -1721,7 +1847,7 @@ mod tests {
 
     use meticulous::ResultExt as _;
 
-    use super::{RelayBroadcast, RelayDepartures, RelayTryRecv};
+    use super::{RelayBroadcast, RelayDepartures, RelayTryBroadcast, RelayTryRecv};
 
     #[nervix_primitives::test]
     async fn a_consumer_that_departs_releasing_takes_back_what_was_delivered_to_it() {
@@ -2083,6 +2209,106 @@ mod tests {
             .expect("a consumer registered after the close has room");
         assert_eq!(joined_later.recv().await, Some(3));
         assert_eq!(closed.try_recv(), RelayTryRecv::Closed);
+    }
+
+    #[nervix_primitives::test]
+    async fn waiting_for_room_keeps_none_of_the_room_it_waited_for() {
+        let channel = RelayBroadcast::with_capacity(capacity(1));
+        let mut receiver = channel.new_receiver();
+        channel.broadcast(1).await.expect("the consumer has room");
+
+        let waiting = channel.publication().wait_for_room();
+        tokio::pin!(waiting);
+        assert!(
+            futures_util::poll!(waiting.as_mut()).is_pending(),
+            "a consumer at capacity holds the wait"
+        );
+        assert_eq!(receiver.try_recv(), RelayTryRecv::Batch(1));
+        waiting.await;
+        assert_eq!(channel.len(), 0, "the wait gave back the room it found");
+
+        let delivered = match channel.publication().try_broadcast_with(|| 2) {
+            Ok(departures) => departures,
+            Err(RelayTryBroadcast::Full) => panic!("the wait kept the room it found"),
+            Err(RelayTryBroadcast::Closed(_)) => panic!("the consumer is still registered"),
+        };
+        assert_eq!(delivered, RelayDepartures::default());
+        assert_eq!(receiver.try_recv(), RelayTryRecv::Batch(2));
+    }
+
+    #[nervix_primitives::test]
+    async fn an_attempt_that_finds_a_consumer_full_builds_nothing_and_gives_its_room_back() {
+        let channel = RelayBroadcast::with_capacity(capacity(1));
+        let mut first = channel.new_receiver();
+        let mut second = channel.new_receiver();
+        channel
+            .broadcast(1)
+            .await
+            .expect("both consumers have room");
+        assert_eq!(first.try_recv(), RelayTryRecv::Batch(1));
+
+        // The first consumer has room again and the second is still at capacity.
+        let mut built = false;
+        let attempt = channel.publication().try_broadcast_with(|| {
+            built = true;
+            2
+        });
+        assert!(
+            matches!(attempt, Err(RelayTryBroadcast::Full)),
+            "a consumer at capacity holds the attempt back"
+        );
+        assert!(!built, "an attempt that delivered nothing built a batch");
+        assert_eq!(first.try_recv(), RelayTryRecv::Empty);
+
+        // The attempt gave back the room it reserved on the first consumer, so once the second
+        // takes its batch the next attempt reaches both.
+        assert_eq!(second.try_recv(), RelayTryRecv::Batch(1));
+        let delivered = match channel.publication().try_broadcast_with(|| 3) {
+            Ok(departures) => departures,
+            Err(RelayTryBroadcast::Full) => panic!("the earlier attempt kept the room it reserved"),
+            Err(RelayTryBroadcast::Closed(_)) => panic!("both consumers are still registered"),
+        };
+        assert_eq!(delivered, RelayDepartures::default());
+        assert_eq!(first.try_recv(), RelayTryRecv::Batch(3));
+        assert_eq!(second.try_recv(), RelayTryRecv::Batch(3));
+    }
+
+    #[nervix_primitives::test]
+    async fn an_attempt_that_never_waits_skips_a_closed_consumer_as_a_waiting_publication_does() {
+        let channel = RelayBroadcast::with_capacity(capacity(1));
+        let mut closed = channel.new_receiver();
+        channel.broadcast(1).await.expect("the consumer has room");
+        // The closed consumer keeps the batch it has not taken, so it stays at capacity.
+        channel.close_receivers();
+
+        let waiting = channel.publication().wait_for_room();
+        tokio::pin!(waiting);
+        assert!(
+            futures_util::poll!(waiting.as_mut()).is_ready(),
+            "a closed consumer's backlog holds the wait"
+        );
+        match channel.publication().try_broadcast_with(|| 2) {
+            Err(RelayTryBroadcast::Closed(returned)) => assert_eq!(returned.batch, 2),
+            Err(RelayTryBroadcast::Full) => {
+                panic!("a closed consumer at capacity held the attempt back")
+            }
+            Ok(_) => panic!("no open consumer was registered to take the batch"),
+        }
+
+        // A consumer registered afterwards takes the next batch, beside the closed one.
+        let mut joined_later = channel.new_receiver();
+        match channel.publication().try_broadcast_with(|| 3) {
+            Ok(departures) => assert_eq!(departures, RelayDepartures::default()),
+            Err(RelayTryBroadcast::Full) => {
+                panic!("a closed consumer at capacity held the attempt back")
+            }
+            Err(RelayTryBroadcast::Closed(_)) => {
+                panic!("the consumer registered after the close was left out")
+            }
+        }
+        assert_eq!(joined_later.try_recv(), RelayTryRecv::Batch(3));
+        assert_eq!(closed.recv().await, Some(1));
+        assert_eq!(closed.recv().await, None);
     }
 
     #[nervix_primitives::test]

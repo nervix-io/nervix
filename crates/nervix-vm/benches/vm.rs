@@ -2,8 +2,9 @@ use std::net::IpAddr;
 
 use arch_into::ArchInto as _;
 use arrow_array::{
-    BinaryArray, BooleanArray, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
-    ListArray, StringArray, TimestampNanosecondArray, UInt32Array, types::Int64Type,
+    BinaryArray, BooleanArray, DurationNanosecondArray, Float64Array, Int8Array, Int16Array,
+    Int32Array, Int64Array, ListArray, StringArray, TimestampNanosecondArray, UInt32Array,
+    types::Int64Type,
 };
 use arrow_buffer::{NullBuffer, OffsetBuffer};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
@@ -1980,6 +1981,142 @@ fn datetime_kernel_benches(c: &mut Criterion) {
     group.finish();
 }
 
+/// Rows in a duration kernel batch, which stays at the inline execution threshold like a numeric
+/// kernel batch.
+const DURATION_KERNEL_ROWS: usize = VmInlineRowLimit::DEFAULT;
+
+fn duration_type() -> DataType {
+    DataType::Duration(TimeUnit::Nanosecond)
+}
+
+fn duration_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("wait", duration_type(), true),
+        Field::new("backoff", duration_type(), true),
+        Field::new("started", datetime_type(), true),
+        Field::new("finished", datetime_type(), true),
+        Field::new("count", DataType::Int64, true),
+    ]))
+}
+
+/// The duration operators and conversions, one family per program, so a measurement is that
+/// family's kernels.
+fn duration_programs() -> [DatetimeProgram; 5] {
+    [
+        DatetimeProgram {
+            name: "sum_and_difference",
+            source: "SET total = input.wait + input.backoff, spare = input.backoff - input.wait",
+            outputs: vec![("total", duration_type()), ("spare", duration_type())],
+        },
+        DatetimeProgram {
+            name: "negation",
+            source: "SET reversed = -input.wait",
+            outputs: vec![("reversed", duration_type())],
+        },
+        DatetimeProgram {
+            name: "move_and_measure_instants",
+            source: "SET later = input.started + input.backoff, earlier = input.started - \
+                     input.backoff, took = input.finished - input.started",
+            outputs: vec![
+                ("later", datetime_type()),
+                ("earlier", datetime_type()),
+                ("took", duration_type()),
+            ],
+        },
+        DatetimeProgram {
+            name: "whole_units",
+            source: "SET floor = duration_floor('second', input.wait), ceil = \
+                     duration_ceil('millisecond', input.wait), round = duration_round('minute', \
+                     input.wait)",
+            outputs: vec![
+                ("floor", DataType::Int64),
+                ("ceil", DataType::Int64),
+                ("round", DataType::Int64),
+            ],
+        },
+        DatetimeProgram {
+            name: "to_duration",
+            source: "SET length = to_duration('millisecond', input.count)",
+            outputs: vec![("length", duration_type())],
+        },
+    ]
+}
+
+/// Durations of about eleven days either side of zero, instants spread from 1938 to 2038 that
+/// finish up to a second after they start, and counts of a thousand units either side of zero. A
+/// failing row holds the longest duration and the largest count, whose sum and duration leave the
+/// DURATION range.
+fn duration_batch(program: &CompiledProgram, failures: FailureDensity) -> TypedBatch {
+    let rows = 0..DURATION_KERNEL_ROWS;
+    let wait = DurationNanosecondArray::from_iter_values(rows.clone().map(|row| {
+        if failures.fails(row) {
+            i64::MAX
+        } else {
+            benchmark_row_i64(row) * 1_000_000_007 - 500_000_000_000
+        }
+    }));
+    let backoff = DurationNanosecondArray::from_iter_values(
+        rows.clone()
+            .map(|row| (benchmark_row_i64(row % 97) + 1) * 10_000_000),
+    );
+    let started = TimestampNanosecondArray::from_iter_values(
+        rows.clone()
+            .map(|row| benchmark_row_i64(row) * 3_083_000_000_000_017 - 1_000_000_000_000_000_000),
+    )
+    .with_timezone_utc();
+    let finished = TimestampNanosecondArray::from_iter_values(
+        rows.clone()
+            .zip(started.values().iter())
+            .map(|(row, started)| started + benchmark_row_i64(row % 1_000) * 1_000_000),
+    )
+    .with_timezone_utc();
+    let count = Int64Array::from_iter_values(rows.map(|row| {
+        if failures.fails(row) {
+            i64::MAX
+        } else {
+            benchmark_row_i64(row % 2_001) - 1_000
+        }
+    }));
+    TypedBatch::try_new(
+        program.input_schema.clone(),
+        vec![
+            TypedArray::Duration(wait),
+            TypedArray::Duration(backoff),
+            TypedArray::Datetime(started),
+            TypedArray::Datetime(finished),
+            TypedArray::Int64(count),
+        ],
+    )
+    .expect("duration benchmark batch must build")
+}
+
+/// Duration operators and conversions over one inline batch. Every family runs without failures,
+/// and the sum and the conversion from a count also run with failing rows, which exercises their
+/// range checks and error reporting.
+fn duration_kernel_benches(c: &mut Criterion) {
+    let runtime = benchmark_runtime();
+    let mut group = c.benchmark_group("duration_kernels");
+    group.throughput(Throughput::Elements(DURATION_KERNEL_ROWS.arch_into()));
+    for program in duration_programs() {
+        let compiled = compile_numeric_program(program.source, duration_schema(), &program.outputs);
+        let densities: &[FailureDensity] =
+            if program.name == "sum_and_difference" || program.name == "to_duration" {
+                &FailureDensity::ALL
+            } else {
+                &[FailureDensity::None]
+            };
+        for failures in densities {
+            let batch = duration_batch(&compiled, *failures);
+            group.bench_with_input(
+                BenchmarkId::new(program.name, failures.label()),
+                &batch,
+                |b, batch| b.iter(|| runtime.execute(black_box(&compiled), black_box(batch))),
+            );
+        }
+    }
+    group.finish();
+}
+
 /// A calendar, time zone or format program measured on its own, over instants from 1938 to 2038
 /// and their texts.
 struct CalendarProgram {
@@ -2870,6 +3007,7 @@ criterion_group!(
     conditional_arm_benches,
     numeric_kernel_benches,
     datetime_kernel_benches,
+    duration_kernel_benches,
     calendar_kernel_benches,
     membership_kernel_benches,
     network_kernel_benches,
