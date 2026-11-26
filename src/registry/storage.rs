@@ -1619,7 +1619,10 @@ fn serialize_value(
         .change_context(RegistryError::SerializeValue)?;
     let capacity = MODEL_ARCHIVE_PREFIX_BYTES
         .checked_add(archive.len())
-        .assured("a Vec archive is bounded by isize::MAX, and its 16-byte header fits in usize");
+        .assured(
+            "a Vec archive is bounded by isize::MAX, and its 48-byte prefix, the header and the \
+             four label limits, fits in usize",
+        );
     let mut payload = Vec::with_capacity(capacity);
     payload.extend_from_slice(MODEL_ARCHIVE_HEADER);
     for value in [
