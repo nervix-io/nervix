@@ -61,6 +61,61 @@ Feature: Accepted work waits for internal worker room
       | 1            | extension | udf::add_one(input.value) |
       | 3            | extension | udf::add_one(input.value) |
 
+  # A MODE NO ACK row has no source to send it again, so a node that gave up its delivery to another
+  # node would lose it. Node-1 is cordoned, so the relay runs on another node and every row posted
+  # to node-1 crosses to it; one node alone has no such delivery, so this case runs on three. The
+  # row is held at its delivery's grant request, the step that prepares the exchange with the other
+  # node on the data class, so the full class finds it there rather than in the batch encoding
+  # before it. The subscription reads the relay on its own node.
+  @accepted_remote_delivery
+  Scenario: A NO ACK row on its way to another node keeps its place while every node's data class stays full
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-1;
+      """
+    Given the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( id STRING, value I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id string, value integer );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY delivered SCHEMA event UNBRANCHED;
+      CREATE VHOST edge remote-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
+        TO delivered INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR IGNORE;
+      START;
+      DESCRIBE RELAY delivered;
+      """
+    Then the last command output owner is saved as placeholder "delivered_owner"
+    When these Plexus commands are executed on node "{{delivered_owner}}"
+      """
+      CREATE SUBSCRIPTION output TO delivered;
+      """
+    Given relay payloads for domain "{{domain}}" are held before their grant requests
+    When http payload is posted to node "node-1" with host "remote-{{test_id}}.example.com" path "/events"
+      """
+      {"id":"kept","value":41}
+      """
+    Then a relay payload for domain "{{domain}}" is waiting before its grant request
+    When accepted-work CPU class "data" is full on every node
+    And relay payload grant requests for domain "{{domain}}" are released
+    And accepted-work CPU classes stay full on every node for "10s" and are then released
+    And http payload is posted to node "node-1" with host "remote-{{test_id}}.example.com" path "/events"
+      """
+      {"id":"barrier","value":43}
+      """
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "id":"kept" | "value":41
+      "id":"barrier" | "value":43
+      """
+    And the relay subscription does not receive a payload within "100ms"
+
   # The junction's batch in hand waits for a worker that never returns. It is work in motion, which
   # a graceful stop waits for without a limit, so the stop ends only because its request enforces
   # it.
