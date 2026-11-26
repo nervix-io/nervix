@@ -308,6 +308,59 @@ fn foreign_items_take_the_contract_of_their_actual_owning_module() {
 }
 
 #[test]
+fn undeclared_host_services_are_diagnosed_at_each_reach_and_across_metadata() {
+    let case = Case::new("host_services_undeclared");
+    case.refused("nervix::undeclared_host_service");
+    assert_eq!(
+        case.snippets("nervix::undeclared_host_service"),
+        [
+            "$host.dns()",
+            "Handle::dns",
+            "Handle::dns(host)",
+            "Host::dns",
+            "host.dns()",
+            "host.dns()",
+            "host.executor()"
+        ]
+    );
+    let foreign = Case::new("host_services_metadata_use");
+    foreign.refused("nervix::undeclared_host_service");
+    assert_eq!(
+        foreign.snippets("nervix::undeclared_host_service"),
+        ["host.dns()"]
+    );
+}
+
+#[test]
+fn host_service_contracts_are_refused_once_at_each_invalid_owner() {
+    let case = Case::new("host_services_contract_invalid");
+    case.refused("nervix::invalid_contract");
+    let mut lines = BTreeSet::new();
+    let findings = case.diagnostics("nervix::invalid_contract");
+    assert_eq!(findings.len(), 10);
+    for finding in findings {
+        for span in finding["spans"]
+            .as_array()
+            .assured("the diagnostic has spans")
+        {
+            if span["is_primary"] == true {
+                lines.insert(
+                    span["line_start"]
+                        .as_u64()
+                        .assured("the primary line is present"),
+                );
+            }
+        }
+    }
+    assert_eq!(lines, BTreeSet::from([5, 7, 9, 11, 13, 15, 17, 20, 23, 24]));
+    assert!(
+        case.diagnostics("nervix::undeclared_host_service")
+            .is_empty(),
+        "an invalid contract is refused as a contract, not as a reach"
+    );
+}
+
+#[test]
 fn metadata_aliases_and_source_moves_keep_their_contracts() {
     for (name, diagnostic) in [
         ("architecture_metadata_use", "nervix::model_in_data_plane"),

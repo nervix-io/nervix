@@ -532,6 +532,8 @@ impl Flow {
                                     | "state"
                                     | "input"
                                     | "constant"
+                                    | "host_service"
+                                    | "host_services"
                             ))
                     {
                         cx.tcx.emit_node_span_lint(
@@ -549,7 +551,14 @@ impl Flow {
                         && path.get(1).is_some_and(|name| {
                             matches!(
                                 name.as_str(),
-                                "layer" | "value" | "identity" | "state" | "input" | "constant"
+                                "layer"
+                                    | "value"
+                                    | "identity"
+                                    | "state"
+                                    | "input"
+                                    | "constant"
+                                    | "host_service"
+                                    | "host_services"
                             )
                         })
                     {
