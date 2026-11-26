@@ -163,6 +163,19 @@ pub(super) enum RemoteDispatchError {
     RuntimeStopped { target: ClusterNodeName },
 }
 
+impl RemoteDispatchError {
+    /// Whether membership removed the receiver of the delivery `report` describes before the
+    /// delivery ended: a [`RemoteDispatchError::TargetLeft`] context lies beneath the report's own.
+    pub(super) fn receiver_left(report: &Report<Self>) -> bool {
+        for frame in report.frames() {
+            if let Some(Self::TargetLeft { .. }) = frame.downcast_ref::<Self>() {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 /// Why a relay payload another node sent does not decode into a batch of its relay. A variant
 /// that wraps a decoder keeps that decoder's own failure beneath it.
 #[derive(Debug, Error, PartialEq, Eq)]

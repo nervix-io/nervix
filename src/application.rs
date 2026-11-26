@@ -1690,6 +1690,8 @@ impl Application {
             }
         }));
         let interconnect_for_health = interconnect.clone();
+        #[cfg(feature = "testing")]
+        let fault_injection_for_health = fault_injection.clone();
         let cluster_for_health = cluster.clone();
         let mut health_topology = cluster.subscribe_live_node_states().await;
         let local_node_id = node_id;
@@ -1763,6 +1765,9 @@ impl Application {
                 }
                 if !awaiting_initial_bootstrap_peer {
                     interconnect_for_health.replace_live_nodes(&live_node_ids);
+                    #[cfg(feature = "testing")]
+                    fault_injection_for_health
+                        .observe_published_live_targets(&local_node_id, &live_node_ids);
                     interconnect_for_health.replace_outbound_targets(&outbound_targets);
                 }
 

@@ -1184,7 +1184,10 @@ receiver for as long as liveness and membership keep the receiver run that grant
 permanent refusal, its route changing, its receiver leaving the cluster, the receiver run that
 granted it ending, which a connection binding a newer run of the node shows, or the delivery's
 admission bound, `REMOTE_RELAY_TOTAL_TIMEOUT` (five minutes by default) from storing its records to
-its admission. Once the delivery is admitted, the sender waits for an attached record
+its admission. A delivery whose receiver left before any of its sends reached that receiver is not
+ended by the departure: it waits for the route that replaces the receiver, as [Cancellation And
+Branch Changes](#cancellation-and-branch-changes) describes. Once the delivery is admitted, the
+sender waits for an attached record
 acknowledgement for as long as the receiver run that admitted it lives, as
 [Record Acknowledgements Follow The Receiver Run](#record-acknowledgements-follow-the-receiver-run)
 describes. Progress keeps the records' ingestors informed; it does not change the delivery outcome.
@@ -1624,7 +1627,15 @@ typically because each was still waiting for a connection to a node that stopped
 that owner. It ends at once, releasing its channel position and dispatch permits without a
 cancellation request, and its producer delivers the rows again to the unit's owner on the route the
 installer publishes, so they arrive there exactly once. A producer whose own branch ended meanwhile
-fails those rows instead, as it fails its other work still waiting for admission. A delivery that
+fails those rows instead, as it fails its other work still waiting for admission. Membership can
+also remove the former owner before this node installs the forced change, so that such a delivery
+learns its receiver left while the route that names it is still in force. Nothing of the delivery
+reached that owner then either, so it is not failed: it releases its channel position, its channel
+and its dispatch permits, which the installer and any other change take without waiting for it, and
+waits until the installation retires its channel, until membership lists the former owner live
+again, as a voter that returns within the failover grace keeps its work, or until its admission
+bound passes. Its producer then delivers the rows to the unit's owner on the current route, which is
+the returned owner when the route never changed, and only the admission bound fails them. A delivery that
 may have reached the former owner uses the same cancellation operation, asked again until the
 former owner answers, membership removes it, or the delivery's admission bound passes. The forced
 change follows membership's verdict on that owner, so the delivery need not wait for the fenced

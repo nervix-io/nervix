@@ -59,6 +59,7 @@ checks = [
   "connection::stream_slots::shuttle_checks::relay_drain_stops_leasing_and_waits_for_every_leased_slot",
   "connection::stream_slots::shuttle_checks::replication_drain_stops_leasing_and_waits_for_every_leased_slot",
   "request::shuttle_checks::a_membership_change_between_a_callers_check_and_its_wait_is_never_lost",
+  "request::shuttle_checks::a_return_between_a_callers_check_and_its_wait_is_never_lost",
   "request::shuttle_checks::racing_registrations_lose_no_handler_and_publish_each_name_once",
   "wire::admission_tests::shuttle_a_received_body_waiting_for_a_place_ends_with_its_exchange_or_takes_the_freed_place",
   "wire::admission_tests::shuttle_an_answer_waiting_for_a_place_ends_with_its_exchange_or_takes_the_freed_place",

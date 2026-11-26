@@ -999,7 +999,10 @@ Duplicates](inferencer-state.md#replay-skips-and-duplicates).
 A survivor can also accept a batch before its own installation of the failover revision reaches the
 new route, and forward it to the lost owner. Such a batch never reached the lost owner, so it is
 neither refused nor redelivered: once the survivor has installed the route, the batch goes to the
-unit's new owner exactly once, without a negative acknowledgement. A batch the lost owner may have
+unit's new owner exactly once, without a negative acknowledgement. This holds as well when the
+survivor learns from membership that the lost owner left before it installs the route: the batch
+waits for that route, holding back nothing the installation needs. A lost owner that returns within
+the grace keeps its work and receives the batch itself. A batch the lost owner may have
 received before it stopped is still failed for redelivery; see
 [Cancellation And Branch Changes](./interconnect.md#cancellation-and-branch-changes).
 

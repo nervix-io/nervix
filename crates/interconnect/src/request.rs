@@ -1712,12 +1712,23 @@ impl RequestState {
     }
 
     pub(crate) async fn target_left(&self, node: &ClusterNodeName) {
+        self.until_membership(node, |live| !live).await;
+    }
+
+    pub(crate) async fn target_returned(&self, node: &ClusterNodeName) {
+        self.until_membership(node, |live| live).await;
+    }
+
+    /// Resolves once `holds` accepts whether membership lists `node` as live. The wait registers
+    /// for the next membership change before it reads the current one, so a change published
+    /// between that read and the wait still ends the wait.
+    async fn until_membership(&self, node: &ClusterNodeName, holds: impl Fn(bool) -> bool) {
         loop {
             nervix_primitives::task::consume_budget().await;
             let changed = self.membership_changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if !self.target_is_live(node) {
+            if holds(self.target_is_live(node)) {
                 return;
             }
             changed.await;
@@ -1868,6 +1879,11 @@ impl Transport {
     /// Resolves once membership no longer lists `node` as live.
     pub async fn target_left(&self, node: &ClusterNodeName) {
         self.inner.requests().target_left(node).await;
+    }
+
+    /// Resolves once membership lists `node` as live again, at once when it does now.
+    pub async fn target_returned(&self, node: &ClusterNodeName) {
+        self.inner.requests().target_returned(node).await;
     }
 
     /// The process epoch of `node`'s run that this transport's relay protocol is bound to: the run

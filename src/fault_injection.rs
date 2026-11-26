@@ -74,6 +74,7 @@ mod ingestor_fault;
 mod interest_visibility;
 mod licensing;
 mod listener_accept;
+mod live_targets;
 mod live_view_gap;
 #[cfg(test)]
 mod live_view_gap_tests;
@@ -394,6 +395,10 @@ struct FaultInjectionState {
     /// Gaps a scenario opens in the live view one node's acknowledgement watchers read. Each keeps
     /// whether a watcher read it, so a scenario waits for the read instead of assuming it.
     live_view_gaps: DashMap<LiveViewGap, watch::Sender<LiveViewGapState>, RandomState>,
+    /// The interconnect live set each node last published to its transport, so a scenario waits
+    /// for a node to stop counting a stopped peer live instead of assuming when its application
+    /// health gives that peer up.
+    published_live_targets: watch::Sender<live_targets::PublishedLiveTargets>,
     /// Nodes whose relay memory a scenario fills, at once or just before their relay work reaches
     /// an armed point, and the memory each fill holds.
     relay_memory_fills: DashMap<ClusterNodeName, RelayMemoryFill, RandomState>,
@@ -597,6 +602,7 @@ impl Default for FaultInjection {
         let (listener_accept_failures, _) = watch::channel(ListenerAcceptFailures::default());
         let (session_backpressure, _) = watch::channel(None);
         let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
+        let (published_live_targets, _) = watch::channel(live_targets::PublishedLiveTargets::new());
         Self {
             inner: Arc::new(FaultInjectionState {
                 licensing_clock_offset: watch::channel(std::time::Duration::ZERO).0,
@@ -661,6 +667,7 @@ impl Default for FaultInjection {
                 relay_before_grant_pauses: DashMap::default(),
                 lost_remote_acknowledgements: DashMap::default(),
                 live_view_gaps: DashMap::default(),
+                published_live_targets,
                 relay_memory_fills: DashMap::default(),
                 relay_memory_owners: DashMap::default(),
                 owner_relay_fanout_pauses: DashMap::default(),
