@@ -15,8 +15,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    BrokerIngestorConnector as _, IngestorBatch, IngestorBatchRequest, IngestorConnector,
-    IngestorMessage as _, IngestorReadCancellation, IngestorResume,
+    BrokerIngestorConnector as _, DomainOffsetInitialization, DomainOffsetPosition,
+    DomainOffsetResult, DomainOffsetServices, DomainOffsetStart, DomainOffsets, IngestorBatch,
+    IngestorBatchRequest, IngestorConnector, IngestorMessage as _, IngestorReadCancellation,
+    IngestorResume,
 };
 use nervix_models::{
     ClientConfigEntry, ExternalPartitionAssignment, IngestStartPosition, KafkaTopicName, Timestamp,
@@ -33,10 +35,8 @@ use rdkafka::{
 };
 
 use super::{
-    DomainStart, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization, KafkaDomainOffsetResult,
-    KafkaDomainOffsetServices, KafkaDomainOffsetStart, KafkaGroupCommit, KafkaOffsetPosition,
-    KafkaTopicIngestor, KafkaTopicIngestorError, KafkaTopicIngestorOffsetMode,
-    KafkaTopicIngestorPlan, ScheduledPartitions,
+    DomainStart, KafkaGroupCommit, KafkaTopicIngestor, KafkaTopicIngestorError,
+    KafkaTopicIngestorOffsetMode, KafkaTopicIngestorPlan, ScheduledPartitions,
     commit_tests::{READ_DEADLINE, cluster, plan as group_plan, publish, read_positions},
     rejection::RejectionFloors,
 };
@@ -210,7 +210,7 @@ async fn an_explicit_start_resolves_the_whole_topic_before_any_instance_polls() 
             let start = DomainStart::resolve(
                 consumer,
                 &scheduled,
-                KafkaDomainOffsetStart::At(Timestamp::from_unix_nanos(i64::MAX / 2)),
+                DomainOffsetStart::At(Timestamp::from_unix_nanos(i64::MAX / 2)),
                 budget,
             )?;
             Ok(start.offsets().clone())
@@ -226,8 +226,8 @@ async fn an_explicit_start_resolves_the_whole_topic_before_any_instance_polls() 
 /// How long one read waits for a record before the test publishes another.
 const PUBLISH_INTERVAL: Duration = Duration::from_secs(2);
 
-fn position(partition: i32, offset: i64) -> KafkaOffsetPosition {
-    KafkaOffsetPosition {
+fn position(partition: i32, offset: i64) -> DomainOffsetPosition {
+    DomainOffsetPosition {
         topic: TOPIC.to_string(),
         partition,
         offset,
@@ -356,7 +356,7 @@ async fn latest_group_ingestor(
 async fn read_once_assigned(
     cluster: &MockCluster<'static, DefaultProducerContext>,
     ingestor: &mut KafkaTopicIngestor,
-) -> Vec<KafkaOffsetPosition> {
+) -> Vec<DomainOffsetPosition> {
     let deadline = Instant::now()
         .checked_add(READ_DEADLINE)
         .assured("the read deadline fits the monotonic clock");
@@ -547,19 +547,19 @@ enum ScriptedStart {
 }
 
 impl ScriptedStart {
-    fn start(self) -> KafkaDomainOffsetStart {
+    fn start(self) -> DomainOffsetStart {
         match self {
-            Self::Unrecorded { domain_time } => KafkaDomainOffsetStart::Resume {
+            Self::Unrecorded { domain_time } => DomainOffsetStart::Resume {
                 positions: Vec::new(),
                 missing_partition_timestamp: domain_time,
             },
-            Self::Recorded { next_offset } => KafkaDomainOffsetStart::Resume {
+            Self::Recorded { next_offset } => DomainOffsetStart::Resume {
                 positions: vec![position(0, next_offset)],
                 missing_partition_timestamp: None,
             },
             Self::At(timestamp)
             | Self::ConcurrentAt { timestamp, .. }
-            | Self::ChangedGenerationAt(timestamp) => KafkaDomainOffsetStart::At(timestamp),
+            | Self::ChangedGenerationAt(timestamp) => DomainOffsetStart::At(timestamp),
         }
     }
 }
@@ -568,12 +568,12 @@ impl ScriptedStart {
 /// zero, recording the starts the ingestor stores and the offsets it resets.
 struct ScriptedDomainOffsets {
     start: ScriptedStart,
-    stored: Arc<Mutex<Vec<KafkaOffsetPosition>>>,
-    resets: Arc<Mutex<Vec<KafkaOffsetPosition>>>,
+    stored: Arc<Mutex<Vec<DomainOffsetPosition>>>,
+    resets: Arc<Mutex<Vec<DomainOffsetPosition>>>,
 }
 
 #[async_trait]
-impl KafkaDomainOffsetServices for ScriptedDomainOffsets {
+impl DomainOffsetServices for ScriptedDomainOffsets {
     fn generation(&self) -> Option<u64> {
         if matches!(self.start, ScriptedStart::ChangedGenerationAt(_))
             && !self.resets.lock().is_empty()
@@ -586,14 +586,14 @@ impl KafkaDomainOffsetServices for ScriptedDomainOffsets {
     async fn initialization(
         &self,
         _partitions: &[i32],
-    ) -> KafkaDomainOffsetResult<KafkaDomainOffsetInitialization> {
+    ) -> DomainOffsetResult<DomainOffsetInitialization> {
         let accepted = self.resets.lock();
         let mut generation = 1;
         let start = if accepted.is_empty() {
             self.start.start()
         } else if let ScriptedStart::ChangedGenerationAt(timestamp) = self.start {
             generation = 2;
-            KafkaDomainOffsetStart::At(timestamp)
+            DomainOffsetStart::At(timestamp)
         } else {
             let positions = match self.start {
                 ScriptedStart::ConcurrentAt {
@@ -602,12 +602,12 @@ impl KafkaDomainOffsetServices for ScriptedDomainOffsets {
                 } => vec![position(0, canonical_next_offset)],
                 _ => accepted.clone(),
             };
-            KafkaDomainOffsetStart::Resume {
+            DomainOffsetStart::Resume {
                 positions,
                 missing_partition_timestamp: None,
             }
         };
-        Ok(KafkaDomainOffsetInitialization {
+        Ok(DomainOffsetInitialization {
             generation,
             start,
             assignment: Some(ExternalPartitionAssignment {
@@ -623,14 +623,14 @@ impl KafkaDomainOffsetServices for ScriptedDomainOffsets {
     async fn reset(
         &self,
         generation: u64,
-        positions: Vec<KafkaOffsetPosition>,
-    ) -> KafkaDomainOffsetResult<()> {
+        positions: Vec<DomainOffsetPosition>,
+    ) -> DomainOffsetResult<()> {
         assert_eq!(generation, 1);
         self.resets.lock().extend(positions);
         Ok(())
     }
 
-    async fn commit(&self, position: KafkaOffsetPosition) -> KafkaDomainOffsetResult<()> {
+    async fn commit(&self, position: DomainOffsetPosition) -> DomainOffsetResult<()> {
         self.stored.lock().push(position);
         Ok(())
     }
@@ -639,8 +639,8 @@ impl KafkaDomainOffsetServices for ScriptedDomainOffsets {
 /// A domain-offset ingestor, the starts it stores in its domain and the offsets it resets there.
 struct DomainIngestor {
     ingestor: KafkaTopicIngestor,
-    stored: Arc<Mutex<Vec<KafkaOffsetPosition>>>,
-    resets: Arc<Mutex<Vec<KafkaOffsetPosition>>>,
+    stored: Arc<Mutex<Vec<DomainOffsetPosition>>>,
+    resets: Arc<Mutex<Vec<DomainOffsetPosition>>>,
 }
 
 /// A domain-offset ingestor whose domain starts it as `start` says.
@@ -657,7 +657,7 @@ async fn domain_ingestor(
         topic: KafkaTopicName::parse(TOPIC).assured("the test topic is a valid Kafka topic"),
         offset_mode: KafkaTopicIngestorOffsetMode::Domain {
             group_id: "orders-domain".to_string(),
-            offsets: KafkaDomainOffsetHost::new(ScriptedDomainOffsets {
+            offsets: DomainOffsets::new(ScriptedDomainOffsets {
                 start,
                 stored: Arc::clone(&stored),
                 resets: Arc::clone(&resets),
@@ -881,7 +881,7 @@ fn a_consumer_group_starts_where_its_statement_declares() {
 fn a_domain_offset_consumer_past_what_a_partition_retains_moves_to_the_earliest_record() {
     let mode = KafkaTopicIngestorOffsetMode::Domain {
         group_id: "orders-domain".to_string(),
-        offsets: KafkaDomainOffsetHost::new(ScriptedDomainOffsets {
+        offsets: DomainOffsets::new(ScriptedDomainOffsets {
             start: ScriptedStart::Unrecorded { domain_time: None },
             stored: Arc::new(Mutex::new(Vec::new())),
             resets: Arc::new(Mutex::new(Vec::new())),

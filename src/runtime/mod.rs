@@ -589,7 +589,7 @@ use message_error_delivery::{
 use message_error_plan::{
     BoundMessageErrorRoute, BoundMessageErrorRoutes, MessageErrorRouteBindingContext,
 };
-use nervix_connector_kafka::KafkaOffsetPosition;
+use nervix_connector::DomainOffsetPosition;
 pub(in crate::runtime) use nervix_models::IngestorMetadataDeclaration;
 use nervix_models::{DeduplicatorName, ReingestorName};
 pub(in crate::runtime) use node::RuntimeInner;

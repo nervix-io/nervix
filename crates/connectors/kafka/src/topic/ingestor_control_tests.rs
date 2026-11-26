@@ -13,17 +13,18 @@ use std::{
 
 use async_trait::async_trait;
 use meticulous::ResultExt as _;
-use nervix_connector::{BrokerIngestorConnector as _, IngestorConnector};
+use nervix_connector::{
+    BrokerIngestorConnector as _, DomainOffsetInitialization, DomainOffsetPosition,
+    DomainOffsetResult, DomainOffsetServices, DomainOffsets, IngestorConnector,
+};
 use nervix_execution::{AdmissionError, Executor, MemoryClass, StorageClass};
 use nervix_models::{ClientConfigEntry, KafkaTopicName};
 use nervix_primitives::sync::oneshot;
 use rdkafka::{mocking::MockCluster, producer::DefaultProducerContext, types::RDKafkaRespErr};
 
 use super::{
-    GroupCommitRequest, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
-    KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaGroupCommit, KafkaOffsetPosition,
-    KafkaTopicIngestor, KafkaTopicIngestorError, KafkaTopicIngestorOffsetMode,
-    KafkaTopicIngestorPlan, TopicPartitionInspector,
+    GroupCommitRequest, KafkaGroupCommit, KafkaTopicIngestor, KafkaTopicIngestorError,
+    KafkaTopicIngestorOffsetMode, KafkaTopicIngestorPlan, TopicPartitionInspector,
     commit_tests::{
         READ_DEADLINE, cluster, plan as group_plan, publish, read_positions, subscribed_ingestor,
     },
@@ -105,7 +106,7 @@ async fn rejecting_a_delivered_record_admits_its_seek_and_reads_that_offset_agai
 }
 
 #[async_trait]
-impl KafkaDomainOffsetServices for UnreachedOffsets {
+impl DomainOffsetServices for UnreachedOffsets {
     fn generation(&self) -> Option<u64> {
         Some(1)
     }
@@ -113,19 +114,19 @@ impl KafkaDomainOffsetServices for UnreachedOffsets {
     async fn initialization(
         &self,
         _partitions: &[i32],
-    ) -> KafkaDomainOffsetResult<KafkaDomainOffsetInitialization> {
+    ) -> DomainOffsetResult<DomainOffsetInitialization> {
         panic!("the held broker has not returned the partitions yet")
     }
 
     async fn reset(
         &self,
         _generation: u64,
-        _positions: Vec<KafkaOffsetPosition>,
-    ) -> KafkaDomainOffsetResult<()> {
+        _positions: Vec<DomainOffsetPosition>,
+    ) -> DomainOffsetResult<()> {
         panic!("the held broker has not returned the partitions yet")
     }
 
-    async fn commit(&self, _position: KafkaOffsetPosition) -> KafkaDomainOffsetResult<()> {
+    async fn commit(&self, _position: DomainOffsetPosition) -> DomainOffsetResult<()> {
         panic!("the held broker has delivered no message")
     }
 }
@@ -232,7 +233,7 @@ async fn domain_ingestor(
         topic: KafkaTopicName::parse("orders").assured("orders is a valid Kafka topic"),
         offset_mode: KafkaTopicIngestorOffsetMode::Domain {
             group_id: "metadata-worker-yield".to_string(),
-            offsets: KafkaDomainOffsetHost::new(UnreachedOffsets),
+            offsets: DomainOffsets::new(UnreachedOffsets),
         },
     };
     KafkaTopicIngestor::open(&plan, 0)

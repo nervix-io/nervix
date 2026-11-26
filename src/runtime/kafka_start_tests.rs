@@ -205,7 +205,7 @@ async fn regroup_reinstalls_prepared_offsets_on_a_unit_that_keeps_its_owner() {
     runtime
         .commit_domain_kafka_offset(
             source,
-            KafkaOffsetPosition {
+            DomainOffsetPosition {
                 topic: "events".to_owned(),
                 partition: 0,
                 offset: 41,
@@ -298,7 +298,7 @@ async fn a_single_unit_selects_and_persists_its_canonical_start_directly() {
             .start_single_kafka_unit(
                 &fixture.states[0],
                 7,
-                vec![KafkaOffsetPosition {
+                vec![DomainOffsetPosition {
                     topic: "events".to_owned(),
                     partition: 0,
                     offset,
@@ -319,7 +319,7 @@ async fn a_late_unit_adopts_the_canonical_cut_after_a_plain_resume() {
     let starts = [4, 7, 9]
         .into_iter()
         .enumerate()
-        .map(|(partition, offset)| KafkaOffsetPosition {
+        .map(|(partition, offset)| DomainOffsetPosition {
             topic: "events".to_owned(),
             partition: i32::try_from(partition).assured("the fixture has three partitions"),
             offset,
@@ -337,7 +337,7 @@ async fn a_late_unit_adopts_the_canonical_cut_after_a_plain_resume() {
         .runtime
         .commit_domain_kafka_offset(
             &fixture.states[1],
-            KafkaOffsetPosition {
+            DomainOffsetPosition {
                 topic: "events".to_owned(),
                 partition: 1,
                 offset: 41,
@@ -347,7 +347,7 @@ async fn a_late_unit_adopts_the_canonical_cut_after_a_plain_resume() {
         .assured("the initialized unit commits through its own owner");
     let competing = starts
         .into_iter()
-        .map(|position| KafkaOffsetPosition {
+        .map(|position| DomainOffsetPosition {
             offset: 99,
             ..position
         })

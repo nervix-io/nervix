@@ -22,7 +22,7 @@ use nervix_primitives::sync::oneshot;
 use rdkafka::{mocking::MockCluster, producer::DefaultProducerContext};
 
 use super::{
-    GroupCommitRequest, KafkaConsumer, KafkaGroupCommit, KafkaOffsetPosition, KafkaTopicIngestor,
+    DomainOffsetPosition, GroupCommitRequest, KafkaConsumer, KafkaGroupCommit, KafkaTopicIngestor,
     KafkaTopicIngestorPlan, TopicPartitionInspector,
     commit_tests::{GROUP, HELD_ROUND_TRIP, cluster, plan, publish, read_positions},
 };
@@ -155,7 +155,7 @@ async fn a_commit_waiting_for_a_place_after_its_ingestor_was_dropped_runs_and_th
         .assured("the ingestor accepts its group and broker configuration");
     let full = BusyConnectorWorker::fill(&executor).await;
     let before = executor.snapshot().connector_storage;
-    let request = GroupCommitRequest::positions(&[KafkaOffsetPosition {
+    let request = GroupCommitRequest::positions(&[DomainOffsetPosition {
         topic: "orders".to_string(),
         partition: 0,
         offset: 1,

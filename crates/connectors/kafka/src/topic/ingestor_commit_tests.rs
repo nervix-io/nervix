@@ -26,7 +26,7 @@ use rdkafka::{
 };
 
 use super::{
-    GroupCommitRequest, GroupCommits, KafkaGroupCommit, KafkaOffsetPosition, KafkaTopicIngestor,
+    DomainOffsetPosition, GroupCommitRequest, GroupCommits, KafkaGroupCommit, KafkaTopicIngestor,
     KafkaTopicIngestorError, KafkaTopicIngestorOffsetMode, KafkaTopicIngestorPlan,
 };
 
@@ -114,7 +114,7 @@ pub(super) async fn subscribed_ingestor(
 }
 
 /// Reads the next record from `ingestor` once it joined its group, and returns its position.
-pub(super) async fn read_positions(ingestor: &mut KafkaTopicIngestor) -> Vec<KafkaOffsetPosition> {
+pub(super) async fn read_positions(ingestor: &mut KafkaTopicIngestor) -> Vec<DomainOffsetPosition> {
     let request = IngestorBatchRequest {
         max_messages: NonZeroUsize::MIN,
         batch_timeout: None,

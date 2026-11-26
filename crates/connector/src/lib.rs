@@ -46,6 +46,7 @@ mod client_config;
 mod client_deadline;
 mod confirmation_window;
 mod connector_events;
+mod domain_offsets;
 mod http_client;
 mod ingest_metadata;
 // Reached through its own path rather than re-exported here, so the owner the clock-boundary check
@@ -70,6 +71,10 @@ pub use confirmation_window::{
 };
 pub use connector_events::{
     ConnectorEventCounter, ConnectorEventProvider, UndeclaredConnectorEvent,
+};
+pub use domain_offsets::{
+    DomainOffsetError, DomainOffsetInitialization, DomainOffsetPosition, DomainOffsetResult,
+    DomainOffsetServices, DomainOffsetStart, DomainOffsets,
 };
 pub use emitter::{
     AckConfirmation, BrokerPublishingMode, EmitterBoundedExecution, EmitterCommitReport,

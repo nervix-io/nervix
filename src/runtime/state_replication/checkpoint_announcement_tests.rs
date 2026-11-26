@@ -627,7 +627,7 @@ async fn committed_offset_after_replica_delay(delay: Option<Duration>) {
             runtime
                 .commit_domain_kafka_offset(
                     &originator,
-                    KafkaOffsetPosition {
+                    DomainOffsetPosition {
                         topic: "orders".to_string(),
                         partition: 0,
                         offset: 43,

@@ -48,9 +48,7 @@ use async_trait::async_trait;
 use delivery::{HandedOverRecord, KafkaDeliveryReport, KafkaProducerContext};
 use error_stack::{Report, ResultExt as _};
 pub use ingestor::{
-    KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
-    KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart, KafkaGroupCommit,
-    KafkaGroupPartitionRead, KafkaOffsetPosition, KafkaTopicIngestor, KafkaTopicIngestorError,
+    KafkaGroupCommit, KafkaGroupPartitionRead, KafkaTopicIngestor, KafkaTopicIngestorError,
     KafkaTopicIngestorMessage, KafkaTopicIngestorOffsetMode, KafkaTopicIngestorPlan,
     TopicPartitionInspector,
 };
