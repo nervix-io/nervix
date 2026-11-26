@@ -60,7 +60,7 @@ impl ReadEnd {
     /// after one the loop stops, or starts its next turn, at once.
     pub(super) async fn wait_for_retry(
         self,
-        host: &mut IngestorHost,
+        host: &mut IngestorLoopHost,
         shutdown: &mut watch::Receiver<bool>,
         delay: Duration,
     ) -> bool {
@@ -92,7 +92,7 @@ impl<M> BrokerRead<M> {
     /// What the loop does with this read. A batch the ingestor contract forbids, an empty one or an
     /// interruption the host did not ask for, is reported, and what it carries is still taken in.
     /// Payloads the ingestor dropped for their size are counted, and the loop reads again.
-    pub(super) fn into_outcome(self, host: &IngestorHost) -> ReadOutcome<M> {
+    pub(super) fn into_outcome(self, host: &IngestorLoopHost) -> ReadOutcome<M> {
         let outcome = match &self.batch {
             Ok(IngestorBatch::Messages(messages)) if !messages.is_empty() => {
                 IngestorReadOutcome::Delivered
@@ -128,7 +128,8 @@ impl<M> BrokerRead<M> {
     }
 }
 
-/// Reads the next batch from `ingestor` and awaits the read to completion.
+/// Reads the next batch from `ingestor` and awaits the read to completion, handing the read the
+/// instance's `connector_host`.
 ///
 /// A flush that falls due while the read waits needs nothing from the ingestor, so the host flushes
 /// and keeps waiting. A quiesce change or a stop needs the loop back: the host cancels the read and
@@ -136,7 +137,8 @@ impl<M> BrokerRead<M> {
 /// rather than being dropped with the read.
 pub(super) async fn read_batch<C>(
     connector: &mut C,
-    host: &mut IngestorHost,
+    host: &mut IngestorLoopHost,
+    connector_host: &IngestorHost,
     shutdown: &mut watch::Receiver<bool>,
     request: IngestorBatchRequest,
 ) -> BrokerRead<C::Message>
@@ -144,7 +146,7 @@ where
     C: BrokerIngestorConnector,
 {
     let cancellation = IngestorReadCancellation::new();
-    let mut read = pin!(connector.next_batch(request, &cancellation));
+    let mut read = pin!(connector.next_batch(connector_host, request, &cancellation));
     let end = loop {
         nervix_primitives::task::consume_budget().await;
         let next_flush = host.next_flush();
@@ -222,7 +224,7 @@ pub(super) async fn maintain_held_transport(
 /// change or a stop needs the loop back and ends the hold. The host counts every hold and how
 /// long it lasted.
 pub(super) async fn hold_for_allowance(
-    host: &mut IngestorHost,
+    host: &mut IngestorLoopHost,
     shutdown: &mut watch::Receiver<bool>,
     until: Instant,
     maintenance: Option<&mut dyn IngestorReadHold>,

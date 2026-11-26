@@ -25,6 +25,7 @@ use super::{
     super::*,
     IngestorConnectorStartError, IngestorStartError,
     connector::{BrokerIngestorStart, IngestorStart},
+    connector_host::IngestorEntityServices,
 };
 
 const _: () = assert!(matches!(
@@ -47,11 +48,13 @@ impl RabbitMqQueueIngestorStartPlan {
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let Some(dns) = runtime.dns() else {
+        // The connector takes the resolver from its handle each time it connects; a node without
+        // one refuses the start here, before anything of the connector runs.
+        if runtime.dns().is_none() {
             return Err(
                 ingestor.connector_start_failure(IngestorConnectorStartError::NodeDnsUnavailable)
             );
-        };
+        }
         let consumer_mode = match &mode {
             RabbitMqIngestMode::NoAck => RabbitMqConsumerMode::NoAck,
             RabbitMqIngestMode::AckSequential { .. } => RabbitMqConsumerMode::Ack {
@@ -64,11 +67,11 @@ impl RabbitMqQueueIngestorStartPlan {
         BrokerIngestorStart {
             connector: RabbitMqQueueIngestorPlan::new(
                 resolved.entries,
-                dns.clone(),
                 queue,
                 ingestor.name.as_str().to_string(),
                 consumer_mode,
             ),
+            host: runtime.ingestor_connector_host(ingestor, IngestorEntityServices::default()),
             instances,
             acknowledgement: mode.acknowledgement(),
             buffered_intake: false,

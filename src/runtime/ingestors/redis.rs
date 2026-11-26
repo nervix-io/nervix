@@ -22,6 +22,7 @@ use super::{
     super::*,
     IngestorConnectorStartError, IngestorStartError,
     connector::{BrokerIngestorStart, IngestorStart},
+    connector_host::IngestorEntityServices,
 };
 
 const _: () = assert!(matches!(
@@ -43,20 +44,20 @@ impl RedisPubSubIngestorStartPlan {
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let Some(dns) = runtime.dns() else {
+        // The connector takes the resolver from its handle each time it subscribes; a node
+        // without one refuses the start here, before anything of the connector runs.
+        if runtime.dns().is_none() {
             return Err(
                 ingestor.connector_start_failure(IngestorConnectorStartError::NodeDnsUnavailable)
             );
-        };
-        let connector = RedisPubSubIngestorPlan::new(
-            resolved.entries,
-            subscription,
-            dns.clone(),
-            runtime.outward_tls(),
-        )
-        .change_context_lazy(|| ingestor.initialize_failure())?;
+        }
+        let host = runtime.ingestor_connector_host(ingestor, IngestorEntityServices::default());
+        // The plan builds its TLS configuration under the outward TLS policy its handle hands over.
+        let connector = RedisPubSubIngestorPlan::new(resolved.entries, subscription, host.handle())
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerIngestorStart {
             connector,
+            host,
             instances: NonZeroU64::MIN,
             acknowledgement: mode.acknowledgement(),
             buffered_intake: true,

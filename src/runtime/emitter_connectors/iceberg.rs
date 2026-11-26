@@ -38,9 +38,7 @@ impl EmitterConnectorStarter {
             let mapped_schema = projection.value_schema();
             let opened = IcebergTableEmitter::open(
                 IcebergTableEmitterConfig {
-                    tls_policy: context.runtime.outward_tls().clone(),
                     backend: connector.backend,
-                    dns: context.dns()?,
                     storage_config: connector.storage.config.entries.clone(),
                     catalog_name: connector.catalog.name.as_str().to_string(),
                     catalog_config: connector.catalog.config.entries.clone(),

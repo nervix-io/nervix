@@ -971,7 +971,7 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
     let (_, kafka_payload) = kafka_originator
         .apply_start(
             1,
-            vec![KafkaOffsetPosition {
+            vec![DomainOffsetPosition {
                 topic: "orders".to_string(),
                 partition: 3,
                 offset: 42,
@@ -1501,7 +1501,7 @@ async fn kafka_offset_snapshot_task_owns_persistence() {
     runtime
         .commit_domain_kafka_offset(
             &originator,
-            KafkaOffsetPosition {
+            DomainOffsetPosition {
                 topic: "orders".to_string(),
                 partition: 3,
                 offset: 43,
@@ -1858,12 +1858,12 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
         .apply_start(
             1,
             vec![
-                KafkaOffsetPosition {
+                DomainOffsetPosition {
                     topic: "notifications".to_string(),
                     partition: 0,
                     offset: 12,
                 },
-                KafkaOffsetPosition {
+                DomainOffsetPosition {
                     topic: "notifications".to_string(),
                     partition: 1,
                     offset: 18,

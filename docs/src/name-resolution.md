@@ -86,9 +86,10 @@ Neither file is read again: a changed resolver configuration or hosts file takes
 node next starts.
 
 Clones of the resolver share its configuration, hosts snapshot, answer cache and concurrency bound.
-The node hands one clone to the runtime, which passes it into the typed plan of every ingestor and
-emitter that resolves through it, one to the interconnect, and one to its own OTLP trace exporter
-when enabled. Nothing about the resolver is process-wide: it lives in no static, its
+The node hands one clone to the runtime, which hands it to every ingestor and emitter that
+resolves through it as a service of its
+[host handle](./connector-contract.md#host-handles-and-declared-services), one to the interconnect,
+and one to its own OTLP trace exporter when enabled. Nothing about the resolver is process-wide: it lives in no static, its
 name-server connections and background tasks run on the runtime that built it, and they end when
 its last clone is dropped. A runtime that shuts down with a lookup in flight is not held open by
 that lookup.

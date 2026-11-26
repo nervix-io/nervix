@@ -24,6 +24,17 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        executor,
+        metrics,
+        pool,
+        reason = "the MongoDB collection emitter writes through the client its host leased for \
+                  it, which opens through the node's bounded executor, and records the writes it \
+                  prepares"
+    )
+)]
 
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map},
@@ -52,13 +63,14 @@ use mongodb::{
 use nervix_connector::{
     EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle, EmitterOpenError,
     EmitterRecordPosition, EmitterStartResult, EmitterWriteError, EmitterWriteResult,
-    MappedEmitterMember, MappedEmitterRows, MeasuredRequest, PerRecordOutcome,
-    RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits,
+    MappedEmitterMember, MappedEmitterRows, MeasuredRequest, PerRecordOutcome, PooledClient,
+    PooledClientHost, PooledClientLease, RejectedEmitterMember, RowEmitter, RowRequest,
+    RowRequestLimits,
 };
 use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_models::{
-    ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, FieldPath, MONGODB_MAX_DOCUMENT_BYTES,
-    MongoDbCollectionName, Timestamp,
+    ClientConfigEntry, ClientPoolBounds, ConnectorKind, EmitterBatchPolicy, FieldPath,
+    MONGODB_MAX_DOCUMENT_BYTES, MongoDbCollectionName, Timestamp,
 };
 use nervix_primitives::{sync::Arc, time::Instant};
 use tempfile::NamedTempFile;
@@ -109,14 +121,30 @@ struct MongoDbClientInner {
     _identity: Option<NamedTempFile>,
 }
 
-/// The node-owned client this emitter writes through while its host holds the lease.
-pub trait MongoDbClientProvider: Send + Sync + 'static {
-    fn client(&self) -> EmitterWriteResult<MongoDbClient>;
+/// The node's shared client is the pooled client of a MongoDB `CLIENT`, which the host opens once
+/// and leases to every local emitter of that client.
+#[async_trait]
+impl PooledClient for MongoDbClient {
+    const CONNECTOR: ConnectorKind = ConnectorKind::MongoDb;
+
+    type OpenError = EmitterOpenError;
+
+    /// The client prepares its TLS identity and constructs its native driver on the node's bounded
+    /// executor, which is all it takes from its node.
+    async fn open(
+        config: &[ClientConfigEntry],
+        bounds: ClientPoolBounds,
+        host: &PooledClientHost,
+    ) -> EmitterStartResult<Self> {
+        Self::open(config, bounds, host.executor()).await
+    }
 }
 
 /// What one MongoDB emitter writes with, from its typed emitter plan.
+///
+/// The node-owned client it writes through reaches the emitter through its host handle, which
+/// carries the lease its host took on the node's instance of the emitter's client.
 pub struct MongoDbCollectionEmitterConfig {
-    pub client: Box<dyn MongoDbClientProvider>,
     pub config: Vec<ClientConfigEntry>,
     pub collection: MongoDbCollectionName,
     pub conflict_action: MongoDbConflictAction,
@@ -136,7 +164,10 @@ pub enum MongoDbConflictAction {
 /// The MongoDB emitter, which encodes each mapped row as one BSON document.
 pub struct MongoDbCollectionEmitter {
     host: EmitterHost,
-    client: Box<dyn MongoDbClientProvider>,
+    /// The lease its host took on the node-owned client this emitter writes through, held for as
+    /// long as the emitter lives. The driver pools its own connections per server in the topology,
+    /// so the shared client is never borrowed per write and no wait for a connection is published.
+    client: PooledClientLease<MongoDbClient>,
     database: String,
     collection: MongoDbCollectionName,
     conflict_action: MongoDbConflictAction,
@@ -282,12 +313,16 @@ impl MongoDbCollectionEmitter {
         host: EmitterHost,
     ) -> EmitterStartResult<Self> {
         let MongoDbCollectionEmitterConfig {
-            client,
             config,
             collection,
             conflict_action,
             batch,
         } = config;
+        // An emitter whose host leased it no client cannot open at all, so that is reported before
+        // anything its configuration says.
+        let client = host
+            .pool::<MongoDbClient>()
+            .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
         let configuration = MongoDbClientConfiguration::parse(&config)
             .change_context(EmitterOpenError::InvalidConfiguration { connector: MONGODB })?;
         collection
@@ -1044,14 +1079,8 @@ impl RowEmitter for MongoDbCollectionEmitter {
                 }
             }
         }
-        let client = match self.client.client() {
-            Ok(client) => client,
-            Err(error) => {
-                outcome.fail(error);
-                return outcome;
-            }
-        };
-        let database = match self.provisioned_database(&client).await {
+        let client = self.client.client();
+        let database = match self.provisioned_database(client).await {
             Ok(database) => database,
             Err(error) => {
                 outcome.fail(error);
@@ -1069,8 +1098,7 @@ impl RowEmitter for MongoDbCollectionEmitter {
                     .await;
             }
             MongoDbConflictAction::DoNothing { .. } | MongoDbConflictAction::DoUpdate { .. } => {
-                self.upsert_documents(&client, documents, &mut outcome)
-                    .await;
+                self.upsert_documents(client, documents, &mut outcome).await;
             }
         }
         trace!(
@@ -2151,5 +2179,126 @@ mod tests {
             rejected,
             UnencodableMappedValue::UnsignedIntegerRange { ref field } if field == "counts"
         ));
+    }
+
+    /// The configuration of an emitter whose client names a port that refuses every connection,
+    /// so a request through it ends once the driver's server selection runs out of its deadline.
+    fn collection_config() -> MongoDbCollectionEmitterConfig {
+        MongoDbCollectionEmitterConfig {
+            config: vec![ClientConfigEntry {
+                key: "addr".to_string(),
+                value: "mongodb://127.0.0.1:1/events?serverSelectionTimeoutMS=200".to_string(),
+            }],
+            collection: MongoDbCollectionName::parse("events")
+                .expect("the test collection name is valid"),
+            conflict_action: MongoDbConflictAction::None,
+            batch: EmitterBatchPolicy {
+                max_messages: nervix_models::BatchMessageLimit::try_from(3_u32)
+                    .expect("three is a valid message limit"),
+                max_size: "1KiB".parse().expect("1KiB is a valid size"),
+            },
+        }
+    }
+
+    /// The client `config` declares, constructed without a connection as the driver does until its
+    /// first request.
+    async fn unconnected_client(config: &[ClientConfigEntry]) -> MongoDbClient {
+        let executor = Executor::new(nervix_execution::ExecutionConfig::default())
+            .expect("the default execution configuration is valid");
+        let prepared = MongoDbClientConfiguration::parse(config)
+            .expect("the address is a valid MongoDB connection string")
+            .into_options()
+            .prepare(&executor)
+            .await
+            .expect("a client without TLS files needs no identity preparation");
+        MongoDbClient::from_prepared(prepared, &executor)
+            .await
+            .expect("the driver constructs a client without connecting")
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_whose_host_leased_no_client_fails_to_open_and_names_the_lease() {
+        let opened = <MongoDbCollectionEmitter as nervix_connector::EmitterConnector>::open(
+            collection_config(),
+            nervix_connector_fake::FakeEmitterHost::default().host(),
+        )
+        .await;
+        let error = match opened {
+            Ok(_) => panic!("a pooled emitter writes only through the client its host leased"),
+            Err(error) => error,
+        };
+
+        // The failure is the host's, not the configuration's, so the host opens the emitter again.
+        assert_eq!(
+            *error.current_context(),
+            EmitterOpenError::Initialize { connector: MONGODB }
+        );
+        assert_eq!(
+            error
+                .frames()
+                .find_map(|frame| frame.downcast_ref::<nervix_connector::HostServiceError>()),
+            Some(&nervix_connector::HostServiceError::PooledClientNotLeased)
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_writes_through_the_client_its_host_leased_and_publishes_no_wait() {
+        let config = collection_config();
+        let waits = nervix_connector_fake::FakePooledClientWaits::default();
+        let lease = PooledClientLease::new(
+            Arc::new(unconnected_client(&config.config).await),
+            waits.clone(),
+            (),
+        );
+        let mut connector = <MongoDbCollectionEmitter as nervix_connector::EmitterConnector>::open(
+            config,
+            nervix_connector_fake::FakeEmitterHost::default().leasing(lease),
+        )
+        .await
+        .expect("the host leased this connector's client");
+        let batch = RecordBatch::try_new(
+            StdArc::new(Schema::new(vec![Field::new("seq", DataType::Int64, false)])),
+            vec![StdArc::new(Int64Array::from(vec![1]))],
+        )
+        .expect("the test batch matches its schema");
+        let target_columns = ["seq".to_string()];
+        let selected_rows = [0];
+
+        let outcome = connector
+            .publish(MappedEmitterRows {
+                target_columns: &target_columns,
+                carriers: vec![nervix_connector::MappedEmitterCarrier {
+                    batch_index: 0,
+                    batch: &batch,
+                    selected_rows: &selected_rows,
+                    occurred_at: Timestamp::from_unix_nanos(5),
+                    acknowledgements: None,
+                }],
+            })
+            .await
+            .into_parts();
+
+        assert!(outcome.delivered.is_empty());
+        assert!(outcome.rejected.is_empty());
+        let failure = outcome
+            .infrastructure_error
+            .expect("a write no server answers fails as a whole");
+        let cause = failure
+            .downcast_ref::<MongoRequestFailure>()
+            .expect("the leased client's driver failure stays beneath the publish");
+        assert_eq!(cause.operation, "collection lookup request");
+        assert!(
+            matches!(
+                cause.driver.kind.as_ref(),
+                ErrorKind::ServerSelection { .. }
+            ),
+            "{:?}",
+            cause.driver.kind
+        );
+        // The driver pools its own connections per server, so the emitter borrows none per write
+        // and has no wait for one to publish.
+        let published = waits.observations();
+        assert_eq!((published.begun, published.ended), (0, 0));
+        assert_eq!(published.waiting_since, None);
     }
 }

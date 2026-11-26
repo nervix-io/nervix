@@ -23,6 +23,14 @@
         reason = "owns the engines and infrastructure boundary declared above"
     )
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        tls_policy,
+        reason = "the Pulsar topic ingestor connects its client under its node's outward TLS \
+                  policy"
+    )
+)]
 
 use std::{collections::BTreeMap, fmt, io, num::NonZeroUsize, time::Duration};
 
@@ -33,8 +41,8 @@ use meticulous::ResultExt as _;
 use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow,
     IngestMetadataValues, IngestRowHeaders, IngestorBatch, IngestorBatchRequest, IngestorConnector,
-    IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult, IngestorResume,
-    client_config_value,
+    IngestorError, IngestorHost, IngestorMessage, IngestorReadCancellation, IngestorResult,
+    IngestorResume, client_config_value,
 };
 use nervix_models::{
     ClientConfigEntry, ConnectorKind, PulsarSubscription, PulsarSubscriptionName,
@@ -346,7 +354,19 @@ pub struct PulsarTopicIngestorPlan {
 }
 
 impl PulsarTopicIngestorPlan {
+    /// Connects the one client every instance of the ingestor shares. The host calls this while
+    /// it composes the ingestor, before any instance opens, and the client's TLS handshakes take
+    /// the outward TLS policy of the node behind `host`.
     pub async fn connect(
+        settings: PulsarTopicIngestorSettings<'_>,
+        host: &IngestorHost,
+    ) -> PulsarTopicIngestorResult<Self> {
+        Self::connect_under(settings, &host.tls_policy()).await
+    }
+
+    /// Connects as [`Self::connect`] does, with handshakes under `tls_policy`. Removing a
+    /// subscription, whose caller hands it the policy itself, connects through this as well.
+    async fn connect_under(
         settings: PulsarTopicIngestorSettings<'_>,
         tls_policy: &nervix_connector::OutwardTlsPolicy,
     ) -> PulsarTopicIngestorResult<Self> {
@@ -580,13 +600,14 @@ impl PulsarTopicIngestorPlan {
     /// subscription with its backlog. The broker refuses while another consumer is still connected
     /// to the subscription, and an absent subscription is created by the join and removed again.
     /// The driver's connection timeout bounds the whole removal: connecting the client, joining
-    /// and unsubscribing.
+    /// and unsubscribing. The removal's client connects under the outward TLS policy `host` hands
+    /// over, the handle of the ingestor whose subscription the host retires.
     pub async fn remove_subscription(
         settings: PulsarTopicIngestorSettings<'_>,
-        tls_policy: &nervix_connector::OutwardTlsPolicy,
+        host: &nervix_connector::IngestorHost,
     ) -> PulsarTopicIngestorResult<()> {
         let budget = PulsarConnectionRetryOptions::default().connection_timeout;
-        Self::remove_subscription_within(settings, budget, tls_policy).await
+        Self::remove_subscription_within(settings, budget, &host.tls_policy()).await
     }
 
     async fn remove_subscription_within(
@@ -602,7 +623,7 @@ impl PulsarTopicIngestorPlan {
             let mut settings = settings;
             // Retirement removes the complete owned subscription after all its intake units end.
             settings.assignment = None;
-            let plan = Self::connect(settings, tls_policy).await?;
+            let plan = Self::connect_under(settings, tls_policy).await?;
             plan.unsubscribe().await
         })
         .await;
@@ -860,7 +881,11 @@ impl IngestorConnector for PulsarTopicIngestor {
     /// An instance of an owned subscription joins it here. An instance of a provisioned one joins
     /// in its first resume instead, where a subscription the operator has not provisioned yet is
     /// the ingestor's transient status rather than a failure that keeps the ingestor from starting.
-    async fn open(plan: &Self::Plan, instance_index: u64) -> IngestorResult<Self> {
+    async fn open(
+        plan: &Self::Plan,
+        _host: &IngestorHost,
+        instance_index: u64,
+    ) -> IngestorResult<Self> {
         let consumer = match plan.subscription.ownership {
             PulsarSubscriptionOwnership::Ingestor { .. } => plan
                 .consumer_at_open(instance_index)
@@ -888,7 +913,7 @@ impl IngestorConnector for PulsarTopicIngestor {
             .change_context(IngestorError::Suspend { connector: PULSAR })
     }
 
-    async fn resume(&mut self) -> IngestorResult<IngestorResume> {
+    async fn resume(&mut self, _host: &IngestorHost) -> IngestorResult<IngestorResume> {
         if self.plan.is_idle(self.instance_index) {
             return Ok(IngestorResume::Ready);
         }
@@ -917,6 +942,7 @@ impl BrokerIngestorConnector for PulsarTopicIngestor {
 
     async fn next_batch(
         &mut self,
+        _host: &IngestorHost,
         request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {

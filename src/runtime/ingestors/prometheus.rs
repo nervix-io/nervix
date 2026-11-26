@@ -23,6 +23,7 @@ use super::{
     super::*,
     IngestorConnectorStartError, IngestorStartError,
     connector::{IngestorStart, PacedIngestorStart},
+    connector_host::IngestorEntityServices,
 };
 
 const _: () = assert!(matches!(
@@ -45,22 +46,23 @@ impl PrometheusQueryIngestorStartPlan {
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let Some(dns) = runtime.dns() else {
+        // The connector takes the resolver from its handle when it opens; a node without one
+        // refuses the start here, before anything of the connector runs.
+        if runtime.dns().is_none() {
             return Err(
                 ingestor.connector_start_failure(IngestorConnectorStartError::NodeDnsUnavailable)
             );
-        };
+        }
         // Each intake batch fills at most one ingest group, so a vector of any size enters the
         // graph group by group.
         let intake_batch = intake_batch_bound(runtime.inner.data_plane.ingest_group_max_rows());
         PacedIngestorStart {
             connector: PrometheusQueryIngestorPlan {
-                tls_policy: runtime.outward_tls().clone(),
                 config: resolved.entries,
                 query,
                 max_body_size,
-                dns: dns.clone(),
             },
+            host: runtime.ingestor_connector_host(ingestor, IngestorEntityServices::default()),
             every,
             cadence_start: DomainCadenceStart::AfterInterval,
             intake_batch,

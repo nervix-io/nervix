@@ -95,6 +95,9 @@ struct FakeHost {
     quiesce_change: Option<Arc<Notify>>,
     wake_suspension: bool,
     active: bool,
+    /// The node whose handle the loop hands its connector, which records what the connector did
+    /// through it.
+    connector: nervix_connector_fake::FakeIngestorHost,
 }
 
 impl FakeHost {
@@ -113,14 +116,17 @@ impl FakeHost {
             quiesce_change: None,
             wake_suspension: false,
             active: true,
+            connector: nervix_connector_fake::FakeIngestorHost::default(),
         }
     }
 }
 
-impl nervix_connector::ConnectorEventProvider for FakeHost {}
-
 #[async_trait]
-impl IngestorHostServices for FakeHost {
+impl IngestorLoopServices for FakeHost {
+    fn connector_host(&self) -> nervix_connector::IngestorHost {
+        self.connector.host()
+    }
+
     fn record_read(&self, outcome: nervix_connector::IngestorReadOutcome) {
         self.read_observations.lock().reads.push(outcome);
     }
@@ -297,7 +303,7 @@ impl IngestorHostServices for FakeHost {
 }
 
 #[async_trait]
-impl PacedIngestorHostServices for FakeHost {
+impl PacedIngestorLoopServices for FakeHost {
     fn record_poll(&self, outcome: nervix_connector::IngestorReadOutcome, elapsed: Duration) {
         self.read_observations.lock().polls.push((outcome, elapsed));
     }
@@ -348,7 +354,7 @@ async fn run_policy_with_refresh(
     connector.queued().extend(three_messages());
     connector.resume_required = resume_required;
     connector.replays_pending_after_resume = 0;
-    let host = IngestorHost::new(FakeHost::running(observations.clone()));
+    let host = IngestorLoopHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     run_ingestor_instance_with_retry(
         connector,
@@ -428,6 +434,7 @@ async fn runtime_report_chain_ingestor_lifecycle() {
         prepare_paced_ingestor(
             &mut connector,
             &mut host,
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
             &mut ready,
             &mut false,
             &mut shutdown,
@@ -528,6 +535,7 @@ async fn runtime_report_chain_ingestor_resume() {
         prepare_paced_ingestor(
             &mut connector,
             &mut host,
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
             &mut ready,
             &mut false,
             &mut shutdown,
@@ -551,7 +559,7 @@ async fn ingestor_loop_replays_a_buffer_released_during_resume_before_polling() 
     connector.queued().extend(three_messages());
     connector.resume_required = false;
     connector.replays_pending_after_resume = 2;
-    let host = IngestorHost::new(FakeHost::running(observations.clone()));
+    let host = IngestorLoopHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     run_ingestor_instance_with_retry(
         connector,
@@ -585,7 +593,7 @@ async fn ingestor_shutdown_cancels_pending_resume_and_closes_the_ingestor() {
     let started = Arc::new(Notify::new());
     let mut connector = empty_ingestor(observations.clone());
     connector.resume_gate = Some(started.clone());
-    let host = IngestorHost::new(FakeHost::running(observations.clone()));
+    let host = IngestorLoopHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let running = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
         connector,
@@ -612,7 +620,7 @@ async fn ingestor_quiesce_change_cancels_pending_resume_before_retrying() {
     connector.resume_gate = Some(started.clone());
     let mut fake_host = FakeHost::running(observations.clone());
     fake_host.quiesce_change = Some(changed.clone());
-    let host = IngestorHost::new(fake_host);
+    let host = IngestorLoopHost::new(fake_host);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let running = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
         connector,
@@ -642,7 +650,7 @@ async fn request_ingestor_loop_replays_retained_requests_and_closes_the_ingestor
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
     observations.lock().pending_replays = 2;
     let connector = empty_ingestor(observations.clone());
-    let host = IngestorHost::new(FakeHost::running(observations.clone()));
+    let host = IngestorLoopHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     shutdown_tx.send_replace(true);
 
@@ -672,6 +680,7 @@ async fn paced_ingestor_preparation_suspends_a_ready_ingestor_until_quiesce_rele
     let action = prepare_paced_ingestor(
         &mut connector,
         &mut host,
+        &nervix_connector_fake::FakeIngestorHost::default().host(),
         &mut ready,
         &mut false,
         &mut shutdown,
@@ -708,6 +717,7 @@ async fn paced_ingestor_preparation_retries_resume_until_the_ingestor_is_ready()
         prepare_paced_ingestor(
             &mut connector,
             &mut host,
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
             &mut ready,
             &mut false,
             &mut shutdown,
@@ -720,6 +730,7 @@ async fn paced_ingestor_preparation_retries_resume_until_the_ingestor_is_ready()
         prepare_paced_ingestor(
             &mut connector,
             &mut host,
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
             &mut ready,
             &mut false,
             &mut shutdown,
@@ -732,6 +743,7 @@ async fn paced_ingestor_preparation_retries_resume_until_the_ingestor_is_ready()
         prepare_paced_ingestor(
             &mut connector,
             &mut host,
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
             &mut ready,
             &mut false,
             &mut shutdown,
@@ -766,6 +778,7 @@ async fn paced_ingestor_preparation_stops_when_the_host_is_inactive() {
         prepare_paced_ingestor(
             &mut connector,
             &mut host,
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
             &mut ready,
             &mut false,
             &mut shutdown,
@@ -791,6 +804,7 @@ async fn paced_ingestor_preparation_stops_suspended_intake_after_shutdown_closes
         prepare_paced_ingestor(
             &mut connector,
             &mut host,
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
             &mut ready,
             &mut false,
             &mut shutdown,
@@ -829,7 +843,7 @@ async fn run_policy_stopped_at_the_second_intake(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     run_ingestor_instance_with_retry(
         connector,
-        IngestorHost::new(services),
+        IngestorLoopHost::new(services),
         replayable(policy),
         shutdown_rx,
         nervix_connector::RetryBackoffSettings::default(),
@@ -902,7 +916,7 @@ async fn failed_rewind_cannot_commit_past_an_unacknowledged_kafka_position() {
         .extend(three_messages().into_iter().take(2));
     connector.reject_failures_left = 2;
     connector.replay_rejected = true;
-    let host = IngestorHost::new(FakeHost::running(observations.clone()));
+    let host = IngestorLoopHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let policy = IngestorAckPolicy::Sequential {
         timeout: Duration::from_secs(1),
@@ -977,7 +991,7 @@ async fn individual_settlement_confirms_successes_and_requeues_only_the_failed_d
             TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Acknowledged),
         ),
     ]);
-    let mut host = IngestorHost::new(services);
+    let mut host = IngestorLoopHost::new(services);
     let mut connector = empty_ingestor(observations.clone());
     let batch = IndividualBatch::intake(
         &mut host,
@@ -1025,7 +1039,7 @@ async fn individual_settlement_retains_each_unsettled_position_once_after_a_tran
             TestAcknowledgementPlan::Outcome(IngestorAcknowledgementOutcome::Acknowledged),
         ),
     ]);
-    let mut host = IngestorHost::new(services);
+    let mut host = IngestorLoopHost::new(services);
     let mut connector = empty_ingestor(observations.clone());
     connector.reject_failures_left = 1;
     let batch = IndividualBatch::intake(
@@ -1087,7 +1101,7 @@ fn shuttle_individual_settlement_preserves_every_delivery_until_its_own_graph_ou
                     );
                 }));
             }
-            let mut host = IngestorHost::new(services);
+            let mut host = IngestorLoopHost::new(services);
             let mut connector = empty_ingestor(observations.clone());
             let batch = IndividualBatch::intake(
                 &mut host,
@@ -1160,7 +1174,7 @@ async fn individual_settlement_confirms_ready_siblings_while_one_graph_wait_rema
             );
         }
     });
-    let mut host = IngestorHost::new(services);
+    let mut host = IngestorLoopHost::new(services);
     let mut connector = empty_ingestor(observations.clone());
     let batch = IndividualBatch::intake(
         &mut host,
@@ -1216,7 +1230,7 @@ async fn individual_transport_recovery_keeps_admitted_graph_work() {
             "a failed transport must retain the graph wait of every admitted sibling"
         );
     });
-    let mut host = IngestorHost::new(services);
+    let mut host = IngestorLoopHost::new(services);
     let mut connector = empty_ingestor(observations.clone());
     connector.reject_failures_left = 1;
     let batch = IndividualBatch::intake(
@@ -1277,7 +1291,7 @@ async fn individual_settlement_leaves_every_delivery_from_a_stopped_intake_on_un
     let mut services = FakeHost::running(observations.clone());
     services.stopped_payload = Some(1);
     services.allow_unconfirmed_stop = true;
-    let mut host = IngestorHost::new(services);
+    let mut host = IngestorLoopHost::new(services);
     let mut connector = empty_ingestor(observations.clone());
     let batch = IndividualBatch::intake(
         &mut host,
@@ -1327,7 +1341,7 @@ async fn individual_settlement_requeues_only_the_delivery_the_host_refused() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
     let mut services = FakeHost::running(observations.clone());
     services.refused_payload = Some(1);
-    let mut host = IngestorHost::new(services);
+    let mut host = IngestorLoopHost::new(services);
     let mut connector = empty_ingestor(observations.clone());
     let batch = IndividualBatch::intake(
         &mut host,
@@ -1382,7 +1396,7 @@ async fn individual_settlement_counts_every_unconfirmed_position_when_shutdown_e
             (1, TestAcknowledgementPlan::Outcome(middle)),
             (2, TestAcknowledgementPlan::Outcome(last)),
         ]);
-        let mut host = IngestorHost::new(services);
+        let mut host = IngestorLoopHost::new(services);
         let mut connector = empty_ingestor(observations.clone());
         connector.reject_failures_left = usize::from(transport_failed);
         let batch = IndividualBatch::intake(
@@ -1463,7 +1477,7 @@ fn broker_read_observation_follows_each_typed_answer_once() {
         let mut host = FakeHost::running(Arc::new(Mutex::new(IngestorLoopObservations::default())));
         host.expected_oversized = expected_oversized;
         let events = host.read_observations.clone();
-        let host = IngestorHost::new(host);
+        let host = IngestorLoopHost::new(host);
         let _outcome = read::BrokerRead {
             batch: case.result,
             end: read::ReadEnd::Stopping,
@@ -1485,7 +1499,7 @@ async fn broker_payload_observation_counts_the_transport_batch_and_skips_buffer_
     let (_shutdown, receiver) = watch::channel(false);
     run_ingestor_instance_with_retry(
         connector,
-        IngestorHost::new(services),
+        IngestorLoopHost::new(services),
         replayable(IngestorAckPolicy::None),
         receiver,
         nervix_connector::RetryBackoffSettings::default(),
@@ -1614,7 +1628,7 @@ async fn run_recording_broker(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     run_ingestor_instance_with_retry(
         connector,
-        IngestorHost::new(host),
+        IngestorLoopHost::new(host),
         replayable(policy),
         shutdown_rx,
         nervix_connector::RetryBackoffSettings::default(),
@@ -1852,7 +1866,7 @@ async fn a_quiesce_suspends_only_a_ready_connector_and_is_recorded_once() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let run = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
         connector,
-        IngestorHost::new(host),
+        IngestorLoopHost::new(host),
         replayable(sequential_policy()),
         shutdown_rx,
         nervix_connector::RetryBackoffSettings::default(),
@@ -1874,6 +1888,7 @@ async fn a_quiesce_suspends_only_a_ready_connector_and_is_recorded_once() {
     let action = prepare_paced_ingestor(
         &mut connector,
         &mut host,
+        &nervix_connector_fake::FakeIngestorHost::default().host(),
         &mut ready,
         &mut false,
         &mut shutdown,
@@ -1906,6 +1921,7 @@ async fn paced_preparation_records_resume_outcomes_and_a_poll_failure_that_lost_
     let action = prepare_paced_ingestor(
         &mut connector,
         &mut host,
+        &nervix_connector_fake::FakeIngestorHost::default().host(),
         &mut ready,
         &mut failed_poll,
         &mut shutdown,
@@ -1916,6 +1932,7 @@ async fn paced_preparation_records_resume_outcomes_and_a_poll_failure_that_lost_
     let action = prepare_paced_ingestor(
         &mut connector,
         &mut host,
+        &nervix_connector_fake::FakeIngestorHost::default().host(),
         &mut ready,
         &mut failed_poll,
         &mut shutdown,
@@ -1923,11 +1940,20 @@ async fn paced_preparation_records_resume_outcomes_and_a_poll_failure_that_lost_
     )
     .await;
     assert_eq!(action, PacedIngestorAction::Poll);
-    assert!(connector.poll(Timestamp::from_unix_nanos(0)).await.is_err());
+    assert!(
+        connector
+            .poll(
+                &nervix_connector_fake::FakeIngestorHost::default().host(),
+                Timestamp::from_unix_nanos(0)
+            )
+            .await
+            .is_err()
+    );
     failed_poll = true;
     let action = prepare_paced_ingestor(
         &mut connector,
         &mut host,
+        &nervix_connector_fake::FakeIngestorHost::default().host(),
         &mut ready,
         &mut failed_poll,
         &mut shutdown,
@@ -1947,4 +1973,99 @@ async fn paced_preparation_records_resume_outcomes_and_a_poll_failure_that_lost_
         ]
     );
     assert_eq!(lifecycle.suspends, vec![IngestorSuspendCause::ReadFailure]);
+}
+
+/// What a connector published through the handle `node` gave it: every transient status, in
+/// order, how often it withdrew one, and what it shows now.
+fn published_through(
+    node: &nervix_connector_fake::FakeIngestorHost,
+) -> (Vec<String>, usize, Option<String>) {
+    let observed = node.observations();
+    let mut reasons = Vec::with_capacity(observed.transient_errors.len());
+    for (reason, _retry_after) in observed.transient_errors {
+        reasons.push(reason);
+    }
+    (reasons, observed.transient_clears, observed.transient_error)
+}
+
+/// The broker loop takes its connector's handle from its host once and hands it to every resume
+/// and read, so a connector that reports its own connection publishes each failure through that
+/// one handle and withdraws it there once it has resumed.
+#[nervix_primitives::test]
+async fn the_broker_loop_drives_every_resume_and_read_with_the_handle_its_host_gives_it() {
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    let mut connector = empty_ingestor(observations.clone());
+    connector
+        .queued()
+        .extend(three_messages().into_iter().take(1));
+    connector.status_retry = Some(Duration::from_millis(1));
+    connector.failed_reads_left = 1;
+    connector.failure_loses_transport = true;
+    connector.resume_results = VecDeque::from([
+        Err(Report::new(IngestorError::Resume { connector: "fake" })),
+        Ok(IngestorResume::Ready),
+    ]);
+    let host = FakeHost::running(observations.clone());
+    let node = host.connector.clone();
+
+    let lifecycle = run_recording_broker(connector, host, sequential_policy()).await;
+
+    assert_eq!(
+        lifecycle.lock().resumes,
+        vec![
+            IngestorResumeOutcome::Failed,
+            IngestorResumeOutcome::Ready,
+            IngestorResumeOutcome::Ready,
+        ],
+        "the failed resume, its retry, and the resume the failed read needed"
+    );
+    let (reasons, withdrawn, shown) = published_through(&node);
+    assert_eq!(
+        reasons,
+        [
+            "failed to resume fake ingestor",
+            "failed to read from fake ingestor"
+        ],
+        "the failed resume and the failed read each reached the handle of the loop's host"
+    );
+    assert_eq!(
+        withdrawn, 2,
+        "each resume that succeeded withdrew the status through the same handle"
+    );
+    assert_eq!(shown, None);
+}
+
+/// The paced loop hands the same handle to every resume and poll.
+#[nervix_primitives::test]
+async fn the_paced_loop_drives_every_resume_and_poll_with_the_handle_its_host_gives_it() {
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    let (shutdown_tx, shutdown) = watch::channel(false);
+    let mut connector = empty_ingestor(observations.clone());
+    connector.status_retry = Some(Duration::from_millis(1));
+    connector.stop_after_poll = Some(shutdown_tx);
+    connector
+        .polls
+        .push_back(Err(Report::new(IngestorError::Read { connector: "fake" })));
+    let host = FakeHost::running(observations.clone());
+    let node = host.connector.clone();
+
+    run_paced_ingestor(
+        connector,
+        host,
+        SingleOccurrenceCadence {
+            occurrence: Some(Timestamp::from_unix_nanos(1)),
+        },
+        NonZeroUsize::MIN,
+        shutdown,
+        nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
+    )
+    .await;
+
+    let (reasons, withdrawn, shown) = published_through(&node);
+    assert_eq!(
+        withdrawn, 1,
+        "the resume before the poll withdrew the connector's status through the handle"
+    );
+    assert_eq!(reasons, ["failed to read from fake ingestor"]);
+    assert_eq!(shown.as_deref(), Some("failed to read from fake ingestor"));
 }

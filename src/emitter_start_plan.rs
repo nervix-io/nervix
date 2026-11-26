@@ -343,25 +343,6 @@ impl EmitterClientSpec<DeclaredClientConfig> {
     }
 }
 
-/// The transports whose drivers own a connection pool sized by declared bounds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PooledTransport {
-    Postgres,
-    MySql,
-    MongoDb,
-    Redis,
-}
-
-/// Which pooled transport an emitter's client speaks, and the bounds its pool is opened with.
-///
-/// The pooled emitter plans decide this from the client's Model, so the shared-client registry opens
-/// what it is handed and never works out which driver it is talking to from a Model of its own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct PooledClientPlan {
-    pub(super) transport: PooledTransport,
-    pub(super) bounds: ClientPoolBounds,
-}
-
 fn otel_metric_kind(kind: &nervix_models::OtelMetricKind) -> OtelMetricKind {
     match kind {
         nervix_models::OtelMetricKind::Gauge => OtelMetricKind::Gauge,
@@ -441,46 +422,6 @@ fn mysql_conflict_action(action: &nervix_models::MySqlConflictAction) -> MySqlCo
         nervix_models::MySqlConflictAction::None => MySqlConflictAction::None,
         nervix_models::MySqlConflictAction::DoNothing => MySqlConflictAction::DoNothing,
         nervix_models::MySqlConflictAction::DoUpdate => MySqlConflictAction::DoUpdate,
-    }
-}
-
-impl<Config> RedisPubSubEmitterPlan<Config> {
-    /// The shared pool this emitter leases its command connections from.
-    pub(super) fn pooled_client(&self) -> PooledClientPlan {
-        PooledClientPlan {
-            transport: PooledTransport::Redis,
-            bounds: self.pool,
-        }
-    }
-}
-
-impl<Config> PostgresTableEmitterPlan<Config> {
-    /// The shared pool this emitter leases its connections from.
-    pub(super) fn pooled_client(&self) -> PooledClientPlan {
-        PooledClientPlan {
-            transport: PooledTransport::Postgres,
-            bounds: self.pool,
-        }
-    }
-}
-
-impl<Config> MySqlTableEmitterPlan<Config> {
-    /// The shared pool this emitter leases its connections from.
-    pub(super) fn pooled_client(&self) -> PooledClientPlan {
-        PooledClientPlan {
-            transport: PooledTransport::MySql,
-            bounds: self.pool,
-        }
-    }
-}
-
-impl<Config> MongoDbCollectionEmitterPlan<Config> {
-    /// The shared client this emitter leases, whose driver pools connections per server.
-    pub(super) fn pooled_client(&self) -> PooledClientPlan {
-        PooledClientPlan {
-            transport: PooledTransport::MongoDb,
-            bounds: self.pool,
-        }
     }
 }
 

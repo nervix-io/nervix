@@ -270,6 +270,7 @@ impl TransformedEncodingBenchmark {
                     ),
                 ),
                 remote_ack_timing: node_runtime.remote_ack_timing().clone(),
+                task_end: nervix_primitives::sync::CancellationToken::new(),
                 runtime: node_runtime,
                 domain,
                 emitter,

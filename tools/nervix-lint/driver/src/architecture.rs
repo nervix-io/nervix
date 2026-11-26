@@ -24,6 +24,7 @@ declare_tool_lint! { pub nervix::CLUSTER_AWAIT, Deny, "recurring execution retai
 declare_tool_lint! { pub nervix::NODE_IDENTITY, Deny, "declared node identities use the shared typed vocabulary", @report_in_external_macro = true }
 declare_tool_lint! { pub nervix::INSTALLED_STATE, Deny, "installation-only fields cannot use replaceable read-write locks", @report_in_external_macro = true }
 declare_tool_lint! { pub nervix::STATE_CONTRACT, Deny, "optional names and shared handles behind read-write locks need an explicit lifetime contract", @report_in_external_macro = true }
+declare_tool_lint! { pub nervix::UNDECLARED_HOST_SERVICE, Deny, "a connector reaches only the host services its owner declares", @report_in_external_macro = true }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum Layer {
@@ -83,6 +84,70 @@ fn kind(attribute: &AttrItem) -> Option<Symbol> {
 
 fn declared(tcx: TyCtxt<'_>, definition: DefId, name: &str) -> Option<Symbol> {
     kind(contract_attribute(tcx, definition, name)?)
+}
+
+/// The services a `host_services` contract lists: known, distinct and at least one, followed by a
+/// meaningful reason.
+fn listed_services(attribute: &AttrItem) -> Option<Vec<Symbol>> {
+    let arguments = meta_items(attribute)?;
+    let (reason, services) = arguments.split_last()?;
+    let reason = reason.meta_item()?;
+    if !reason.has_name(Symbol::intern("reason"))
+        || !reason
+            .value_str()
+            .is_some_and(|text| !text.as_str().trim().is_empty())
+    {
+        return None;
+    }
+    let mut listed = Vec::with_capacity(services.len());
+    for service in services {
+        let service = service.meta_item()?;
+        if !service.is_word() {
+            return None;
+        }
+        let name = service.ident()?.name;
+        if !nervix_lint_report::rules::host_service(name.as_str()) || listed.contains(&name) {
+            return None;
+        }
+        listed.push(name);
+    }
+    if listed.is_empty() {
+        return None;
+    }
+    Some(listed)
+}
+
+/// The host service `definition` hands over, as its own contract or its trait method's names it.
+fn host_service(tcx: TyCtxt<'_>, definition: DefId) -> Option<Symbol> {
+    if !matches!(tcx.def_kind(definition), DefKind::Fn | DefKind::AssocFn) {
+        return None;
+    }
+    if let Some(service) = declared(tcx, definition, "host_service") {
+        return Some(service);
+    }
+    let trait_item = tcx.opt_associated_item(definition)?.trait_item_def_id()?;
+    declared(tcx, trait_item, "host_service")
+}
+
+/// The host services the narrowest contracted owner of `definition` declares. A narrower contract
+/// replaces its parent's, and a type's contract covers every implementation written for it.
+fn declared_services(tcx: TyCtxt<'_>, mut definition: DefId) -> Option<Vec<Symbol>> {
+    loop {
+        if let Some(attribute) = contract_attribute(tcx, definition, "host_services") {
+            return listed_services(attribute);
+        }
+        if matches!(tcx.def_kind(definition), DefKind::Impl { .. })
+            && let ty::Adt(adt, _) = tcx
+                .type_of(definition)
+                .instantiate_identity()
+                .skip_norm_wip()
+                .kind()
+            && let Some(attribute) = contract_attribute(tcx, adt.did(), "host_services")
+        {
+            return listed_services(attribute);
+        }
+        definition = tcx.opt_parent(definition)?;
+    }
 }
 
 /// An explicit trait/method boundary can be inherited; its unrelated module default cannot
@@ -172,35 +237,86 @@ fn consumes_plans(tcx: TyCtxt<'_>, mut definition: DefId) -> bool {
     }
 }
 
+/// The item a source contract is written on, as the placement rules of the contracts read it.
+struct ContractOwner {
+    /// A struct, enum or union.
+    named_type: bool,
+    /// A function, a method or a trait's method.
+    callable: bool,
+    /// The crate or a module.
+    module: bool,
+    /// An implementation block.
+    implementation: bool,
+    /// A trait definition.
+    trait_definition: bool,
+}
+
+impl ContractOwner {
+    fn of(owner: &Node<'_>) -> Self {
+        let named_type = matches!(owner, Node::Item(item) if matches!(item.kind,
+            rustc_hir::ItemKind::Struct(..) | rustc_hir::ItemKind::Enum(..) | rustc_hir::ItemKind::Union(..)));
+        let callable = matches!(
+            owner,
+            Node::Item(rustc_hir::Item {
+                kind: rustc_hir::ItemKind::Fn { .. },
+                ..
+            }) | Node::ImplItem(rustc_hir::ImplItem {
+                kind: rustc_hir::ImplItemKind::Fn(..),
+                ..
+            }) | Node::TraitItem(rustc_hir::TraitItem {
+                kind: rustc_hir::TraitItemKind::Fn(..),
+                ..
+            })
+        );
+        let module = matches!(
+            owner,
+            Node::Crate(_)
+                | Node::Item(rustc_hir::Item {
+                    kind: rustc_hir::ItemKind::Mod(..),
+                    ..
+                })
+        );
+        let implementation = matches!(
+            owner,
+            Node::Item(rustc_hir::Item {
+                kind: rustc_hir::ItemKind::Impl(..),
+                ..
+            })
+        );
+        let trait_definition = matches!(
+            owner,
+            Node::Item(rustc_hir::Item {
+                kind: rustc_hir::ItemKind::Trait { .. },
+                ..
+            })
+        );
+        Self {
+            named_type,
+            callable,
+            module,
+            implementation,
+            trait_definition,
+        }
+    }
+
+    /// Whether the owner is one whose items a scoped contract covers: the crate, a module, a type,
+    /// a function, an implementation or a trait.
+    fn scopes_items(&self) -> bool {
+        self.module
+            || self.named_type
+            || self.callable
+            || self.implementation
+            || self.trait_definition
+    }
+}
+
 pub fn validate(cx: &LateContext<'_>, node: HirId, attribute: &AttrItem) {
     let path = &attribute.path.segments;
     let Some(name) = path.get(1) else {
         return;
     };
     let owner = cx.tcx.hir_node(node);
-    let named_type = matches!(owner, Node::Item(item) if matches!(item.kind,
-        rustc_hir::ItemKind::Struct(..) | rustc_hir::ItemKind::Enum(..) | rustc_hir::ItemKind::Union(..)));
-    let callable = matches!(
-        owner,
-        Node::Item(rustc_hir::Item {
-            kind: rustc_hir::ItemKind::Fn { .. },
-            ..
-        }) | Node::ImplItem(rustc_hir::ImplItem {
-            kind: rustc_hir::ImplItemKind::Fn(..),
-            ..
-        }) | Node::TraitItem(rustc_hir::TraitItem {
-            kind: rustc_hir::TraitItemKind::Fn(..),
-            ..
-        })
-    );
-    let module = matches!(
-        owner,
-        Node::Crate(_)
-            | Node::Item(rustc_hir::Item {
-                kind: rustc_hir::ItemKind::Mod(..),
-                ..
-            })
-    );
+    let placement = ContractOwner::of(&owner);
     let contract = kind(attribute);
     let valid = match name.as_str() {
         "constant" => {
@@ -219,37 +335,21 @@ pub fn validate(cx: &LateContext<'_>, node: HirId, attribute: &AttrItem) {
             ) && contract.is_some_and(|kind| kind.as_str() == "fixed")
         }
         "layer" => {
-            (module
-                || named_type
-                || callable
-                || matches!(
-                    owner,
-                    Node::Item(rustc_hir::Item {
-                        kind: rustc_hir::ItemKind::Impl(..),
-                        ..
-                    }) | Node::Item(rustc_hir::Item {
-                        kind: rustc_hir::ItemKind::Trait { .. },
-                        ..
-                    })
-                ))
+            placement.scopes_items()
                 && contract.is_some_and(|kind| Layer::parse(kind.as_str()).is_some())
         }
         "value" => {
-            (named_type
-                || matches!(
-                    owner,
-                    Node::Item(rustc_hir::Item {
-                        kind: rustc_hir::ItemKind::Trait { .. },
-                        ..
-                    })
-                ))
+            (placement.named_type || placement.trait_definition)
                 && contract.is_some_and(|kind| {
-                    matches!(kind.as_str(), "model" | "name" | "cluster_access")
+                    matches!(
+                        kind.as_str(),
+                        "model" | "name" | "cluster_access" | "host_handle"
+                    )
                 })
         }
         "identity" => {
-            (named_type
-                || callable
+            (placement.named_type
+                || placement.callable
                 || matches!(
                     owner,
                     Node::Field(_)
@@ -260,26 +360,26 @@ pub fn validate(cx: &LateContext<'_>, node: HirId, attribute: &AttrItem) {
                         })
                 ))
                 && contract.is_some_and(|kind| kind.as_str() == "node")
-                && (!named_type
+                && (!placement.named_type
                     || layer(cx.tcx, node.owner.def_id.to_def_id()) == Some(Layer::Vocabulary))
         }
         "input" => {
-            (module
-                || named_type
-                || callable
-                || matches!(
-                    owner,
-                    Node::Item(rustc_hir::Item {
-                        kind: rustc_hir::ItemKind::Trait { .. },
-                        ..
-                    })
-                ))
+            (placement.module
+                || placement.named_type
+                || placement.callable
+                || placement.trait_definition)
                 && contract.is_some_and(|kind| kind.as_str() == "plans")
         }
         "state" => {
             matches!(owner, Node::Field(_))
                 && contract.is_some_and(|kind| matches!(kind.as_str(), "installed" | "mutable"))
         }
+        "host_service" => {
+            placement.callable
+                && contract
+                    .is_some_and(|kind| nervix_lint_report::rules::host_service(kind.as_str()))
+        }
+        "host_services" => placement.scopes_items() && listed_services(attribute).is_some(),
         _ => return,
     };
     let count = tool_attributes(cx.tcx, node, path).len();
@@ -469,6 +569,27 @@ impl ArchitectureRules {
                 _ => {}
             }
         }
+        // A harness sits outside the product layer order: a test asserts what a handle hands over
+        // and a scripted connector stands in for any real one, so neither declares services.
+        if let Some(service) = host_service(cx.tcx, definition)
+            && layer(cx.tcx, owner.to_def_id()) != Some(Layer::Harness)
+        {
+            let refusal = match declared_services(cx.tcx, owner.to_def_id()) {
+                Some(services) if services.contains(&service) => None,
+                Some(_) => Some(format!(
+                    "this owner reaches the host's {service} service, which its host_services \
+                     contract does not declare; declare it where the connector reaches it, or \
+                     stop reaching it"
+                )),
+                None => Some(format!(
+                    "this owner reaches the host's {service} service without a host_services \
+                     contract; declare the services its connector reaches"
+                )),
+            };
+            if let Some(message) = refusal {
+                self.diagnostic(cx, node, span, UNDECLARED_HOST_SERVICE, message, flow);
+            }
+        }
         // Abstract associated types have no type_of query in foreign metadata. Their concrete
         // projections are normalized at the consuming signature/field/body, not at a bare path.
         if matches!(cx.tcx.def_kind(definition), DefKind::TyAlias) {
@@ -483,6 +604,51 @@ impl ArchitectureRules {
                 flow,
             );
         }
+    }
+
+    /// A public method of a host handle names the service it hands over, so a connector reaches
+    /// nothing through the handle that a `host_services` contract cannot name.
+    pub fn handle_method(
+        &mut self,
+        cx: &LateContext<'_>,
+        item: &rustc_hir::ImplItem<'_>,
+        flow: &mut Flow,
+    ) {
+        let rustc_hir::ImplItemKind::Fn(signature, _) = item.kind else {
+            return;
+        };
+        if !signature.decl.implicit_self().has_implicit_self() {
+            return;
+        }
+        let definition = item.owner_id.to_def_id();
+        let Some(implementation) = cx.tcx.inherent_impl_of_assoc(definition) else {
+            return;
+        };
+        let ty::Adt(adt, _) = cx
+            .tcx
+            .type_of(implementation)
+            .instantiate_identity()
+            .skip_norm_wip()
+            .kind()
+        else {
+            return;
+        };
+        if !value_role(cx.tcx, adt.did(), "host_handle")
+            || !cx.tcx.visibility(definition).is_public()
+            || contract_attribute(cx.tcx, definition, "host_service").is_some()
+        {
+            return;
+        }
+        self.diagnostic(
+            cx,
+            item.hir_id(),
+            item.ident.span,
+            INVALID_CONTRACT,
+            "a public method of a host handle names the host service it hands over; put a \
+             host_service contract on it"
+                .into(),
+            flow,
+        );
     }
 
     pub fn field(

@@ -23,6 +23,15 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        metrics,
+        pool,
+        reason = "the MySQL table emitter writes through the pool its host leased for it and \
+                  records the inserts it prepares"
+    )
+)]
 
 use std::{num::NonZeroUsize, ops::Range};
 
@@ -44,11 +53,12 @@ use nervix_connector::{
     ClientConfigError, ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost,
     EmitterLifecycle, EmitterOpenError, EmitterRecordPosition, EmitterStartResult,
     EmitterWriteError, EmitterWriteResult, MappedEmitterMember, MappedEmitterRows, MeasuredRequest,
-    PerRecordOutcome, RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits,
-    client_config_value, client_tls_paths,
+    PerRecordOutcome, PooledClient, PooledClientHost, PooledClientLease, RejectedEmitterMember,
+    RowEmitter, RowRequest, RowRequestLimits, client_config_value, client_tls_paths,
 };
 use nervix_models::{
-    ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, MYSQL_MAX_PLACEHOLDERS, MySqlTableName,
+    ClientConfigEntry, ClientPoolBounds, ConnectorKind, EmitterBatchPolicy, MYSQL_MAX_PLACEHOLDERS,
+    MySqlTableName,
 };
 use nervix_primitives::{
     sync::atomic::Ordering,
@@ -153,16 +163,50 @@ impl MySqlConnection {
     }
 }
 
-/// The node-owned pool this emitter borrows connections from while its host holds the lease.
+/// Where this emitter checks its connections out: the pool its host leased for it, or the stand-in
+/// of a test that opens no connection.
 #[async_trait]
-pub trait MySqlConnections: Send + Sync + 'static {
-    /// Borrow for one insert and its row isolation, with the host's pool wait recorded around it.
+trait ConnectionCheckout: Send + Sync + 'static {
+    /// Borrow for one insert and its row isolation, with the wait published while the pool hands
+    /// no connection over.
     async fn connection(&self) -> EmitterWriteResult<MySqlConnection>;
 }
 
+#[async_trait]
+impl ConnectionCheckout for PooledClientLease<MySqlPool> {
+    /// Borrow a connection for one insert, publishing the wait until the pool hands one over.
+    ///
+    /// The borrow covers one bounded insert and its row-by-row isolation when the database refuses
+    /// a record. It returns to the shared pool before the next insert, flush interval or retry
+    /// backoff.
+    async fn connection(&self) -> EmitterWriteResult<MySqlConnection> {
+        self.checkout(self.client().connection()).await
+    }
+}
+
+/// The node's shared pool is the pooled client of a MySQL `CLIENT`, which the host opens once and
+/// leases to every local emitter of that client.
+#[async_trait]
+impl PooledClient for MySqlPool {
+    const CONNECTOR: ConnectorKind = ConnectorKind::MySql;
+
+    type OpenError = EmitterOpenError;
+
+    /// The driver resolves and dials the server itself, so the pool takes nothing from its node.
+    async fn open(
+        config: &[ClientConfigEntry],
+        bounds: ClientPoolBounds,
+        _host: &PooledClientHost,
+    ) -> EmitterStartResult<Self> {
+        Self::open(config, bounds).await
+    }
+}
+
 /// What one MySQL emitter inserts with, from its typed emitter plan.
+///
+/// The pool it borrows its connections from reaches the emitter through its host handle, which
+/// carries the lease its host took on the node's instance of the emitter's client.
 pub struct MySqlTableEmitterConfig {
-    pub connections: Box<dyn MySqlConnections>,
     pub table: MySqlTableName,
     pub conflict_action: MySqlConflictAction,
     /// The emitter's `BATCH` limits, which bound the rows and the measured bytes of every insert.
@@ -180,7 +224,7 @@ pub enum MySqlConflictAction {
 /// The MySQL emitter, which binds each mapped row as the parameters of one multi-row insert.
 pub struct MySqlTableEmitter {
     host: EmitterHost,
-    connections: Box<dyn MySqlConnections>,
+    connections: Box<dyn ConnectionCheckout>,
     table: MySqlTableName,
     conflict_action: MySqlConflictAction,
     limits: RowRequestLimits,
@@ -415,13 +459,15 @@ impl MySqlTableEmitter {
     )]
     fn prepare(config: MySqlTableEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
         let MySqlTableEmitterConfig {
-            connections,
             table,
             conflict_action,
             batch,
         } = config;
+        let pool = host
+            .pool::<MySqlPool>()
+            .change_context(EmitterOpenError::Initialize { connector: MYSQL })?;
         Ok(Self {
-            connections,
+            connections: Box::new(pool),
             table,
             conflict_action,
             limits: RowRequestLimits::from(batch),
@@ -470,9 +516,8 @@ impl MySqlTableEmitter {
     /// Borrow once for a bounded insert and the isolation of any rows the database refuses.
     #[cfg_attr(
         nervix_lint,
-        nervix::dispatch(
-            reason = "the host owns external driver-pool acquisition and its wait publication"
-        )
+        nervix::dispatch(reason = "the leased pool owns external driver-pool acquisition, and \
+                                   its lease the publication of the wait")
     )]
     async fn connection(&self) -> error_stack::Result<MySqlConnection, MySqlWriteError> {
         match self.connections.connection().await {
@@ -1342,7 +1387,7 @@ mod tests {
     struct NoConnections;
 
     #[async_trait]
-    impl MySqlConnections for NoConnections {
+    impl ConnectionCheckout for NoConnections {
         async fn connection(&self) -> EmitterWriteResult<MySqlConnection> {
             Err(
                 Report::new(EmitterWriteError::NotInitialized { connector: MYSQL })
@@ -1483,7 +1528,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn connection_pool_failure_keeps_the_acquire_diagnostic_at_the_host_boundary() {
+    async fn connection_pool_failure_keeps_the_acquire_diagnostic_at_the_pool_boundary() {
         let connector = test_emitter(MySqlConflictAction::None);
         let error = match connector.connection().await {
             Ok(_) => panic!("the test pool has no connection"),
@@ -1665,6 +1710,93 @@ mod tests {
                 Value::Bytes(b"\x00\xff".to_vec()),
             ]
         );
+    }
+
+    /// A pool whose every checkout the port it names refuses.
+    fn refused_pool() -> MySqlPool {
+        let opts = Opts::from_url("mysql://nervix@127.0.0.1:1/nervix")
+            .expect("the address is a valid MySQL URL");
+        let policy = MySqlPoolPolicy::read(&[]).expect("the declared defaults are valid");
+        let pool = ConfiguredPool {
+            driver: DriverPool::new(opts),
+            timeout: None,
+            checkout: policy.checkout(None),
+        };
+        MySqlPool {
+            _minimum: PoolMinimum::keep(pool.clone(), 0, policy.maintenance_interval()),
+            pool,
+        }
+    }
+
+    fn table_config() -> MySqlTableEmitterConfig {
+        MySqlTableEmitterConfig {
+            table: MySqlTableName::parse("events").expect("the test table name is valid"),
+            conflict_action: MySqlConflictAction::None,
+            batch: EmitterBatchPolicy {
+                max_messages: nervix_models::BatchMessageLimit::try_from(3_u32)
+                    .expect("three is a valid message limit"),
+                max_size: "1KiB".parse().expect("1KiB is a valid size"),
+            },
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_whose_host_leased_no_pool_fails_to_open_and_names_the_lease() {
+        let opened = <MySqlTableEmitter as nervix_connector::EmitterConnector>::open(
+            table_config(),
+            nervix_connector_fake::FakeEmitterHost::default().host(),
+        )
+        .await;
+        let error = match opened {
+            Ok(_) => panic!("a pooled emitter writes only through the pool its host leased"),
+            Err(error) => error,
+        };
+
+        // The failure is the host's, not the configuration's, so the host opens the emitter again.
+        assert_eq!(
+            *error.current_context(),
+            EmitterOpenError::Initialize { connector: MYSQL }
+        );
+        assert_eq!(
+            error
+                .frames()
+                .find_map(|frame| frame.downcast_ref::<nervix_connector::HostServiceError>()),
+            Some(&nervix_connector::HostServiceError::PooledClientNotLeased)
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_checks_out_of_the_pool_its_host_leased_and_publishes_the_wait() {
+        let waits = nervix_connector_fake::FakePooledClientWaits::default();
+        let lease = PooledClientLease::new(
+            nervix_primitives::sync::Arc::new(refused_pool()),
+            waits.clone(),
+            (),
+        );
+        let connector = <MySqlTableEmitter as nervix_connector::EmitterConnector>::open(
+            table_config(),
+            nervix_connector_fake::FakeEmitterHost::default().leasing(lease),
+        )
+        .await
+        .expect("the host leased this connector's pool");
+
+        let error = match connector.connection().await {
+            Ok(_) => panic!("a checkout from a port that refuses connections must fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error.current_context(), MySqlWriteError::Pool));
+        assert!(
+            error.contains::<mysql_async::Error>(),
+            "the driver's error stays beneath the pool's: {error:?}"
+        );
+        let published = waits.observations();
+        assert_eq!(
+            (published.begun, published.ended),
+            (1, 1),
+            "the checkout the pool did not answer at once published one wait and ended it"
+        );
+        assert_eq!(published.waiting_since, None);
     }
 
     /// The driver's pool as its minimum's keeper reads and draws on it: a pool that has opened

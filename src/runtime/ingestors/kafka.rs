@@ -16,18 +16,23 @@
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
-use nervix_connector::{IngestorConnector, IngestorPlan};
+use nervix_connector::{
+    DomainOffsetError, DomainOffsetInitialization, DomainOffsetPosition, DomainOffsetResult,
+    DomainOffsetServices, DomainOffsetStart, DomainOffsets, IngestorConnector, IngestorPlan,
+};
 use nervix_connector_kafka::{
-    KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
-    KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart, KafkaGroupCommit,
-    KafkaOffsetPosition, KafkaTopicIngestor, KafkaTopicIngestorOffsetMode, KafkaTopicIngestorPlan,
+    KafkaGroupCommit, KafkaTopicIngestor, KafkaTopicIngestorOffsetMode, KafkaTopicIngestorPlan,
 };
 
 use super::{
     super::*,
     IngestorConnectorStartError, IngestorStartError,
     connector::{BrokerIngestorInstance, BrokerIngestorPolicy, IngestorStart},
+    connector_host::IngestorEntityServices,
 };
+
+/// The transport whose offsets this node keeps for a domain, as its offset failures name it.
+const KAFKA: &str = "Kafka";
 
 struct RuntimeKafkaDomainOffsets {
     runtime: Runtime,
@@ -49,7 +54,7 @@ const _: () = assert!(matches!(
 ));
 
 #[async_trait]
-impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
+impl DomainOffsetServices for RuntimeKafkaDomainOffsets {
     fn generation(&self) -> Option<u64> {
         self.lifecycle.generation()
     }
@@ -57,14 +62,13 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
     async fn initialization(
         &self,
         partitions: &[i32],
-    ) -> KafkaDomainOffsetResult<KafkaDomainOffsetInitialization> {
+    ) -> DomainOffsetResult<DomainOffsetInitialization> {
         let Some(domain_state) = self.lifecycle.task_state() else {
-            return Err(
-                Report::new(KafkaDomainOffsetError::Read).attach_printable(format!(
+            return Err(Report::new(DomainOffsetError::Read { transport: KAFKA })
+                .attach_printable(format!(
                     "domain '{}' is not installed",
                     self.domain.as_str()
-                )),
-            );
+                )));
         };
         let generation = domain_state.generation;
         let last_start = domain_state.last_start.clone();
@@ -93,47 +97,47 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
             self.runtime
                 .synchronize_kafka_start(&state, generation)
                 .await
-                .change_context(KafkaDomainOffsetError::Read)?;
+                .change_context(DomainOffsetError::Read { transport: KAFKA })?;
         }
         let missing_partition_timestamp = match last_start {
             nervix_models::DomainStartPoint::Resume => self
                 .runtime
                 .current_paced_domain_time(&self.domain)
                 .map_err(|error| {
-                    Report::new(KafkaDomainOffsetError::Read).attach_printable(error.to_string())
+                    Report::new(DomainOffsetError::Read { transport: KAFKA })
+                        .attach_printable(error.to_string())
                 })?,
             nervix_models::DomainStartPoint::At { timestamp, .. } => {
                 if state.read().applied_start_generation() != Some(generation) {
-                    return Ok(KafkaDomainOffsetInitialization {
+                    return Ok(DomainOffsetInitialization {
                         generation,
-                        start: KafkaDomainOffsetStart::At(timestamp),
+                        start: DomainOffsetStart::At(timestamp),
                         assignment,
                     });
                 }
                 Some(timestamp)
             }
             nervix_models::DomainStartPoint::Now { .. } => {
-                return Err(
-                    Report::new(KafkaDomainOffsetError::Read).attach_printable(format!(
+                return Err(Report::new(DomainOffsetError::Read { transport: KAFKA })
+                    .attach_printable(format!(
                         "domain '{}' has an unresolved START AT NOW",
                         self.domain.as_str(),
-                    )),
-                );
+                    )));
             }
         };
         let mut positions = Vec::new();
         for partition in partitions {
             if let Some(offset) = state.read().next_offset(&self.topic, *partition) {
-                positions.push(KafkaOffsetPosition {
+                positions.push(DomainOffsetPosition {
                     topic: self.topic.clone(),
                     partition: *partition,
                     offset,
                 });
             }
         }
-        Ok(KafkaDomainOffsetInitialization {
+        Ok(DomainOffsetInitialization {
             generation,
-            start: KafkaDomainOffsetStart::Resume {
+            start: DomainOffsetStart::Resume {
                 positions,
                 missing_partition_timestamp,
             },
@@ -144,12 +148,13 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
     async fn reset(
         &self,
         generation: u64,
-        positions: Vec<KafkaOffsetPosition>,
-    ) -> KafkaDomainOffsetResult<()> {
+        positions: Vec<DomainOffsetPosition>,
+    ) -> DomainOffsetResult<()> {
         if self.lifecycle.generation() != Some(generation) {
-            return Err(Report::new(KafkaDomainOffsetError::Reset).attach_printable(
-                "the domain start generation changed before Kafka initialization",
-            ));
+            return Err(Report::new(DomainOffsetError::Reset { transport: KAFKA })
+                .attach_printable(
+                    "the domain start generation changed before Kafka initialization",
+                ));
         }
         let state = self.state.current();
         if self.instances.get() == 1 {
@@ -157,20 +162,20 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
                 .runtime
                 .start_single_kafka_unit(&state, generation, positions)
                 .await
-                .change_context(KafkaDomainOffsetError::Reset);
+                .change_context(DomainOffsetError::Reset { transport: KAFKA });
         }
         self.runtime
             .propose_kafka_start(&state, generation, positions)
             .await
-            .change_context(KafkaDomainOffsetError::Reset)
+            .change_context(DomainOffsetError::Reset { transport: KAFKA })
     }
 
-    async fn commit(&self, position: KafkaOffsetPosition) -> KafkaDomainOffsetResult<()> {
+    async fn commit(&self, position: DomainOffsetPosition) -> DomainOffsetResult<()> {
         let state = self.state.current();
         self.runtime
             .commit_domain_kafka_offset(&state, position)
             .await
-            .change_context(KafkaDomainOffsetError::Commit)
+            .change_context(DomainOffsetError::Commit { transport: KAFKA })
     }
 }
 
@@ -258,6 +263,9 @@ impl KafkaTopicIngestorStartPlan {
             .change_context_lazy(|| ingestor.initialize_failure())?;
 
         let mut domain_offsets = None;
+        // The offsets a domain-offset ingestor reads and commits reach its connector through its
+        // host handle, never in its plan.
+        let mut entity = IngestorEntityServices::default();
         let connector_offset_mode = match offsets {
             KafkaOffsetPlan::ConsumerGroup { group, start_at } => {
                 KafkaTopicIngestorOffsetMode::ConsumerGroup {
@@ -279,7 +287,7 @@ impl KafkaTopicIngestorStartPlan {
                 };
                 let state = StdArc::new(KafkaOffsetOriginatorSlot::new(originator));
                 domain_offsets = Some(state.clone());
-                let offsets = KafkaDomainOffsetHost::new(RuntimeKafkaDomainOffsets {
+                entity.domain_offsets = Some(DomainOffsets::new(RuntimeKafkaDomainOffsets {
                     lifecycle: runtime
                         .domain_clock_lifecycle(domain)
                         .change_context_lazy(|| ingestor.initialize_failure())?,
@@ -289,21 +297,20 @@ impl KafkaTopicIngestorStartPlan {
                     topic: topic.as_str().to_string(),
                     instances,
                     state,
-                });
+                }));
                 KafkaTopicIngestorOffsetMode::Domain {
                     group_id: format!(
                         "nervix_domain_{}_{}",
                         domain.as_str(),
                         ingestor.name.as_str(),
                     ),
-                    offsets,
                 }
             }
         };
+        let host = runtime.ingestor_connector_host(ingestor, entity);
         let connector_plan = IngestorPlan {
             connector: KafkaTopicIngestorPlan {
                 settings: runtime.inner.connector_host.kafka,
-                executor: runtime.executor().clone(),
                 config: resolved_client.entries,
                 topic,
                 offset_mode: connector_offset_mode,
@@ -317,10 +324,13 @@ impl KafkaTopicIngestorStartPlan {
             connector_plan.capabilities.position_class(),
             runtime.inner.data_plane,
         );
-        let connector =
-            KafkaTopicIngestor::open(&connector_plan.connector, ingestor.instance_index())
-                .await
-                .change_context_lazy(|| ingestor.initialize_failure())?;
+        let connector = KafkaTopicIngestor::open(
+            &connector_plan.connector,
+            host.handle(),
+            ingestor.instance_index(),
+        )
+        .await
+        .change_context_lazy(|| ingestor.initialize_failure())?;
         let instance = Box::new(BrokerIngestorInstance { connector, policy });
         Ok(IngestorStart {
             instance,
@@ -332,6 +342,7 @@ impl KafkaTopicIngestorStartPlan {
                 .keyword()
                 .to_ascii_lowercase(),
             domain_offsets,
+            connector_host: host,
         })
     }
 }

@@ -27,11 +27,14 @@
 use error_stack::{AttachmentKind, FrameKind, ResultExt as _};
 use nervix_connector::{
     EmitterBoundedExecution, EmitterEventReporter, EmitterFinish, EmitterFinishError,
-    EmitterGeneralErrorHandler, EmitterHost, EmitterRecordAcknowledgementServices,
-    EmitterRecordAcknowledgements, EmitterStagingDirectory, EmitterTransientErrorStatus,
+    EmitterGeneralErrorHandler, EmitterHost, EmitterNameResolution, EmitterOutwardTls,
+    EmitterRecordAcknowledgementServices, EmitterRecordAcknowledgements, EmitterStagingDirectory,
+    EmitterTaskEnd, EmitterTransientErrorStatus, HostServiceError, OutwardTlsPolicy, PooledClient,
+    PooledClientLease,
     physical_time::{PhysicalDeadline, actual_utc_now},
 };
 use nervix_models::{DiscardedWorkKind, ExternalErrorCode};
+use nervix_primitives::sync::CancellationToken;
 
 use super::{
     emitter_publishing::{EmitterPublishAttemptKind, EmitterStopDrainOutcome},
@@ -87,6 +90,10 @@ pub(in crate::runtime) struct EmitterConnectorContext {
     /// that keeps the emitter's held acknowledgements alive reads its committed alive interval
     /// here once that work waits.
     pub(super) remote_ack_timing: SharedRemoteAckTiming,
+    /// Cancelled once this emitter's task has ended, which the host handle hands the emitter's
+    /// connector. The task holds the guard that cancels it; every clone of this context only
+    /// observes it.
+    pub(super) task_end: CancellationToken,
 }
 
 impl EmitterConnectorContext {
@@ -396,10 +403,6 @@ pub(super) fn emitter_report(
     Report::new(context).attach_printable(error.to_string())
 }
 
-pub(super) fn emitter_init_error(error: impl std::fmt::Display) -> Report<EmitterRuntimeError> {
-    emitter_report(EmitterRuntimeError::InitializeConnector, error)
-}
-
 impl EmitterConnectorContext {
     pub(super) fn record_confirmation_timeout(&self, error: &Report<EmitterRuntimeError>) {
         let timed_out = error.frames().any(|frame| {
@@ -448,16 +451,18 @@ impl EmitterConnectorContext {
         );
     }
 
-    pub(super) fn dns(&self) -> Result<DnsResolver, Report<EmitterRuntimeError>> {
-        let Some(dns) = self.runtime.dns() else {
-            return Err(Report::new(EmitterRuntimeError::InitializeConnector)
-                .attach_printable("the node DNS resolver is not installed"));
-        };
-        Ok(dns.clone())
-    }
-
+    /// The handle through which this emitter's connector reaches its node.
     pub(super) fn emitter_host(&self) -> EmitterHost {
         EmitterHost::new(self.clone())
+    }
+
+    /// The handle of a pooled emitter, which also carries the lease this host took for it on its
+    /// client's pooled client.
+    pub(super) fn emitter_host_leasing<K: PooledClient>(
+        &self,
+        lease: PooledClientLease<K>,
+    ) -> EmitterHost {
+        EmitterHost::leasing(self.clone(), lease)
     }
 
     pub(super) fn report_init_error(&self, connector: &str, error: &str) {
@@ -713,6 +718,24 @@ impl EmitterBoundedExecution for EmitterConnectorContext {
     }
 }
 
+impl EmitterNameResolution for EmitterConnectorContext {
+    fn dns(&self) -> Option<DnsResolver> {
+        self.runtime.dns().cloned()
+    }
+}
+
+impl EmitterOutwardTls for EmitterConnectorContext {
+    fn tls_policy(&self) -> OutwardTlsPolicy {
+        self.runtime.outward_tls().clone()
+    }
+}
+
+impl EmitterTaskEnd for EmitterConnectorContext {
+    fn cancellation(&self) -> CancellationToken {
+        self.task_end.clone()
+    }
+}
+
 impl EmitterGeneralErrorHandler for EmitterConnectorContext {
     fn handle_general_error(
         &self,
@@ -750,13 +773,26 @@ impl EmitterGeneralErrorHandler for EmitterConnectorContext {
 }
 
 /// How an emitter describes `error`: by the first printable attachment in its chain, which carries
-/// the connector's or task's own description, or else by the error's outermost context.
+/// the connector's or task's own description; or else by what its host could not hand it, the
+/// outermost of a service its node does not provide and a client the node could not open, which
+/// name themselves; or else by the error's outermost context.
 #[cfg_attr(
     nervix_lint,
     nervix::dispatch(reason = "the failure is formatted through its context's Display contract")
 )]
 pub(super) fn emitter_error_message<C: error_stack::Context>(error: &Report<C>) -> String {
-    emitter_attached_message(error).unwrap_or_else(|| error.current_context().to_string())
+    if let Some(attached) = emitter_attached_message(error) {
+        return attached;
+    }
+    for frame in error.frames() {
+        if let Some(refused) = frame.downcast_ref::<HostServiceError>() {
+            return refused.to_string();
+        }
+        if let Some(unopened) = frame.downcast_ref::<SharedClientError>() {
+            return unopened.to_string();
+        }
+    }
+    error.current_context().to_string()
 }
 
 /// The first printable attachment of `error`, which is how an emitter describes its own failure.
@@ -1374,7 +1410,13 @@ impl EmitterTask {
             );
             let status = runtime.emitter_status(&emitter_key);
             let confirmation_waits = runtime.emitter_confirmation_counter(&emitter_key);
+            // The end of this task ends the emitter's instance for its connector: the guard is
+            // dropped when the task returns or is aborted, and cancels the token the connector
+            // took through its host handle.
+            let task_end = CancellationToken::new();
+            let _task_end = task_end.clone().drop_guard();
             let context = EmitterConnectorContext {
+                task_end,
                 readiness: runtime.register_emitter_readiness(&emitter_key),
                 routing: shared_routing,
                 metrics_dirty: runtime.unit_branch_metrics_mark(

@@ -49,7 +49,7 @@ where
         )
     )]
     pub(super) async fn intake<M>(
-        host: &mut IngestorHost,
+        host: &mut IngestorLoopHost,
         messages: Vec<M>,
         timeout: Duration,
         mut maintenance: Option<&mut dyn IngestorReadHold>,
@@ -117,7 +117,7 @@ where
     pub(super) async fn settle<C>(
         mut self,
         connector: &mut C,
-        host: &mut IngestorHost,
+        host: &mut IngestorLoopHost,
         settlement: BatchSettlement,
     ) -> BatchDisposition<P>
     where

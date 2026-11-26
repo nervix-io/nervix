@@ -17,10 +17,11 @@ use aws_sdk_sqs::{
 use meticulous::ResultExt as _;
 use nervix_connector::{
     BrokerIngestorConnector as _, DeadlineElapsed, EmitterOpenError, EmitterRecord,
-    EmitterRecordId, EmitterWriteError, IngestorBatch, IngestorBatchRequest,
-    IngestorConnector as _, IngestorError, IngestorReadCancellation, IngestorResume,
+    EmitterRecordId, EmitterWriteError, HostServiceError, IngestorBatch, IngestorBatchRequest,
+    IngestorConnector as _, IngestorError, IngestorHost, IngestorReadCancellation, IngestorResume,
     RecordEmitter as _,
 };
+use nervix_connector_fake::FakeIngestorHost;
 use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_models::{ClientConfigEntry, DeadlineKey, SqsQueueName, Timestamp};
 use nervix_primitives::{
@@ -84,6 +85,12 @@ impl Fixture {
 
     pub(crate) fn dns(&self) -> DnsResolver {
         self.dns.clone()
+    }
+
+    /// The handle of one ingestor on a node whose resolver is this fixture's: the one service an
+    /// SQS ingestor takes from its node, when its plan is composed.
+    pub(crate) fn ingestor_host(&self) -> IngestorHost {
+        FakeIngestorHost::default().with_dns(self.dns()).host()
     }
 
     fn answer(&self, addresses: Vec<IpAddr>) {
@@ -278,10 +285,11 @@ async fn requests_reach_the_answer_that_accepts_signed_for_the_configured_host()
         .await
         .expect("the answer that accepts returns the queue URL");
     assert_eq!(queue_url, format!("http://{SERVICE}/000000000000/{QUEUE}"));
-    let mut ingestor = open_ingestor(&config, fixture.dns()).await;
+    let host = fixture.ingestor_host();
+    let mut ingestor = open_ingestor(&config, &host).await;
     assert_eq!(
         ingestor
-            .resume()
+            .resume(&host)
             .await
             .expect("the ingestor reaches the same answer"),
         IngestorResume::Ready
@@ -562,16 +570,17 @@ async fn a_ca_file_that_cannot_be_read_is_a_configuration_failure() {
     );
 }
 
-/// An ingestor instance of the client `config` declares, polling the queue every check looks up.
+/// An ingestor instance of the client `config` declares, composed and opened with `host`, polling
+/// the queue every check looks up.
 pub(crate) async fn open_ingestor(
     config: &[ClientConfigEntry],
-    dns: DnsResolver,
+    host: &IngestorHost,
 ) -> SqsQueueIngestor {
     let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
-    let plan = SqsQueueIngestorPlan::new(config, queue, dns)
+    let plan = SqsQueueIngestorPlan::new(config, queue, host)
         .await
         .expect("the ingestor client configuration is valid");
-    SqsQueueIngestor::open(&plan, 0)
+    SqsQueueIngestor::open(&plan, host, 0)
         .await
         .expect("opening an ingestor sends no request")
 }
@@ -597,24 +606,22 @@ async fn an_ingestor_looks_its_queue_up_once_when_it_first_resumes() {
     fixture.answer(vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
     let service = stand_in(listener, 1, QueueAnswer::Url);
 
-    let mut ingestor = open_ingestor(
-        &client_config(&format!("http://{SERVICE}:{port}")),
-        fixture.dns(),
-    )
-    .await;
+    let host = fixture.ingestor_host();
+    let mut ingestor =
+        open_ingestor(&client_config(&format!("http://{SERVICE}:{port}")), &host).await;
 
     // Opening built the client alone: it neither resolved the service's name nor polled.
     assert_eq!(fixture.authority.questions_for(SERVICE), 0);
     assert!(ingestor.needs_resume());
     let batch = ingestor
-        .next_batch(batch_request(), &IngestorReadCancellation::new())
+        .next_batch(&host, batch_request(), &IngestorReadCancellation::new())
         .await
         .expect("an ingestor without its queue's URL asks to resume");
     assert!(matches!(batch, IngestorBatch::ResumeRequired));
 
     assert_eq!(
         ingestor
-            .resume()
+            .resume(&host)
             .await
             .expect("the stand-in returns the queue URL"),
         IngestorResume::Ready
@@ -632,7 +639,7 @@ async fn an_ingestor_looks_its_queue_up_once_when_it_first_resumes() {
     // The stand-in no longer listens, so only an ingestor that kept the URL is ready again.
     assert_eq!(
         ingestor
-            .resume()
+            .resume(&host)
             .await
             .expect("an ingestor that has its queue's URL sends no request"),
         IngestorResume::Ready
@@ -644,14 +651,12 @@ async fn an_ingestor_that_cannot_reach_the_service_opens_and_fails_its_resume() 
     let fixture = Fixture::start().await;
     let endpoint = RefusedEndpoint::reserve();
     let port = endpoint.port();
-    let mut ingestor = open_ingestor(
-        &client_config(&format!("http://127.0.0.1:{port}")),
-        fixture.dns(),
-    )
-    .await;
+    let host = fixture.ingestor_host();
+    let mut ingestor =
+        open_ingestor(&client_config(&format!("http://127.0.0.1:{port}")), &host).await;
 
     let report = ingestor
-        .resume()
+        .resume(&host)
         .await
         .expect_err("a refused connection cannot return the queue URL");
 
@@ -687,14 +692,12 @@ async fn a_queue_the_service_does_not_have_fails_the_resume_with_its_name() {
             .expect("a bound listener has an address")
             .port();
         let service = stand_in(listener, 1, answer);
-        let mut ingestor = open_ingestor(
-            &client_config(&format!("http://127.0.0.1:{port}")),
-            fixture.dns(),
-        )
-        .await;
+        let host = fixture.ingestor_host();
+        let mut ingestor =
+            open_ingestor(&client_config(&format!("http://127.0.0.1:{port}")), &host).await;
 
         let report = ingestor
-            .resume()
+            .resume(&host)
             .await
             .expect_err("the service does not have the queue");
 
@@ -774,13 +777,14 @@ async fn a_ca_file_smithy_cannot_trust_fails_the_client_configuration_of_both_di
         assert_untrusted_ca_file(&report, case);
 
         let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
-        let plan = SqsQueueIngestorPlan::new(&config, queue, fixture.dns()).await;
+        let host = fixture.ingestor_host();
+        let plan = SqsQueueIngestorPlan::new(&config, queue, &host).await;
         let report = match plan {
             Ok(plan) => {
-                let mut ingestor = SqsQueueIngestor::open(&plan, 0)
+                let mut ingestor = SqsQueueIngestor::open(&plan, &host, 0)
                     .await
                     .expect("opening an ingestor sends no request");
-                let resume = ingestor.resume().await;
+                let resume = ingestor.resume(&host).await;
                 panic!(
                     "a CA file with {case} configured an ingestor, whose resume gave {resume:?}"
                 );
@@ -861,8 +865,9 @@ async fn a_queue_lookup_the_service_never_answers_ends_within_timeout_ms_after_o
         value: budget.as_millis().to_string(),
     });
 
-    let mut ingestor = open_ingestor(&config, fixture.dns()).await;
-    let resumed = nervix_primitives::time::timeout(GENEROUS_BUDGET, ingestor.resume())
+    let host = fixture.ingestor_host();
+    let mut ingestor = open_ingestor(&config, &host).await;
+    let resumed = nervix_primitives::time::timeout(GENEROUS_BUDGET, ingestor.resume(&host))
         .await
         .expect("a lookup the service never answers ends within the client's timeout_ms");
     let report = resumed.expect_err("a service that never answers returns no queue URL");
@@ -938,9 +943,10 @@ async fn a_session_token_is_sent_with_the_requests_of_both_directions() {
     SqsQueueEmitter::queue_url(&client, QUEUE)
         .await
         .expect("the stand-in returns the queue URL");
-    let mut ingestor = open_ingestor(&config, fixture.dns()).await;
+    let host = fixture.ingestor_host();
+    let mut ingestor = open_ingestor(&config, &host).await;
     ingestor
-        .resume()
+        .resume(&host)
         .await
         .expect("the stand-in returns the queue URL to the ingestor too");
 
@@ -977,7 +983,7 @@ async fn a_client_must_name_its_region_and_credentials_in_both_directions() {
             "{missing}"
         );
         let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
-        let plan = SqsQueueIngestorPlan::new(&config, queue, fixture.dns()).await;
+        let plan = SqsQueueIngestorPlan::new(&config, queue, &fixture.ingestor_host()).await;
         let Err(report) = plan else {
             panic!("an ingestor client without {missing} was configured");
         };
@@ -1015,9 +1021,38 @@ async fn a_ca_file_holding_a_certificate_configures_both_directions() {
         .await
         .expect("an emitter trusting a CA certificate is configured");
     let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
-    SqsQueueIngestorPlan::new(&config, queue, fixture.dns())
+    SqsQueueIngestorPlan::new(&config, queue, &fixture.ingestor_host())
         .await
         .expect("an ingestor trusting a CA certificate is configured");
+}
+
+#[nervix_primitives::test]
+async fn a_plan_composed_on_a_node_without_its_resolver_names_the_resolver() {
+    let cases = [
+        (client_config("http://127.0.0.1:9324"), "a valid client"),
+        // Entries that name no endpoint are a configuration failure of their own: the node's
+        // missing resolver is reported before anything the configuration says.
+        (Vec::new(), "a client that names no endpoint"),
+    ];
+    for (config, case) in cases {
+        let queue = SqsQueueName::try_from(QUEUE).expect("a fixed queue name is valid");
+        let plan =
+            SqsQueueIngestorPlan::new(&config, queue, &FakeIngestorHost::default().host()).await;
+        let Err(report) = plan else {
+            panic!("{case} was composed into a plan on a node without its resolver");
+        };
+
+        assert_eq!(
+            report.current_context(),
+            &SqsQueueIngestorError::NodeResolverUnavailable,
+            "{case}"
+        );
+        assert_eq!(
+            report.downcast_ref::<HostServiceError>(),
+            Some(&HostServiceError::DnsNotInstalled),
+            "{case}"
+        );
+    }
 }
 
 #[nervix_primitives::test]

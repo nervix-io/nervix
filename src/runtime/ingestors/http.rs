@@ -21,6 +21,7 @@ use super::{
     super::*,
     IngestorConnectorStartError, IngestorStartError,
     connector::{IngestorStart, PacedIngestorStart},
+    connector_host::IngestorEntityServices,
 };
 
 const _: () = assert!(matches!(
@@ -44,21 +45,22 @@ impl HttpRequestIngestorStartPlan {
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let Some(dns) = runtime.dns() else {
+        // The connector takes the resolver from its handle when it opens; a node without one
+        // refuses the start here, before anything of the connector runs.
+        if runtime.dns().is_none() {
             return Err(
                 ingestor.connector_start_failure(IngestorConnectorStartError::NodeDnsUnavailable)
             );
-        };
+        }
         PacedIngestorStart {
             connector: HttpRequestIngestorPlan {
-                tls_policy: runtime.outward_tls().clone(),
                 config: resolved.entries,
-                dns: dns.clone(),
                 method,
                 headers,
                 header_limits: runtime.cluster_parameters().http_header_limits(),
                 max_body_size,
             },
+            host: runtime.ingestor_connector_host(ingestor, IngestorEntityServices::default()),
             every,
             cadence_start: DomainCadenceStart::Immediate,
             // A poll answers at most one message, its response body.

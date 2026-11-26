@@ -15,7 +15,9 @@
 //!   emitter host hands a connector, and the TLS, HTTP client, URL and template libraries a client
 //!   configuration is built with.
 //! - **Must not know.** Relays, branches, schedules, Models, the registry or the runtime. A
-//!   connector receives a typed plan and host handles, and reaches nothing past them. It never
+//!   connector receives a typed plan and one host handle, and reaches nothing past them. Its
+//!   plan carries configuration only: the node's resolver, executor, outward TLS policy, pooled
+//!   clients and recorders reach it through the handle, as the services it declares. It never
 //!   resolves a resource mount: the host resolves one and hands in the resolved paths.
 //!
 //! Every external integration belongs in its own crate under `crates/connectors/`, which implements
@@ -46,6 +48,8 @@ mod client_config;
 mod client_deadline;
 mod confirmation_window;
 mod connector_events;
+mod domain_offsets;
+mod host_service;
 mod http_client;
 mod ingest_metadata;
 // Reached through its own path rather than re-exported here, so the owner the clock-boundary check
@@ -54,6 +58,7 @@ mod emitter;
 mod emitter_observation;
 mod ingestor;
 pub mod physical_time;
+mod pooled_client;
 mod row_requests;
 mod service_url;
 mod tls;
@@ -71,21 +76,27 @@ pub use confirmation_window::{
 pub use connector_events::{
     ConnectorEventCounter, ConnectorEventProvider, UndeclaredConnectorEvent,
 };
+pub use domain_offsets::{
+    DomainOffsetError, DomainOffsetInitialization, DomainOffsetPosition, DomainOffsetResult,
+    DomainOffsetServices, DomainOffsetStart, DomainOffsets,
+};
 pub use emitter::{
     AckConfirmation, BrokerPublishingMode, EmitterBoundedExecution, EmitterCommitReport,
     EmitterConnector, EmitterEventReporter, EmitterFinish, EmitterFinishError, EmitterFinishResult,
     EmitterGeneralErrorHandler, EmitterHost, EmitterHostServices, EmitterHttpRequest,
     EmitterLifecycle, EmitterLifecycleError, EmitterLifecycleResult, EmitterLifecycleStep,
-    EmitterOpenError, EmitterReadiness, EmitterRecord, EmitterRecordAcknowledgementServices,
-    EmitterRecordAcknowledgements, EmitterRecordId, EmitterRecordPosition, EmitterResume,
-    EmitterRetryDelay, EmitterRowRequest, EmitterStagedCommit, EmitterStagingDirectory,
-    EmitterStartResult, EmitterTransientErrorStatus, EmitterWriteError, EmitterWriteResult,
-    HttpRequestEmitter, MappedEmitterCarrier, MappedEmitterMember, MappedEmitterRows,
-    PerRecordOutcome, PerRecordOutcomeParts, PreparedRowRequest, PropertyValue, RecordDestination,
-    RecordEmitter, RecordEnvelope, RecordKey, RecordProperty, RejectedEmitterMember, RowEmitter,
+    EmitterNameResolution, EmitterOpenError, EmitterOutwardTls, EmitterReadiness, EmitterRecord,
+    EmitterRecordAcknowledgementServices, EmitterRecordAcknowledgements, EmitterRecordId,
+    EmitterRecordPosition, EmitterResume, EmitterRetryDelay, EmitterRowRequest,
+    EmitterStagedCommit, EmitterStagingDirectory, EmitterStartResult, EmitterTaskEnd,
+    EmitterTransientErrorStatus, EmitterWriteError, EmitterWriteResult, HttpRequestEmitter,
+    MappedEmitterCarrier, MappedEmitterMember, MappedEmitterRows, PerRecordOutcome,
+    PerRecordOutcomeParts, PreparedRowRequest, PropertyValue, RecordDestination, RecordEmitter,
+    RecordEnvelope, RecordKey, RecordProperty, RejectedEmitterMember, RowEmitter,
     RowRequestEmitter, RowRequestPreparation, TypedRecordHeader,
 };
 pub use emitter_observation::{EmitterPayloadMeasurement, EmitterPayloadObserver};
+pub use host_service::HostServiceError;
 pub use http_client::{DeclaredProxy, HttpClientConfig, HttpClientConfigError};
 pub use ingest_metadata::{
     IngestMessageHeaders, IngestMessageMetadata, IngestMetadataFailure, IngestMetadataRow,
@@ -97,13 +108,17 @@ pub use ingestor::{
     IngestorAcknowledgementSupport, IngestorBatch, IngestorBatchAcknowledgement,
     IngestorBatchAcknowledgementServices, IngestorBatchRequest, IngestorCapabilities,
     IngestorConnector, IngestorError, IngestorHost, IngestorHostServices, IngestorIntakeError,
-    IngestorIntakeMessage, IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll,
-    IngestorPollMessage, IngestorReadAheadOverflow, IngestorReadBudget, IngestorReadCancellation,
-    IngestorReadHold, IngestorReadOutcome, IngestorResult, IngestorResume, IngestorResumeOutcome,
-    IngestorSettlement, IngestorSettlementOperation, IngestorSettlementOutcome,
-    IngestorSuspendCause, PacedIngestorConnector,
+    IngestorIntakeMessage, IngestorIntakeResult, IngestorLoopHost, IngestorLoopServices,
+    IngestorMessage, IngestorPlan, IngestorPoll, IngestorPollMessage, IngestorReadAheadOverflow,
+    IngestorReadBudget, IngestorReadCancellation, IngestorReadHold, IngestorReadOutcome,
+    IngestorResult, IngestorResume, IngestorResumeOutcome, IngestorSettlement,
+    IngestorSettlementOperation, IngestorSettlementOutcome, IngestorSuspendCause,
+    PacedIngestorConnector,
 };
 pub use nervix_tls::OutwardTlsPolicy;
+pub use pooled_client::{
+    PooledClient, PooledClientHost, PooledClientLease, PooledClientWait, PooledClientWaits,
+};
 pub use row_requests::{
     ExceededLimit, MeasuredRequest, RowOversize, RowRequest, RowRequestLimits, RowRequests,
 };

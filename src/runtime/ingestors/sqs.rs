@@ -22,6 +22,7 @@ use super::{
     super::*,
     IngestorConnectorStartError, IngestorStartError,
     connector::{BrokerIngestorStart, IngestorStart},
+    connector_host::IngestorEntityServices,
 };
 
 const _: () = assert!(matches!(
@@ -44,18 +45,22 @@ impl SqsQueueIngestorStartPlan {
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let Some(dns) = runtime.dns() else {
+        // The plan's constructor takes the resolver from the handle; a node without one refuses
+        // the start here, before anything of the connector runs.
+        if runtime.dns().is_none() {
             return Err(
                 ingestor.connector_start_failure(IngestorConnectorStartError::NodeDnsUnavailable)
             );
-        };
+        }
+        let host = runtime.ingestor_connector_host(ingestor, IngestorEntityServices::default());
         // The plan builds its client without a request; each instance looks the queue up when it
         // resumes, so an unreachable service is a transient ingestor failure, not a failed start.
-        let connector = SqsQueueIngestorPlan::new(&resolved.entries, queue, dns.clone())
+        let connector = SqsQueueIngestorPlan::new(&resolved.entries, queue, host.handle())
             .await
             .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerIngestorStart {
             connector,
+            host,
             instances,
             acknowledgement: mode.acknowledgement(),
             buffered_intake: false,

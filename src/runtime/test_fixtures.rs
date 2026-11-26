@@ -1472,6 +1472,7 @@ pub(super) fn emitter_context() -> EmitterConnectorContext {
             nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic),
         ),
         remote_ack_timing: runtime.remote_ack_timing().clone(),
+        task_end: nervix_primitives::sync::CancellationToken::new(),
         runtime,
         clock: test_domain_clock(&domain),
         domain,

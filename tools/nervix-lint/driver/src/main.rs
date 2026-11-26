@@ -121,7 +121,7 @@ struct AcquisitionPass {
     report: Arc<Mutex<CompilerReport>>,
 }
 
-impl_lint_pass!(AcquisitionPass => [SYNC_ACQUISITION, LIFECYCLE_CALL, UNKNOWN_EFFECT, INVALID_CONTRACT, errors::BARE_ERROR_SIGNATURE, errors::DISCARDED_OUTCOME, errors::BARE_PANIC, errors::REPLACED_ERROR, errors::PARTIAL_REPORT_FIELD, architecture::MODEL_IN_DATA_PLANE, architecture::PARSER_DEPENDENCY, architecture::CLUSTER_AWAIT, architecture::NODE_IDENTITY, architecture::INSTALLED_STATE, architecture::STATE_CONTRACT, api::CLAMPED_ARITHMETIC, api::COMBINATOR_CONTROL_FLOW, branches::BRANCH_INVERSION, tunables::HIDDEN_TUNABLE]);
+impl_lint_pass!(AcquisitionPass => [SYNC_ACQUISITION, LIFECYCLE_CALL, UNKNOWN_EFFECT, INVALID_CONTRACT, errors::BARE_ERROR_SIGNATURE, errors::DISCARDED_OUTCOME, errors::BARE_PANIC, errors::REPLACED_ERROR, errors::PARTIAL_REPORT_FIELD, architecture::MODEL_IN_DATA_PLANE, architecture::PARSER_DEPENDENCY, architecture::CLUSTER_AWAIT, architecture::NODE_IDENTITY, architecture::INSTALLED_STATE, architecture::STATE_CONTRACT, architecture::UNDECLARED_HOST_SERVICE, api::CLAMPED_ARITHMETIC, api::COMBINATOR_CONTROL_FLOW, branches::BRANCH_INVERSION, tunables::HIDDEN_TUNABLE]);
 
 /// Why a span has no authored source location.
 enum Exclusion {
@@ -540,6 +540,7 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
         );
         if self.authored(cx, item.span) {
             self.tunables.impl_item(cx, item, &mut self.flow);
+            self.architecture.handle_method(cx, item, &mut self.flow);
         }
     }
     fn check_trait_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx rustc_hir::TraitItem<'tcx>) {
@@ -861,6 +862,7 @@ impl Callbacks for Analysis {
                 architecture::NODE_IDENTITY,
                 architecture::INSTALLED_STATE,
                 architecture::STATE_CONTRACT,
+                architecture::UNDECLARED_HOST_SERVICE,
                 api::CLAMPED_ARITHMETIC,
                 api::COMBINATOR_CONTROL_FLOW,
                 branches::BRANCH_INVERSION,
@@ -1011,6 +1013,7 @@ fn main() -> anyhow::Result<()> {
                 "-Wnervix::node_identity",
                 "-Wnervix::installed_state",
                 "-Wnervix::state_contract",
+                "-Wnervix::undeclared_host_service",
                 "-Wnervix::clamped_arithmetic",
                 "-Wnervix::combinator_control_flow",
                 "-Wnervix::branch_inversion",

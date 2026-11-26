@@ -521,7 +521,7 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         snapshot: PersistedRuntimeStateEntry,
         generation: u64,
-    ) -> error_stack::Result<Vec<KafkaOffsetPosition>, StateReplicationError> {
+    ) -> error_stack::Result<Vec<DomainOffsetPosition>, StateReplicationError> {
         let length =
             u64::try_from(snapshot.payload.len()).assured("a native payload length fits u64");
         let failure = || StateReplicationError::Capture {
@@ -739,7 +739,7 @@ impl Runtime {
         &self,
         state: &KafkaOffsetStateOriginator,
         generation: u64,
-        positions: Vec<KafkaOffsetPosition>,
+        positions: Vec<DomainOffsetPosition>,
     ) -> error_stack::Result<(), StateReplicationError> {
         let failure = || StateReplicationError::Capture {
             placement: state.placement().clone(),
@@ -811,7 +811,7 @@ impl Runtime {
         &self,
         state: &KafkaOffsetStateOriginator,
         generation: u64,
-        positions: Vec<KafkaOffsetPosition>,
+        positions: Vec<DomainOffsetPosition>,
     ) -> error_stack::Result<(), StateReplicationError> {
         let freeze = self.kafka_start_freeze(state.placement());
         let _initializing = state
@@ -994,7 +994,7 @@ mod shuttle_checks {
                             originator
                                 .apply_canonical_start(
                                     7,
-                                    vec![KafkaOffsetPosition {
+                                    vec![DomainOffsetPosition {
                                         topic: "events".to_owned(),
                                         partition: 0,
                                         offset: 31,

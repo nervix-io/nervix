@@ -269,6 +269,18 @@ checklists.
   per-record outcomes and decides nothing about the graph. It reads no Model, only the typed plan
   the decision layer converts once, and only the server, the composition root, names every
   connector.
+- An ingestor or emitter reaches its node only through its host handle, `IngestorHost` or
+  `EmitterHost`, which the host hands to `open` and to every ingestor `resume` and read. The resolver, the bounded
+  executor, the outward TLS policy, the pooled client, status, readiness, recorders, the end of
+  the instance and an entity's own services (domain offsets, a compiled signaling protocol) are
+  typed services of the handle. A plan or connector configuration carries configuration only,
+  never a service, and no connector crate defines an interface for the host to implement: a
+  pooled client implements the contract's `PooledClient`, the host opens and leases it, and its
+  emitter takes the lease through `EmitterHost::pool`. A connector declares the services its code
+  reaches in a `nervix::host_services` source contract, and a refused service is a typed
+  `HostServiceError` beneath the step that needed it. [Host handles and declared
+  services](docs/src/connector-contract.md#host-handles-and-declared-services) owns the services
+  and the pooled-client service.
 - Models, plans and runtime composition nest connector, then entity. Every entity, a second one
   included, has its own plan variant and concrete connector type; no mode flag or shared private
   mechanism replaces an entity boundary. The type declares its vocabulary kind
@@ -1408,7 +1420,7 @@ at `tests/`, depends on `httparse`.
 ## Architecture Rules and the Debt Ratchet
 
 [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md) owns the complete
-contract matrix, the nine source-contract annotations, source and compiler scope,
+contract matrix, the eleven source-contract annotations, source and compiler scope,
 report identity and reuse, the analysis toolchain and its upgrade, qualification and its CI
 selection, what each form of evidence establishes, and the workaround audit and its review limits.
 
@@ -1418,8 +1430,9 @@ Real Nervix compiler diagnostics, across the complete declared configuration mat
 consumption, language dependencies, recurring cluster awaits, node identities, installation state,
 synchronization, failure signatures, discarded outcomes, canonical panic APIs, report-bearing
 tracing fields, integer and `Duration` clamped arithmetic, `Option` and `Result` adapter control
-flow, [numeric policy outside declared settings](#node-settings) and [branch collection
-ownership](#a-branch-owns-its-runtime). Finite API recognition is Rust
+flow, [numeric policy outside declared settings](#node-settings), [branch collection
+ownership](#a-branch-owns-its-runtime) and the [host services a connector
+declares](#connector-crates). Finite API recognition is Rust
 code in the rules, and no policy is inferred from filenames,
 sharing traits or method names. Contracts and reviewed exceptions live beside their source owners
 under `cfg_attr(nervix_lint, ...)`, move with their module, and state the actual recurring,
@@ -1434,6 +1447,14 @@ catalog, count allowance or filename exception substitutes for one.
   normalized interface and body types enforce the Model and language boundaries, recurring
   data-plane call edges diagnose awaited cluster access, and language dependency and inactive import
   provenance stay a separate source and manifest check.
+- `nervix::value(host_handle, ...)` marks a handle a host gives the connector it drives, and each
+  public method of one names the service it hands over with `nervix::host_service(<service>, ...)`.
+  `nervix::host_services(<service>, ..., reason = "...")` on a crate, module, type, trait,
+  implementation or function lists the services its code reaches; the narrowest such contract
+  replaces a wider one, and `nervix::undeclared_host_service` refuses a call, qualified call or
+  function reference that reaches a service it does not list, or that no contract covers. Harness
+  code, outside the product layer order, declares none. The finite list of services is Rust code
+  in the rules.
 - `nervix::identity(node, ...)` marks the shared vocabulary identity types and every field,
   parameter, alias or return interface whose value is a node identity; a mixed aggregate is not one
   because one member is typed.

@@ -18,7 +18,7 @@ use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_checkpoint_replication::{CheckpointReplication, ReplicaProgress};
-use nervix_connector_kafka::KafkaOffsetPosition;
+use nervix_connector::DomainOffsetPosition;
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{
     publication::ArcSwap,
@@ -63,7 +63,7 @@ const KAFKA_OFFSET_FORMAT: [u8; 16] = *b"NervixKafkaState";
 
 pub(super) fn encode_start_candidate(
     generation: u64,
-    positions: Vec<KafkaOffsetPosition>,
+    positions: Vec<DomainOffsetPosition>,
 ) -> error_stack::Result<Vec<u8>, RuntimePersistenceError> {
     let offsets = positions
         .into_iter()
@@ -86,7 +86,7 @@ pub(super) fn decode_start_positions(
     payload: &[u8],
     generation: u64,
     cancellation: &nervix_execution::Cancellation,
-) -> error_stack::Result<Vec<KafkaOffsetPosition>, RuntimePersistenceError> {
+) -> error_stack::Result<Vec<DomainOffsetPosition>, RuntimePersistenceError> {
     let snapshot = access_offset_snapshot(payload)?;
     let observed = snapshot
         .applied_start_generation
@@ -104,7 +104,7 @@ pub(super) fn decode_start_positions(
         cancellation
             .check()
             .change_context(RuntimePersistenceError::Cancelled)?;
-        positions.push(KafkaOffsetPosition {
+        positions.push(DomainOffsetPosition {
             topic: entry.topic.as_str().to_owned(),
             partition: entry.partition.to_native(),
             offset: entry.next_offset.to_native(),
@@ -630,7 +630,7 @@ impl KafkaOffsetStateOriginator {
     pub(super) fn apply_start(
         &self,
         generation: u64,
-        offsets: Vec<KafkaOffsetPosition>,
+        offsets: Vec<DomainOffsetPosition>,
     ) -> error_stack::Result<(u64, Vec<u8>), RuntimeStateOperationError> {
         self.apply_start_for(KafkaStartApplication::Unit, generation, offsets)
     }
@@ -638,7 +638,7 @@ impl KafkaOffsetStateOriginator {
     pub(super) fn apply_canonical_start(
         &self,
         generation: u64,
-        offsets: Vec<KafkaOffsetPosition>,
+        offsets: Vec<DomainOffsetPosition>,
     ) -> error_stack::Result<(u64, Vec<u8>), RuntimeStateOperationError> {
         self.apply_start_for(KafkaStartApplication::Canonical, generation, offsets)
     }
@@ -647,7 +647,7 @@ impl KafkaOffsetStateOriginator {
         &self,
         application: KafkaStartApplication,
         generation: u64,
-        offsets: Vec<KafkaOffsetPosition>,
+        offsets: Vec<DomainOffsetPosition>,
     ) -> error_stack::Result<(u64, Vec<u8>), RuntimeStateOperationError> {
         let state = &self.read.state;
         let encoded = state
@@ -694,7 +694,7 @@ impl KafkaOffsetStateOriginator {
     /// snapshot task does, on its interval.
     pub(super) fn apply_committed_offset(
         &self,
-        position: &KafkaOffsetPosition,
+        position: &DomainOffsetPosition,
     ) -> Result<u64, Report<StateAuthorityError>> {
         let state = &self.read.state;
         let moved =
@@ -814,7 +814,7 @@ impl KafkaOffsetStatePersistence {
 impl KafkaOffsetTable {
     /// A later initialization may have observed additional partitions while resolving the start.
     /// Keep every recorded slot, and install only starts the current table does not yet contain.
-    fn record_unrecorded_starts(&mut self, positions: Vec<KafkaOffsetPosition>) -> bool {
+    fn record_unrecorded_starts(&mut self, positions: Vec<DomainOffsetPosition>) -> bool {
         let mut changed = false;
         for position in positions {
             if self.slot(&position.topic, position.partition).is_none() {
@@ -826,7 +826,7 @@ impl KafkaOffsetTable {
     }
 
     /// A table recording `offsets`, each partition in a slot of its own.
-    fn from_offsets(offsets: Vec<KafkaOffsetPosition>) -> Self {
+    fn from_offsets(offsets: Vec<DomainOffsetPosition>) -> Self {
         let mut table = Self {
             applied_start_generation: None,
             topics: HashMap::default(),
@@ -1318,7 +1318,7 @@ impl KafkaOffsetTable {
         for _ in 0..arbitrary.entropy().count(3) {
             let topic = arbitrary.string();
             for _ in 0..arbitrary.entropy().count(3) {
-                positions.push(KafkaOffsetPosition {
+                positions.push(DomainOffsetPosition {
                     topic: topic.clone(),
                     partition: generated_partition(arbitrary),
                     offset: arbitrary.entropy().any_i64(),
@@ -1546,7 +1546,7 @@ mod tests {
             .originator
             .assured("the primary may commit offsets");
         let revision = originator
-            .apply_committed_offset(&KafkaOffsetPosition {
+            .apply_committed_offset(&DomainOffsetPosition {
                 topic: "events".into(),
                 partition: 0,
                 offset: 9,
@@ -1604,7 +1604,7 @@ mod tests {
         let owner = ClusterNodeName::parse("node-1").assured("the owner name is valid");
         let lost = ClusterNodeName::parse("node-2").assured("the lost replica name is valid");
         let promoted = ClusterNodeName::parse("node-3").assured("the new replica name is valid");
-        let position = |offset| KafkaOffsetPosition {
+        let position = |offset| DomainOffsetPosition {
             topic: "events".into(),
             partition: 0,
             offset,
@@ -1655,7 +1655,7 @@ mod tests {
                 .encode()
                 .assured("current positions encode")
         };
-        let position = |partition, offset| KafkaOffsetPosition {
+        let position = |partition, offset| DomainOffsetPosition {
             topic: "events".into(),
             partition,
             offset,
@@ -1735,12 +1735,12 @@ mod tests {
 
         let topic = format!("events-{}", "x".repeat(240));
         let positions = (0..4096)
-            .map(|partition| KafkaOffsetPosition {
+            .map(|partition| DomainOffsetPosition {
                 topic: topic.clone(),
                 partition,
                 offset: i64::from(partition) + 17,
             })
-            .chain([KafkaOffsetPosition {
+            .chain([DomainOffsetPosition {
                 topic: "other".into(),
                 partition: 7,
                 offset: 99,
@@ -1769,7 +1769,7 @@ mod tests {
         .assured("the owner can originate offsets");
         assert!(originator.read().capture_after(Some(7)).is_none());
         originator
-            .apply_committed_offset(&KafkaOffsetPosition {
+            .apply_committed_offset(&DomainOffsetPosition {
                 topic: topic.clone(),
                 partition: 0,
                 offset: 71,
@@ -1854,7 +1854,7 @@ mod tests {
         let topic = "events";
         let partition = 0;
         let offset = |next_offset| {
-            vec![KafkaOffsetPosition {
+            vec![DomainOffsetPosition {
                 topic: topic.to_string(),
                 partition,
                 offset: next_offset,
@@ -1925,7 +1925,7 @@ mod tests {
             .take()
             .assured("node-2 is assigned as the owner");
         originator
-            .apply_committed_offset(&KafkaOffsetPosition {
+            .apply_committed_offset(&DomainOffsetPosition {
                 topic: topic.to_string(),
                 partition,
                 offset: 9,
@@ -2114,7 +2114,7 @@ mod tests {
                         for partition in 0..partition_count {
                             let partition = i32::try_from(partition)
                                 .assured("there are at most twelve partitions");
-                            canonical.push(KafkaOffsetPosition {
+                            canonical.push(DomainOffsetPosition {
                                 topic: topic.to_owned(),
                                 partition,
                                 offset: 500,
@@ -2203,7 +2203,7 @@ mod tests {
                                     i64::try_from(arbitrary.entropy().boundary_biased(0..=1000))
                                         .assured("the generated position is at most one thousand");
                                 states[unit]
-                                    .apply_committed_offset(&KafkaOffsetPosition {
+                                    .apply_committed_offset(&DomainOffsetPosition {
                                         offset,
                                         ..position.clone()
                                     })
@@ -2304,7 +2304,7 @@ mod tests {
         .originator
         .assured("the local owner originates offsets");
         let starts = || {
-            vec![KafkaOffsetPosition {
+            vec![DomainOffsetPosition {
                 topic: "events".into(),
                 partition: 0,
                 offset: 0,
@@ -2314,7 +2314,7 @@ mod tests {
             .apply_start(3, starts())
             .assured("the first explicit start applies");
         let committed = originator
-            .apply_committed_offset(&KafkaOffsetPosition {
+            .apply_committed_offset(&DomainOffsetPosition {
                 topic: "events".into(),
                 partition: 0,
                 offset: 9,
@@ -2330,7 +2330,7 @@ mod tests {
             assert_eq!(decoded.next_offset("events", 0), Some(9));
         }
         let mut expanded = starts();
-        expanded.push(KafkaOffsetPosition {
+        expanded.push(DomainOffsetPosition {
             topic: "events".into(),
             partition: 1,
             offset: 5,
@@ -2344,7 +2344,7 @@ mod tests {
             .apply_start(4, starts())
             .assured("the next explicit generation resets offsets");
         originator
-            .apply_committed_offset(&KafkaOffsetPosition {
+            .apply_committed_offset(&DomainOffsetPosition {
                 topic: "events".into(),
                 partition: 1,
                 offset: 5,
@@ -2391,7 +2391,7 @@ mod tests {
 
         use super::{
             super::{KafkaOffsetTable, ReplicatedKafkaOffsetState},
-            KafkaOffsetPosition, StateReplicationRoles, offset_placement,
+            DomainOffsetPosition, StateReplicationRoles, offset_placement,
         };
 
         const SNAPSHOT_REVISION: InvariantId =
@@ -2399,8 +2399,8 @@ mod tests {
 
         const TOPIC: &str = "events";
 
-        fn position(offset: i64) -> KafkaOffsetPosition {
-            KafkaOffsetPosition {
+        fn position(offset: i64) -> DomainOffsetPosition {
+            DomainOffsetPosition {
                 topic: TOPIC.to_string(),
                 partition: 0,
                 offset,
@@ -2478,7 +2478,7 @@ mod tests {
                 .assured("the local coordinator originates");
                 let positions = [0, 1, 2]
                     .into_iter()
-                    .map(|partition| KafkaOffsetPosition {
+                    .map(|partition| DomainOffsetPosition {
                         topic: "events".to_owned(),
                         partition,
                         offset: 0,
@@ -2490,7 +2490,7 @@ mod tests {
                 let committing = thread::spawn({
                     let root = root.clone();
                     move || {
-                        root.apply_committed_offset(&KafkaOffsetPosition {
+                        root.apply_committed_offset(&DomainOffsetPosition {
                             topic: "events".to_owned(),
                             partition: 0,
                             offset: 11,
@@ -2528,7 +2528,7 @@ mod tests {
                     move || {
                         let later = positions
                             .into_iter()
-                            .map(|position| KafkaOffsetPosition {
+                            .map(|position| DomainOffsetPosition {
                                 offset: 99,
                                 ..position
                             })
@@ -2601,14 +2601,14 @@ mod tests {
                     instances.push(thread::spawn(move || {
                         let mut starts = [0, 1]
                             .into_iter()
-                            .map(|partition| KafkaOffsetPosition {
+                            .map(|partition| DomainOffsetPosition {
                                 topic: "events".into(),
                                 partition,
                                 offset: 0,
                             })
                             .collect::<Vec<_>>();
                         if partition == 1 {
-                            starts.push(KafkaOffsetPosition {
+                            starts.push(DomainOffsetPosition {
                                 topic: "events".into(),
                                 partition: 2,
                                 offset: 0,
@@ -2618,7 +2618,7 @@ mod tests {
                             .apply_start(7, starts)
                             .assured("the start is assignment-qualified");
                         originator
-                            .apply_committed_offset(&KafkaOffsetPosition {
+                            .apply_committed_offset(&DomainOffsetPosition {
                                 topic: "events".into(),
                                 partition,
                                 offset: i64::from(partition) + 1,
@@ -2664,7 +2664,7 @@ mod tests {
             // A partition's first commit records the partition itself; the commit after it only
             // moves that partition's offset.
             originator
-                .apply_committed_offset(&KafkaOffsetPosition {
+                .apply_committed_offset(&DomainOffsetPosition {
                     topic: "events".to_string(),
                     partition: 0,
                     offset: 1,
@@ -2692,7 +2692,7 @@ mod tests {
 
             // The barrier stays held until the commit and its quorum wait return, so either one
             // waiting for it would leave every thread blocked, which Shuttle reports as a deadlock.
-            let committed = originator.apply_committed_offset(&KafkaOffsetPosition {
+            let committed = originator.apply_committed_offset(&DomainOffsetPosition {
                 topic: "events".to_string(),
                 partition: 0,
                 offset: 2,
@@ -2758,7 +2758,7 @@ mod tests {
                     .take()
                     .assured("node-1 is assigned as the owner");
                 let lsm = originator
-                    .apply_committed_offset(&KafkaOffsetPosition {
+                    .apply_committed_offset(&DomainOffsetPosition {
                         topic: "events".to_string(),
                         partition: 0,
                         offset: 1,

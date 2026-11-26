@@ -38,7 +38,6 @@ impl EmitterConnectorStarter {
             RabbitMqQueueEmitter::open(
                 RabbitMqQueueEmitterConfig {
                     config: connector.client.config.entries.clone(),
-                    dns: context.dns()?,
                     queue: connector.queue.clone(),
                     mode: connector.mode,
                 },
@@ -63,7 +62,6 @@ impl EmitterConnectorStarter {
             RabbitMqExchangeEmitter::open(
                 RabbitMqExchangeEmitterConfig {
                     config: connector.client.config.entries.clone(),
-                    dns: context.dns()?,
                     exchange: connector.exchange.clone(),
                     mode: connector.mode,
                 },

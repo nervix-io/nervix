@@ -7,16 +7,17 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use meticulous::ResultExt as _;
-use nervix_connector_kafka::{KafkaOffsetPosition, earliest_message_offsets, latest_positions};
+use nervix_connector::DomainOffsetPosition;
+use nervix_connector_kafka::{earliest_message_offsets, latest_positions};
 
 /// The positions each measurement folds, as one acknowledgement batch carries them.
 const POSITIONS: usize = 1_024;
 
 /// `POSITIONS` positions over two topics and `partitions` partitions, with increasing offsets.
-fn positions(partitions: usize) -> Vec<KafkaOffsetPosition> {
+fn positions(partitions: usize) -> Vec<DomainOffsetPosition> {
     let mut positions = Vec::with_capacity(POSITIONS);
     for index in 0..POSITIONS {
-        positions.push(KafkaOffsetPosition {
+        positions.push(DomainOffsetPosition {
             topic: format!("topic-{}", index % 2),
             partition: i32::try_from(index % partitions)
                 .assured("the benchmark uses at most 1,024 partitions"),

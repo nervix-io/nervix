@@ -4,11 +4,13 @@
 //!
 //! - **Owns.** The typed ingestor plan, broker and paced-polling connector traits, ingestor messages,
 //!   acknowledgement policies, lifecycle operations, typed ingestor failures, the cancellation
-//!   through which the host ends a broker read in flight, the opaque host handle through which
-//!   an ingestor delivers messages and reports lifecycle state, and the retained report through
-//!   which an ingestor's connection records the payloads its read-ahead had no room for.
+//!   through which the host ends a broker read in flight, the host handle through which an
+//!   ingestor connector reaches the services of its node, the opaque loop host through which the
+//!   host's own loop delivers messages and reports lifecycle state, and the retained report
+//!   through which an ingestor's connection records the payloads its read-ahead had no room for.
 //! - **Depends on.** Typed ingest metadata, the vocabulary's positions and timestamps,
-//!   `error-stack`, and the primitive boundary's monotonic clock, cancellation token and shared
+//!   `error-stack`, the node's resolver, bounded executor and outward TLS policy a host hands
+//!   over, and the primitive boundary's monotonic clock, cancellation token and shared
 //!   ownership.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, ACK-tree
 //!   implementations, metrics implementations, or any connector driver.
@@ -22,6 +24,7 @@
 )]
 
 use std::{
+    any::Any,
     fmt::Debug,
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
@@ -30,16 +33,19 @@ use std::{
 
 use async_trait::async_trait;
 use error_stack::Report;
+use nervix_dns::DnsResolver;
+use nervix_execution::Executor;
 use nervix_models::{PositionClass, Timestamp};
 use nervix_primitives::{
-    sync::{CancellationToken, StdArc},
+    sync::{Arc, CancellationToken, StdArc},
     time::Instant,
 };
+use nervix_tls::OutwardTlsPolicy;
 use thiserror::Error;
 
 use crate::{
-    IngestMessageHeaders, IngestMetadataRow, ParsedRetryPolicy, RetainedIngestHeaders,
-    RetainedIngestMetadata,
+    DomainOffsets, HostServiceError, IngestMessageHeaders, IngestMetadataRow, ParsedRetryPolicy,
+    RetainedIngestHeaders, RetainedIngestMetadata,
 };
 
 /// The acknowledgement behavior an ingestor transport supports for the selected plan.
@@ -305,7 +311,12 @@ pub trait IngestorConnector: Send + Sized + 'static {
             reason = "the host installs one driver before admitting ingestor work"
         )
     )]
-    async fn open(plan: &Self::Plan, instance_index: u64) -> IngestorResult<Self>;
+    /// Opens the instance `instance_index` of `plan`, reaching its node only through `host`.
+    async fn open(
+        plan: &Self::Plan,
+        host: &IngestorHost,
+        instance_index: u64,
+    ) -> IngestorResult<Self>;
 
     fn needs_resume(&mut self) -> bool {
         false
@@ -315,7 +326,8 @@ pub trait IngestorConnector: Send + Sized + 'static {
         Ok(())
     }
 
-    async fn resume(&mut self) -> IngestorResult<IngestorResume> {
+    /// Acquires or repairs the transport, with the same `host` the instance was opened with.
+    async fn resume(&mut self, _host: &IngestorHost) -> IngestorResult<IngestorResume> {
         Ok(IngestorResume::Ready)
     }
 
@@ -392,8 +404,11 @@ pub trait BrokerIngestorConnector: IngestorConnector {
     /// A ingestor that gathers several messages observes the cancellation between its transport
     /// reads, and a read it cannot interrupt without losing what that read returns completes
     /// within its own bounded wait first.
+    ///
+    /// `host` is the handle the instance was opened with, handed to every read.
     async fn next_batch(
         &mut self,
+        host: &IngestorHost,
         request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>>;
@@ -447,7 +462,12 @@ pub struct IngestorPoll {
     )
 )]
 pub trait PacedIngestorConnector: IngestorConnector {
-    async fn poll(&mut self, scheduled_at: Timestamp) -> IngestorResult<IngestorPoll>;
+    /// Performs the poll due at `scheduled_at`, with the `host` the instance was opened with.
+    async fn poll(
+        &mut self,
+        host: &IngestorHost,
+        scheduled_at: Timestamp,
+    ) -> IngestorResult<IngestorPoll>;
 }
 
 /// One borrowed ingestor message crossing into host-owned decoding and dispatch.
@@ -603,7 +623,7 @@ impl IngestorBatchAcknowledgement {
     }
 }
 
-/// Every runtime service exposed through one ingestor host handle.
+/// Every runtime service the host's own loop drives one ingestor instance through.
 #[async_trait]
 #[cfg_attr(
     nervix_lint,
@@ -613,7 +633,17 @@ impl IngestorBatchAcknowledgement {
                   acknowledgements"
     )
 )]
-pub trait IngestorHostServices: crate::ConnectorEventProvider + Send + 'static {
+pub trait IngestorLoopServices: Send + 'static {
+    /// The handle through which this instance's connector reaches its node. The loop takes it
+    /// once when it starts and hands it to every resume and read it drives.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "the loop takes its connector's handle once when it starts"
+        )
+    )]
+    fn connector_host(&self) -> IngestorHost;
     /// Observes one completed broker read or host-interrupted read, without changing its outcome.
     fn record_read(&self, outcome: IngestorReadOutcome);
     /// Counts raw transport payloads before decoding or graph admission, never internal replay.
@@ -679,8 +709,8 @@ pub trait IngestorHostServices: crate::ConnectorEventProvider + Send + 'static {
 }
 
 /// Task-local host services an ingestor loop drives without exposing a runtime type.
-pub struct IngestorHost {
-    services: Box<dyn IngestorHostServices>,
+pub struct IngestorLoopHost {
+    services: Box<dyn IngestorLoopServices>,
 }
 
 /// The bounded observation of one transport read or scheduled poll.
@@ -693,17 +723,18 @@ pub enum IngestorReadOutcome {
     Interrupted,
 }
 
-impl IngestorHost {
-    /// Resolves one declared observation at connector construction.
+impl IngestorLoopHost {
+    /// The handle through which this instance's connector reaches its node, which the loop takes
+    /// once when it starts.
     #[cfg_attr(
         nervix_lint,
-        nervix::context(lifecycle, reason = "resolves a declared event once before intake")
+        nervix::context(
+            lifecycle,
+            reason = "the loop takes its connector's handle once when it starts"
+        )
     )]
-    pub fn event_counter(
-        &self,
-        event: nervix_models::ConnectorEvent,
-    ) -> error_stack::Result<crate::ConnectorEventCounter, crate::UndeclaredConnectorEvent> {
-        self.services.event_counter(event)
+    pub fn connector_host(&self) -> IngestorHost {
+        self.services.connector_host()
     }
 
     pub fn record_read(&self, outcome: IngestorReadOutcome) {
@@ -713,7 +744,7 @@ impl IngestorHost {
     pub fn record_read_payloads(&self, payloads: usize, bytes: u64) {
         self.services.record_read_payloads(payloads, bytes);
     }
-    pub fn new(services: impl IngestorHostServices) -> Self {
+    pub fn new(services: impl IngestorLoopServices) -> Self {
         Self {
             services: Box::new(services),
         }
@@ -834,12 +865,244 @@ impl IngestorHost {
     }
 }
 
+/// Every service a host hands one ingestor connector instance through its [`IngestorHost`].
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "a connector calls its retained host services from its reads, resumes and \
+                  background transport tasks"
+    )
+)]
+pub trait IngestorHostServices: crate::ConnectorEventProvider + Send + Sync + 'static {
+    /// Publishes `reason` as the instance's transient status and when the connector tries again.
+    fn record_transient_error(&self, reason: String, retry_after: Duration);
+    /// Withdraws the instance's transient status.
+    fn clear_transient_error(&self);
+    /// Reports `message` as an error event of the ingestor.
+    fn report_error(&self, message: String);
+    /// The node's bounded executor.
+    fn executor(&self) -> Executor;
+    /// The node's resolver, or `None` on a node that runs without one.
+    fn dns(&self) -> Option<DnsResolver>;
+    /// The node's committed outward TLS policy.
+    fn tls_policy(&self) -> OutwardTlsPolicy;
+    /// The end of the host task that drives this exact instance.
+    fn cancellation(&self) -> CancellationToken;
+    /// The record of payloads this unit's connections drop for lack of read-ahead room.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a connector resolves its unit's overflow recorder once when it opens and \
+                      records through the one it kept"
+        )
+    )]
+    fn read_ahead_overflow(&self) -> IngestorReadAheadOverflow;
+    /// The domain-owned offsets of this ingestor, for an entity that keeps its positions there.
+    fn domain_offsets(&self) -> Option<DomainOffsets>;
+    /// The signaling protocol the host compiled for this ingestor, for an entity that names one,
+    /// as the shared value its connector reads.
+    fn signaling_protocol(&self) -> Option<&(dyn Any + Send + Sync)>;
+}
+
+struct IngestorHostInner {
+    services: Box<dyn IngestorHostServices>,
+}
+
+/// The services a host hands one ingestor connector instance, without exposing a runtime type.
+///
+/// The host builds the handle for the exact unit before it opens the connector and hands it to
+/// `open`, `resume` and every read, so a connector takes what it needs where it needs it and may
+/// keep what it took for as long as its instance lives. The handle is the only way a connector
+/// reaches its node: its plan carries configuration and no service. Every method hands over one
+/// named service, and the code that calls it declares that service in a `nervix::host_services`
+/// contract.
+#[derive(Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::value(
+        host_handle,
+        reason = "the handle an ingestor host gives the connector it drives"
+    )
+)]
+pub struct IngestorHost {
+    inner: Arc<IngestorHostInner>,
+}
+
+impl IngestorHost {
+    pub fn new(services: impl IngestorHostServices) -> Self {
+        Self {
+            inner: Arc::new(IngestorHostInner {
+                services: Box::new(services),
+            }),
+        }
+    }
+
+    /// Resolves one declared observation at connector construction.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(lifecycle, reason = "resolves a declared event once before intake")
+    )]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(
+            metrics,
+            reason = "hands over the recorder of one event the ingestor's entity declares"
+        )
+    )]
+    pub fn event_counter(
+        &self,
+        event: nervix_models::ConnectorEvent,
+    ) -> error_stack::Result<crate::ConnectorEventCounter, crate::UndeclaredConnectorEvent> {
+        self.inner.services.event_counter(event)
+    }
+
+    /// The record of payloads this unit's connections drop because their bounded read-ahead had no
+    /// room. A task that polls its transport apart from the host's loop keeps it and records every
+    /// drop at once.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a connector takes its unit's overflow recorder once when it opens"
+        )
+    )]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(
+            metrics,
+            reason = "hands over the recorder of payloads dropped for lack of read-ahead room"
+        )
+    )]
+    pub fn read_ahead_overflow(&self) -> IngestorReadAheadOverflow {
+        self.inner.services.read_ahead_overflow()
+    }
+
+    /// Publishes `reason` as this instance's transient status, and that the connector tries again
+    /// after `retry_after`.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(status, reason = "publishes the instance's transient status")
+    )]
+    pub fn record_transient_error(&self, reason: String, retry_after: Duration) {
+        self.inner
+            .services
+            .record_transient_error(reason, retry_after);
+    }
+
+    /// Withdraws this instance's transient status.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(status, reason = "withdraws the instance's transient status")
+    )]
+    pub fn clear_transient_error(&self) {
+        self.inner.services.clear_transient_error();
+    }
+
+    /// Reports `message` as an error event of the ingestor.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(status, reason = "reports an error event of the ingestor")
+    )]
+    pub fn report_error(&self, message: String) {
+        self.inner.services.report_error(message);
+    }
+
+    /// The node's bounded executor, through which a connector admits the synchronous work it does
+    /// itself. A connector keeps the handle it is given for as long as it runs work through it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(executor, reason = "hands over the node's bounded executor")
+    )]
+    pub fn executor(&self) -> Executor {
+        self.inner.services.executor()
+    }
+
+    /// The node's resolver, through which a connector dials every host it names.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(dns, reason = "hands over the node's resolver")
+    )]
+    pub fn dns(&self) -> Result<DnsResolver, Report<HostServiceError>> {
+        match self.inner.services.dns() {
+            Some(dns) => Ok(dns),
+            None => Err(Report::new(HostServiceError::DnsNotInstalled)),
+        }
+    }
+
+    /// The node's committed outward TLS policy, which every TLS client a connector builds captures
+    /// for its handshakes.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(
+            tls_policy,
+            reason = "hands over the node's committed outward TLS policy"
+        )
+    )]
+    pub fn tls_policy(&self) -> OutwardTlsPolicy {
+        self.inner.services.tls_policy()
+    }
+
+    /// A token cancelled once the host task that drives this exact instance has ended, so work a
+    /// connector started beside its reads can end with it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(
+            cancellation,
+            reason = "hands over the end of the host task that drives the instance"
+        )
+    )]
+    pub fn cancellation(&self) -> CancellationToken {
+        self.inner.services.cancellation()
+    }
+
+    /// The domain-owned offsets of this ingestor, which an entity that keeps its positions in its
+    /// domain reads, replaces and commits through.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(
+            domain_offsets,
+            reason = "hands over the domain-owned offsets the host keeps for the ingestor"
+        )
+    )]
+    pub fn domain_offsets(&self) -> Result<DomainOffsets, Report<HostServiceError>> {
+        match self.inner.services.domain_offsets() {
+            Some(offsets) => Ok(offsets),
+            None => Err(Report::new(HostServiceError::DomainOffsetsNotKept)),
+        }
+    }
+
+    /// The signaling protocol the host compiled for this ingestor, as the shared value `P` its
+    /// connector reads, or `None` for an ingestor that names no protocol.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::host_service(
+            signaling,
+            reason = "hands over the signaling protocol the host compiled for the ingestor"
+        )
+    )]
+    pub fn signaling_protocol<P: Any + Clone>(
+        &self,
+    ) -> Result<Option<P>, Report<HostServiceError>> {
+        let Some(compiled) = self.inner.services.signaling_protocol() else {
+            return Ok(None);
+        };
+        match compiled.downcast_ref::<P>() {
+            Some(protocol) => Ok(Some(protocol.clone())),
+            None => Err(Report::new(
+                HostServiceError::SignalingProtocolOfOtherConnector,
+            )),
+        }
+    }
+}
+
 /// The host's record of payloads an ingestor's connection dropped because its bounded read-ahead
 /// had no room for traffic its transport does not hold back, such as MQTT publishes at QoS 0.
 ///
-/// The task that drops such a payload polls the connection apart from the host's loop and its
-/// [`IngestorHost`], so the host resolves one report for the ingestor's execution unit when it
-/// composes the connector and hands it over in the connector's plan. Each connection keeps a clone
+/// The task that drops such a payload polls the connection apart from the host's loop, so the
+/// connector takes one report for its execution unit from [`IngestorHost::read_ahead_overflow`]
+/// when it opens. Each connection keeps a clone
 /// and records every drop through it at once, also while the host waits on a batch's
 /// acknowledgement trees, without naming a metrics type, resolving labels or reaching a registry.
 /// Clones record into the same count.

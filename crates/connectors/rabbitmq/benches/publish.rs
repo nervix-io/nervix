@@ -36,9 +36,10 @@ use meticulous::OptionExt as _;
 use nervix_connector::{
     BrokerPublishingMode, EmitterBoundedExecution, EmitterConnector as _, EmitterEventReporter,
     EmitterFinish, EmitterGeneralErrorHandler, EmitterHost, EmitterLifecycle,
-    EmitterPayloadMeasurement, EmitterPayloadObserver, EmitterReadiness, EmitterRecord,
-    EmitterRecordAcknowledgements, EmitterRecordId, EmitterResume, EmitterStagingDirectory,
-    EmitterTransientErrorStatus, RecordEmitter,
+    EmitterNameResolution, EmitterOutwardTls, EmitterPayloadMeasurement, EmitterPayloadObserver,
+    EmitterReadiness, EmitterRecord, EmitterRecordAcknowledgements, EmitterRecordId, EmitterResume,
+    EmitterStagingDirectory, EmitterTaskEnd, EmitterTransientErrorStatus, OutwardTlsPolicy,
+    RecordEmitter,
 };
 use nervix_connector_rabbitmq::{RabbitMqQueueEmitter, RabbitMqQueueEmitterConfig};
 use nervix_dns::{DnsConfiguration, DnsResolver};
@@ -46,6 +47,7 @@ use nervix_execution::Executor;
 use nervix_models::{ClientConfigEntry, RabbitMqQueueName, Timestamp};
 use nervix_primitives::{
     runtime::{Builder, Runtime},
+    sync::CancellationToken,
     time::{Instant, timeout},
 };
 use nervix_test_environment::{
@@ -75,9 +77,13 @@ async fn reply<T>(operation: impl Future<Output = lapin::Result<T>>) -> T {
     require(answered)
 }
 
-/// No host service is reached by the record publisher. A future dependency must be measured
-/// explicitly instead of silently disappearing into an inert benchmark implementation.
-struct BenchmarkHost;
+/// The one host service the record publisher reaches is the node resolver its broker host
+/// resolves through, which the emitter takes once when it opens, outside every timed sample. A
+/// future dependency must be measured explicitly instead of silently disappearing into an inert
+/// benchmark implementation.
+struct BenchmarkHost {
+    dns: DnsResolver,
+}
 
 impl EmitterReadiness for BenchmarkHost {
     fn mark_ready(&self) {
@@ -128,6 +134,24 @@ impl EmitterGeneralErrorHandler for BenchmarkHost {
 impl EmitterBoundedExecution for BenchmarkHost {
     fn executor(&self) -> Executor {
         panic!("the RabbitMQ record publisher submits no executor work");
+    }
+}
+
+impl EmitterNameResolution for BenchmarkHost {
+    fn dns(&self) -> Option<DnsResolver> {
+        Some(self.dns.clone())
+    }
+}
+
+impl EmitterOutwardTls for BenchmarkHost {
+    fn tls_policy(&self) -> OutwardTlsPolicy {
+        panic!("the RabbitMQ record publisher takes no outward TLS policy from its host");
+    }
+}
+
+impl EmitterTaskEnd for BenchmarkHost {
+    fn cancellation(&self) -> CancellationToken {
+        panic!("the RabbitMQ record publisher starts no work beside its publishes");
     }
 }
 
@@ -203,11 +227,10 @@ impl<'runtime> PublicationBenchmark<'runtime> {
                                 value: "30000".into(),
                             },
                         ],
-                        dns,
                         queue: require(RabbitMqQueueName::try_from(QUEUE)),
                         mode: BrokerPublishingMode::NoAck,
                     },
-                    EmitterHost::new(BenchmarkHost),
+                    EmitterHost::new(BenchmarkHost { dns }),
                 )
                 .await,
             );

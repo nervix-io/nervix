@@ -22,6 +22,14 @@
         reason = "owns the engines and infrastructure boundary declared above"
     )
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        tls_policy,
+        reason = "the Syslog listener ingestor accepts TLS connections under the node's outward \
+                  TLS policy"
+    )
+)]
 
 use std::{net::SocketAddr, num::NonZeroUsize};
 
@@ -32,8 +40,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerIngestorConnector, ConfiguredDeadline, IngestMessageHeaders, IngestMetadataRow,
     IngestRowHeaders, IngestTransportPosition, IngestorBatch, IngestorBatchRequest,
-    IngestorConnector, IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult,
-    IngestorResume, NoIngestHeaders,
+    IngestorConnector, IngestorError, IngestorHost, IngestorMessage, IngestorReadCancellation,
+    IngestorResult, IngestorResume, NoIngestHeaders,
 };
 use nervix_models::{
     ClientConfigEntry, SYSLOG_FRAME_LIMITS, SyslogFraming, SyslogListenerClient,
@@ -102,10 +110,13 @@ pub use settings::{
     SyslogReadChunkBytes,
 };
 
+/// What one Syslog listener ingestor binds and reads with, from its typed plan.
+///
+/// The outward TLS policy a TLS listener's handshakes take reaches the ingestor through its host
+/// handle.
 #[derive(Clone)]
 pub struct SyslogListenerIngestorPlan {
     settings: SyslogListenerSettings,
-    tls_policy: nervix_connector::OutwardTlsPolicy,
     client: SyslogListenerClient,
     bind_addr: SocketAddr,
     listener_faults: ConfiguredListenerFaults,
@@ -116,7 +127,6 @@ impl SyslogListenerIngestorPlan {
     pub fn new(
         entries: Vec<ClientConfigEntry>,
         bind_addr: impl FnOnce(SocketAddr) -> SocketAddr,
-        tls_policy: nervix_connector::OutwardTlsPolicy,
         settings: SyslogListenerSettings,
     ) -> error_stack::Result<Self, SyslogConfigError> {
         let client =
@@ -125,7 +135,6 @@ impl SyslogListenerIngestorPlan {
         let bind_addr = bind_addr(client.bind);
         Ok(Self {
             settings,
-            tls_policy,
             client,
             bind_addr,
             listener_faults: ConfiguredListenerFaults::default(),
@@ -341,10 +350,14 @@ impl IngestorConnector for SyslogListenerIngestor {
 
     type Plan = SyslogListenerIngestorPlan;
 
-    async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
+    async fn open(
+        plan: &Self::Plan,
+        host: &IngestorHost,
+        _instance_index: u64,
+    ) -> IngestorResult<Self> {
         let tls_acceptor = match &plan.client.transport {
             SyslogListenerTransport::Tls(tls) => {
-                let config = tls_server_config(tls, &plan.tls_policy)
+                let config = tls_server_config(tls, &host.tls_policy())
                     .change_context(IngestorError::Open { connector: SYSLOG })?;
                 Some(TlsAcceptor::from(config))
             }
@@ -376,7 +389,7 @@ impl IngestorConnector for SyslogListenerIngestor {
         Ok(())
     }
 
-    async fn resume(&mut self) -> IngestorResult<IngestorResume> {
+    async fn resume(&mut self, _host: &IngestorHost) -> IngestorResult<IngestorResume> {
         if let Some(listener) = self.listener.as_mut() {
             if let SyslogListener::Stream(listener) = listener {
                 if listener.listener.is_none() {
@@ -415,6 +428,7 @@ impl BrokerIngestorConnector for SyslogListenerIngestor {
 
     async fn next_batch(
         &mut self,
+        _host: &IngestorHost,
         _request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {

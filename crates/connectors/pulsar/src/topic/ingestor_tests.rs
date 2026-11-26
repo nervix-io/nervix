@@ -14,8 +14,9 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
     BrokerIngestorConnector, IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError,
-    IngestorMessage, IngestorReadCancellation, IngestorResume,
+    IngestorHost, IngestorMessage, IngestorReadCancellation, IngestorResume,
 };
+use nervix_connector_fake::FakeIngestorHost;
 use nervix_models::{
     ClientConfigEntry, PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership,
     PulsarSubscriptionType, PulsarTopicName,
@@ -538,14 +539,22 @@ fn message_id(entry_id: u64) -> MessageIdData {
     }
 }
 
+/// The handle a test opens, resumes and reads its ingestor with. An instance takes nothing from
+/// it: only connecting a plan reads the node's outward TLS policy, and these tests build their
+/// plans around a client of their own.
+fn host() -> IngestorHost {
+    FakeIngestorHost::default().host()
+}
+
 /// The ingestor of one instance under an `ACK` mode, subscribed on `broker` through a client whose
 /// operation timeout is short enough for a test to outlast.
-async fn open(broker: &LoopbackBroker) -> PulsarTopicIngestor {
-    open_with(broker, PulsarAckReceipts::Awaited).await
+async fn open(broker: &LoopbackBroker, host: &IngestorHost) -> PulsarTopicIngestor {
+    open_with(broker, host, PulsarAckReceipts::Awaited).await
 }
 
 async fn open_with(
     broker: &LoopbackBroker,
+    host: &IngestorHost,
     ack_receipts: PulsarAckReceipts,
 ) -> PulsarTopicIngestor {
     let plan = plan(
@@ -556,7 +565,7 @@ async fn open_with(
         },
     )
     .await;
-    PulsarTopicIngestor::open(&plan, 0)
+    PulsarTopicIngestor::open(&plan, host, 0)
         .await
         .expect("the loopback broker serves the subscription")
 }
@@ -621,6 +630,7 @@ fn removal_settings<'a>(
 /// The positions of the first `count` messages the ingestor reads.
 async fn read(
     ingestor: &mut PulsarTopicIngestor,
+    host: &IngestorHost,
     count: usize,
 ) -> Vec<PulsarTopicIngestorPosition> {
     let mut positions = Vec::new();
@@ -631,7 +641,7 @@ async fn read(
         };
         let batch = timeout(
             DEADLINE,
-            ingestor.next_batch(request, &IngestorReadCancellation::new()),
+            ingestor.next_batch(host, request, &IngestorReadCancellation::new()),
         )
         .await
         .expect("the ingestor reads the broker's next message")
@@ -665,12 +675,14 @@ async fn broker_redelivery_counts_reach_the_message_metadata_with_the_protocol_d
         SubscriptionAnswers::ABSENT,
     )
     .await;
-    let mut ingestor = open(&broker).await;
+    let host = host();
+    let mut ingestor = open(&broker, &host).await;
     for count in counts {
         nervix_primitives::task::consume_budget().await;
         let batch = timeout(
             DEADLINE,
             ingestor.next_batch(
+                &host,
                 IngestorBatchRequest {
                     max_messages: std::num::NonZeroUsize::MIN,
                     batch_timeout: None,
@@ -705,14 +717,15 @@ async fn metadata_failure_returns_the_gathered_prefix_and_survives_a_cancelled_r
         SubscriptionAnswers::ABSENT,
     )
     .await;
-    let mut ingestor = open(&broker).await;
+    let host = host();
+    let mut ingestor = open(&broker, &host).await;
     let request = IngestorBatchRequest {
         max_messages: std::num::NonZeroUsize::new(3).assured("three is nonzero"),
         batch_timeout: Some(Duration::from_secs(1)),
     };
     let first = timeout(
         DEADLINE,
-        ingestor.next_batch(request, &IngestorReadCancellation::new()),
+        ingestor.next_batch(&host, request, &IngestorReadCancellation::new()),
     )
     .await
     .assured("the broker sends the entire fixture")
@@ -725,12 +738,12 @@ async fn metadata_failure_returns_the_gathered_prefix_and_survives_a_cancelled_r
     let cancelled = IngestorReadCancellation::new();
     cancelled.cancel();
     let interrupted = ingestor
-        .next_batch(request, &cancelled)
+        .next_batch(&host, request, &cancelled)
         .await
         .assured("cancellation keeps the deferred failure");
     assert!(matches!(interrupted, IngestorBatch::Interrupted { gathered } if gathered.is_empty()));
     let Err(error) = ingestor
-        .next_batch(request, &IngestorReadCancellation::new())
+        .next_batch(&host, request, &IngestorReadCancellation::new())
         .await
     else {
         panic!("the exact metadata failure must remain pending after cancellation");
@@ -743,6 +756,7 @@ async fn metadata_failure_returns_the_gathered_prefix_and_survives_a_cancelled_r
     let next = timeout(
         DEADLINE,
         ingestor.next_batch(
+            &host,
             IngestorBatchRequest {
                 max_messages: std::num::NonZeroUsize::MIN,
                 batch_timeout: None,
@@ -763,10 +777,11 @@ async fn metadata_failure_returns_the_gathered_prefix_and_survives_a_cancelled_r
 #[nervix_primitives::test]
 async fn a_cancelled_parallel_read_returns_every_message_it_gathered() {
     let broker = LoopbackBroker::start(4, AckAnswer::Confirm).await;
-    let mut ingestor = open(&broker).await;
+    let host = host();
+    let mut ingestor = open(&broker, &host).await;
     // The first read waits until the broker has delivered its messages.
     let mut entries = Vec::new();
-    for position in read(&mut ingestor, 1).await {
+    for position in read(&mut ingestor, &host, 1).await {
         entries.push(position.message_id.entry_id);
     }
 
@@ -783,7 +798,7 @@ async fn a_cancelled_parallel_read_returns_every_message_it_gathered() {
         .expect("thirty seconds after now fits the monotonic clock");
     while entries.len() < 4 {
         let batch = ingestor
-            .next_batch(request, &cancellation)
+            .next_batch(&host, request, &cancellation)
             .await
             .expect("the loopback broker delivers its messages");
         let IngestorBatch::Interrupted { gathered } = batch else {
@@ -819,8 +834,9 @@ fn pulsar_failure(error: &error_stack::Report<IngestorError>) -> &PulsarTopicIng
 #[nervix_primitives::test]
 async fn acknowledging_returns_once_the_broker_confirmed_the_acknowledgement() {
     let mut broker = LoopbackBroker::start(1, AckAnswer::Confirm).await;
-    let mut ingestor = open(&broker).await;
-    let positions = read(&mut ingestor, 1).await;
+    let host = host();
+    let mut ingestor = open(&broker, &host).await;
+    let positions = read(&mut ingestor, &host, 1).await;
 
     ingestor
         .acknowledge(&positions)
@@ -839,8 +855,9 @@ async fn acknowledging_returns_once_the_broker_confirmed_the_acknowledgement() {
 #[nervix_primitives::test]
 async fn the_positions_of_one_topic_are_confirmed_by_one_acknowledgement() {
     let mut broker = LoopbackBroker::start(3, AckAnswer::Confirm).await;
-    let mut ingestor = open(&broker).await;
-    let positions = read(&mut ingestor, 3).await;
+    let host = host();
+    let mut ingestor = open(&broker, &host).await;
+    let positions = read(&mut ingestor, &host, 3).await;
 
     ingestor
         .acknowledge(&positions)
@@ -866,8 +883,9 @@ async fn an_acknowledgement_the_broker_refuses_reports_its_server_error_and_reas
         ),
     )
     .await;
-    let mut ingestor = open(&broker).await;
-    let positions = read(&mut ingestor, 1).await;
+    let host = host();
+    let mut ingestor = open(&broker, &host).await;
+    let positions = read(&mut ingestor, &host, 1).await;
 
     let error = ingestor
         .acknowledge(&positions)
@@ -897,8 +915,9 @@ async fn an_acknowledgement_the_broker_refuses_reports_its_server_error_and_reas
 async fn an_acknowledgement_the_broker_does_not_answer_is_unconfirmed_after_the_operation_timeout()
 {
     let broker = LoopbackBroker::start(1, AckAnswer::Ignore).await;
-    let mut ingestor = open(&broker).await;
-    let positions = read(&mut ingestor, 1).await;
+    let host = host();
+    let mut ingestor = open(&broker, &host).await;
+    let positions = read(&mut ingestor, &host, 1).await;
 
     let error = ingestor
         .acknowledge(&positions)
@@ -919,8 +938,9 @@ async fn an_acknowledgement_the_broker_does_not_answer_is_unconfirmed_after_the_
 #[nervix_primitives::test]
 async fn a_redelivery_request_the_consumer_cannot_send_is_reported_after_its_connection_closed() {
     let mut broker = LoopbackBroker::start(1, AckAnswer::CloseConnection).await;
-    let mut ingestor = open(&broker).await;
-    let positions = read(&mut ingestor, 1).await;
+    let host = host();
+    let mut ingestor = open(&broker, &host).await;
+    let positions = read(&mut ingestor, &host, 1).await;
 
     let error = ingestor
         .acknowledge(&positions)
@@ -971,8 +991,9 @@ async fn a_redelivery_request_the_consumer_cannot_send_is_reported_after_its_con
 #[nervix_primitives::test]
 async fn a_mode_without_an_acknowledgement_tree_does_not_wait_for_the_broker() {
     let mut broker = LoopbackBroker::start(1, AckAnswer::Ignore).await;
-    let mut ingestor = open_with(&broker, PulsarAckReceipts::Unawaited).await;
-    let positions = read(&mut ingestor, 1).await;
+    let host = host();
+    let mut ingestor = open_with(&broker, &host, PulsarAckReceipts::Unawaited).await;
+    let positions = read(&mut ingestor, &host, 1).await;
 
     ingestor
         .acknowledge(&positions)
@@ -991,8 +1012,9 @@ async fn a_mode_without_an_acknowledgement_tree_does_not_wait_for_the_broker() {
 #[nervix_primitives::test]
 async fn rejecting_sends_a_redelivery_request_for_the_rejected_message() {
     let mut broker = LoopbackBroker::start(1, AckAnswer::Confirm).await;
-    let mut ingestor = open(&broker).await;
-    let positions = read(&mut ingestor, 1).await;
+    let host = host();
+    let mut ingestor = open(&broker, &host).await;
+    let positions = read(&mut ingestor, &host, 1).await;
 
     ingestor
         .reject(&positions)
@@ -1126,7 +1148,7 @@ async fn an_instance_joins_its_owned_subscription_at_open_under_its_indexed_cons
     )
     .await;
 
-    let mut ingestor = PulsarTopicIngestor::open(&plan, 1)
+    let mut ingestor = PulsarTopicIngestor::open(&plan, &host(), 1)
         .await
         .expect("the loopback broker serves the subscription");
 
@@ -1163,7 +1185,7 @@ async fn an_instance_joins_as_the_declared_type() {
         .await;
         plan.subscription.kind = kind;
 
-        let _ingestor = PulsarTopicIngestor::open(&plan, 0)
+        let _ingestor = PulsarTopicIngestor::open(&plan, &host(), 0)
             .await
             .expect("the loopback broker serves the subscription");
 
@@ -1196,8 +1218,9 @@ async fn a_subscription_another_consumer_holds_is_left_to_resume_and_reported_un
     )
     .await;
     plan.subscription.kind = PulsarSubscriptionType::Exclusive;
+    let host = host();
 
-    let mut ingestor = PulsarTopicIngestor::open(&plan, 0)
+    let mut ingestor = PulsarTopicIngestor::open(&plan, &host, 0)
         .await
         .expect("a held subscription does not keep the ingestor from starting");
     assert!(
@@ -1206,7 +1229,7 @@ async fn a_subscription_another_consumer_holds_is_left_to_resume_and_reported_un
     );
 
     let refused = ingestor
-        .resume()
+        .resume(&host)
         .await
         .expect_err("the broker still refuses the join");
     let PulsarTopicIngestorError::SubscriptionRefused {
@@ -1229,11 +1252,11 @@ async fn a_subscription_another_consumer_holds_is_left_to_resume_and_reported_un
     assert!(ingestor.needs_resume(), "the refused join is tried again");
 
     let resumed = ingestor
-        .resume()
+        .resume(&host)
         .await
         .expect("the consumer that held the subscription left");
     assert!(matches!(resumed, IngestorResume::Ready));
-    assert_eq!(read(&mut ingestor, 1).await.len(), 1);
+    assert_eq!(read(&mut ingestor, &host, 1).await.len(), 1);
 }
 
 #[nervix_primitives::test]
@@ -1254,7 +1277,7 @@ async fn a_join_the_broker_refuses_for_what_is_declared_keeps_the_ingestor_from_
     )
     .await;
 
-    let Err(failure) = PulsarTopicIngestor::open(&plan, 0).await else {
+    let Err(failure) = PulsarTopicIngestor::open(&plan, &host(), 0).await else {
         panic!("an unauthorized join fails the open");
     };
 
@@ -1366,7 +1389,8 @@ async fn a_provisioned_subscription_is_verified_then_joined_on_resume() {
         PulsarSubscriptionOwnership::Provisioned,
     )
     .await;
-    let mut ingestor = PulsarTopicIngestor::open(&plan, 0)
+    let host = host();
+    let mut ingestor = PulsarTopicIngestor::open(&plan, &host, 0)
         .await
         .expect("opening a provisioned subscription asks the broker nothing");
     assert!(
@@ -1375,7 +1399,7 @@ async fn a_provisioned_subscription_is_verified_then_joined_on_resume() {
     );
 
     let resumed = ingestor
-        .resume()
+        .resume(&host)
         .await
         .expect("the broker refuses the probe because the subscription exists");
 
@@ -1396,7 +1420,7 @@ async fn a_provisioned_subscription_is_verified_then_joined_on_resume() {
             subscription_type: PulsarSubType::Shared,
         }
     );
-    assert_eq!(read(&mut ingestor, 1).await.len(), 1);
+    assert_eq!(read(&mut ingestor, &host, 1).await.len(), 1);
 }
 
 #[nervix_primitives::test]
@@ -1409,12 +1433,13 @@ async fn a_missing_provisioned_subscription_is_reported_and_never_created() {
         PulsarSubscriptionOwnership::Provisioned,
     )
     .await;
-    let mut ingestor = PulsarTopicIngestor::open(&plan, 0)
+    let host = host();
+    let mut ingestor = PulsarTopicIngestor::open(&plan, &host, 0)
         .await
         .expect("opening a provisioned subscription asks the broker nothing");
 
     let error = ingestor
-        .resume()
+        .resume(&host)
         .await
         .expect_err("a subscription nobody provisioned is missing");
 
@@ -1474,12 +1499,13 @@ async fn a_probe_refused_for_another_reason_does_not_say_the_subscription_exists
         PulsarSubscriptionOwnership::Provisioned,
     )
     .await;
-    let mut ingestor = PulsarTopicIngestor::open(&plan, 0)
+    let host = host();
+    let mut ingestor = PulsarTopicIngestor::open(&plan, &host, 0)
         .await
         .expect("opening a provisioned subscription asks the broker nothing");
 
     let error = ingestor
-        .resume()
+        .resume(&host)
         .await
         .expect_err("a refused probe leaves the subscription unverified");
 
@@ -1503,6 +1529,46 @@ async fn a_probe_refused_for_another_reason_does_not_say_the_subscription_exists
         }
     );
     assert!(ingestor.needs_resume());
+}
+
+/// Composing an ingestor connects its plan through the handle of its host, and every instance then
+/// opens its consumer through the client that plan connected.
+#[nervix_primitives::test]
+async fn a_plan_connects_through_the_handle_of_the_host_that_composes_it() {
+    let mut broker = LoopbackBroker::start(0, AckAnswer::Confirm).await;
+    let config = broker.config();
+    let topic = topic();
+    let settings = PulsarTopicIngestorSettings {
+        assignment: None,
+        config: &config,
+        topic: &topic,
+        subscription: subscription(PulsarSubscriptionOwnership::Ingestor {
+            start_at: nervix_models::IngestStartPosition::Earliest,
+        }),
+        consumer_name: "orders".to_string(),
+        ack_receipts: PulsarAckReceipts::Awaited,
+    };
+    let host = host();
+
+    let plan = PulsarTopicIngestorPlan::connect(settings, &host)
+        .await
+        .expect("the loopback broker serves the client's handshake");
+    let mut ingestor = PulsarTopicIngestor::open(&plan, &host, 0)
+        .await
+        .expect("the loopback broker serves the subscription");
+
+    assert!(
+        !ingestor.needs_resume(),
+        "an owned subscription is joined at open"
+    );
+    assert_eq!(
+        broker.next_subscription_command().await,
+        SubscriptionCommand::Subscribe {
+            durable: true,
+            consumer_name: Some("orders-0".to_string()),
+            subscription_type: PulsarSubType::Shared,
+        }
+    );
 }
 
 #[nervix_primitives::test]

@@ -123,13 +123,13 @@ connector crate.
 | --- | --- |
 | Vocabulary and registry | Define and validate ingestor capabilities, schemas, delivery modes, header availability, branches, and references before activation. The vocabulary nests every ingestor and emitter Model by connector and entity, and each pair declares its capabilities once there. The registry names no connector crate. |
 | Decision and composition | Convert a validated Model into a typed ingestor or emitter start plan once. The registry decides every ingestor's connector plan together with its codec and lowered routes, validating the ingestor name, kind, client and route identities as one decision. The server is the composition root and the only crate that names every integration. It resolves client resource mounts before opening a connector. |
-| `nervix-connector` | Define ingestor and emitter operations, typed boundary values, and opaque host services. It knows neither a driver nor graph execution state. |
+| `nervix-connector` | Define ingestor and emitter operations, typed boundary values, the host handle of each side with the services it hands over, and the pooled client a host opens and leases. It knows neither a driver nor graph execution state. |
 | `nervix-connector-*` | Own one integration's driver, connection and configuration interpretation, transport headers, protocol acknowledgements, and per-record results. A crate implements the ingestor contract, the emitter contract, or both. |
 | Host data plane | Own tasks, intake and Arrow decoding, branch routing and retention of held emitter work, ACK trees, quiesce, buffering, retry and flush scheduling, metrics, events, and drain. It executes typed plans; it does not parse Plexus or read a Model during data-plane execution. |
 
 The contract may name shared vocabulary types, Arrow, the async and error facilities needed by its
-boundary, the node's bounded executor, and configuration helpers for TLS, HTTP clients, service
-URLs, resource mounts, and physical time. It must not name the registry, runtime, relays, branches, schedules, or a driver.
+boundary, the node's bounded executor and resolver, and configuration helpers for TLS, HTTP clients,
+service URLs, resource mounts, and physical time. It must not name the registry, runtime, relays, branches, schedules, or a driver.
 TLS algorithm implementations belong to `nervix-crypto`; the host supplies the node-owned committed
 outward policy to shared-provider construction. Every new handshake captures its current pair,
 while established connections retain their negotiation and the connector retains its driver.
@@ -144,7 +144,8 @@ and a connector change adds none.
 An integration crate may depend on the contract, vocabulary, Arrow, and its own driver stack. It
 must not depend on the server, another integration crate, or runtime collectors. Driver libraries
 belong in that integration's manifest, with test-harness dependencies kept separately. A
-connector receives resolved configuration and a typed plan, not graph routing authority. Two
+connector receives resolved configuration in a typed plan and one
+[host handle](#host-handles-and-declared-services), not graph routing authority. Two
 ingestors have no external driver and live in the server. The node's own HTTP/HTTPS endpoint uses the
 same ingestor lifecycle and host intake. A client ingestor admits the batches applications submit
 through their sessions; it has no connector crate, because the session protocol is its transport,
@@ -168,6 +169,117 @@ it resolves through the node's resolver, as the sections below describe, and a d
 inside itself is one of the residual paths [Residual
 Resolution](./name-resolution.md#residual-resolution) lists.
 
+### Host handles and declared services
+
+An ingestor or an emitter reaches its node only through its host handle: `IngestorHost` on the
+ingestor side and `EmitterHost` on the emitter side. A plan carries configuration and nothing else. No resolver,
+executor, TLS policy, pooled client, recorder, offset store or compiled protocol travels in a plan
+or a connector configuration, and no connector crate defines an interface for the host to
+implement.
+
+The host builds an ingestor's handle for the exact unit before anything of its connector runs. It
+hands that one handle to `open`, to every `resume`, and to every read: a broker ingestor's
+`next_batch` and a paced ingestor's `poll`. A function of the connector crate that the host calls
+while it composes the ingestor, such as a constructor that builds the client a plan carries, takes
+the handle in place of the service it needs. A connector takes a service where it uses it and may
+keep what it took for as long as its instance lives. The handle is not the host's own loop
+interface: intake, quiesce, readiness and acknowledgement records stay with `IngestorLoopHost`,
+which no connector sees. An emitter is opened with its handle and keeps it.
+
+Every public method of a handle hands over one service:
+
+| Service | Handle methods | Side | What it is |
+| --- | --- | --- | --- |
+| `status` | `record_transient_error`, `clear_transient_error`, `report_error` | Both | The transient status the entity shows and the error events it reports. A connector publishes beside the host task that drives it, and each withdraws only what it published: a read that succeeds never hides a connection its connector still reports lost, and a connector that recovers never clears its host's failure. |
+| `readiness` | `mark_ready`, `mark_unready` | Emitter | The readiness of the exact emitter instance. |
+| `executor` | `executor` | Both | The node's bounded executor, as [Blocking work and the node's executor](#blocking-work-and-the-nodes-executor) describes. |
+| `dns` | `dns` | Both | The node's resolver, through which a connector dials every host it names. |
+| `tls_policy` | `tls_policy` | Both | The node's committed outward TLS policy. The handle hands over the node's own publication, so a client built from it follows a later commit as [Live Outward TLS Algorithms](#live-outward-tls-algorithms) describes. |
+| `cancellation` | `cancellation` | Both | A token cancelled once the host has let the instance go, for work a connector started beside its reads or publishes. |
+| `metrics` | `event_counter`, `read_ahead_overflow` on an ingestor, `record_prepared_payload` and `record_payload_subdivisions` on an emitter | Both | The recorders of what only the connector can count. No connector crate names a metrics type. |
+| `staging` | `staging_directory` | Emitter | The directory an emitter stages local files in. |
+| `general_errors` | `handle_general_error` | Emitter | The node's general error policy, applied to acknowledgements the emitter retained. |
+| `pool` | `pool::<K>` | Emitter | The pooled client the host leased for the emitter, as the [pooled-client service](#the-pooled-client-service) describes. |
+| `domain_offsets` | `domain_offsets` | Ingestor | The offsets an ingestor's domain keeps for it: a Kafka ingestor in `DOMAIN` offset mode reads, replaces and commits them through `DomainOffsets`, which the contract defines. |
+| `signaling` | `signaling_protocol::<P>` | Ingestor | The signaling protocol the host compiled for an ingestor that names one, as the shared value its connector reads. |
+
+The instance's end is not its stop. A stop still ends an ingestor through `close` and an emitter
+through `finish` and `close`, and the token of `cancellation` is cancelled only afterwards: when the
+ingestor loop that drove the instance has ended and let its host go, when the emitter's task has
+ended, when either task was aborted, or when a start was abandoned after the connector had opened.
+A connector therefore never cuts work a planned stop still waits for by watching the token. An
+emitter's staged work needs no service of its own: the host reads `EmitterLifecycle::staged_commit`
+and drives `commit`, as [Emitter boundary](#emitter-boundary) describes.
+
+A service the host does not provide is refused with a typed `HostServiceError`, never a panic: the
+node runs without its resolver, the host leased no pooled client for the emitter or leased another
+connector's, the host keeps no domain offsets for the ingestor, or the compiled signaling protocol
+is another connector's value. A connector reports the refusal beneath the context of the step that
+needed the service: `IngestorError::Open` or `Resume` on the ingestor side and
+`EmitterOpenError::Initialize` on the emitter side, which the host retries, never
+`InvalidConfiguration`, which it does not. An emitter whose step failed this way shows the reason
+the refusal names, such as `the node DNS resolver is not installed`.
+
+#### Declared services
+
+A connector declares the services it reaches, beside its code. A `nervix::host_services` source
+contract on a crate, module, type, trait, implementation or function lists them with a reason:
+
+```rust
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        tls_policy,
+        reason = "the Prometheus query ingestor dials through its node's resolver under the \
+                  node's outward TLS policy"
+    )
+)]
+```
+
+Each handle is marked `nervix::value(host_handle, ...)`, and each of its public methods names its
+service in a `nervix::host_service` contract. The `nervix::undeclared_host_service` diagnostic of
+the [typed ratchet](./architecture-enforcement.md) refuses a call, a qualified call or a function
+reference to a handle method whose service the narrowest contract of the calling code does not
+list, and a call no contract covers. A narrower contract replaces a wider one instead of adding to
+it, so the list beside an entity is the whole of what that entity's code reaches. The declaration
+is a static contract only: at run time the host hands over what it prepared, and
+[Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts) owns how the rule resolves
+callers and what it does not see. The handle a pooled client opens through, `PooledClientHost`, is
+a host handle under the same rule. Harness code is outside it: a test asserts what a handle hands
+over, and the fake connectors stand in for any real one, so neither declares services.
+
+#### The pooled-client service
+
+A connector whose client pools its connections says how the client opens by implementing
+`PooledClient` for its pool type: the connector kind whose `CLIENT` statement the pool serves, the
+typed failure of its open, and `open`, which takes the client's resolved entries, its declared
+`POOL SIZE` bounds and a `PooledClientHost` that hands it the node's resolver and executor. MySQL,
+Postgres, MongoDB and Redis implement it.
+
+The host opens a pool once for one named client in one domain on one node, however many local
+emitters of that client start together, from the first user's resolved configuration, and keeps the
+client's resource mounts with it. Before the connector sees the configuration, the host refuses an
+entry or an address parameter that sizes the pool beside `POOL SIZE`. The service is one registry
+keyed by client and generic over the pooled client: the composition root names the pool type of
+the emitter it opens, and nothing in the host names a transport. A client another connector opened
+is refused by name.
+
+The host leases the pool before it opens the emitter, so opening the emitter performs no I/O for
+it, and hands the lease over in the emitter's handle. `EmitterHost::pool::<K>()` answers with a
+`PooledClientLease<K>`: `client()` is the shared pool, `checkout` awaits one checkout and publishes
+the emitter's wait from the moment the pool does not answer at once until the checkout is
+answered, fails or is abandoned, and `begin_wait` publishes a wait a connector bounds itself. A
+checkout the pool answers at once publishes nothing. `DESCRIBE EMITTER` shows the wait, and its
+duration is recorded in the emitter's pool-wait family when it ends. The MongoDB driver pools per
+server inside its client, so its emitter takes the client from its lease and publishes no wait.
+
+A lease is held for exactly as long as its emitter can use the client: the pool stays open while
+any local emitter holds a lease, and the last lease to be dropped closes it and releases its
+resource mounts. A client that cannot open fails the emitter's initialization with the connector's
+own typed failure beneath `failed to open client '<name>'`, gives its interest back, and leaves
+nothing leased, so the host's next attempt opens it again.
+
 ### Host test fixtures
 
 `nervix-connector-fake` is a test harness outside the product layer order and a server
@@ -175,6 +287,19 @@ dev-dependency. Product code never names it. It implements the broker and paced 
 boundaries and the record, mapped-row, row-request and HTTP-request emitter boundaries. Its
 family kinds use the vocabulary's existing entity declarations; it introduces no connector
 kind or Plexus statement.
+
+`FakeIngestorHost` and `FakeEmitterHost` put scripted services behind the two host handles. A
+test gives its host exactly the services its connector takes, such as a resolver, an executor, a
+TLS policy, domain offsets, a compiled signaling protocol or declared events, and a service it left
+out is refused as a node without it would refuse. Their observations show what the connector did
+through its handle: the status it published and withdrew, the errors it reported, the events and
+read-ahead drops it recorded, and, for an emitter, readiness, payload measurements and general
+errors. Each host ends its instance on request, which cancels the token its handle hands the
+connector. `FakePooledClient` and `OtherFakePooledClient` are scripted pools of two connectors
+that open through the pooled-client contract, and `FakePooledClientWaits` records the waits a
+lease publishes. The fake connectors keep the handle they were opened with, and the fake ingestor
+publishes its failed resumes and reads through the handle it is driven with when a test scripts it
+to report its own connection.
 
 Finite publish scripts fail on an unexpected extra call. Repeating answers are explicit.
 Scripts distinguish accepted, rejected and unanswered members, infrastructure failures and
@@ -396,8 +521,8 @@ configuration, answer order, cache and TTL bounds, lookup budgets and failures, 
 features that select it, and the drivers that still resolve by themselves. These sections own how
 each integration connects through it.
 
-Composition passes the resolver's handle into the HTTP polling and Prometheus ingestor plans and into
-the HTTP request, Sentry, OTEL HTTP, and Iceberg emitter plans. The shared `HttpClientConfig` installs
+The HTTP polling and Prometheus ingestors and the HTTP request, Sentry, OTEL HTTP and Iceberg
+emitters take the resolver from their [host handle](#host-handles-and-declared-services). The shared `HttpClientConfig` installs
 it on the Reqwest 0.13 clients of HTTP polling, Prometheus, Sentry and OTEL HTTP. Their shared TLS
 trust and identity follow [HTTP client transport](#http-client-transport), as HTTP request emission does. The HTTP request
 emitter resolves each request's target host, or its client's declared proxy's host, itself, as its
@@ -507,7 +632,7 @@ credentials.
 
 ### DNS for RabbitMQ
 
-Composition also passes the node resolver into every RabbitMQ ingestor plan and emitter configuration.
+Every RabbitMQ ingestor and emitter also takes the node resolver from its host handle.
 The connector reads the client's `addr` as an AMQP URI and takes its host from the URL grammar,
 because Lapin's own grammar substitutes `localhost` for an IPv6 literal host and for an address that
 names no host. One owner reads the address before a client is committed and again for every
@@ -577,8 +702,8 @@ address-attempt expiry.
 
 ### DNS for Redis
 
-Composition gives the node resolver to the shared Redis command pool and to each Pub/Sub ingestor
-plan. Redis 1.8.0 exposes `AsyncConnectionConfig::set_dns_resolver` for command connections. The
+The shared Redis command pool takes the node resolver from the `PooledClientHost` it opens
+through, and each Pub/Sub ingestor takes it from its host handle. Redis 1.8.0 exposes `AsyncConnectionConfig::set_dns_resolver` for command connections. The
 connector's `bb8` manager installs that hook whenever it opens a physical pooled connection;
 pool bounds, health checks and lease ownership remain with the existing pool and host. `bb8` tests
 every connection it hands to a checkout with the manager's `PING`, its `test_on_check_out` default,
@@ -660,7 +785,7 @@ delivered before a terminal read failure.
 
 ### DNS for MQTT
 
-Composition passes the node resolver into every MQTT ingestor plan and emitter configuration. Both
+Every MQTT ingestor and emitter takes the node resolver from its host handle. Both
 connect through `rumqttc`'s event loop, which asks a socket connector for the TCP stream of every
 connection it opens: the first, and each one after a connection is lost. Each client installs its
 own connector with `MqttOptions::set_socket_connector` in place of the driver's default, which
@@ -692,8 +817,8 @@ the next connection uses the new answer.
 
 ### DNS for ClickHouse and SQS
 
-Composition passes the node resolver into every ClickHouse emitter configuration and into every SQS
-ingestor plan and emitter configuration. Both connectors keep their driver's HTTP client and hand the
+Every ClickHouse emitter and every SQS ingestor and emitter takes the node resolver from its host
+handle. Both connectors keep their driver's HTTP client and hand the
 resolver to it at the driver's own DNS hook, so every new connection resolves its host again while
 the request URL, its authority, the TLS server name and the signing inputs remain what the client
 configured. `nervix-dns` implements both hooks on the node resolver: Hyper's resolver service for
@@ -765,7 +890,7 @@ receive stand-ins continue to run independently beside these checks.
 
 ### DNS for OTEL gRPC
 
-The OTEL emitter receives the node's resolver in its typed emitter configuration. Its gRPC transport
+The OTEL emitter takes the node's resolver from its host handle. Its gRPC transport
 builds a Tonic 0.14 lazy channel with a custom Hyper `HttpConnector` that resolves through that
 resolver. Constructing the emitter or channel asks no DNS question and opens no connection. When an
 export first needs a connection, Hyper resolves the configured endpoint's host, dials its answers
@@ -807,8 +932,8 @@ sequenceDiagram
 
 A connector runs on the host's asynchronous tasks and never blocks one. Synchronous work it does
 itself, such as writing or reading a local file, goes through the node's bounded executor. The
-emitter host supplies it as `EmitterHost::executor`; ingestor composition passes the same node-owned
-handle in a connector plan where its startup needs synchronous work. The connector chooses the storage or CPU class
+emitter host supplies it as `EmitterHost::executor` and the ingestor host as
+`IngestorHost::executor`, the same node-owned handle. The connector chooses the storage or CPU class
 of its work and the memory it charges; the executor admits that work beside the rest of the node's,
 and a refusal is the connector's own typed failure. The Iceberg emitter appends to and reads its
 Arrow IPC staging files on the filesystem storage workers. A staging write the node cannot take now
@@ -2009,7 +2134,7 @@ session-control hook, which the host also drives while a payload it took waits f
 node's extension workers.
 
 Before every broker read the host asks its services for the read's budget,
-`IngestorHostServices::read_budget`, given the window its delivery mode leaves: one message under
+`IngestorLoopServices::read_budget`, given the window its delivery mode leaves: one message under
 `NO ACK` and `ACK SEQUENTIAL`, `MAX` under `ACK PARALLEL`. A host whose ingestor writes no
 `RATE LIMIT` returns the window. Otherwise the budget lowers `IngestorBatchRequest::max_messages`
 to how many one-unit payloads the clauses without `OF` admit now, or is `WaitUntil` an instant
@@ -2019,7 +2144,7 @@ MQTT stop once they hold that many, and a ZeroMQ or Syslog read takes one messag
 else stays with the transport. On `WaitUntil` the loop
 holds before reading, on a deadline of the boundary's timer, servicing its ingest group's flush
 cadence; a quiesce change or a stop ends the hold, and every turn asks for the budget again.
-`IngestorHostServices::record_rate_limit_hold_started` counts each hold as it starts and
+`IngestorLoopServices::record_rate_limit_hold_started` counts each hold as it starts and
 `record_rate_limit_hold_ended` adds its length once it ended.
 
 The host drives that hook during both waits for the allowance, before a read and when the
@@ -2508,7 +2633,7 @@ transport's own redelivery contract applies.
 A batch acknowledgement's wait returns a typed `IngestorAcknowledgementOutcome`: `Acknowledged`,
 `Failed { reason }` for a tree the graph failed, `TimedOut { silence }` for a tree that reported no
 progress for the ingestor's `ACK TIMEOUT`, or `Shutdown`. The loop hands each outcome to
-`IngestorHost::record_acknowledgement` exactly once, for a batch or for each individually settled
+`IngestorLoopHost::record_acknowledgement` exactly once, for a batch or for each individually settled
 delivery, before it confirms or rejects the positions; the host counts it and reports a failed or
 timed-out tree as an error event that names which it was. The loop times every `acknowledge` and
 `reject` it asks of the connector, the retried rejection of a replayable ingestor included, and
@@ -2534,7 +2659,7 @@ Initial startup, reassignment and an entity swap use that same plan. A swap publ
 remote consumer edges from the new plan; it does not reconstruct the emitter from a Model in the
 host. The host resolves resource mounts and binds the lowered VM programs to installed schemas and
 UDFs when it starts the task. `EmitterConnector::open(plan, host)` consumes the typed configuration
-and host handles once. It performs local validation and TLS preparation without network I/O.
+and the emitter's [host handle](#host-handles-and-declared-services) once. It performs local validation and TLS preparation without network I/O.
 The awaitable `suspend`, `resume` and `close` hooks return `EmitterLifecycleStep`: immediate outcomes
 stay inline, and only asynchronous transport work owns a boxed future. A retained usable client
 therefore adds no allocation to recovery. The host protocol borrows its existing readiness service.
@@ -3680,8 +3805,11 @@ sequenceDiagram
   suspension before the intake hold is released; a failed drain retains the committed execution
   and the admitted batches' original outcome ownership.
   [Ingestors](./ingestors.md#client-ingestors) defines the public behavior.
-- **Pooled emitters.** The connector owns the driver's pool and borrowed connection. The host owns
-  the lease on the node's named client and the runtime wait while no connection is available.
+- **Pooled emitters.** The connector owns the driver's pool and borrowed connection, and says how
+  the pool opens by implementing `PooledClient`. The host owns the one instance of the node's named
+  client, the lease each local emitter holds on it and the runtime wait while no connection is
+  available, and hands the lease to the emitter through its handle, as the
+  [pooled-client service](#the-pooled-client-service) describes.
   [Database client pools](./database-client-pools.md) defines the bounds.
 - **Listening entities.** A configured server-side listening port is bound on every live Nervix
   node, independent of leadership and placement. This includes Syslog and server endpoint
@@ -3700,8 +3828,9 @@ sequenceDiagram
   a resolved address alone never completes a Syslog record or an input acknowledgement.
 - **WebSocket client ingestor.** The WebSocket connector crate supplies the outbound
   `WEBSOCKETS CONNECTION` ingestor through `IngestorConnector` and `BrokerIngestorConnector`. It has
-  no emitter or listening endpoint. Its plan carries resolved client configuration, the node
-  resolver, validated literal upgrade headers and an optional compiled signaling protocol. The
+  no emitter or listening endpoint. Its plan carries resolved client configuration and validated
+  literal upgrade headers; it takes the node resolver, the outward TLS policy and the compiled
+  signaling protocol of an ingestor that names one from its host handle. The
   client's declared key schema is its one key validator: the endpoint, positive
   connection/ping/idle durations, positive handoff/message/frame limits with their declared
   defaults, and TLS file keys restricted to secure endpoints with paired client identity files.
@@ -3897,30 +4026,32 @@ The host resolves labels and metric children at unit startup. The recurring path
 those retained handles.
 
 A connector reports a transport-specific fact using a host-handle method or a declared event, or,
-from a task that polls its transport apart from the host's loop, a typed report in its plan.
+from a task that polls its transport apart from the host's loop, a typed report it took from its
+handle.
 
-- `IngestorHost` exposes `record_read`, `record_read_payloads`, `record_acknowledgement`,
+- `IngestorLoopHost` exposes `record_read`, `record_read_payloads`, `record_acknowledgement`,
   `record_transport_settlement`, `record_resume` and `record_suspend` for host observations.
   `record_transport_redeliveries`, `record_oversized_payloads` and `record_unconfirmed_stop`
   report transport facts. `record_rate_limit_hold_started` and `record_rate_limit_hold_ended`
   report allowance holds.
 - `EmitterHost` exposes `record_prepared_payload` and `record_payload_subdivisions` for native
   preparation measurements.
-- Both handles expose `record_transient_error` for connector status. Its reason is a display
-  diagnostic. Labels and delivery choices come from typed classes.
+- `IngestorHost` and `EmitterHost` expose `record_transient_error` for connector status. Its
+  reason is a display diagnostic. Labels and delivery choices come from typed classes.
 
-`ConnectorEventProvider` is exposed through both handles. During construction the connector
+`ConnectorEventProvider` is exposed through both connector handles. During construction the connector
 resolves a `ConnectorEventCounter` by typed event identity and retains it. An undeclared event
 returns a typed refusal. Keep metric types, registration, labels, wall rates and inspection in the
 host. [Connector Interaction Metrics](metrics-and-observability.md#connector-interaction-metrics)
 owns the family inventory and inspection format. The generated capability reference owns each
 entity's declared events.
 
-A connector task that polls its transport apart from the host's loop cannot reach `IngestorHost`,
-so a fact only that task sees arrives through a report the host resolves into the plan instead. An
-ingestor connection's read-ahead overflow is the one such fact: the host builds an
-`IngestorReadAheadOverflow` around its counter child for the unit, and the task records each drop
-through its retained clone, with the same rules as an event counter. The host keeps the family, its
+A connector task that polls its transport apart from the host's loop never reaches
+`IngestorLoopHost`, so a fact only that task sees arrives through a report the connector takes from
+its handle when it opens. An ingestor connection's read-ahead overflow is the one such fact:
+`IngestorHost::read_ahead_overflow` hands over an `IngestorReadAheadOverflow` around the unit's
+counter child, and the task records each drop through its retained clone, with the same rules as an
+event counter. The host keeps the family, its
 labels and its registration; see [MQTT ingestor connections](#mqtt-ingestor-connections).
 
 The ingestor host resolves its interaction counter children once at startup for its exact execution
@@ -4165,8 +4296,9 @@ delivery semantics rather than assuming a generic envelope or exactly-once exter
 
 The host prepares MQTT's connector plan, rendered client entries and resource mounts once per
 logical ingestor and installed declaration on each node. The connector checks the rendered client
-identities once in that prepared plan. Unit plans share immutable entry arrays and retain their own
-read-ahead overflow report; an executing unit retains only its selected instance's mount. Input
+identities once in that prepared plan. Unit plans share immutable entry arrays, and each unit's
+connector takes its own read-ahead overflow report from its handle; an executing unit retains only
+its selected instance's mount. Input
 replacement compares external sessions once per local logical input and retires only the
 explicitly ending global indices. This keeps preparation and retirement proportional to the
 declared instance count. A declaration change invalidates the prepared entry; no mutable driver or

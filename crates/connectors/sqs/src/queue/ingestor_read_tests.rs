@@ -9,7 +9,7 @@ use std::{future::Future, net::Ipv4Addr, pin::pin, time::Duration};
 
 use aws_sdk_sqs::types::Message as SqsMessage;
 use nervix_connector::{
-    BrokerIngestorConnector as _, IngestorBatch, IngestorError, IngestorMessage as _,
+    BrokerIngestorConnector as _, IngestorBatch, IngestorError, IngestorHost, IngestorMessage as _,
     IngestorReadCancellation,
 };
 use nervix_primitives::{
@@ -91,18 +91,15 @@ fn held_receive(
     })
 }
 
-/// An ingestor instance polling the queue of the stand-in on `listener`, whose URL it already looked
-/// up.
-async fn polling_ingestor(fixture: &Fixture, listener: &TcpListener) -> SqsQueueIngestor {
+/// An ingestor instance, composed and opened with `host`, polling the queue of the stand-in on
+/// `listener`, whose URL it already looked up.
+async fn polling_ingestor(host: &IngestorHost, listener: &TcpListener) -> SqsQueueIngestor {
     let port = listener
         .local_addr()
         .expect("a bound listener has an address")
         .port();
-    let mut ingestor = open_ingestor(
-        &client_config(&format!("http://127.0.0.1:{port}")),
-        fixture.dns(),
-    )
-    .await;
+    let mut ingestor =
+        open_ingestor(&client_config(&format!("http://127.0.0.1:{port}")), host).await;
     ingestor.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
     ingestor
 }
@@ -133,13 +130,14 @@ async fn read_while_the_receive_is_held(
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("a loopback port is available");
-    let mut ingestor = polling_ingestor(fixture, &listener).await;
+    let handle = fixture.ingestor_host();
+    let mut ingestor = polling_ingestor(&handle, &listener).await;
     let (arrived, receive_arrived) = oneshot::channel();
     let (answer_now, answer_held) = oneshot::channel();
     let service = held_receive(listener, answer, arrived, answer_held);
 
     let cancellation = IngestorReadCancellation::new();
-    let read = ingestor.next_batch(batch_request(), &cancellation);
+    let read = ingestor.next_batch(&handle, batch_request(), &cancellation);
     let host = async {
         receive_arrived
             .await
@@ -298,15 +296,13 @@ async fn a_receive_that_cannot_reach_the_service_fails_the_read() {
     let fixture = Fixture::start().await;
     let endpoint = RefusedEndpoint::reserve();
     let port = endpoint.port();
-    let mut ingestor = open_ingestor(
-        &client_config(&format!("http://127.0.0.1:{port}")),
-        fixture.dns(),
-    )
-    .await;
+    let host = fixture.ingestor_host();
+    let mut ingestor =
+        open_ingestor(&client_config(&format!("http://127.0.0.1:{port}")), &host).await;
     ingestor.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
 
     let Err(report) = ingestor
-        .next_batch(batch_request(), &IngestorReadCancellation::new())
+        .next_batch(&host, batch_request(), &IngestorReadCancellation::new())
         .await
     else {
         panic!("a refused connection cannot return a batch");
@@ -341,7 +337,8 @@ async fn a_receive_the_service_never_answers_ends_within_timeout_ms_after_its_lo
         key: "timeout_ms".to_string(),
         value: budget.as_millis().to_string(),
     });
-    let mut ingestor = open_ingestor(&config, fixture.dns()).await;
+    let host = fixture.ingestor_host();
+    let mut ingestor = open_ingestor(&config, &host).await;
     ingestor.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
     // The service takes the receive and never answers it, holding its connection open.
     let service = nervix_primitives::task::spawn(async move {
@@ -356,7 +353,7 @@ async fn a_receive_the_service_never_answers_ends_within_timeout_ms_after_its_lo
     let started = Instant::now();
     let read = timeout(
         GENEROUS_BUDGET,
-        ingestor.next_batch(batch_request(), &IngestorReadCancellation::new()),
+        ingestor.next_batch(&host, batch_request(), &IngestorReadCancellation::new()),
     )
     .await
     .expect("a receive the service never answers ends within its long poll and timeout_ms");
@@ -424,7 +421,7 @@ impl UnansweredIngestor {
             key: "timeout_ms".to_string(),
             value: budget.as_millis().to_string(),
         });
-        let mut ingestor = open_ingestor(&config, fixture.dns()).await;
+        let mut ingestor = open_ingestor(&config, &fixture.ingestor_host()).await;
         ingestor.queue_url = Some(format!("http://127.0.0.1:{port}/000000000000/{QUEUE}"));
         Self {
             ingestor,

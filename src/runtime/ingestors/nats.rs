@@ -25,6 +25,7 @@ use super::{
     super::*,
     IngestorStartError,
     connector::{BrokerIngestorStart, IngestorStart},
+    connector_host::IngestorEntityServices,
 };
 
 const _: () = assert!(matches!(
@@ -54,12 +55,8 @@ impl NatsSubjectIngestorStartPlan {
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerIngestorStart {
-            connector: NatsSubjectIngestorPlan::new(
-                runtime.executor().clone(),
-                resolved.entries,
-                subject,
-                queue_group,
-            ),
+            connector: NatsSubjectIngestorPlan::new(resolved.entries, subject, queue_group),
+            host: runtime.ingestor_connector_host(ingestor, IngestorEntityServices::default()),
             instances,
             acknowledgement: mode.acknowledgement(),
             buffered_intake: true,
@@ -87,12 +84,8 @@ impl NatsStreamIngestorStartPlan {
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerIngestorStart {
-            connector: NatsStreamIngestorPlan::new(
-                runtime.executor().clone(),
-                resolved.entries,
-                stream,
-                consumer,
-            ),
+            connector: NatsStreamIngestorPlan::new(resolved.entries, stream, consumer),
+            host: runtime.ingestor_connector_host(ingestor, IngestorEntityServices::default()),
             instances: NonZeroU64::MIN,
             acknowledgement: mode.acknowledgement(),
             // Under BUFFER and DROP the pull keeps running while the ingestor is quiesced, and the

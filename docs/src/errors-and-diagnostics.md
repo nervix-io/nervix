@@ -1100,7 +1100,10 @@ refusal, which keeps the transport's refusal attached for typed inspection and p
 subprotocol, since an offer can carry a credential. None is a record rejection, and a DNS result
 by itself never marks a Syslog record delivered.
 
-Redis command connections receive the node resolver through the driver's DNS hook. A failed
+Redis command connections receive the node resolver through the driver's DNS hook. The command
+pool takes that resolver from the node when its host opens it, and a node that runs without one
+fails the open with `RedisClientError::MissingNodeResolver` above the host handle's
+`HostServiceError::DnsNotInstalled`. A failed
 initial or later pool connection keeps the resolver's typed failure in
 `RedisClientError::Resolve`; a later failure sits beneath `EmitterWriteError::Publish` for the
 emitter host to retry. No caller waits on the connections a pool opens to restore its
@@ -1122,8 +1125,8 @@ A Redis client's command-pool lifetimes, `pool_idle_timeout_ms` and `pool_max_li
 refused at `CREATE CLIENT` unless they are positive, schedulable whole milliseconds. The pool reads
 them from the client's effective entries and checks them again: an invalid value fails opening the
 pool with `RedisClientError::InvalidPoolLifetime`, naming the key above the schema's
-`ClientConfigSchemaError::InvalidValue`, which the node reports as
-`OpenClientError::InvalidPoolLifetime`. It is a configuration failure, not a record rejection.
+`ClientConfigSchemaError::InvalidValue`, which the node keeps, typed, beneath the client it could
+not open (`SharedClientError::Open`). It is a configuration failure, not a record rejection.
 
 A Postgres client's pool keys are refused at `CREATE CLIENT` unless `pool_acquire_timeout_ms`,
 `pool_idle_timeout_ms` and `pool_max_lifetime_ms` are positive, schedulable whole milliseconds and

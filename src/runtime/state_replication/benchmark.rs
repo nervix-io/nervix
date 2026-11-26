@@ -172,7 +172,7 @@ impl StateReplicationBenchmark {
             .current_lsm()
             .checked_add(1)
             .assured("a benchmark commits far fewer than 2^64 offsets");
-        let position = KafkaOffsetPosition {
+        let position = DomainOffsetPosition {
             topic: TOPIC.to_string(),
             partition: 0,
             offset: self.next_offset,
