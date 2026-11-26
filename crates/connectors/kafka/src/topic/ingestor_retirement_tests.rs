@@ -24,20 +24,16 @@ use rdkafka::{mocking::MockCluster, producer::DefaultProducerContext};
 use super::{
     DomainOffsetPosition, GroupCommitRequest, KafkaConsumer, KafkaGroupCommit, KafkaTopicIngestor,
     KafkaTopicIngestorPlan, TopicPartitionInspector,
-    commit_tests::{GROUP, HELD_ROUND_TRIP, cluster, plan, publish, read_positions},
+    commit_tests::{GROUP, HELD_ROUND_TRIP, cluster, host_on, plan, publish, read_positions},
 };
 use crate::topic::retirement_tests::{
     BusyConnectorWorker, connector_workers_reach, single_connector_worker,
 };
 
-/// The plan of an ingestor in the test group that runs its driver jobs on `executor`.
-fn plan_on(
-    broker: &MockCluster<'static, DefaultProducerContext>,
-    executor: &Executor,
-) -> KafkaTopicIngestorPlan {
-    let mut plan = plan(broker, KafkaGroupCommit::EachAcknowledgedBatch);
-    plan.executor = executor.clone();
-    plan
+/// The plan of an ingestor in the test group, which runs its driver jobs on the executor the host
+/// that opens it hands over.
+fn group_plan(broker: &MockCluster<'static, DefaultProducerContext>) -> KafkaTopicIngestorPlan {
+    plan(broker, KafkaGroupCommit::EachAcknowledgedBatch)
 }
 
 /// An ingestor's own drop, at the end of its host's loop, lets the last handle go. Its consumer joined
@@ -48,14 +44,15 @@ async fn a_dropped_ingestor_destroys_its_joined_consumer_on_a_connector_worker()
     let broker = cluster();
     publish(&broker).await;
     let executor = Executor::default();
-    let mut ingestor = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
+    let host = host_on(&executor);
+    let mut ingestor = KafkaTopicIngestor::open(&group_plan(&broker), &host, 0)
         .await
         .assured("the ingestor accepts its group and broker configuration");
     ingestor
-        .resume()
+        .resume(&host)
         .await
         .assured("the ingestor subscribes to its topic");
-    read_positions(&mut ingestor).await;
+    read_positions(&mut ingestor, &host).await;
     ingestor
         .close()
         .await
@@ -123,7 +120,8 @@ async fn a_dropped_partition_inspector_destroys_its_consumer_on_a_connector_work
 async fn a_destruction_waits_for_the_busy_connector_worker() {
     let broker = cluster();
     let executor = single_connector_worker();
-    let ingestor = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
+    let host = host_on(&executor);
+    let ingestor = KafkaTopicIngestor::open(&group_plan(&broker), &host, 0)
         .await
         .assured("the ingestor accepts its group and broker configuration");
     let full = BusyConnectorWorker::fill(&executor).await;
@@ -150,7 +148,8 @@ async fn a_commit_waiting_for_a_place_after_its_ingestor_was_dropped_runs_and_th
  {
     let broker = cluster();
     let executor = single_connector_worker();
-    let mut ingestor = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
+    let host = host_on(&executor);
+    let mut ingestor = KafkaTopicIngestor::open(&group_plan(&broker), &host, 0)
         .await
         .assured("the ingestor accepts its group and broker configuration");
     let full = BusyConnectorWorker::fill(&executor).await;
@@ -195,14 +194,15 @@ async fn a_commit_answered_after_its_ingestor_was_dropped_keeps_the_consumer_unt
     let broker = cluster();
     publish(&broker).await;
     let executor = Executor::default();
-    let mut ingestor = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
+    let host = host_on(&executor);
+    let mut ingestor = KafkaTopicIngestor::open(&group_plan(&broker), &host, 0)
         .await
         .assured("the ingestor accepts its group and broker configuration");
     ingestor
-        .resume()
+        .resume(&host)
         .await
         .assured("the ingestor subscribes to its topic");
-    let positions = read_positions(&mut ingestor).await;
+    let positions = read_positions(&mut ingestor, &host).await;
     broker
         .broker_round_trip_time(1, HELD_ROUND_TRIP)
         .assured("the test broker can hold its replies");
@@ -256,7 +256,8 @@ async fn a_commit_answered_after_its_ingestor_was_dropped_keeps_the_consumer_unt
 async fn a_control_job_that_outlives_its_ingestor_destroys_the_consumer_on_a_connector_worker() {
     let broker = cluster();
     let executor = Executor::default();
-    let ingestor = KafkaTopicIngestor::open(&plan_on(&broker, &executor), 0)
+    let host = host_on(&executor);
+    let ingestor = KafkaTopicIngestor::open(&group_plan(&broker), &host, 0)
         .await
         .assured("the ingestor accepts its group and broker configuration");
     let before = executor.snapshot().connector_storage;
@@ -305,8 +306,9 @@ async fn a_consumer_holds_the_charge_of_its_retirement_from_its_creation() {
         .try_reserve(MemoryClass::Commands, capacity)
         .assured("the test occupies the command budget before opening");
 
-    let plan = plan_on(&broker, &executor);
-    let mut opening = Box::pin(KafkaTopicIngestor::open(&plan, 0));
+    let plan = group_plan(&broker);
+    let host = host_on(&executor);
+    let mut opening = Box::pin(KafkaTopicIngestor::open(&plan, &host, 0));
     let first_poll = poll_fn(|context| Poll::Ready(opening.as_mut().poll(context))).await;
     assert!(
         first_poll.is_pending(),

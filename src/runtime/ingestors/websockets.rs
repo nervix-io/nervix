@@ -16,12 +16,15 @@
 
 use error_stack::ResultExt as _;
 use nervix_connector::IngestorConnector as _;
-use nervix_connector_websockets::{WebsocketsConnectionIngestor, WebsocketsConnectionIngestorPlan};
+use nervix_connector_websockets::{
+    WebsocketsConnectionIngestor, WebsocketsConnectionIngestorPlan, WebsocketsSignalingProtocol,
+};
 
 use super::{
     super::*,
     IngestorConnectorStartError, IngestorStartError,
     connector::{BrokerIngestorStart, IngestorStart},
+    connector_host::IngestorEntityServices,
 };
 
 const _: () = assert!(matches!(
@@ -46,33 +49,31 @@ impl WebsocketsConnectionIngestorStartPlan {
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let signaling_protocol = match signaling_protocol {
-            Some(name) => {
-                let Some(protocol) = runtime.signaling_protocol(&ingestor.domain, &name).await
-                else {
-                    return Err(ingestor.connector_start_failure(
-                        IngestorConnectorStartError::SignalingProtocolMissing { protocol: name },
-                    ));
-                };
-                Some(protocol)
-            }
-            None => None,
-        };
-        let Some(dns) = runtime.dns() else {
+        // The protocol an ingestor names reaches its connector through its host handle, as the
+        // shared value the domain compiled; the plan says nothing of it.
+        let mut entity = IngestorEntityServices::default();
+        if let Some(name) = signaling_protocol {
+            let Some(protocol) = runtime.signaling_protocol(&ingestor.domain, &name).await else {
+                return Err(ingestor.connector_start_failure(
+                    IngestorConnectorStartError::SignalingProtocolMissing { protocol: name },
+                ));
+            };
+            // Typed as the connector asks for it: its handle answers by exactly this type.
+            let shared: WebsocketsSignalingProtocol = protocol;
+            entity.signaling_protocol = Some(Box::new(shared));
+        }
+        // The connector takes the resolver from its handle when it opens; a node without one
+        // refuses the start here, before anything of the connector runs.
+        if runtime.dns().is_none() {
             return Err(
                 ingestor.connector_start_failure(IngestorConnectorStartError::NodeDnsUnavailable)
             );
-        };
-        let connector = WebsocketsConnectionIngestorPlan::new(
-            resolved.entries,
-            headers,
-            signaling_protocol,
-            dns.clone(),
-            runtime.outward_tls().clone(),
-        )
-        .change_context_lazy(|| ingestor.initialize_failure())?;
+        }
+        let connector = WebsocketsConnectionIngestorPlan::new(resolved.entries, headers)
+            .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerIngestorStart {
             connector,
+            host: runtime.ingestor_connector_host(ingestor, entity),
             instances: NonZeroU64::MIN,
             acknowledgement: mode.acknowledgement(),
             buffered_intake: true,

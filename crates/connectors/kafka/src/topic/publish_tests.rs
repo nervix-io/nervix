@@ -8,7 +8,6 @@ use std::{
     collections::BTreeSet,
     future::Future,
     num::NonZeroUsize,
-    path::PathBuf,
     pin::Pin,
     task::{Context, Wake, Waker},
     time::Duration,
@@ -16,11 +15,11 @@ use std::{
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    AckConfirmation, BrokerPublishingMode, EmitterBoundedExecution, EmitterConnector as _,
-    EmitterEventReporter, EmitterFinish, EmitterFinishError, EmitterGeneralErrorHandler,
-    EmitterHost, EmitterLifecycle, EmitterRecord, EmitterRecordAcknowledgements, EmitterRecordId,
-    EmitterStagingDirectory, EmitterTransientErrorStatus, RecordEmitter, RecordEnvelope,
+    AckConfirmation, BrokerPublishingMode, EmitterConnector as _, EmitterFinish,
+    EmitterFinishError, EmitterLifecycle, EmitterRecord, EmitterRecordId, RecordEmitter,
+    RecordEnvelope,
 };
+use nervix_connector_fake::FakeEmitterHost;
 use nervix_models::{ClientConfigEntry, KafkaTopicName, Timestamp};
 use nervix_primitives::{
     sync::{
@@ -83,62 +82,6 @@ const REFUSED_PRODUCE_REQUESTS: usize = 10_000;
 /// A payload larger than a [`ONE_KIB_QUEUE`] producer queue holds, so the producer can never take
 /// it into that queue, and larger than a [`THOUSAND_BYTE_MESSAGES`] message.
 const OVERSIZED_PAYLOAD_BYTES: usize = 2048;
-
-/// A host that records nothing, for an emitter whose publishes report everything in their outcome. It
-/// hands the emitter `executor`.
-pub(super) struct SilentHost {
-    executor: nervix_execution::Executor,
-}
-
-impl SilentHost {
-    pub(super) fn on(executor: nervix_execution::Executor) -> Self {
-        Self { executor }
-    }
-}
-
-impl EmitterTransientErrorStatus for SilentHost {
-    fn record_transient_error(&self, _reason: String, _retry_after: Duration) {}
-
-    fn clear_transient_error(&self) {}
-}
-
-impl nervix_connector::EmitterReadiness for SilentHost {
-    fn mark_ready(&self) {}
-    fn mark_unready(&self) {}
-}
-
-impl EmitterEventReporter for SilentHost {
-    fn report_error(&self, _message: String) {}
-}
-
-impl nervix_connector::ConnectorEventProvider for SilentHost {}
-
-impl nervix_connector::EmitterPayloadObserver for SilentHost {
-    fn record_prepared_payload(&self, _measurement: nervix_connector::EmitterPayloadMeasurement) {}
-    fn record_payload_subdivisions(&self, _subdivisions: u64) {}
-}
-
-impl EmitterStagingDirectory for SilentHost {
-    fn staging_directory(&self) -> PathBuf {
-        std::env::temp_dir()
-    }
-}
-
-impl EmitterBoundedExecution for SilentHost {
-    fn executor(&self) -> nervix_execution::Executor {
-        self.executor.clone()
-    }
-}
-
-impl EmitterGeneralErrorHandler for SilentHost {
-    fn handle_general_error(
-        &self,
-        _acks: &EmitterRecordAcknowledgements,
-        _class: nervix_models::MessageErrorClass,
-        _reason: String,
-    ) {
-    }
-}
 
 /// A waker that holds the thread that wakes it until the test lets it go.
 ///
@@ -223,7 +166,8 @@ async fn emitter(
     .await
 }
 
-/// An emitter like [`emitter`]'s, whose host hands it `executor`.
+/// An emitter like [`emitter`]'s, whose host hands it `executor`, which is all a Kafka emitter
+/// takes from its node: its publishes report everything in their outcome.
 pub(super) async fn emitter_on(
     cluster: &MockCluster<'static, DefaultProducerContext>,
     entries: &[(&str, &str)],
@@ -232,7 +176,7 @@ pub(super) async fn emitter_on(
 ) -> KafkaTopicEmitter {
     let mut emitter = KafkaTopicEmitter::open(
         emitter_config(cluster, entries, mode),
-        EmitterHost::new(SilentHost::on(executor)),
+        FakeEmitterHost::on(executor).host(),
     )
     .await
     .assured("librdkafka accepts the test producer configuration");

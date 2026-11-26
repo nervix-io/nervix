@@ -2,7 +2,8 @@
 //!
 //! Outside the layer order: a harness.
 //! - **Owns.** Causal driver-wait and cancelled-commit regressions through the production ingestor.
-//! - **Depends on.** The connector contract, bounded executor and librdkafka's mock broker.
+//! - **Depends on.** The connector contract and its scripted host, bounded executor and
+//!   librdkafka's mock broker.
 //! - **Must not know.** Runtime graph ownership, registry Models or cluster placement.
 
 use std::{
@@ -15,8 +16,9 @@ use async_trait::async_trait;
 use meticulous::ResultExt as _;
 use nervix_connector::{
     BrokerIngestorConnector as _, DomainOffsetInitialization, DomainOffsetPosition,
-    DomainOffsetResult, DomainOffsetServices, DomainOffsets, IngestorConnector,
+    DomainOffsetResult, DomainOffsetServices, DomainOffsets, IngestorConnector, IngestorHost,
 };
+use nervix_connector_fake::FakeIngestorHost;
 use nervix_execution::{AdmissionError, Executor, MemoryClass, StorageClass};
 use nervix_models::{ClientConfigEntry, KafkaTopicName};
 use nervix_primitives::sync::oneshot;
@@ -26,7 +28,8 @@ use super::{
     GroupCommitRequest, KafkaGroupCommit, KafkaTopicIngestor, KafkaTopicIngestorError,
     KafkaTopicIngestorOffsetMode, KafkaTopicIngestorPlan, TopicPartitionInspector,
     commit_tests::{
-        READ_DEADLINE, cluster, plan as group_plan, publish, read_positions, subscribed_ingestor,
+        READ_DEADLINE, cluster, host_on, plan as group_plan, publish, read_positions,
+        subscribed_ingestor,
     },
 };
 use crate::topic::retirement_tests::{BusyConnectorWorker, single_connector_worker};
@@ -46,7 +49,7 @@ async fn an_admitted_partition_inspection_preserves_a_named_missing_topic() {
     let inspector = TopicPartitionInspector::new(
         &plan.config,
         "metadata-missing-topic".to_string(),
-        plan.executor,
+        Executor::default(),
     )
     .await
     .assured("the inspector accepts the test broker configuration");
@@ -77,19 +80,19 @@ async fn rejecting_a_delivered_record_admits_its_seek_and_reads_that_offset_agai
     let broker = cluster();
     publish(&broker).await;
     let executor = Executor::default();
-    let mut plan = group_plan(&broker, KafkaGroupCommit::EachAcknowledgedBatch);
-    plan.executor = executor.clone();
-    let mut ingestor = KafkaTopicIngestor::open(&plan, 0)
+    let plan = group_plan(&broker, KafkaGroupCommit::EachAcknowledgedBatch);
+    let host = host_on(&executor);
+    let mut ingestor = KafkaTopicIngestor::open(&plan, &host, 0)
         .await
         .assured("the ingestor accepts its group and broker configuration");
     assert!(matches!(
         ingestor
-            .resume()
+            .resume(&host)
             .await
             .assured("the ingestor subscribes to its topic"),
         nervix_connector::IngestorResume::Ready
     ));
-    let positions = read_positions(&mut ingestor).await;
+    let positions = read_positions(&mut ingestor, &host).await;
     let admitted = executor.snapshot().connector_storage.admitted;
 
     ingestor
@@ -102,7 +105,7 @@ async fn rejecting_a_delivered_record_admits_its_seek_and_reads_that_offset_agai
         admitted + 1,
         "all rejected partitions seek through one admitted control job"
     );
-    assert_eq!(read_positions(&mut ingestor).await, positions);
+    assert_eq!(read_positions(&mut ingestor, &host).await, positions);
 }
 
 #[async_trait]
@@ -135,8 +138,10 @@ impl DomainOffsetServices for UnreachedOffsets {
 async fn cancelling_a_commit_keeps_its_request_in_flight() {
     let broker = cluster();
     publish(&broker).await;
-    let mut ingestor = subscribed_ingestor(&broker, KafkaGroupCommit::EachAcknowledgedBatch).await;
-    let positions = read_positions(&mut ingestor).await;
+    let host = host_on(&Executor::default());
+    let mut ingestor =
+        subscribed_ingestor(&broker, &host, KafkaGroupCommit::EachAcknowledgedBatch).await;
+    let positions = read_positions(&mut ingestor, &host).await;
     broker
         .broker_round_trip_time(1, Duration::from_secs(3600))
         .assured("the test broker can hold its replies");
@@ -165,7 +170,8 @@ async fn cancelling_a_commit_keeps_its_request_in_flight() {
 #[nervix_primitives::test]
 async fn a_control_turn_outlives_the_future_that_admitted_it() {
     let broker = cluster();
-    let ingestor = domain_ingestor(&broker, Executor::default()).await;
+    let host = domain_host(&Executor::default());
+    let ingestor = domain_ingestor(&broker, &host).await;
     let (started, has_started) = oneshot::channel();
     let (release, released) = oneshot::channel();
     {
@@ -200,8 +206,9 @@ async fn a_domain_resume_yields_while_the_broker_holds_its_metadata() {
     broker
         .broker_round_trip_time(1, Duration::from_secs(3600))
         .assured("the test broker can hold its replies");
-    let mut ingestor = domain_ingestor(&broker, Executor::default()).await;
-    let mut resume = Box::pin(ingestor.resume());
+    let host = domain_host(&Executor::default());
+    let mut ingestor = domain_ingestor(&broker, &host).await;
+    let mut resume = Box::pin(ingestor.resume(&host));
     let first_poll = poll_fn(|context| Poll::Ready(resume.as_mut().poll(context))).await;
     broker
         .broker_round_trip_time(1, Duration::ZERO)
@@ -213,13 +220,21 @@ async fn a_domain_resume_yields_while_the_broker_holds_its_metadata() {
     );
 }
 
+/// The handle of a node that hands a domain-offset ingestor `executor` for its driver jobs and
+/// keeps domain offsets for it that no test here reaches.
+fn domain_host(executor: &Executor) -> IngestorHost {
+    FakeIngestorHost::default()
+        .with_executor(executor.clone())
+        .with_domain_offsets(DomainOffsets::new(UnreachedOffsets))
+        .host()
+}
+
 async fn domain_ingestor(
     broker: &MockCluster<'static, DefaultProducerContext>,
-    executor: Executor,
+    host: &IngestorHost,
 ) -> KafkaTopicIngestor {
     let plan = KafkaTopicIngestorPlan {
         settings: crate::KafkaTopicIngestorSettings::default(),
-        executor,
         config: vec![
             ClientConfigEntry {
                 key: "bootstrap.servers".to_string(),
@@ -233,10 +248,9 @@ async fn domain_ingestor(
         topic: KafkaTopicName::parse("orders").assured("orders is a valid Kafka topic"),
         offset_mode: KafkaTopicIngestorOffsetMode::Domain {
             group_id: "metadata-worker-yield".to_string(),
-            offsets: DomainOffsets::new(UnreachedOffsets),
         },
     };
-    KafkaTopicIngestor::open(&plan, 0)
+    KafkaTopicIngestor::open(&plan, host, 0)
         .await
         .assured("the ingestor accepts the test broker's configuration")
 }
@@ -248,7 +262,8 @@ async fn domain_ingestor(
 async fn a_full_command_budget_holds_the_control_job_back_until_its_deadline() {
     let broker = cluster();
     let executor = Executor::default();
-    let mut ingestor = domain_ingestor(&broker, executor.clone()).await;
+    let host = domain_host(&executor);
+    let mut ingestor = domain_ingestor(&broker, &host).await;
     // The open ingestor already holds the charge of its consumer's retirement.
     let commands = executor.snapshot().commands_memory;
     let _held = executor
@@ -258,7 +273,7 @@ async fn a_full_command_budget_holds_the_control_job_back_until_its_deadline() {
         )
         .assured("the test occupies the rest of the command budget before resuming");
     let report = ingestor
-        .resume()
+        .resume(&host)
         .await
         .expect_err("the control deadline ends the metadata job's wait for room");
     assert!(
@@ -282,7 +297,8 @@ async fn a_full_command_budget_holds_the_control_job_back_until_its_deadline() {
 async fn control_admission_waits_for_a_place_and_spends_the_client_deadline_on_it() {
     let broker = cluster();
     let executor = single_connector_worker();
-    let ingestor = domain_ingestor(&broker, executor.clone()).await;
+    let host = domain_host(&executor);
+    let ingestor = domain_ingestor(&broker, &host).await;
     // The charge of its consumer's retirement, which the open ingestor holds throughout.
     let opened = executor.snapshot().commands_memory.reserved_bytes;
 
@@ -343,7 +359,8 @@ async fn control_admission_waits_for_a_place_and_spends_the_client_deadline_on_i
 async fn a_cancelled_control_call_finishes_before_the_next_can_mutate_its_consumer() {
     let broker = cluster();
     let executor = Executor::default();
-    let ingestor = domain_ingestor(&broker, executor.clone()).await;
+    let host = domain_host(&executor);
+    let ingestor = domain_ingestor(&broker, &host).await;
     let (started, has_started) = oneshot::channel();
     let (release, released) = oneshot::channel();
     let mut first = Box::pin(ingestor.control.run(&ingestor.consumer, move |_, _| {

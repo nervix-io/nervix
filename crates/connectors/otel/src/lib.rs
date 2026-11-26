@@ -28,10 +28,11 @@ pub use otlp::{
 pub use traces::{OtelTracesEmitter, OtelTracesEmitterConfig};
 
 /// Parameters common to every OTLP export, without an entity selector.
+///
+/// The node resolver an export's client dials through and the outward TLS policy the handshakes
+/// of its HTTP transport take reach each emitter through its host handle.
 pub struct OtelExportConfig {
-    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<nervix_models::ClientConfigEntry>,
-    pub dns: nervix_dns::DnsResolver,
     pub batch: Option<nervix_models::EmitterBatchPolicy>,
     pub values: Vec<String>,
     pub attributes: Vec<String>,
@@ -43,9 +44,7 @@ pub struct OtelExportConfig {
 impl OtelExportConfig {
     fn into_encoder(self, signal: otlp::OtlpSignal) -> otlp::OtlpEncoderConfig {
         let Self {
-            tls_policy,
             config,
-            dns,
             batch,
             values,
             attributes,
@@ -54,9 +53,7 @@ impl OtelExportConfig {
             mapped_schema,
         } = self;
         otlp::OtlpEncoderConfig {
-            tls_policy,
             config,
-            dns,
             signal,
             batch,
             values,

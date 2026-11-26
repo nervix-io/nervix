@@ -27,6 +27,15 @@
         reason = "owns the engines and infrastructure boundary declared above"
     )
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        tls_policy,
+        reason = "the HTTP request emitter dials through its node's resolver under the node's \
+                  outward TLS policy"
+    )
+)]
 
 impl nervix_connector::EmitterConnector for HttpRequestEmitter {
     const KIND: nervix_models::EmitterEntityKind = Self::KIND;
@@ -58,8 +67,8 @@ use nervix_connector::HttpRequestEmitter as _;
 use nervix_connector::{
     DeclaredProxy, EmitterFinish, EmitterFinishResult, EmitterHost, EmitterHttpRequest,
     EmitterLifecycle, EmitterOpenError, EmitterRecordId, EmitterRetryDelay, EmitterStartResult,
-    EmitterWriteError, HttpClientConfig, PerRecordOutcome, RustlsClientConfigProvider,
-    physical_time::actual_utc_now,
+    EmitterWriteError, HttpClientConfig, OutwardTlsPolicy, PerRecordOutcome,
+    RustlsClientConfigProvider, physical_time::actual_utc_now,
 };
 use nervix_dns::{AddressAttempt, DnsResolver, LookupShare, OperationBudget};
 use nervix_models::ClientConfigEntry;
@@ -104,11 +113,12 @@ const HTTP2_PROTOCOL: &[u8] = b"h2";
 /// The ALPN identifier of HTTP/1.1.
 const HTTP1_PROTOCOL: &[u8] = b"http/1.1";
 
-/// The emitter's resolved client settings and its node-owned resolver.
+/// The emitter's resolved client settings.
+///
+/// The node-owned resolver every request resolves its endpoint or proxy through, and the outward
+/// TLS policy its handshakes take, reach the emitter through its host handle.
 pub struct HttpRequestEmitterConfig {
-    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
-    pub dns: DnsResolver,
 }
 
 /// Each publish call sends its prepared requests sequentially. A fresh connection serves one
@@ -216,29 +226,35 @@ type HttpAttemptResult<T> = Result<T, Report<HttpAttemptError>>;
 struct AddressShareElapsed;
 
 impl HttpRequestEmitter {
-    fn prepare(config: HttpRequestEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
-        Self::prepare_client(config)
+    fn prepare(config: HttpRequestEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
+        // A node without its resolver cannot open the emitter at all, so that is reported before
+        // anything its configuration says.
+        let dns = host.dns().change_context(EmitterOpenError::Initialize {
+            connector: HTTP_EMITTER,
+        })?;
+        let tls_policy = host.tls_policy();
+        Self::prepare_client(config, dns, &tls_policy)
     }
 
     /// The emitter `config` declares: its client transport, its proxy and its TLS settings, read
-    /// locally without contacting the endpoint.
-    fn prepare_client(config: HttpRequestEmitterConfig) -> EmitterStartResult<Self> {
+    /// locally without contacting the endpoint. Its requests resolve through `dns`, its node's
+    /// resolver, and its handshakes take `tls_policy`, its node's outward TLS policy.
+    fn prepare_client(
+        config: HttpRequestEmitterConfig,
+        dns: DnsResolver,
+        tls_policy: &OutwardTlsPolicy,
+    ) -> EmitterStartResult<Self> {
         let transport = ClientTransport::declared(&config.config, HTTP_EMITTER).change_context(
             EmitterOpenError::InvalidConfiguration {
                 connector: HTTP_EMITTER,
             },
         )?;
-        let proxy = HttpClientConfig::new(
-            &config.config,
-            HTTP_EMITTER,
-            &config.dns,
-            &config.tls_policy,
-        )
-        .proxy()
-        .change_context(EmitterOpenError::InvalidConfiguration {
-            connector: HTTP_EMITTER,
-        })?;
-        let tls = RustlsClientConfigProvider::new(&config.config, &config.tls_policy)
+        let proxy = HttpClientConfig::new(&config.config, HTTP_EMITTER, &dns, tls_policy)
+            .proxy()
+            .change_context(EmitterOpenError::InvalidConfiguration {
+                connector: HTTP_EMITTER,
+            })?;
+        let tls = RustlsClientConfigProvider::new(&config.config, tls_policy)
             .build_with_default_roots()
             .change_context(EmitterOpenError::InvalidConfiguration {
                 connector: HTTP_EMITTER,
@@ -250,7 +266,7 @@ impl HttpRequestEmitter {
         let mut proxy_tls = (*tls).clone();
         proxy_tls.alpn_protocols = vec![HTTP1_PROTOCOL.to_vec()];
         Ok(Self {
-            dns: config.dns,
+            dns,
             endpoint_tls: StdArc::new(endpoint_tls),
             proxy_tls: StdArc::new(proxy_tls),
             timeout: transport.timeout,

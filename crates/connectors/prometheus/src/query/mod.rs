@@ -21,14 +21,24 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        tls_policy,
+        reason = "the Prometheus query ingestor dials through its node's resolver under the \
+                  node's outward TLS policy"
+    )
+)]
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    HttpClientConfig, HttpClientConfigError, IngestorConnector, IngestorError, IngestorPoll,
-    IngestorPollMessage, IngestorResult, PacedIngestorConnector, RetainedIngestHeaders,
-    RetainedIngestMetadata, RetainedIngestMetadataValue, physical_time::actual_utc_now,
+    HttpClientConfig, HttpClientConfigError, IngestorConnector, IngestorError, IngestorHost,
+    IngestorPoll, IngestorPollMessage, IngestorResult, PacedIngestorConnector,
+    RetainedIngestHeaders, RetainedIngestMetadata, RetainedIngestMetadataValue,
+    physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{
@@ -43,13 +53,15 @@ use answer::PrometheusQueryResponse;
 
 const PROMETHEUS: &str = "prometheus";
 
+/// What one Prometheus query ingestor polls, from its typed plan.
+///
+/// The node resolver its client dials through and the outward TLS policy its handshakes take
+/// reach the ingestor through its host handle.
 pub struct PrometheusQueryIngestorPlan {
-    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
     pub query: String,
     /// The most bytes of one query response a poll reads.
     pub max_body_size: PayloadSizeLimit,
-    pub dns: DnsResolver,
 }
 
 pub struct PrometheusQueryIngestor {
@@ -102,13 +114,20 @@ impl IngestorConnector for PrometheusQueryIngestor {
 
     type Plan = PrometheusQueryIngestorPlan;
 
-    async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
+    async fn open(
+        plan: &Self::Plan,
+        host: &IngestorHost,
+        _instance_index: u64,
+    ) -> IngestorResult<Self> {
         let api_root = PrometheusApiRoot::of_client_config(&plan.config).change_context(
             IngestorError::Open {
                 connector: PROMETHEUS,
             },
         )?;
-        let client = Self::client_from_config(&plan.config, &plan.dns, &plan.tls_policy)
+        let dns = host.dns().change_context(IngestorError::Open {
+            connector: PROMETHEUS,
+        })?;
+        let client = Self::client_from_config(&plan.config, &dns, &host.tls_policy())
             .change_context(IngestorError::Open {
                 connector: PROMETHEUS,
             })?;
@@ -123,7 +142,11 @@ impl IngestorConnector for PrometheusQueryIngestor {
 
 #[async_trait]
 impl PacedIngestorConnector for PrometheusQueryIngestor {
-    async fn poll(&mut self, scheduled_at: Timestamp) -> IngestorResult<IngestorPoll> {
+    async fn poll(
+        &mut self,
+        _host: &IngestorHost,
+        scheduled_at: Timestamp,
+    ) -> IngestorResult<IngestorPoll> {
         let read = || IngestorError::Read {
             connector: PROMETHEUS,
         };
@@ -303,12 +326,13 @@ mod tests {
         )
         .await?;
         let plan = |config: Vec<ClientConfigEntry>| PrometheusQueryIngestorPlan {
-            tls_policy: Default::default(),
             config,
             query: "up".to_string(),
             max_body_size: nervix_models::PROMETHEUS_DEFAULT_MAX_BODY_SIZE,
-            dns: dns.clone(),
         };
+        let host = nervix_connector_fake::FakeIngestorHost::default()
+            .with_dns(dns.clone())
+            .host();
         let entry = |key: &str, value: &str| ClientConfigEntry {
             key: key.to_string(),
             value: value.to_string(),
@@ -319,6 +343,7 @@ mod tests {
                 entry("addr", "http://prometheus:9090/base"),
                 entry("timeout_ms", "5000"),
             ]),
+            &host,
             0,
         )
         .await
@@ -330,6 +355,7 @@ mod tests {
 
         let Err(refused) = PrometheusQueryIngestor::open(
             &plan(vec![entry("addr", "http://prometheus:9090/?stale=true")]),
+            &host,
             0,
         )
         .await
@@ -354,6 +380,27 @@ mod tests {
             PrometheusQueryIngestor::client_from_config(&timeout, &dns, &Default::default())
                 .expect_err("invalid Prometheus timeout");
         assert!(error.to_string().contains("Prometheus timeout_ms"));
+
+        let Err(unresolved) = PrometheusQueryIngestor::open(
+            &plan(vec![
+                entry("addr", "http://prometheus:9090/base"),
+                entry("timeout_ms", "5000"),
+            ]),
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
+            0,
+        )
+        .await
+        else {
+            panic!("an ingestor that dials by name needs its node's resolver");
+        };
+        assert!(matches!(
+            unresolved.current_context(),
+            IngestorError::Open { .. }
+        ));
+        assert_eq!(
+            unresolved.downcast_ref::<nervix_connector::HostServiceError>(),
+            Some(&nervix_connector::HostServiceError::DnsNotInstalled)
+        );
         Ok(())
     }
 
@@ -658,7 +705,10 @@ mod tests {
         let evaluated_at = Timestamp::from_unix_nanos(1_775_520_000_123_456_789);
 
         let poll = ingestor
-            .poll(evaluated_at)
+            .poll(
+                &nervix_connector_fake::FakeIngestorHost::default().host(),
+                evaluated_at,
+            )
             .await
             .expect("the answer is a vector");
 

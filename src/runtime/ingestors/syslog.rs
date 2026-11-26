@@ -23,6 +23,7 @@ use super::{
     super::*,
     IngestorStartError,
     connector::{BrokerIngestorStart, IngestorStart},
+    connector_host::IngestorEntityServices,
 };
 
 const _: () = assert!(matches!(
@@ -43,7 +44,6 @@ impl SyslogListenerIngestorStartPlan {
         let connector = SyslogListenerIngestorPlan::new(
             resolved.entries,
             |configured| runtime.syslog_ingestor_bind_addr(configured),
-            runtime.outward_tls().clone(),
             runtime.inner.connector_host.syslog,
         )
         .change_context_lazy(|| ingestor.initialize_failure())?;
@@ -52,6 +52,7 @@ impl SyslogListenerIngestorStartPlan {
             connector.with_listener_faults(runtime.inner.fault_injection.syslog_listener_faults());
         BrokerIngestorStart {
             connector,
+            host: runtime.ingestor_connector_host(ingestor, IngestorEntityServices::default()),
             instances: NonZeroU64::MIN,
             acknowledgement: IngestAcknowledgement::Unacknowledged,
             buffered_intake: true,

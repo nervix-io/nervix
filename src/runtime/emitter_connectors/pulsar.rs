@@ -33,7 +33,6 @@ impl EmitterConnectorStarter {
             batch,
             PulsarTopicEmitter::open(
                 PulsarTopicEmitterConfig {
-                    tls_policy: context.runtime.outward_tls().clone(),
                     config: connector.client.config.entries.clone(),
                     topic: connector.topic.clone(),
                     mode: connector.mode,

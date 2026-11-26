@@ -982,13 +982,7 @@ fn carries_the_declared_client_and_the_emitter_parameters() {
     );
     assert_eq!(connector.conflict_action, PostgresConflictAction::None);
     assert_eq!(connector.batch, batch_policy());
-    assert_eq!(
-        connector.pooled_client(),
-        PooledClientPlan {
-            transport: PooledTransport::Postgres,
-            bounds: pool_bounds(),
-        }
-    );
+    assert_eq!(connector.pool, pool_bounds());
 }
 
 #[test]

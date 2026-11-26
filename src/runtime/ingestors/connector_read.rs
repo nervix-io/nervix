@@ -128,7 +128,8 @@ impl<M> BrokerRead<M> {
     }
 }
 
-/// Reads the next batch from `ingestor` and awaits the read to completion.
+/// Reads the next batch from `ingestor` and awaits the read to completion, handing the read the
+/// instance's `connector_host`.
 ///
 /// A flush that falls due while the read waits needs nothing from the ingestor, so the host flushes
 /// and keeps waiting. A quiesce change or a stop needs the loop back: the host cancels the read and
@@ -137,6 +138,7 @@ impl<M> BrokerRead<M> {
 pub(super) async fn read_batch<C>(
     connector: &mut C,
     host: &mut IngestorLoopHost,
+    connector_host: &IngestorHost,
     shutdown: &mut watch::Receiver<bool>,
     request: IngestorBatchRequest,
 ) -> BrokerRead<C::Message>
@@ -144,7 +146,7 @@ where
     C: BrokerIngestorConnector,
 {
     let cancellation = IngestorReadCancellation::new();
-    let mut read = pin!(connector.next_batch(request, &cancellation));
+    let mut read = pin!(connector.next_batch(connector_host, request, &cancellation));
     let end = loop {
         nervix_primitives::task::consume_budget().await;
         let next_flush = host.next_flush();

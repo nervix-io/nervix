@@ -1,17 +1,20 @@
-//! One live connector per named client on this node, shared by every local user of that client.
+//! One live pooled client per named client on this node, shared by every local user of that client.
 //!
 //! Layer: data plane.
-//! Owns: the connector instance behind each named client on this node, the interest its local
-//! users hold in it, and the wait a user sits in between asking for a connection and being handed
-//! one.
-//! Depends on: the vocabulary that names a domain and a client, the pooled client an emitter's start
-//! plan decides, the resolved client configuration, and the connector drivers.
-//! Must not know: which graph node asked for a connection, how a batch is built, or how a
-//! schedule was decided.
+//! Owns: the pooled-client service of the emitter host: the instance behind each named client on
+//! this node, whatever connector opened it, the interest its local users hold in it, and the wait
+//! a user publishes between asking for a connection and being handed one.
+//! Depends on: the vocabulary that names a domain, a client and a connector, the declared pool
+//! bounds, the resolved client configuration, and the connector contract's pooled client, through
+//! which a connector crate says how its client opens.
+//! Must not know: any connector crate or driver, which graph node asked for a connection, how a
+//! batch is built, or how a schedule was decided.
 //!
-//! A pool belongs to one named client in one domain on one physical node. Every local emitter and
-//! ingestor of that client borrows from the same instance, which is what makes the declared bounds
-//! a property of the transport rather than of whoever happened to open a connection first.
+//! A pool belongs to one named client in one domain on one physical node. Every local emitter of
+//! that client borrows from the same instance, which is what makes the declared bounds a property
+//! of the transport rather than of whoever happened to open a connection first. The service is
+//! keyed by connector kind and generic over the pooled client: the composition root names the pool
+//! type of the emitter it opens, and nothing here names a transport.
 
 #![cfg_attr(
     nervix_lint,
@@ -25,77 +28,32 @@
     )
 )]
 
-use error_stack::Report;
-use nervix_connector::{ClientResourceMounts, EmitterOpenError, ResolvedClientConfig};
-use nervix_connector_mongodb::MongoDbClient;
-use nervix_connector_mysql::MySqlPool;
-use nervix_connector_postgres::PostgresPool;
-use nervix_connector_redis::{RedisClientError, RedisCommandPool, open_redis_command_pool};
+use std::any::Any;
+
+use error_stack::{Report, ResultExt as _};
+use nervix_connector::{
+    ClientResourceMounts, PooledClient, PooledClientHost, PooledClientWaits, ResolvedClientConfig,
+};
+use nervix_models::{ClientPoolBounds, ConnectorKind};
 use url::Url;
 
 use super::*;
 
-/// Why one client's connector instance could not be opened.
+/// Why this node refused to open one client's pooled client before its connector saw it.
 ///
-/// The transport names itself so a diagnostic says which driver refused, and no variant carries a
-/// credential or a complete connection address.
+/// The connector names itself so a diagnostic says whose client was refused, and no variant
+/// carries a credential or a complete connection address.
 #[derive(Debug, thiserror::Error)]
 pub(in crate::runtime) enum OpenClientError {
-    #[error("missing {transport} client config key '{key}'")]
-    MissingConfig {
-        transport: &'static str,
-        key: &'static str,
+    /// A configuration entry or address parameter sizes the pool beside the client's `POOL SIZE`.
+    #[error(
+        "invalid {connector} client configuration: '{key}' sizes the connection pool, which is \
+         declared by POOL SIZE MIN ... MAX ... on the client"
+    )]
+    SizesPool {
+        connector: ConnectorKind,
+        key: String,
     },
-    #[error("invalid {transport} client configuration: {reason}")]
-    InvalidConfig {
-        transport: &'static str,
-        reason: String,
-    },
-    /// One of the client's deadline keys breaks the deadline rule; the cause beneath names it.
-    #[error("invalid {transport} client deadline")]
-    InvalidDeadline { transport: &'static str },
-    /// One of the client's connection-pool lifetimes breaks its declared value rule; the cause
-    /// beneath says why.
-    #[error("invalid {transport} client {key}")]
-    InvalidPoolLifetime {
-        transport: &'static str,
-        key: &'static str,
-    },
-    #[error("failed to connect to {transport}: {reason}")]
-    Connect {
-        transport: &'static str,
-        reason: String,
-    },
-}
-
-impl OpenClientError {
-    /// How the Redis connector's own client failure reads as a client this node could not open.
-    fn from_redis(error: Report<RedisClientError>) -> Report<Self> {
-        let context = match error.current_context() {
-            RedisClientError::MissingConfig { key } => Self::MissingConfig {
-                transport: "Redis",
-                key,
-            },
-            RedisClientError::InvalidConfig { reason } => Self::InvalidConfig {
-                transport: "Redis",
-                reason: reason.clone(),
-            },
-            RedisClientError::InvalidConnectTimeout => Self::InvalidDeadline { transport: "Redis" },
-            RedisClientError::InvalidPoolLifetime { key } => Self::InvalidPoolLifetime {
-                transport: "Redis",
-                key,
-            },
-            RedisClientError::Connect { reason } => Self::Connect {
-                transport: "Redis",
-                reason: reason.clone(),
-            },
-            RedisClientError::Resolve { .. } => Self::Connect {
-                transport: "Redis",
-                reason: error.current_context().to_string(),
-            },
-        };
-        error.change_context(context)
-    }
 }
 
 /// Reject connector configuration that tries to size the connection pool.
@@ -104,16 +62,13 @@ impl OpenClientError {
 /// that also sizes the pool is rejected rather than ignored, so an operator never has two
 /// disagreeing answers with the winner decided by which driver read which.
 fn reject_pool_sizing(
-    transport: &'static str,
+    connector: ConnectorKind,
     config: &[nervix_models::ClientConfigEntry],
 ) -> Result<(), Report<OpenClientError>> {
     let rejected = |key: &str| {
-        Report::new(OpenClientError::InvalidConfig {
-            transport,
-            reason: format!(
-                "'{key}' sizes the connection pool, which is declared by POOL SIZE MIN ... MAX \
-                 ... on the client"
-            ),
+        Report::new(OpenClientError::SizesPool {
+            connector,
+            key: key.to_string(),
         })
     };
     for entry in config {
@@ -138,33 +93,25 @@ fn reject_pool_sizing(
 }
 
 /// Why this node could not supply a shared client.
+///
+/// A client that could not open keeps its cause beneath it: this node's own refusal of its
+/// configuration, or the typed failure of the connector that opens it.
 #[derive(Debug, thiserror::Error)]
 pub(in crate::runtime) enum SharedClientError {
     #[error("failed to open client '{client}'")]
     Open { client: String },
     #[error("client '{client}' is not a {expected} client")]
-    WrongTransport {
+    WrongConnector {
         client: String,
-        expected: &'static str,
+        expected: ConnectorKind,
     },
-}
-
-/// The driver-owned instance behind one named client.
-///
-/// Each variant pairs a transport with the widest thing its driver can share, so a holder cannot
-/// carry a MySQL pool while believing it has a MongoDB client. Only transports that own a real
-/// connection pool appear here; the connection policies of the broker, socket and request
-/// transports stay with those connectors.
-pub(in crate::runtime) enum SharedClientInstance {
-    MySql(MySqlPool),
-    MongoDb(MongoDbClient),
-    Redis(RedisCommandPool),
-    Postgres(PostgresPool),
 }
 
 /// One named client's instance on this node, together with everything it needs to stay usable.
 pub(in crate::runtime) struct SharedClient {
-    instance: SharedClientInstance,
+    /// The pooled client its connector opened, behind the type only that connector's crate and
+    /// the composition root name: the shared `Arc` of its [`PooledClient`].
+    instance: Box<dyn Any + Send + Sync>,
     /// The rendered resource mount this instance reads its TLS material from.
     ///
     /// The instance outlives every individual user, so the mount is held here rather than by the
@@ -173,58 +120,16 @@ pub(in crate::runtime) struct SharedClient {
 }
 
 impl SharedClient {
-    /// The MySQL pool behind this client, or an error naming the transport mismatch.
-    pub(in crate::runtime) fn mysql(
+    /// The pooled client behind this client as connector `K`'s, or an error naming the mismatch.
+    fn pooled<K: PooledClient>(
         &self,
         client: &ClientName,
-    ) -> Result<&MySqlPool, Report<SharedClientError>> {
-        match &self.instance {
-            SharedClientInstance::MySql(pool) => Ok(pool),
-            _ => Err(Report::new(SharedClientError::WrongTransport {
+    ) -> Result<Arc<K>, Report<SharedClientError>> {
+        match self.instance.downcast_ref::<Arc<K>>() {
+            Some(pooled) => Ok(pooled.clone()),
+            None => Err(Report::new(SharedClientError::WrongConnector {
                 client: client.as_str().to_string(),
-                expected: "MySQL",
-            })),
-        }
-    }
-
-    /// The MongoDB client behind this client, or an error naming the transport mismatch.
-    pub(in crate::runtime) fn mongodb(
-        &self,
-        client: &ClientName,
-    ) -> Result<&MongoDbClient, Report<SharedClientError>> {
-        match &self.instance {
-            SharedClientInstance::MongoDb(driver) => Ok(driver),
-            _ => Err(Report::new(SharedClientError::WrongTransport {
-                client: client.as_str().to_string(),
-                expected: "MongoDB",
-            })),
-        }
-    }
-
-    /// The Postgres pool behind this client, or an error naming the transport mismatch.
-    pub(in crate::runtime) fn postgres(
-        &self,
-        client: &ClientName,
-    ) -> Result<&PostgresPool, Report<SharedClientError>> {
-        match &self.instance {
-            SharedClientInstance::Postgres(pool) => Ok(pool),
-            _ => Err(Report::new(SharedClientError::WrongTransport {
-                client: client.as_str().to_string(),
-                expected: "Postgres",
-            })),
-        }
-    }
-
-    /// The Redis command pool behind this client, or an error naming the transport mismatch.
-    pub(in crate::runtime) fn redis(
-        &self,
-        client: &ClientName,
-    ) -> Result<&RedisCommandPool, Report<SharedClientError>> {
-        match &self.instance {
-            SharedClientInstance::Redis(pool) => Ok(pool),
-            _ => Err(Report::new(SharedClientError::WrongTransport {
-                client: client.as_str().to_string(),
-                expected: "Redis",
+                expected: K::CONNECTOR,
             })),
         }
     }
@@ -240,25 +145,29 @@ pub(in crate::runtime) struct SharedClientSlot {
 
 /// One local user's interest in this node's shared instance of a client.
 ///
-/// A lease is held for exactly as long as its emitter or ingestor can use the client. The instance
-/// closes when the last lease is dropped, so removing one user preserves the pool for the others
-/// and removing the last one releases the connections and the resource mount together.
+/// A lease is held for exactly as long as its emitter can use the client. The instance closes when
+/// the last lease is dropped, so removing one user preserves the pool for the others and removing
+/// the last one releases the connections and the resource mount together.
 pub(in crate::runtime) struct SharedClientLease {
     runtime: Runtime,
     key: DomainNodeRef,
-    client: StdArc<SharedClient>,
-}
-
-impl SharedClientLease {
-    pub(in crate::runtime) fn client(&self) -> &SharedClient {
-        &self.client
-    }
+    /// Keeps the instance and its resource mount alive for this user, whatever becomes of the
+    /// registry slot it was leased from.
+    _client: StdArc<SharedClient>,
 }
 
 impl Drop for SharedClientLease {
     fn drop(&mut self) {
         self.runtime.release_shared_client(&self.key);
     }
+}
+
+/// One emitter's lease on its client's pooled client, as its connector's type.
+pub(in crate::runtime) struct LeasedPooledClient<K> {
+    /// The node's shared instance, which the emitter writes through.
+    pub(in crate::runtime) pooled: Arc<K>,
+    /// The emitter's interest in that instance, given back when it is dropped.
+    pub(in crate::runtime) interest: SharedClientLease,
 }
 
 /// What a graph node is waiting for while it holds no connection yet.
@@ -298,57 +207,48 @@ impl PoolWaitSlot {
             interactions,
         }
     }
-
-    pub(in crate::runtime) fn begin(slot: &Arc<Self>) -> PoolWaitGuard {
-        let since = Instant::now();
-        slot.active.store(Some(StdArc::new(PoolWait {
-            client: slot.client.clone(),
-            since,
-        })));
-        PoolWaitGuard {
-            slot: slot.clone(),
-            since,
-        }
-    }
-
-    /// A ready borrow performs no publication or registry operation. Cancellation drops its guard.
-    pub(in crate::runtime) async fn borrow<F: std::future::Future>(
-        slot: &Arc<Self>,
-        future: F,
-    ) -> F::Output {
-        let mut future = std::pin::pin!(future);
-        let mut waiting = None;
-        std::future::poll_fn(|context| {
-            let result = future.as_mut().poll(context);
-            if result.is_pending() && waiting.is_none() {
-                waiting = Some(Self::begin(slot));
-            }
-            result
-        })
-        .await
-    }
 }
 
-/// Clears a pending connection borrow on success, failure or cancellation.
-pub(in crate::runtime) struct PoolWaitGuard {
-    slot: Arc<PoolWaitSlot>,
-    since: Instant,
-}
-
-impl Drop for PoolWaitGuard {
-    fn drop(&mut self) {
-        self.slot
-            .interactions
-            .record_pool_wait(self.since.elapsed());
-        self.slot.active.store(None);
-    }
-}
-
+/// One pooled emitter's wait publication, which its lease publishes its checkouts' waits through.
+///
 /// Registry interest follows the emitter lifetime, independently of individual connection borrows.
 pub(in crate::runtime) struct PoolWaitRegistration {
     pub(in crate::runtime) slot: Arc<PoolWaitSlot>,
     runtime: Runtime,
     key: DomainNodeUnitRef,
+}
+
+impl PooledClientWaits for PoolWaitRegistration {
+    /// Publishes the wait of a checkout the pool did not answer at once. A checkout that is ready
+    /// never reaches this, so it performs no publication or registry operation.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "a pending checkout publishes its wait through the emitter's retained slot"
+        )
+    )]
+    fn begin(&self, since: Instant) {
+        self.slot.active.store(Some(StdArc::new(PoolWait {
+            client: self.slot.client.clone(),
+            since,
+        })));
+    }
+
+    /// Records the wait and clears its publication: on success, failure or cancellation of the
+    /// checkout that published it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "an answered or abandoned checkout records and withdraws its wait through \
+                      the emitter's retained slot"
+        )
+    )]
+    fn end(&self, since: Instant) {
+        self.slot.interactions.record_pool_wait(since.elapsed());
+        self.slot.active.store(None);
+    }
 }
 
 impl Drop for PoolWaitRegistration {
@@ -361,7 +261,8 @@ impl Drop for PoolWaitRegistration {
 }
 
 impl Runtime {
-    /// This node's shared instance of `client`, opening it on first local use as `pool` plans.
+    /// This node's shared instance of `client` as connector `K`'s pooled client, opening it on
+    /// first local use with `bounds`.
     ///
     /// The instance is built from the first user's resolved configuration. Every pool-capable
     /// client renders the same configuration for all of its users, so the instance a later user
@@ -373,12 +274,12 @@ impl Runtime {
             reason = "emitter installation retains one shared-client lease for its configuration"
         )
     )]
-    pub(in crate::runtime) async fn lease_shared_client(
+    pub(in crate::runtime) async fn lease_shared_client<K: PooledClient>(
         &self,
         domain: &DomainName,
         client: &EmitterClientSpec,
-        pool: PooledClientPlan,
-    ) -> Result<SharedClientLease, Report<SharedClientError>> {
+        bounds: ClientPoolBounds,
+    ) -> Result<LeasedPooledClient<K>, Report<SharedClientError>> {
         let name = &client.name;
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Client, name.clone());
         let cell = {
@@ -398,95 +299,51 @@ impl Runtime {
         };
 
         let opened = cell
-            .get_or_try_init(|| self.open_shared_client(name, pool, &client.config))
+            .get_or_try_init(|| self.open_shared_client::<K>(name, bounds, &client.config))
             .await;
 
-        match opened {
-            Ok(client) => Ok(SharedClientLease {
-                runtime: self.clone(),
-                key,
-                client: StdArc::clone(client),
-            }),
+        let shared = match opened {
+            Ok(shared) => StdArc::clone(shared),
             Err(error) => {
                 // The interest was taken before the open was attempted, so it has to be given back
                 // here; a failed open leaves the slot empty and the next user retries it.
                 self.release_shared_client(&key);
-                Err(error)
+                return Err(error);
             }
-        }
+        };
+        // From here the interest is the lease's, so a client another connector opened gives it
+        // back when the refused lease is dropped.
+        let interest = SharedClientLease {
+            runtime: self.clone(),
+            key,
+            _client: StdArc::clone(&shared),
+        };
+        let pooled = shared.pooled::<K>(name)?;
+        Ok(LeasedPooledClient { pooled, interest })
     }
 
-    /// Build the driver instance behind one pool-capable client.
-    async fn open_shared_client(
+    /// Build the pooled client behind one pool-capable client, as its connector opens it.
+    async fn open_shared_client<K: PooledClient>(
         &self,
         name: &ClientName,
-        pool: PooledClientPlan,
+        bounds: ClientPoolBounds,
         resolved: &ResolvedClientConfig,
     ) -> Result<StdArc<SharedClient>, Report<SharedClientError>> {
-        let mounts = resolved.mounts.clone();
+        let unopened = || SharedClientError::Open {
+            client: name.as_str().to_string(),
+        };
         let config = resolved.entries.as_slice();
-        let transport: &'static str = match pool.transport {
-            PooledTransport::Postgres => "Postgres",
-            PooledTransport::MySql => "MySQL",
-            PooledTransport::MongoDb => "MongoDB",
-            PooledTransport::Redis => "Redis",
-        };
-        reject_pool_sizing(transport, config).map_err(|error| {
-            error.change_context(SharedClientError::Open {
-                client: name.as_str().to_string(),
-            })
-        })?;
-        let opened = |error: Report<OpenClientError>| {
-            error.change_context(SharedClientError::Open {
-                client: name.as_str().to_string(),
-            })
-        };
-        // A connector states its own start failure, and the client names which one could not open.
-        let started = |error: Report<EmitterOpenError>| {
-            error.change_context(SharedClientError::Open {
-                client: name.as_str().to_string(),
-            })
-        };
-        let instance = match pool.transport {
-            PooledTransport::Postgres => SharedClientInstance::Postgres(
-                PostgresPool::open(config, pool.bounds)
-                    .await
-                    .map_err(started)?,
-            ),
-            PooledTransport::MySql => SharedClientInstance::MySql(
-                MySqlPool::open(config, pool.bounds)
-                    .await
-                    .map_err(started)?,
-            ),
-            PooledTransport::MongoDb => SharedClientInstance::MongoDb(
-                MongoDbClient::open(config, pool.bounds, &self.inner.executor)
-                    .await
-                    .map_err(started)?,
-            ),
-            PooledTransport::Redis => {
-                let Some(dns) = self.dns() else {
-                    return Err(Report::new(OpenClientError::InvalidConfig {
-                        transport: "Redis",
-                        reason: "the node DNS resolver is not installed".to_string(),
-                    })
-                    .change_context(SharedClientError::Open {
-                        client: name.as_str().to_string(),
-                    }));
-                };
-                SharedClientInstance::Redis({
-                    let mapping_input = open_redis_command_pool(config, pool.bounds, dns.clone())
-                        .await
-                        .map_err(OpenClientError::from_redis);
-                    match mapping_input {
-                        Ok(mapped_value) => Ok(mapped_value),
-                        Err(mapping_error) => Err((opened)(mapping_error)),
-                    }
-                }?)
-            }
-        };
+        reject_pool_sizing(K::CONNECTOR, config).change_context_lazy(unopened)?;
+        // A pool opens before any emitter of its client exists, so it takes the node's services
+        // here rather than from an emitter's handle.
+        let host = PooledClientHost::new(self.dns().cloned(), self.inner.executor.clone());
+        // A connector states its own open failure, and the client names which one could not open.
+        let pooled = K::open(config, bounds, &host)
+            .await
+            .change_context_lazy(unopened)?;
         Ok(StdArc::new(SharedClient {
-            instance,
-            _mounts: mounts,
+            instance: Box::new(Arc::new(pooled)),
+            _mounts: resolved.mounts.clone(),
         }))
     }
 
@@ -550,8 +407,12 @@ impl Runtime {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use nervix_dns::DnsLookupFailure;
-    use nervix_models::ClientPoolBounds;
+    use nervix_connector::{HostServiceError, PooledClientLease};
+    use nervix_connector_fake::{
+        FakePooledClient, FakePooledClientError, OtherFakePooledClient, REFUSE_OPEN,
+        RESOLVE_THROUGH_NODE,
+    };
+    use nervix_models::ClientConfigEntry;
 
     use super::*;
 
@@ -572,6 +433,46 @@ mod tests {
         )
     }
 
+    fn bounds() -> ClientPoolBounds {
+        ClientPoolBounds::new(0, nonzero_ext::nonzero!(1u32)).assured("zero is below one")
+    }
+
+    fn client(name: &str, entries: &[(&str, &str)]) -> EmitterClientSpec {
+        EmitterClientSpec {
+            name: named(name),
+            config: ResolvedClientConfig {
+                entries: entries
+                    .iter()
+                    .map(|(key, value)| ClientConfigEntry {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    })
+                    .collect(),
+                mounts: None,
+            },
+        }
+    }
+
+    fn client_key(name: &str) -> DomainNodeRef {
+        DomainNodeRef::node_in(
+            domain("pool_wait"),
+            ModelKind::Client,
+            named::<ClientName>(name),
+        )
+    }
+
+    /// A lease on a scripted pool whose waits the emitter `key` publishes through this node.
+    fn waiting_lease(
+        runtime: &Runtime,
+        key: &DomainNodeUnitRef,
+        pooled: Arc<FakePooledClient>,
+    ) -> (PooledClientLease<FakePooledClient>, Arc<PoolWaitSlot>) {
+        let registration =
+            runtime.register_pool_wait(key.clone(), named("database"), pool_metrics(runtime));
+        let slot = registration.slot.clone();
+        (PooledClientLease::new(pooled, registration, ()), slot)
+    }
+
     #[nervix_primitives::test]
     async fn retained_pool_wait_reports_only_pending_borrows_and_clears_on_cancel() {
         let runtime = Runtime::new();
@@ -580,16 +481,22 @@ mod tests {
             ModelKind::Emitter,
             named::<EmitterName>("emitter"),
         ));
-        let registration =
-            runtime.register_pool_wait(key.clone(), named("database"), pool_metrics(&runtime));
-        let slot = registration.slot.clone();
+        let opened = runtime
+            .lease_shared_client::<FakePooledClient>(
+                &domain("pool_wait"),
+                &client("database", &[]),
+                bounds(),
+            )
+            .await
+            .assured("the scripted pool opens");
+        let (lease, slot) = waiting_lease(&runtime, &key, opened.pooled.clone());
         for _ in 0..100 {
-            assert_eq!(PoolWaitSlot::borrow(&slot, std::future::ready(7)).await, 7);
+            assert_eq!(lease.checkout(std::future::ready(7)).await, 7);
         }
         assert!(slot.active.load().is_none());
         assert_pool_outcomes(&slot, 0);
         let (sender, receiver) = oneshot::channel::<u8>();
-        let mut borrow = Box::pin(PoolWaitSlot::borrow(&slot, receiver));
+        let mut borrow = Box::pin(lease.checkout(receiver));
         std::future::poll_fn(|context| {
             assert!(borrow.as_mut().poll(context).is_pending());
             std::task::Poll::Ready(())
@@ -603,7 +510,7 @@ mod tests {
         assert_eq!(borrow.await.assured("the connection borrow succeeds"), 9);
         assert!(slot.active.load().is_none());
         assert_pool_outcomes(&slot, 1);
-        let mut borrow = Box::pin(PoolWaitSlot::borrow(&slot, std::future::pending::<()>()));
+        let mut borrow = Box::pin(lease.checkout(std::future::pending::<()>()));
         std::future::poll_fn(|context| {
             assert!(borrow.as_mut().poll(context).is_pending());
             std::task::Poll::Ready(())
@@ -614,7 +521,7 @@ mod tests {
         assert!(slot.active.load().is_none());
         assert_pool_outcomes(&slot, 2);
         let (sender, receiver) = oneshot::channel::<()>();
-        let mut failed = Box::pin(PoolWaitSlot::borrow(&slot, receiver));
+        let mut failed = Box::pin(lease.checkout(receiver));
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(failed.as_mut(), cx).is_pending());
             std::task::Poll::Ready(())
@@ -624,13 +531,15 @@ mod tests {
         assert!(failed.await.is_err());
         assert_pool_outcomes(&slot, 3);
         assert!(
-            PoolWaitSlot::borrow(&slot, std::future::ready(Err::<(), ()>(())))
+            lease
+                .checkout(std::future::ready(Err::<(), ()>(())))
                 .await
                 .is_err()
         );
         assert_pool_outcomes(&slot, 3);
-        drop(registration);
+        drop(lease);
         assert!(runtime.pool_wait(&key).is_none());
+        assert!(!runtime.inner.pool_waits.contains_key(&key));
     }
 
     #[test]
@@ -646,87 +555,183 @@ mod tests {
         let replacement =
             runtime.register_pool_wait(key.clone(), named("database"), pool_metrics(&runtime));
         drop(first);
-        let waiting = PoolWaitSlot::begin(&replacement.slot);
+        let since = Instant::now();
+        replacement.begin(since);
         assert!(runtime.pool_wait(&key).is_some());
-        drop(waiting);
+        replacement.end(since);
         drop(replacement);
         assert!(!runtime.inner.pool_waits.contains_key(&key));
     }
 
-    #[test]
-    fn redis_lookup_failure_keeps_its_cause_when_a_shared_client_reports_it() {
-        let error = OpenClientError::from_redis(Report::new(RedisClientError::Resolve {
-            host: "missing.nervix.test".to_string(),
-            failure: DnsLookupFailure::NameNotFound,
-        }));
-        assert!(matches!(
-            error.current_context(),
-            OpenClientError::Connect {
-                transport: "Redis",
-                reason,
-            } if reason.contains("missing.nervix.test") && reason.contains("the name does not exist")
-        ));
-        assert!(
-            error
-                .frames()
-                .any(|frame| frame.downcast_ref::<RedisClientError>().is_some())
-        );
-    }
+    #[nervix_primitives::test]
+    async fn local_emitters_of_one_client_share_one_instance_until_the_last_lets_it_go() {
+        let runtime = Runtime::new();
+        let spec = client("database", &[("addr", "db.internal")]);
+        let first = runtime
+            .lease_shared_client::<FakePooledClient>(&domain("pool_wait"), &spec, bounds())
+            .await
+            .assured("the first local emitter opens the pool");
+        let second = runtime
+            .lease_shared_client::<FakePooledClient>(&domain("pool_wait"), &spec, bounds())
+            .await
+            .assured("a later local emitter joins the pool");
 
-    #[test]
-    fn an_invalid_redis_pool_lifetime_names_its_key_when_a_shared_client_reports_it() {
-        let error =
-            OpenClientError::from_redis(Report::new(RedisClientError::InvalidPoolLifetime {
-                key: "pool_max_lifetime_ms",
-            }));
-        assert!(matches!(
-            error.current_context(),
-            OpenClientError::InvalidPoolLifetime {
-                transport: "Redis",
-                key: "pool_max_lifetime_ms",
-            }
-        ));
-        assert_eq!(
-            error.current_context().to_string(),
-            "invalid Redis client pool_max_lifetime_ms"
-        );
         assert!(
-            error
-                .frames()
-                .any(|frame| frame.downcast_ref::<RedisClientError>().is_some())
+            Arc::ptr_eq(&first.pooled, &second.pooled),
+            "both emitters borrow from the one instance of their client"
+        );
+        assert_eq!(first.pooled.opening.config, spec.config.entries);
+        assert_eq!(first.pooled.opening.bounds, bounds());
+        let key = client_key("database");
+        drop(first);
+        assert!(
+            runtime.inner.shared_clients.contains_key(&key),
+            "removing one emitter preserves the pool for the other"
+        );
+        drop(second);
+        assert!(
+            !runtime.inner.shared_clients.contains_key(&key),
+            "the last lease closes the instance"
         );
     }
 
     #[nervix_primitives::test]
-    async fn redis_pool_reports_a_missing_node_resolver_before_opening() {
-        let client = ClientName::try_from("cache".to_string()).assured("the fixture name is valid");
-        let error = Runtime::default()
-            .open_shared_client(
-                &client,
-                PooledClientPlan {
-                    transport: PooledTransport::Redis,
-                    bounds: ClientPoolBounds::new(0, nonzero_ext::nonzero!(1u32))
-                        .assured("zero is below one"),
-                },
-                &ResolvedClientConfig::default(),
-            )
+    async fn a_client_another_connector_opened_is_refused_by_name_and_keeps_its_users() {
+        let runtime = Runtime::new();
+        let spec = client("database", &[]);
+        let opened = runtime
+            .lease_shared_client::<FakePooledClient>(&domain("pool_wait"), &spec, bounds())
             .await
-            .err()
-            .assured("a Redis pool requires the node resolver");
+            .assured("the scripted pool opens");
+
+        let Err(refused) = runtime
+            .lease_shared_client::<OtherFakePooledClient>(&domain("pool_wait"), &spec, bounds())
+            .await
+        else {
+            panic!("a client is the pooled client of the one connector that opened it");
+        };
+
+        assert!(matches!(
+            refused.current_context(),
+            SharedClientError::WrongConnector { client, expected }
+                if client == "database" && *expected == ConnectorKind::MySql
+        ));
+        // The refused lease gave its interest back, and the user that holds the client keeps it.
+        let key = client_key("database");
+        assert!(runtime.inner.shared_clients.contains_key(&key));
+        drop(opened);
+        assert!(!runtime.inner.shared_clients.contains_key(&key));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_pool_that_fails_to_open_keeps_its_typed_cause_beneath_its_client_and_is_retried() {
+        let runtime = Runtime::new();
+        let refusing = client("cache", &[(REFUSE_OPEN, "")]);
+        let Err(error) = runtime
+            .lease_shared_client::<FakePooledClient>(&domain("pool_wait"), &refusing, bounds())
+            .await
+        else {
+            panic!("the configuration scripts a refusal");
+        };
+
         assert!(matches!(
             error.current_context(),
             SharedClientError::Open { client } if client == "cache"
         ));
-        let cause = error
-            .frames()
-            .find_map(|frame| frame.downcast_ref::<OpenClientError>())
-            .assured("the shared-client error retains the Redis configuration failure");
+        assert_eq!(
+            error
+                .frames()
+                .find_map(|frame| frame.downcast_ref::<FakePooledClientError>()),
+            Some(&FakePooledClientError::Refused),
+            "the connector's own failure stays beneath the client that could not open"
+        );
+        // The failed open gave its interest back and left nothing behind, so the next user opens
+        // the client again from its own configuration.
+        assert!(
+            !runtime
+                .inner
+                .shared_clients
+                .contains_key(&client_key("cache"))
+        );
+        runtime
+            .lease_shared_client::<FakePooledClient>(
+                &domain("pool_wait"),
+                &client("cache", &[]),
+                bounds(),
+            )
+            .await
+            .assured("the next user retries the open");
+    }
+
+    #[nervix_primitives::test]
+    async fn a_pool_that_dials_by_name_reports_a_missing_node_resolver_beneath_its_client() {
+        let error = Runtime::default()
+            .lease_shared_client::<FakePooledClient>(
+                &domain("pool_wait"),
+                &client("cache", &[(RESOLVE_THROUGH_NODE, "")]),
+                bounds(),
+            )
+            .await
+            .err()
+            .assured("a pool that resolves through its node requires the node resolver");
+
         assert!(matches!(
-            cause,
-            OpenClientError::InvalidConfig {
-                transport: "Redis",
-                reason,
-            } if reason == "the node DNS resolver is not installed"
+            error.current_context(),
+            SharedClientError::Open { client } if client == "cache"
         ));
+        assert_eq!(
+            error
+                .frames()
+                .find_map(|frame| frame.downcast_ref::<HostServiceError>()),
+            Some(&HostServiceError::DnsNotInstalled)
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn configuration_that_sizes_the_pool_is_refused_before_its_connector_opens() {
+        let runtime = Runtime::new();
+        for (entries, sizing_key) in [
+            (vec![("pool_max", "8")], "pool_max"),
+            (
+                vec![("addr", "db://db.internal/app?pool_max=8")],
+                "pool_max",
+            ),
+        ] {
+            let Err(error) = runtime
+                .lease_shared_client::<FakePooledClient>(
+                    &domain("pool_wait"),
+                    &client("database", &entries),
+                    bounds(),
+                )
+                .await
+            else {
+                panic!("capacity is declared once, by POOL SIZE on the client");
+            };
+
+            assert!(matches!(
+                error.current_context(),
+                SharedClientError::Open { client } if client == "database"
+            ));
+            let cause = error
+                .frames()
+                .find_map(|frame| frame.downcast_ref::<OpenClientError>())
+                .assured("the node's own refusal stays beneath the client");
+            assert!(matches!(
+                cause,
+                OpenClientError::SizesPool { connector, key }
+                    if *connector == ConnectorKind::Postgres && key == sizing_key
+            ));
+            assert_eq!(
+                cause.to_string(),
+                format!(
+                    "invalid POSTGRES client configuration: '{sizing_key}' sizes the connection \
+                     pool, which is declared by POOL SIZE MIN ... MAX ... on the client"
+                )
+            );
+            assert!(
+                error.downcast_ref::<FakePooledClientError>().is_none(),
+                "the connector never saw the refused configuration"
+            );
+        }
     }
 }

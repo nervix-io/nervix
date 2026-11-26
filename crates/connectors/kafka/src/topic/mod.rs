@@ -25,6 +25,14 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        executor,
+        reason = "the Kafka topic emitter admits its producer's partition lookups and destruction \
+                  through its node's bounded executor"
+    )
+)]
 
 #[cfg(feature = "testing")]
 #[doc(hidden)]

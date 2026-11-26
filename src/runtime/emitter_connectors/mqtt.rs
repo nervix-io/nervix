@@ -44,7 +44,6 @@ impl EmitterConnectorStarter {
                         context.domain.as_str(),
                         context.emitter.as_str()
                     ),
-                    dns: context.dns()?,
                 },
                 context.emitter_host(),
             )

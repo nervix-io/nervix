@@ -130,31 +130,38 @@ impl DomainOffsets {
         self.inner.services.generation()
     }
 
+    /// Where each of `partitions` starts. A caller places its partitions with it once, before it
+    /// polls, and keeps the positions it placed them at.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "an ingestor places its partitions from its domain's offsets once, before it \
+                      polls; its recurring reads keep the positions that placement chose"
+        )
+    )]
     pub async fn initialization(
         &self,
         partitions: &[i32],
     ) -> DomainOffsetResult<DomainOffsetInitialization> {
-        nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "a resume installs its exact domain-offset placement before polling; the ingestor \
-             retains the resulting position",
-            self.inner.services.initialization(partitions)
-        )
-        .await
+        self.inner.services.initialization(partitions).await
     }
 
+    /// Replaces every recorded position with `positions` as the start point `generation`.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "an explicit start point is selected and made durable once, before polling; \
+                      recurring record acknowledgements call commit instead"
+        )
+    )]
     pub async fn reset(
         &self,
         generation: u64,
         positions: Vec<DomainOffsetPosition>,
     ) -> DomainOffsetResult<()> {
-        nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "initialization selects one explicit starting cut before polling; recurring record \
-             acknowledgements call commit instead",
-            self.inner.services.reset(generation, positions)
-        )
-        .await
+        self.inner.services.reset(generation, positions).await
     }
 
     pub async fn commit(&self, position: DomainOffsetPosition) -> DomainOffsetResult<()> {

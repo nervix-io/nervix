@@ -95,6 +95,9 @@ struct FakeHost {
     quiesce_change: Option<Arc<Notify>>,
     wake_suspension: bool,
     active: bool,
+    /// The node whose handle the loop hands its connector, which records what the connector did
+    /// through it.
+    connector: nervix_connector_fake::FakeIngestorHost,
 }
 
 impl FakeHost {
@@ -113,14 +116,17 @@ impl FakeHost {
             quiesce_change: None,
             wake_suspension: false,
             active: true,
+            connector: nervix_connector_fake::FakeIngestorHost::default(),
         }
     }
 }
 
-impl nervix_connector::ConnectorEventProvider for FakeHost {}
-
 #[async_trait]
 impl IngestorLoopServices for FakeHost {
+    fn connector_host(&self) -> nervix_connector::IngestorHost {
+        self.connector.host()
+    }
+
     fn record_read(&self, outcome: nervix_connector::IngestorReadOutcome) {
         self.read_observations.lock().reads.push(outcome);
     }
@@ -428,6 +434,7 @@ async fn runtime_report_chain_ingestor_lifecycle() {
         prepare_paced_ingestor(
             &mut connector,
             &mut host,
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
             &mut ready,
             &mut false,
             &mut shutdown,
@@ -528,6 +535,7 @@ async fn runtime_report_chain_ingestor_resume() {
         prepare_paced_ingestor(
             &mut connector,
             &mut host,
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
             &mut ready,
             &mut false,
             &mut shutdown,
@@ -672,6 +680,7 @@ async fn paced_ingestor_preparation_suspends_a_ready_ingestor_until_quiesce_rele
     let action = prepare_paced_ingestor(
         &mut connector,
         &mut host,
+        &nervix_connector_fake::FakeIngestorHost::default().host(),
         &mut ready,
         &mut false,
         &mut shutdown,
@@ -708,6 +717,7 @@ async fn paced_ingestor_preparation_retries_resume_until_the_ingestor_is_ready()
         prepare_paced_ingestor(
             &mut connector,
             &mut host,
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
             &mut ready,
             &mut false,
             &mut shutdown,
@@ -720,6 +730,7 @@ async fn paced_ingestor_preparation_retries_resume_until_the_ingestor_is_ready()
         prepare_paced_ingestor(
             &mut connector,
             &mut host,
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
             &mut ready,
             &mut false,
             &mut shutdown,
@@ -732,6 +743,7 @@ async fn paced_ingestor_preparation_retries_resume_until_the_ingestor_is_ready()
         prepare_paced_ingestor(
             &mut connector,
             &mut host,
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
             &mut ready,
             &mut false,
             &mut shutdown,
@@ -766,6 +778,7 @@ async fn paced_ingestor_preparation_stops_when_the_host_is_inactive() {
         prepare_paced_ingestor(
             &mut connector,
             &mut host,
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
             &mut ready,
             &mut false,
             &mut shutdown,
@@ -791,6 +804,7 @@ async fn paced_ingestor_preparation_stops_suspended_intake_after_shutdown_closes
         prepare_paced_ingestor(
             &mut connector,
             &mut host,
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
             &mut ready,
             &mut false,
             &mut shutdown,
@@ -1874,6 +1888,7 @@ async fn a_quiesce_suspends_only_a_ready_connector_and_is_recorded_once() {
     let action = prepare_paced_ingestor(
         &mut connector,
         &mut host,
+        &nervix_connector_fake::FakeIngestorHost::default().host(),
         &mut ready,
         &mut false,
         &mut shutdown,
@@ -1906,6 +1921,7 @@ async fn paced_preparation_records_resume_outcomes_and_a_poll_failure_that_lost_
     let action = prepare_paced_ingestor(
         &mut connector,
         &mut host,
+        &nervix_connector_fake::FakeIngestorHost::default().host(),
         &mut ready,
         &mut failed_poll,
         &mut shutdown,
@@ -1916,6 +1932,7 @@ async fn paced_preparation_records_resume_outcomes_and_a_poll_failure_that_lost_
     let action = prepare_paced_ingestor(
         &mut connector,
         &mut host,
+        &nervix_connector_fake::FakeIngestorHost::default().host(),
         &mut ready,
         &mut failed_poll,
         &mut shutdown,
@@ -1923,11 +1940,20 @@ async fn paced_preparation_records_resume_outcomes_and_a_poll_failure_that_lost_
     )
     .await;
     assert_eq!(action, PacedIngestorAction::Poll);
-    assert!(connector.poll(Timestamp::from_unix_nanos(0)).await.is_err());
+    assert!(
+        connector
+            .poll(
+                &nervix_connector_fake::FakeIngestorHost::default().host(),
+                Timestamp::from_unix_nanos(0)
+            )
+            .await
+            .is_err()
+    );
     failed_poll = true;
     let action = prepare_paced_ingestor(
         &mut connector,
         &mut host,
+        &nervix_connector_fake::FakeIngestorHost::default().host(),
         &mut ready,
         &mut failed_poll,
         &mut shutdown,
@@ -1947,4 +1973,99 @@ async fn paced_preparation_records_resume_outcomes_and_a_poll_failure_that_lost_
         ]
     );
     assert_eq!(lifecycle.suspends, vec![IngestorSuspendCause::ReadFailure]);
+}
+
+/// What a connector published through the handle `node` gave it: every transient status, in
+/// order, how often it withdrew one, and what it shows now.
+fn published_through(
+    node: &nervix_connector_fake::FakeIngestorHost,
+) -> (Vec<String>, usize, Option<String>) {
+    let observed = node.observations();
+    let mut reasons = Vec::with_capacity(observed.transient_errors.len());
+    for (reason, _retry_after) in observed.transient_errors {
+        reasons.push(reason);
+    }
+    (reasons, observed.transient_clears, observed.transient_error)
+}
+
+/// The broker loop takes its connector's handle from its host once and hands it to every resume
+/// and read, so a connector that reports its own connection publishes each failure through that
+/// one handle and withdraws it there once it has resumed.
+#[nervix_primitives::test]
+async fn the_broker_loop_drives_every_resume_and_read_with_the_handle_its_host_gives_it() {
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    let mut connector = empty_ingestor(observations.clone());
+    connector
+        .queued()
+        .extend(three_messages().into_iter().take(1));
+    connector.status_retry = Some(Duration::from_millis(1));
+    connector.failed_reads_left = 1;
+    connector.failure_loses_transport = true;
+    connector.resume_results = VecDeque::from([
+        Err(Report::new(IngestorError::Resume { connector: "fake" })),
+        Ok(IngestorResume::Ready),
+    ]);
+    let host = FakeHost::running(observations.clone());
+    let node = host.connector.clone();
+
+    let lifecycle = run_recording_broker(connector, host, sequential_policy()).await;
+
+    assert_eq!(
+        lifecycle.lock().resumes,
+        vec![
+            IngestorResumeOutcome::Failed,
+            IngestorResumeOutcome::Ready,
+            IngestorResumeOutcome::Ready,
+        ],
+        "the failed resume, its retry, and the resume the failed read needed"
+    );
+    let (reasons, withdrawn, shown) = published_through(&node);
+    assert_eq!(
+        reasons,
+        [
+            "failed to resume fake ingestor",
+            "failed to read from fake ingestor"
+        ],
+        "the failed resume and the failed read each reached the handle of the loop's host"
+    );
+    assert_eq!(
+        withdrawn, 2,
+        "each resume that succeeded withdrew the status through the same handle"
+    );
+    assert_eq!(shown, None);
+}
+
+/// The paced loop hands the same handle to every resume and poll.
+#[nervix_primitives::test]
+async fn the_paced_loop_drives_every_resume_and_poll_with_the_handle_its_host_gives_it() {
+    let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
+    let (shutdown_tx, shutdown) = watch::channel(false);
+    let mut connector = empty_ingestor(observations.clone());
+    connector.status_retry = Some(Duration::from_millis(1));
+    connector.stop_after_poll = Some(shutdown_tx);
+    connector
+        .polls
+        .push_back(Err(Report::new(IngestorError::Read { connector: "fake" })));
+    let host = FakeHost::running(observations.clone());
+    let node = host.connector.clone();
+
+    run_paced_ingestor(
+        connector,
+        host,
+        SingleOccurrenceCadence {
+            occurrence: Some(Timestamp::from_unix_nanos(1)),
+        },
+        NonZeroUsize::MIN,
+        shutdown,
+        nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
+    )
+    .await;
+
+    let (reasons, withdrawn, shown) = published_through(&node);
+    assert_eq!(
+        withdrawn, 1,
+        "the resume before the poll withdrew the connector's status through the handle"
+    );
+    assert_eq!(reasons, ["failed to read from fake ingestor"]);
+    assert_eq!(shown.as_deref(), Some("failed to read from fake ingestor"));
 }

@@ -80,10 +80,12 @@ impl ChannelHost {
     }
 }
 
-impl nervix_connector::ConnectorEventProvider for ChannelHost {}
-
 #[async_trait]
 impl IngestorLoopServices for ChannelHost {
+    fn connector_host(&self) -> nervix_connector::IngestorHost {
+        nervix_connector_fake::FakeIngestorHost::default().host()
+    }
+
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
     fn record_read_payloads(&self, _payloads: usize, _bytes: u64) {}
 
@@ -761,6 +763,7 @@ impl IngestorConnector for ConfirmingChannelIngestor {
 
     async fn open(
         _plan: &Self::Plan,
+        _host: &nervix_connector::IngestorHost,
         _instance_index: u64,
     ) -> nervix_connector::IngestorResult<Self> {
         Err(Report::new(IngestorError::Open {
@@ -776,6 +779,7 @@ impl BrokerIngestorConnector for ConfirmingChannelIngestor {
 
     async fn next_batch(
         &mut self,
+        _host: &nervix_connector::IngestorHost,
         _request: IngestorBatchRequest,
         _cancellation: &IngestorReadCancellation,
     ) -> nervix_connector::IngestorResult<IngestorBatch<Self::Message>> {
@@ -822,10 +826,12 @@ struct GraphHost {
     shutdown: watch::Receiver<bool>,
 }
 
-impl nervix_connector::ConnectorEventProvider for GraphHost {}
-
 #[async_trait]
 impl IngestorLoopServices for GraphHost {
+    fn connector_host(&self) -> nervix_connector::IngestorHost {
+        nervix_connector_fake::FakeIngestorHost::default().host()
+    }
+
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
     fn record_read_payloads(&self, _payloads: usize, _bytes: u64) {}
 
@@ -1055,10 +1061,12 @@ struct RefusingGraphHost {
     shutdown: watch::Receiver<bool>,
 }
 
-impl nervix_connector::ConnectorEventProvider for RefusingGraphHost {}
-
 #[async_trait]
 impl IngestorLoopServices for RefusingGraphHost {
+    fn connector_host(&self) -> nervix_connector::IngestorHost {
+        nervix_connector_fake::FakeIngestorHost::default().host()
+    }
+
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
     fn record_read_payloads(&self, _payloads: usize, _bytes: u64) {}
 
@@ -1406,4 +1414,74 @@ fn instance_unit_handoff() {
 fn shuttle_an_instance_handoff_leaves_a_sibling_running_and_cannot_release_its_replacement() {
     check_random(instance_unit_handoff, 500);
     check_pct(instance_unit_handoff, 500, 3);
+}
+
+/// A connector that reports its own connection keeps a task beside its reads for as long as its
+/// instance lives. That task waits for the end of the instance its handle hands it while the host
+/// loop reads, takes a message in and meets a stop at any point, and the connector publishes its
+/// status through the same handle meanwhile.
+fn instance_end_beside_a_stopping_loop() {
+    shuttle::future::block_on(async move {
+        let node = nervix_connector_fake::FakeIngestorHost::default();
+        let handle = node.host();
+        let (transport, receiver) = mpsc::channel(1);
+        let mut connector = ChannelIngestor::new(receiver);
+        connector.status_retry = Some(Duration::from_millis(1));
+        let driven = connector.observations.clone();
+        let instance_end = handle.cancellation();
+        let beside_reads = nervix_primitives::task::spawn(async move {
+            instance_end.cancelled().await;
+            // What the loop had done with the connector by the time its instance ended for it.
+            driven.lock().closes
+        });
+        let events = ReadLog::new();
+        let control = Arc::new(HostControl::new());
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let loop_task = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
+            connector,
+            IngestorLoopHost::new(RecordingHost::new(events.clone(), control.clone()).driving(
+                crate::runtime::ingestors::connector_host::IngestorConnectorHost::new(
+                    handle,
+                    node.instance_end(),
+                ),
+            )),
+            gathering_policy(1),
+            shutdown_rx,
+            nervix_connector::RetryBackoffSettings::default(),
+        ));
+        let deliverer = nervix_primitives::task::spawn(async move {
+            // The ingestor drops its transport once the loop has stopped, which may come first.
+            let sent = transport.send(ChannelMessage::new(1, vec![1])).await;
+            (transport, sent.is_ok())
+        });
+
+        shutdown.send_replace(true);
+        loop_task.await.assured(JOIN);
+        let closes_at_instance_end = beside_reads
+            .await
+            .assured("the connector's own task ends once its instance has ended");
+        let _transport = deliverer
+            .await
+            .assured("the deliverer ends once it sent its message or the ingestor stopped");
+
+        assert_eq!(
+            closes_at_instance_end, 1,
+            "the instance ended for its connector only after the loop had closed the connector"
+        );
+        assert!(
+            node.instance_end().is_cancelled(),
+            "the loop that let its host go ended the instance"
+        );
+        assert_eq!(
+            node.observations().transient_error,
+            None,
+            "the connector withdrew what it published through its handle once it had resumed"
+        );
+    });
+}
+
+#[test]
+fn shuttle_a_connectors_instance_ends_for_it_only_after_its_host_loop_closed_it() {
+    check_random(instance_end_beside_a_stopping_loop, 500);
+    check_pct(instance_end_beside_a_stopping_loop, 500, 3);
 }

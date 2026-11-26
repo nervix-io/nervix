@@ -30,12 +30,17 @@ use super::{
     super::*,
     IngestorConnectorStartError, IngestorStartError,
     connector::{BrokerIngestorStart, IngestorStart},
+    connector_host::{IngestorConnectorHost, IngestorEntityServices},
 };
 
-/// The resolved connector plan and the resource mounts kept alive while it is used.
+/// The resolved connector plan, the resource mounts kept alive while it is used, and the handle
+/// through which the connector reaches this node, for the unit the plan was resolved for.
 struct ResolvedMqttIngestor {
     connector: MqttTopicIngestorPlan,
     client_mounts: Arc<[Option<Arc<ClientResourceMounts>>]>,
+    /// The handle of the unit this node resolved the input through: the unit a start opens, or
+    /// the one a retirement dials its cleanup connections for.
+    host: IngestorConnectorHost,
 }
 
 /// Immutable per-instance client material rendered once for a logical ingestor on this node.
@@ -100,7 +105,12 @@ impl ResolvedMqttIngestor {
     ) -> InstanceRetirements {
         let mut cleanups = FuturesUnordered::new();
         for instance in instances {
-            cleanups.push(async move { (instance, self.connector.retire(instance).await) });
+            cleanups.push(async move {
+                (
+                    instance,
+                    self.connector.retire(self.host.handle(), instance).await,
+                )
+            });
         }
         let mut retirements = InstanceRetirements {
             retired: BTreeSet::new(),
@@ -128,6 +138,7 @@ impl MqttTopicIngestorStartPlan {
         let ResolvedMqttIngestor {
             connector,
             client_mounts,
+            host,
         } = self
             .resolve(runtime, ingestor)
             .await
@@ -143,6 +154,7 @@ impl MqttTopicIngestorStartPlan {
         };
         BrokerIngestorStart {
             connector,
+            host,
             instances: self.instances,
             acknowledgement: self.mode.acknowledgement(),
             buffered_intake: true,
@@ -166,14 +178,6 @@ impl MqttTopicIngestorStartPlan {
         runtime: &Runtime,
         ingestor: &IngestorSpec,
     ) -> error_stack::Result<ResolvedMqttIngestor, IngestorConnectorStartError> {
-        let dispatcher = runtime.inner.remote_dispatcher.load();
-        let read_ahead_overflow = runtime.inner.metrics.ingestor_read_ahead_dropped_payloads(
-            &ingestor.domain,
-            &ingestor.name,
-            ingestor.unit,
-            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-            ingestor.declared_input.entity_kind(),
-        );
         let cached = match runtime.inner.executions.get(&ingestor.domain) {
             Some(execution) => match execution.mqtt_ingestor_clients.get(&ingestor.name) {
                 Some(prepared) if prepared.declaration == *self => Some(prepared.rendered.clone()),
@@ -199,9 +203,12 @@ impl MqttTopicIngestorStartPlan {
                     entries.push(resolved.entries);
                     mounts.push(resolved.mounts);
                 }
-                let Some(dns) = runtime.dns() else {
+                // Each instance takes the resolver from its handle when it opens or retires a
+                // session; a node without one refuses the input here, before anything of the
+                // connector runs.
+                if runtime.dns().is_none() {
                     return Err(Report::new(IngestorConnectorStartError::NodeDnsUnavailable));
-                };
+                }
                 let default_client_id =
                     format!("{}~{}", ingestor.domain.as_str(), ingestor.name.as_str());
                 let connector = MqttTopicIngestorPlan::new(MqttTopicIngestorSettings {
@@ -212,8 +219,6 @@ impl MqttTopicIngestorStartPlan {
                     session: self.session,
                     qos: self.qos,
                     acknowledgement_window: self.mode.acknowledgement_window(),
-                    dns: dns.clone(),
-                    read_ahead_overflow: read_ahead_overflow.clone(),
                     read_ahead: runtime.inner.connector_host.mqtt,
                 });
                 let rendered = Arc::new(RenderedMqttClient {
@@ -232,13 +237,12 @@ impl MqttTopicIngestorStartPlan {
                 rendered
             }
         };
-        let connector = rendered
-            .connector
-            .clone()
-            .with_read_ahead_overflow(read_ahead_overflow);
+        // The unit's connector takes its read-ahead overflow record and the node's resolver from
+        // this handle, so the prepared plan the units share carries neither.
         Ok(ResolvedMqttIngestor {
-            connector,
+            connector: rendered.connector.clone(),
             client_mounts: rendered.mounts.clone(),
+            host: runtime.ingestor_connector_host(ingestor, IngestorEntityServices::default()),
         })
     }
 

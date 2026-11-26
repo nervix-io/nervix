@@ -28,6 +28,7 @@ use super::{
     super::*,
     IngestorConnectorStartError, IngestorStartError,
     connector::{BrokerIngestorInstance, BrokerIngestorPolicy, IngestorStart},
+    connector_host::IngestorEntityServices,
 };
 
 /// The transport whose offsets this node keeps for a domain, as its offset failures name it.
@@ -262,6 +263,9 @@ impl KafkaTopicIngestorStartPlan {
             .change_context_lazy(|| ingestor.initialize_failure())?;
 
         let mut domain_offsets = None;
+        // The offsets a domain-offset ingestor reads and commits reach its connector through its
+        // host handle, never in its plan.
+        let mut entity = IngestorEntityServices::default();
         let connector_offset_mode = match offsets {
             KafkaOffsetPlan::ConsumerGroup { group, start_at } => {
                 KafkaTopicIngestorOffsetMode::ConsumerGroup {
@@ -283,7 +287,7 @@ impl KafkaTopicIngestorStartPlan {
                 };
                 let state = StdArc::new(KafkaOffsetOriginatorSlot::new(originator));
                 domain_offsets = Some(state.clone());
-                let offsets = DomainOffsets::new(RuntimeKafkaDomainOffsets {
+                entity.domain_offsets = Some(DomainOffsets::new(RuntimeKafkaDomainOffsets {
                     lifecycle: runtime
                         .domain_clock_lifecycle(domain)
                         .change_context_lazy(|| ingestor.initialize_failure())?,
@@ -293,21 +297,20 @@ impl KafkaTopicIngestorStartPlan {
                     topic: topic.as_str().to_string(),
                     instances,
                     state,
-                });
+                }));
                 KafkaTopicIngestorOffsetMode::Domain {
                     group_id: format!(
                         "nervix_domain_{}_{}",
                         domain.as_str(),
                         ingestor.name.as_str(),
                     ),
-                    offsets,
                 }
             }
         };
+        let host = runtime.ingestor_connector_host(ingestor, entity);
         let connector_plan = IngestorPlan {
             connector: KafkaTopicIngestorPlan {
                 settings: runtime.inner.connector_host.kafka,
-                executor: runtime.executor().clone(),
                 config: resolved_client.entries,
                 topic,
                 offset_mode: connector_offset_mode,
@@ -321,10 +324,13 @@ impl KafkaTopicIngestorStartPlan {
             connector_plan.capabilities.position_class(),
             runtime.inner.data_plane,
         );
-        let connector =
-            KafkaTopicIngestor::open(&connector_plan.connector, ingestor.instance_index())
-                .await
-                .change_context_lazy(|| ingestor.initialize_failure())?;
+        let connector = KafkaTopicIngestor::open(
+            &connector_plan.connector,
+            host.handle(),
+            ingestor.instance_index(),
+        )
+        .await
+        .change_context_lazy(|| ingestor.initialize_failure())?;
         let instance = Box::new(BrokerIngestorInstance { connector, policy });
         Ok(IngestorStart {
             instance,
@@ -336,6 +342,7 @@ impl KafkaTopicIngestorStartPlan {
                 .keyword()
                 .to_ascii_lowercase(),
             domain_offsets,
+            connector_host: host,
         })
     }
 }

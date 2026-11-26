@@ -119,7 +119,11 @@ impl IngestorConnector for ConfirmingIngestor {
 
     type Plan = ();
 
-    async fn open(_plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
+    async fn open(
+        _plan: &Self::Plan,
+        _host: &nervix_connector::IngestorHost,
+        _instance_index: u64,
+    ) -> IngestorResult<Self> {
         Err(Report::new(IngestorError::Open {
             connector: "confirming",
         }))
@@ -138,6 +142,7 @@ impl BrokerIngestorConnector for ConfirmingIngestor {
 
     async fn next_batch(
         &mut self,
+        _host: &nervix_connector::IngestorHost,
         _request: IngestorBatchRequest,
         _cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {
@@ -204,10 +209,12 @@ struct ConfirmingHost {
     record: Arc<Mutex<ConfirmationRecord>>,
 }
 
-impl nervix_connector::ConnectorEventProvider for ConfirmingHost {}
-
 #[async_trait]
 impl IngestorLoopServices for ConfirmingHost {
+    fn connector_host(&self) -> nervix_connector::IngestorHost {
+        nervix_connector_fake::FakeIngestorHost::default().host()
+    }
+
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
     fn record_read_payloads(&self, _payloads: usize, _bytes: u64) {}
 

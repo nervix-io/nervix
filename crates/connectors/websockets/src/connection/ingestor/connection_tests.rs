@@ -68,6 +68,7 @@ async fn a_message_retains_its_upgrade_snapshot_and_exact_data_frame_kind() {
             .assured("the peer sends the data frame");
         let batch = ingestor
             .next_batch(
+                &tests::host(),
                 IngestorBatchRequest {
                     max_messages: std::num::NonZeroUsize::MIN,
                     batch_timeout: None,
@@ -115,7 +116,9 @@ async fn a_configured_ping_is_written_while_the_ingestor_waits_for_data() {
     let (mut ingestor, mut peer) =
         tests::connected_pair_with(config, WebsocketsUpgradeHeaders::default()).await;
     let cancellation = IngestorReadCancellation::new();
+    let host = tests::host();
     let read = ingestor.next_batch(
+        &host,
         IngestorBatchRequest {
             max_messages: std::num::NonZeroUsize::MIN,
             batch_timeout: None,
@@ -183,7 +186,7 @@ async fn a_held_connection_answers_pings_and_hands_over_the_frame_it_parked_firs
     let cancellation = IngestorReadCancellation::new();
     for expected in [b"parked".as_slice(), b"behind".as_slice()] {
         let batch = ingestor
-            .next_batch(request, &cancellation)
+            .next_batch(&tests::host(), request, &cancellation)
             .await
             .assured("the connection stays open");
         let IngestorBatch::Messages(messages) = batch else {
@@ -218,6 +221,7 @@ async fn a_silent_peer_expires_with_the_explicit_or_ping_derived_idle_bound() {
         let result = timeout(
             Duration::from_secs(60),
             ingestor.next_batch(
+                &tests::host(),
                 IngestorBatchRequest {
                     max_messages: std::num::NonZeroUsize::MIN,
                     batch_timeout: None,
@@ -267,8 +271,9 @@ async fn a_responsive_peer_survives_a_handoff_past_the_idle_deadline() {
             batch_timeout: None,
         };
         let cancellation = IngestorReadCancellation::new();
+        let host = tests::host();
         let first = ingestor
-            .next_batch(request, &cancellation)
+            .next_batch(&host, request, &cancellation)
             .await
             .assured("the first payload reaches the host");
         let IngestorBatch::Messages(first) = first else {
@@ -329,7 +334,7 @@ async fn a_responsive_peer_survives_a_handoff_past_the_idle_deadline() {
             }
         };
         let (next, ()) = timeout(Duration::from_secs(60), async {
-            tokio::join!(ingestor.next_batch(request, &cancellation), answer)
+            tokio::join!(ingestor.next_batch(&host, request, &cancellation), answer)
         })
         .await
         .assured("the probe and its payload complete within the fixture budget");
@@ -396,7 +401,7 @@ async fn a_cancelled_read_keeps_the_response_deadline_of_its_written_catch_up_pi
         batch_timeout: None,
     };
     let interrupted = ingestor
-        .next_batch(request, &cancellation)
+        .next_batch(&tests::host(), request, &cancellation)
         .await
         .assured("read cancellation is an ordinary outcome");
     assert!(matches!(interrupted, IngestorBatch::Interrupted { .. }));
@@ -405,9 +410,11 @@ async fn a_cancelled_read_keeps_the_response_deadline_of_its_written_catch_up_pi
     resume();
     // Thirty-five seconds have passed since the probe, but only twenty-five since the next
     // ping. A renewed window would still wait; the retained deadline must expire immediately.
-    let result = futures_util::FutureExt::now_or_never(
-        ingestor.next_batch(request, &IngestorReadCancellation::new()),
-    )
+    let result = futures_util::FutureExt::now_or_never(ingestor.next_batch(
+        &tests::host(),
+        request,
+        &IngestorReadCancellation::new(),
+    ))
     .assured("the original response deadline ends a silent peer without another wait");
     let Err(report) = result else {
         panic!("cancellation and further overdue pings cannot renew an unanswered probe");
@@ -431,6 +438,7 @@ async fn a_connection_without_client_pings_keeps_its_physical_idle_deadline_afte
     resume();
     let result = ingestor
         .next_batch(
+            &tests::host(),
             IngestorBatchRequest {
                 max_messages: std::num::NonZeroUsize::MIN,
                 batch_timeout: None,
@@ -459,6 +467,7 @@ async fn inbound_message_and_frame_limits_end_the_exact_connection_with_the_driv
             .assured("the peer can send its small test frame");
         let result = ingestor
             .next_batch(
+                &tests::host(),
                 IngestorBatchRequest {
                     max_messages: std::num::NonZeroUsize::MIN,
                     batch_timeout: None,
@@ -534,6 +543,7 @@ async fn a_peer_protocol_violation_reads_a_protocol_error_close_and_keeps_the_dr
             .assured("the peer's transport writes the frame as given");
         let result = ingestor
             .next_batch(
+                &tests::host(),
                 IngestorBatchRequest {
                     max_messages: std::num::NonZeroUsize::MIN,
                     batch_timeout: None,
@@ -589,6 +599,7 @@ async fn text_that_is_not_utf8_reads_an_invalid_payload_close_and_keeps_the_driv
             .assured("the peer's transport writes the frame as given");
         let result = ingestor
             .next_batch(
+                &tests::host(),
                 IngestorBatchRequest {
                     max_messages: std::num::NonZeroUsize::MIN,
                     batch_timeout: None,
@@ -632,6 +643,7 @@ async fn a_peer_that_ends_tcp_first_is_released_without_a_close() {
         .assured("a connected socket ends its sending half");
     let result = ingestor
         .next_batch(
+            &tests::host(),
             IngestorBatchRequest {
                 max_messages: std::num::NonZeroUsize::MIN,
                 batch_timeout: None,
@@ -716,6 +728,7 @@ async fn a_silent_peer_reads_a_going_away_close_before_its_connection_ends() {
         let result = timeout(
             Duration::from_secs(60),
             ingestor.next_batch(
+                &tests::host(),
                 IngestorBatchRequest {
                     max_messages: std::num::NonZeroUsize::MIN,
                     batch_timeout: None,
@@ -768,6 +781,7 @@ async fn the_idle_verdict_never_waits_for_a_transport_that_cannot_take_its_close
     nervix_primitives::task::yield_now().await;
     let verdict = ingestor
         .next_batch(
+            &tests::host(),
             IngestorBatchRequest {
                 max_messages: std::num::NonZeroUsize::MIN,
                 batch_timeout: None,
@@ -900,6 +914,7 @@ async fn a_failed_read_never_waits_for_a_transport_that_cannot_take_its_close() 
     nervix_primitives::task::yield_now().await;
     let verdict = ingestor
         .next_batch(
+            &tests::host(),
             IngestorBatchRequest {
                 max_messages: std::num::NonZeroUsize::MIN,
                 batch_timeout: None,

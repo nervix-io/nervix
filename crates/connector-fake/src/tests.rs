@@ -28,7 +28,8 @@ async fn opening_consumes_only_the_selected_instance() {
             })),
         ),
     ]));
-    let mut opened = FakeIngestor::open(&plan, 0)
+    let host = FakeIngestorHost::default().host();
+    let mut opened = FakeIngestor::open(&plan, &host, 0)
         .await
         .assured("instance zero is configured");
     opened
@@ -36,10 +37,10 @@ async fn opening_consumes_only_the_selected_instance() {
         .await
         .assured("the configured instance closes");
     assert!(
-        FakeIngestor::open(&plan, 0).await.is_err(),
+        FakeIngestor::open(&plan, &host, 0).await.is_err(),
         "an instance opens once"
     );
-    let error = match FakeIngestor::open(&plan, 1).await {
+    let error = match FakeIngestor::open(&plan, &host, 1).await {
         Err(error) => error,
         Ok(_) => panic!("instance one's refusal must survive opening instance zero"),
     };
@@ -225,9 +226,11 @@ async fn queued_messages_keep_headers_metadata_positions_and_the_batch_bound() {
         .extend([message, FakeMessage::new(6, vec![1])]);
     let cancellation = IngestorReadCancellation::new();
     cancellation.cancel();
+    let host = FakeIngestorHost::default().host();
     // Input already ready is retained even when the host cancels the read.
     let batch = connector
         .next_batch(
+            &host,
             IngestorBatchRequest {
                 max_messages: NonZeroUsize::MIN,
                 batch_timeout: None,
@@ -286,8 +289,10 @@ async fn a_cancelled_channel_read_returns_and_allows_close() {
     let mut connector = FakeIngestor::new(receiver);
     let cancellation = IngestorReadCancellation::new();
     cancellation.cancel();
+    let host = FakeIngestorHost::default().host();
     let batch = connector
         .next_batch(
+            &host,
             IngestorBatchRequest {
                 max_messages: NonZeroUsize::MIN,
                 batch_timeout: None,

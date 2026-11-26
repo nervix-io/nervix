@@ -3,11 +3,12 @@
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** Opening broker and paced instances, registering a composed ingestor with its branch
-//!   runtimes, readiness and tasks, the acknowledgement policy a declared delivery mode parses
-//!   into, the broker, paced and request-scoped loops with their quiesce and readiness handling,
-//!   grouping policy, runtime decoding and dispatch, acknowledgement waiting, retry cadence, and
-//!   connector error reporting.
+//! - **Owns.** Opening broker and paced instances through the handle their connector reaches its
+//!   node by, registering a composed ingestor with its branch runtimes, readiness and tasks, the
+//!   acknowledgement policy a declared delivery mode parses into, the broker, paced and
+//!   request-scoped loops with their quiesce and readiness handling, handing every resume and read
+//!   the instance's handle, grouping policy, runtime decoding and dispatch, acknowledgement
+//!   waiting, retry cadence, and connector error reporting.
 //! - **Depends on.** The connector ingestor contract, declared delivery modes, and pre-resolved
 //!   runtime execution handles.
 //! - **Must not know.** A broker driver, connector-specific configuration, Plexus parsing, registry
@@ -26,7 +27,7 @@ use nervix_connector::{
     BrokerIngestorConnector, ClientResourceMounts, IngestMetadataRow, IngestorAckPolicy,
     IngestorAcknowledgementOutcome, IngestorAcknowledgementSupport, IngestorBatch,
     IngestorBatchAcknowledgement, IngestorBatchRequest, IngestorCapabilities, IngestorConnector,
-    IngestorError, IngestorIntakeError, IngestorIntakeMessage, IngestorIntakeResult,
+    IngestorError, IngestorHost, IngestorIntakeError, IngestorIntakeMessage, IngestorIntakeResult,
     IngestorLoopHost, IngestorLoopServices, IngestorMessage, IngestorPlan, IngestorPoll,
     IngestorReadBudget, IngestorReadHold, IngestorReadOutcome, IngestorResume,
     IngestorResumeOutcome, IngestorSettlement, IngestorSettlementOperation,
@@ -42,6 +43,7 @@ use super::{
         *,
     },
     IngestorConnectorStartError, IngestorStartError,
+    connector_host::IngestorConnectorHost,
 };
 use crate::{
     metrics::{IngestorInteractionMetrics, TaskFailureBinding},
@@ -163,11 +165,17 @@ pub(super) struct IngestorStart {
     /// The originator a domain-offset Kafka ingestor commits through, which schedule application
     /// replaces while the ingestor keeps running here; absent for every other ingestor.
     pub(super) domain_offsets: Option<StdArc<KafkaOffsetOriginatorSlot>>,
+    /// The handle the instance was opened with, which its loop hands to every resume and read and
+    /// whose instance ends when the loop lets it go.
+    pub(super) connector_host: IngestorConnectorHost,
 }
 
 /// One broker ingestor ready to open: its connector plan and the host settings it runs under.
 pub(super) struct BrokerIngestorStart<'a, P> {
     pub(super) connector: P,
+    /// The handle the unit's connector reaches its node through, which its composer built before
+    /// anything of the connector ran.
+    pub(super) host: IngestorConnectorHost,
     pub(super) instances: NonZeroU64,
     pub(super) acknowledgement: IngestAcknowledgement<'a>,
     pub(super) buffered_intake: bool,
@@ -190,6 +198,7 @@ impl<P> BrokerIngestorStart<'_, P> {
     {
         let Self {
             connector,
+            host,
             instances,
             acknowledgement,
             buffered_intake,
@@ -206,7 +215,7 @@ impl<P> BrokerIngestorStart<'_, P> {
             capabilities: ingestor.ingestor_capabilities(instances, acknowledgement.support()),
             acknowledgement,
         };
-        let connector = C::open(&plan.connector, ingestor.instance_index())
+        let connector = C::open(&plan.connector, host.handle(), ingestor.instance_index())
             .await
             .change_context_lazy(|| ingestor.initialize_failure())?;
         let instance = Box::new(BrokerIngestorInstance {
@@ -224,6 +233,7 @@ impl<P> BrokerIngestorStart<'_, P> {
             client_mounts,
             connector_label: C::KIND.connector().keyword().to_ascii_lowercase(),
             domain_offsets: None,
+            connector_host: host,
         })
     }
 }
@@ -299,6 +309,9 @@ where
 /// One paced ingestor ready to open: its connector plan and the domain cadence the host polls it on.
 pub(super) struct PacedIngestorStart<P> {
     pub(super) connector: P,
+    /// The handle the unit's connector reaches its node through, which its composer built before
+    /// anything of the connector ran.
+    pub(super) host: IngestorConnectorHost,
     pub(super) every: DomainClockPeriod,
     /// Whether the first poll is due as soon as the cadence binds or one period later.
     pub(super) cadence_start: DomainCadenceStart,
@@ -320,6 +333,7 @@ impl<P> PacedIngestorStart<P> {
     {
         let Self {
             connector,
+            host,
             every,
             cadence_start,
             intake_batch,
@@ -332,7 +346,7 @@ impl<P> PacedIngestorStart<P> {
                 .ingestor_capabilities(NonZeroU64::MIN, acknowledgement.support()),
             acknowledgement,
         };
-        let connector = C::open(&plan.connector, 0)
+        let connector = C::open(&plan.connector, host.handle(), 0)
             .await
             .change_context_lazy(|| ingestor.initialize_failure())?;
         let cadence = runtime
@@ -350,6 +364,7 @@ impl<P> PacedIngestorStart<P> {
             client_mounts,
             connector_label: C::KIND.connector().keyword().to_ascii_lowercase(),
             domain_offsets: None,
+            connector_host: host,
         })
     }
 }
@@ -409,6 +424,7 @@ impl Runtime {
             client_mounts,
             connector_label,
             domain_offsets,
+            connector_host,
         } = connector;
         let IngestorDependencies {
             handles,
@@ -448,6 +464,7 @@ impl Runtime {
             flush_each_intake,
             general_error_policy: ingestor.general_error_policy.clone(),
             rate_limit,
+            connector_host,
         });
         let run = instance.start(host, shutdown_tx.subscribe());
         let task_domain = domain.clone();
@@ -525,6 +542,8 @@ pub(super) struct RuntimeIngestorHostSpec {
     pub(super) general_error_policy: GeneralErrorPolicy,
     /// The ingestor's `RATE LIMIT` clauses, from which this unit's allowance starts full.
     pub(super) rate_limit: Option<Arc<BoundRateLimit>>,
+    /// The handle the unit's connector was opened with.
+    pub(super) connector_host: IngestorConnectorHost,
 }
 
 pub(super) struct RuntimeIngestorHost {
@@ -570,6 +589,10 @@ pub(super) struct RuntimeIngestorHost {
     /// Publishes this task's transient status as the unit's transient-failure gauge until the
     /// host ends.
     _failure_observation: TaskFailureBinding,
+    /// The handle the unit's connector was opened with, which the loop hands to every resume and
+    /// read. The loop owns this host, so the instance ends for its connector when the loop ends or
+    /// its task is aborted.
+    connector_host: IngestorConnectorHost,
 }
 
 impl RuntimeIngestorHost {
@@ -690,6 +713,7 @@ impl RuntimeIngestorHost {
             allowance,
             confirmation_delay,
             _failure_observation: failure_observation,
+            connector_host: spec.connector_host,
         }
     }
 
@@ -1497,27 +1521,12 @@ fn batch_payload<'a>(
     }
 }
 
-impl nervix_connector::ConnectorEventProvider for RuntimeIngestorHost {
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            lifecycle,
-            reason = "connector construction borrows its exact unit's declared event children"
-        )
-    )]
-    fn event_counter(
-        &self,
-        event: nervix_models::ConnectorEvent,
-    ) -> error_stack::Result<
-        nervix_connector::ConnectorEventCounter,
-        nervix_connector::UndeclaredConnectorEvent,
-    > {
-        self.interactions.events.counter(event)
-    }
-}
-
 #[async_trait]
 impl IngestorLoopServices for RuntimeIngestorHost {
+    fn connector_host(&self) -> IngestorHost {
+        self.connector_host.handle().clone()
+    }
+
     fn record_read(&self, outcome: IngestorReadOutcome) {
         self.interactions.reads.read(outcome);
     }
@@ -2108,6 +2117,7 @@ enum PacedIngestorAction {
 async fn prepare_paced_ingestor<C, H>(
     connector: &mut C,
     host: &mut H,
+    connector_host: &IngestorHost,
     ready: &mut bool,
     failed_poll: &mut bool,
     shutdown: &mut watch::Receiver<bool>,
@@ -2148,7 +2158,7 @@ where
         }
         *failed_poll = false;
         flush_paced_ingestor(host).await;
-        let resumed = connector.resume().await;
+        let resumed = connector.resume(connector_host).await;
         host.record_resume(IngestorResumeOutcome::from(&resumed));
         match resumed {
             Ok(IngestorResume::Ready) => {
@@ -2201,6 +2211,12 @@ async fn run_paced_ingestor<C, H, D>(
     D: PacedIngestorCadence,
 {
     let cadence_cancellation = CancellationToken::new();
+    let connector_host = nervix_primitives::expect_lint!(
+        nervix::lifecycle_call,
+        "the paced loop takes its connector's handle once, before its first resume; every resume \
+         and poll reuses it",
+        host.connector_host()
+    );
     let mut ready = false;
     let mut failed_poll = false;
 
@@ -2209,6 +2225,7 @@ async fn run_paced_ingestor<C, H, D>(
         let preparation = prepare_paced_ingestor(
             &mut connector,
             &mut host,
+            &connector_host,
             &mut ready,
             &mut failed_poll,
             &mut shutdown,
@@ -2266,7 +2283,7 @@ async fn run_paced_ingestor<C, H, D>(
                 host.record_poll(IngestorReadOutcome::Interrupted, started_at.elapsed());
                 continue;
             }
-            poll = connector.poll(due_at) => poll,
+            poll = connector.poll(&connector_host, due_at) => poll,
         };
         let elapsed = started_at.elapsed();
         let poll = match poll {
@@ -2428,6 +2445,12 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
         retry: retry_policy,
         position_class,
     } = policy;
+    let connector_host = nervix_primitives::expect_lint!(
+        nervix::lifecycle_call,
+        "the broker loop takes its connector's handle once, before its first resume; every resume \
+         and read reuses it",
+        host.connector_host()
+    );
     let mut retry_delay = retry_policy.backoff;
     let mut ready = false;
     // Whether the latest read failed, which suspends a connector that then needs a resume.
@@ -2481,7 +2504,7 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                     continue;
                 }
                 _ = host.wait_for_quiesce_change() => continue,
-                resumed = connector.resume() => resumed,
+                resumed = connector.resume(&connector_host) => resumed,
             };
             host.record_resume(IngestorResumeOutcome::from(&resumed));
             match resumed {
@@ -2585,7 +2608,14 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                 }
             }
         };
-        let read = read_batch(&mut connector, &mut host, &mut shutdown, request).await;
+        let read = read_batch(
+            &mut connector,
+            &mut host,
+            &connector_host,
+            &mut shutdown,
+            request,
+        )
+        .await;
         let end = read.end;
         let messages = match read.into_outcome(&host) {
             ReadOutcome::TakeIn(messages) => {
@@ -2922,6 +2952,10 @@ mod decode_tests;
 #[cfg(test)]
 #[path = "connector_reconnect_tests.rs"]
 mod reconnect_tests;
+
+#[cfg(test)]
+#[path = "connector_host_tests.rs"]
+mod host_tests;
 
 #[cfg(test)]
 #[path = "connector_confirmation_tests.rs"]

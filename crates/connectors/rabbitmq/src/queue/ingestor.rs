@@ -6,7 +6,8 @@
 //!   declared consumer mode and prefetch window, AMQP headers as ingest headers, the delivery's
 //!   envelope and basic properties as its typed metadata, and per-delivery acknowledgement and
 //!   requeue.
-//! - **Depends on.** The connector contract, typed client configuration entries, the crate's
+//! - **Depends on.** The connector contract and the host handle through which an instance takes
+//!   the node resolver each time it connects, typed client configuration entries, the crate's
 //!   broker connection, `error-stack`, Tokio and `lapin`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or Plexus.
 
@@ -19,6 +20,14 @@
     nervix::layer(
         engine,
         reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        reason = "the RabbitMQ queue ingestor resolves its broker host through its node's \
+                  resolver each time it connects"
     )
 )]
 
@@ -37,7 +46,8 @@ use lapin::{
 use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow,
     IngestMetadataValues, IngestRowHeaders, IngestorBatch, IngestorBatchRequest, IngestorConnector,
-    IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult, IngestorResume,
+    IngestorError, IngestorHost, IngestorMessage, IngestorReadCancellation, IngestorResult,
+    IngestorResume,
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, IngestorMetadataType, RabbitMqQueueName, Timestamp};
@@ -86,13 +96,14 @@ pub enum RabbitMqConsumerMode {
     Ack { prefetch: NonZeroU16 },
 }
 
-/// What one RabbitMQ ingestor consumes: its resolved client entries, the node resolver its broker
-/// host resolves through, the queue, and the consumer tag each instance registers under, suffixed
-/// with its instance index.
+/// What one RabbitMQ ingestor consumes: its resolved client entries, the queue, and the consumer
+/// tag each instance registers under, suffixed with its instance index.
+///
+/// The node resolver its broker host resolves through reaches each instance through its host
+/// handle, which hands it over every time the instance connects.
 #[derive(Clone)]
 pub struct RabbitMqQueueIngestorPlan {
     config: Vec<ClientConfigEntry>,
-    dns: DnsResolver,
     queue: RabbitMqQueueName,
     consumer_tag: String,
     mode: RabbitMqConsumerMode,
@@ -109,24 +120,27 @@ struct RabbitMqConsumer {
 impl RabbitMqQueueIngestorPlan {
     pub fn new(
         config: Vec<ClientConfigEntry>,
-        dns: DnsResolver,
         queue: RabbitMqQueueName,
         consumer_tag: String,
         mode: RabbitMqConsumerMode,
     ) -> Self {
         Self {
             config,
-            dns,
             queue,
             consumer_tag,
             mode,
         }
     }
 
-    /// Connects and starts the consumer of one instance, every step within the client's
+    /// Connects and starts the consumer of one instance, resolving the broker host through `dns`,
+    /// the node resolver the instance's host handle handed over, every step within the client's
     /// `connect_timeout_ms`.
-    async fn consume(&self, instance_index: u64) -> RabbitMqQueueIngestorResult<RabbitMqConsumer> {
-        let broker = RabbitMqBroker::from_config(&self.config, self.dns.clone())
+    async fn consume(
+        &self,
+        dns: DnsResolver,
+        instance_index: u64,
+    ) -> RabbitMqQueueIngestorResult<RabbitMqConsumer> {
+        let broker = RabbitMqBroker::from_config(&self.config, dns)
             .change_context(RabbitMqQueueIngestorError::Connect)?;
         let opening = broker
             .connect()
@@ -382,7 +396,11 @@ impl IngestorConnector for RabbitMqQueueIngestor {
 
     type Plan = RabbitMqQueueIngestorPlan;
 
-    async fn open(plan: &Self::Plan, instance_index: u64) -> IngestorResult<Self> {
+    async fn open(
+        plan: &Self::Plan,
+        _host: &IngestorHost,
+        instance_index: u64,
+    ) -> IngestorResult<Self> {
         Ok(Self {
             plan: plan.clone(),
             instance_index,
@@ -401,11 +419,16 @@ impl IngestorConnector for RabbitMqQueueIngestor {
         Ok(())
     }
 
-    async fn resume(&mut self) -> IngestorResult<IngestorResume> {
+    /// Connects when the instance has no consumer, taking the node resolver the broker host
+    /// resolves through from `host` for that connection.
+    async fn resume(&mut self, host: &IngestorHost) -> IngestorResult<IngestorResume> {
         if self.consumer.is_none() {
+            let dns = host.dns().change_context(IngestorError::Resume {
+                connector: RABBITMQ,
+            })?;
             let consumer = self
                 .plan
-                .consume(self.instance_index)
+                .consume(dns, self.instance_index)
                 .await
                 .change_context(IngestorError::Resume {
                     connector: RABBITMQ,
@@ -431,6 +454,7 @@ impl BrokerIngestorConnector for RabbitMqQueueIngestor {
 
     async fn next_batch(
         &mut self,
+        _host: &IngestorHost,
         request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {
@@ -718,18 +742,20 @@ mod tests {
                     key: "addr".to_string(),
                     value: addr.clone(),
                 }],
-                dns.clone(),
                 RabbitMqQueueName::parse("orders").expect("a fixed queue name is valid"),
                 "orders".to_string(),
                 RabbitMqConsumerMode::Ack {
                     prefetch: NonZeroU16::MIN,
                 },
             );
-            let mut ingestor = RabbitMqQueueIngestor::open(&plan, 0)
+            let host = nervix_connector_fake::FakeIngestorHost::default()
+                .with_dns(dns.clone())
+                .host();
+            let mut ingestor = RabbitMqQueueIngestor::open(&plan, &host, 0)
                 .await
                 .expect("opening a RabbitMQ ingestor connects nothing");
             let error = ingestor
-                .resume()
+                .resume(&host)
                 .await
                 .expect_err("a broker that cannot be reached fails the resume");
             assert!(matches!(
@@ -751,16 +777,57 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn an_ingestor_on_a_node_without_its_resolver_fails_its_resume_and_names_the_resolver() {
+        let plan = RabbitMqQueueIngestorPlan::new(
+            vec![ClientConfigEntry {
+                key: "addr".to_string(),
+                value: "amqp://guest:guest@127.0.0.1:5672/%2f".to_string(),
+            }],
+            RabbitMqQueueName::parse("orders").expect("a fixed queue name is valid"),
+            "orders".to_string(),
+            RabbitMqConsumerMode::Ack {
+                prefetch: NonZeroU16::MIN,
+            },
+        );
+        let host = nervix_connector_fake::FakeIngestorHost::default().host();
+        let mut ingestor = RabbitMqQueueIngestor::open(&plan, &host, 0)
+            .await
+            .expect("opening a RabbitMQ ingestor connects nothing and takes nothing from its node");
+
+        let error = ingestor
+            .resume(&host)
+            .await
+            .expect_err("an ingestor that dials its broker by name needs its node's resolver");
+
+        assert_eq!(
+            *error.current_context(),
+            IngestorError::Resume {
+                connector: RABBITMQ
+            }
+        );
+        assert_eq!(
+            error.downcast_ref::<nervix_connector::HostServiceError>(),
+            Some(&nervix_connector::HostServiceError::DnsNotInstalled)
+        );
+        assert!(
+            error.downcast_ref::<RabbitMqQueueIngestorError>().is_none(),
+            "the node refused its resolver before the ingestor read its client or dialled: \
+             {error:?}"
+        );
+        assert!(ingestor.needs_resume());
+    }
+
+    #[nervix_primitives::test]
     async fn automatic_consumption_never_uses_a_deliveries_transport_acknowledgement() {
-        let (_files, dns) = literal_address_resolver().await;
         let plan = RabbitMqQueueIngestorPlan::new(
             Vec::new(),
-            dns,
             RabbitMqQueueName::parse("orders").expect("a fixed queue name is valid"),
             "orders".into(),
             RabbitMqConsumerMode::NoAck,
         );
-        let mut ingestor = RabbitMqQueueIngestor::open(&plan, 0)
+        // Opening, acknowledging and rejecting take nothing from the node.
+        let host = nervix_connector_fake::FakeIngestorHost::default().host();
+        let mut ingestor = RabbitMqQueueIngestor::open(&plan, &host, 0)
             .await
             .expect("opening connects nothing");
         let delivery = Delivery::mock(1, "".into(), "orders".into(), false, vec![1]);

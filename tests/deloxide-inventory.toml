@@ -7129,6 +7129,16 @@ workloads = [
   "owner.emitter-retained-cancellation",
 ]
 
+[[owner]]
+gap = "No diagnostic workload instantiates the fake ingestor host. The services it scripts behind an ingestor's handle and its observation log are covered by the fake connector's host tests, the ingestor host's loop tests and the registered Shuttle check shuttle_a_connectors_instance_ends_for_it_only_after_its_host_loop_closed_it; no Deloxide claim covers its lock."
+path = "crates/connector-fake/src/ingestor_host.rs"
+workloads = []
+
+[[owner]]
+gap = "No diagnostic workload leases a scripted pool. The wait log its leases publish through is covered by the fake connector's host tests and the pooled-client tests of the shared client registry; no Deloxide claim covers its lock."
+path = "crates/connector-fake/src/pooled_client.rs"
+workloads = []
+
 [[workload]]
 coverage = "Archive capture and streamed restore reach the state store installation barrier and checkpoint publication locks. Tensor execution, immutable pointer publication, async admission and transport waits are outside Deloxide; the cut Shuttle check and descriptor properties cover those boundaries."
 examples = 12

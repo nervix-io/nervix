@@ -22,6 +22,15 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        tls_policy,
+        reason = "the HTTP request ingestor dials through its node's resolver under the node's \
+                  outward TLS policy"
+    )
+)]
 
 mod emitter;
 mod transport;
@@ -33,12 +42,12 @@ pub use emitter::{HttpRequestEmitter, HttpRequestEmitterConfig};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    ClientConfigResult, HttpClientConfig, IngestorConnector, IngestorError, IngestorPoll,
-    IngestorPollMessage, IngestorResult, PacedIngestorConnector, RetainedIngestHeaders,
-    RetainedIngestMetadata, RetainedIngestMetadataValue, client_config_value,
-    physical_time::actual_utc_now,
+    ClientConfigResult, HttpClientConfig, IngestorConnector, IngestorError, IngestorHost,
+    IngestorPoll, IngestorPollMessage, IngestorResult, PacedIngestorConnector,
+    RetainedIngestHeaders, RetainedIngestMetadata, RetainedIngestMetadataValue,
+    client_config_value, physical_time::actual_utc_now,
 };
-use nervix_dns::{DnsResolver, LookupShare, OperationBudget};
+use nervix_dns::{LookupShare, OperationBudget};
 use nervix_models::{
     ClientConfigEntry, HttpRequestHeader, HttpRequestHeaderValue, PayloadSizeLimit, Timestamp,
 };
@@ -53,10 +62,12 @@ use self::transport::{ClientTransport, RedirectAnswer, Redirects};
 
 const HTTP: &str = "http";
 
+/// What one HTTP request ingestor polls, from its typed plan.
+///
+/// The node resolver its client dials through and the outward TLS policy its handshakes take
+/// reach the ingestor through its host handle.
 pub struct HttpRequestIngestorPlan {
-    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
-    pub dns: DnsResolver,
     pub method: String,
     pub headers: Vec<HttpRequestHeader>,
     pub header_limits: nervix_models::HttpHeaderLimits,
@@ -102,7 +113,11 @@ impl IngestorConnector for HttpRequestIngestor {
 
     type Plan = HttpRequestIngestorPlan;
 
-    async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
+    async fn open(
+        plan: &Self::Plan,
+        host: &IngestorHost,
+        _instance_index: u64,
+    ) -> IngestorResult<Self> {
         let endpoint = Self::endpoint_from_config(&plan.config)
             .change_context(IngestorError::Open { connector: HTTP })?;
         let endpoint = Self::endpoint_url(&endpoint)
@@ -116,7 +131,10 @@ impl IngestorConnector for HttpRequestIngestor {
             .change_context(IngestorError::Open { connector: HTTP })?;
         let transport = ClientTransport::declared(&plan.config, "HTTP")
             .change_context(IngestorError::Open { connector: HTTP })?;
-        let client = HttpClientConfig::new(&plan.config, "HTTP", &plan.dns, &plan.tls_policy)
+        let dns = host
+            .dns()
+            .change_context(IngestorError::Open { connector: HTTP })?;
+        let client = HttpClientConfig::new(&plan.config, "HTTP", &dns, &host.tls_policy())
             .build()
             .change_context(IngestorError::Open { connector: HTTP })?;
         Ok(Self {
@@ -133,7 +151,11 @@ impl IngestorConnector for HttpRequestIngestor {
 
 #[async_trait]
 impl PacedIngestorConnector for HttpRequestIngestor {
-    async fn poll(&mut self, scheduled_at: Timestamp) -> IngestorResult<IngestorPoll> {
+    async fn poll(
+        &mut self,
+        _host: &IngestorHost,
+        scheduled_at: Timestamp,
+    ) -> IngestorResult<IngestorPoll> {
         let response = self
             .send()
             .await
@@ -560,8 +582,9 @@ mod tests {
         lines
     }
 
-    /// A polling ingestor of `endpoint` whose client declares `follow_redirects` as given.
-    async fn ingestor(endpoint: String, follow_redirects: &str) -> HttpRequestIngestor {
+    /// The plan of a polling ingestor of `endpoint` whose client declares `follow_redirects` as
+    /// given.
+    fn polling_plan(endpoint: String, follow_redirects: &str) -> HttpRequestIngestorPlan {
         let config = vec![
             ClientConfigEntry {
                 key: "endpoint".to_string(),
@@ -576,15 +599,8 @@ mod tests {
                 value: follow_redirects.to_string(),
             },
         ];
-        let plan = HttpRequestIngestorPlan {
-            tls_policy: Default::default(),
+        HttpRequestIngestorPlan {
             config,
-            dns: DnsResolver::load(
-                nervix_dns::DnsConfiguration::system(),
-                nervix_dns::DnsSettings::default(),
-            )
-            .await
-            .expect("the host resolver configuration loads in tests"),
             method: "GET".to_string(),
             headers: vec![HttpRequestHeader {
                 name: "x-tenant".to_string(),
@@ -592,10 +608,48 @@ mod tests {
             }],
             header_limits: nervix_models::HttpHeaderLimits::default(),
             max_body_size: "1KiB".parse().expect("a byte size"),
-        };
-        HttpRequestIngestor::open(&plan, 0)
+        }
+    }
+
+    /// A polling ingestor of `endpoint` whose client declares `follow_redirects` as given, opened
+    /// on a node that provides its resolver.
+    async fn ingestor(endpoint: String, follow_redirects: &str) -> HttpRequestIngestor {
+        let plan = polling_plan(endpoint, follow_redirects);
+        let dns = nervix_dns::DnsResolver::load(
+            nervix_dns::DnsConfiguration::system(),
+            nervix_dns::DnsSettings::default(),
+        )
+        .await
+        .expect("the host resolver configuration loads in tests");
+        let host = nervix_connector_fake::FakeIngestorHost::default()
+            .with_dns(dns)
+            .host();
+        HttpRequestIngestor::open(&plan, &host, 0)
             .await
             .expect("a valid polling plan opens")
+    }
+
+    #[nervix_primitives::test]
+    async fn an_ingestor_on_a_node_without_its_resolver_fails_to_open_and_names_the_resolver() {
+        let plan = polling_plan("http://127.0.0.1:9/events".to_string(), "false");
+        let opened = HttpRequestIngestor::open(
+            &plan,
+            &nervix_connector_fake::FakeIngestorHost::default().host(),
+            0,
+        )
+        .await;
+        let Err(error) = opened else {
+            panic!("an ingestor that dials by name needs its node's resolver");
+        };
+
+        assert_eq!(
+            *error.current_context(),
+            IngestorError::Open { connector: HTTP }
+        );
+        assert_eq!(
+            error.downcast_ref::<nervix_connector::HostServiceError>(),
+            Some(&nervix_connector::HostServiceError::DnsNotInstalled)
+        );
     }
 
     #[nervix_primitives::test]

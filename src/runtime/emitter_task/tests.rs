@@ -78,13 +78,26 @@ fn batch_context<'a>(
     }
 }
 
+/// An emitter that dials by name takes the resolver from its host handle when it opens. On a node
+/// without one the open fails as the emitter's initialization, which the host retries, and the
+/// emitter shows the reason the missing resolver names.
 #[test]
-fn emitter_context_reports_missing_node_dns_as_initialization_failure() {
+fn emitter_handle_reports_missing_node_dns_as_initialization_failure() {
     let context = emitter_context();
-    let error = context
+    let refused = context
+        .emitter_host()
         .dns()
         .err()
         .assured("the fixture runtime has no DNS resolver");
+    assert_eq!(
+        *refused.current_context(),
+        nervix_connector::HostServiceError::DnsNotInstalled
+    );
+
+    // As a connector that could not open reports it, and its composition root after it.
+    let error = refused
+        .change_context(nervix_connector::EmitterOpenError::Initialize { connector: "kafka" })
+        .change_context(EmitterRuntimeError::InitializeConnector);
     assert!(matches!(
         error.current_context(),
         EmitterRuntimeError::InitializeConnector
@@ -92,6 +105,37 @@ fn emitter_context_reports_missing_node_dns_as_initialization_failure() {
     assert_eq!(
         emitter_error_message(&error),
         "the node DNS resolver is not installed"
+    );
+}
+
+/// A pooled emitter whose client cannot open shows the client that could not open, unless
+/// something beneath describes the failure in its own words.
+#[test]
+fn an_emitter_names_the_client_it_could_not_lease_unless_a_cause_describes_itself() {
+    let unopened = || {
+        Report::new(nervix_connector::EmitterOpenError::Initialize {
+            connector: "postgres",
+        })
+        .change_context(SharedClientError::Open {
+            client: "database".to_string(),
+        })
+    };
+
+    let bare = unopened().change_context(EmitterRuntimeError::InitializeConnector);
+    assert_eq!(
+        emitter_error_message(&bare),
+        "failed to open client 'database'"
+    );
+
+    let described = unopened()
+        .attach_printable("connection refused")
+        .change_context(EmitterRuntimeError::InitializeConnector);
+    assert_eq!(emitter_error_message(&described), "connection refused");
+
+    let unrelated = Report::new(EmitterRuntimeError::InitializeConnector);
+    assert_eq!(
+        emitter_error_message(&unrelated),
+        "failed to initialize emitter connector"
     );
 }
 
@@ -1263,4 +1307,226 @@ async fn emitter_outcomes_terminal_failure_counts_only_rows_routed_to_message_po
     assert!(context.interactions.describe_lines().iter().any(|line| {
         line.starts_with("nervix_emitter_records_failed_total{") && line.ends_with("total=1")
     }));
+}
+
+fn pooled_client_spec(entries: &[(&str, &str)]) -> EmitterClientSpec {
+    EmitterClientSpec {
+        name: crate::runtime::test_fixtures::named("database"),
+        config: nervix_connector::ResolvedClientConfig {
+            entries: entries
+                .iter()
+                .map(|(key, value)| nervix_models::ClientConfigEntry {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                })
+                .collect(),
+            mounts: None,
+        },
+    }
+}
+
+fn pooled_client_bounds() -> nervix_models::ClientPoolBounds {
+    nervix_models::ClientPoolBounds::new(0, std::num::NonZeroU32::MIN).assured("zero is below one")
+}
+
+fn pooled_client_key(context: &EmitterConnectorContext) -> DomainNodeRef {
+    DomainNodeRef::node_in(
+        context.domain.clone(),
+        ModelKind::Client,
+        crate::runtime::test_fixtures::named::<ClientName>("database"),
+    )
+}
+
+/// The node's outward TLS policy and the end of the emitter's task reach its connector through
+/// the handle, and an emitter whose host leased it no pooled client is refused one by name.
+#[nervix_primitives::test]
+async fn emitter_host_hands_over_the_nodes_tls_policy_and_the_end_of_its_task() {
+    let context = emitter_context();
+    let host = context.emitter_host();
+
+    assert!(
+        StdArc::ptr_eq(
+            &host.tls_policy().provider(),
+            &context.runtime.outward_tls().provider()
+        ),
+        "the handle hands over the node's own policy publication"
+    );
+
+    let task_end = host.cancellation();
+    assert!(!task_end.is_cancelled());
+    // The emitter's task holds the guard that ends it; the context and the handle only observe.
+    drop(context.task_end.clone().drop_guard());
+    assert!(
+        task_end.is_cancelled(),
+        "the end of the emitter's task ends the instance for its connector"
+    );
+
+    let unleased = host
+        .pool::<nervix_connector_fake::FakePooledClient>()
+        .err()
+        .assured("the host leased this emitter no pooled client");
+    assert_eq!(
+        *unleased.current_context(),
+        nervix_connector::HostServiceError::PooledClientNotLeased
+    );
+}
+
+/// A pooled emitter's host leases its client before it opens the emitter and hands the lease over
+/// in the emitter's handle. A checkout the pool does not answer at once shows as that emitter's
+/// wait, and the client stays open for exactly as long as the emitter keeps the lease it took.
+#[nervix_primitives::test]
+async fn a_pooled_emitter_takes_its_lease_through_its_handle_and_publishes_its_own_waits() {
+    let context = emitter_context();
+    let lease = context
+        .lease_pooled_client::<nervix_connector_fake::FakePooledClient>(
+            &pooled_client_spec(&[("addr", "db.internal")]),
+            pooled_client_bounds(),
+        )
+        .await
+        .expect("the scripted pool opens");
+    let host = context.emitter_host_leasing(lease);
+
+    let taken = host
+        .pool::<nervix_connector_fake::FakePooledClient>()
+        .expect("the host leased this connector's pooled client");
+    assert_eq!(taken.client().opening.bounds, pooled_client_bounds());
+    let other = host
+        .pool::<nervix_connector_fake::OtherFakePooledClient>()
+        .err()
+        .assured("the lease is the pooled client of the connector it was leased for");
+    assert_eq!(
+        *other.current_context(),
+        nervix_connector::HostServiceError::PooledClientOfOtherConnector {
+            leased: nervix_models::ConnectorKind::Postgres,
+            requested: nervix_models::ConnectorKind::MySql,
+        }
+    );
+
+    let waiter = context.registry_key();
+    assert!(context.runtime.pool_wait(&waiter).is_none());
+    {
+        let mut pending = Box::pin(taken.checkout(std::future::pending::<()>()));
+        std::future::poll_fn(|polling| {
+            assert!(pending.as_mut().poll(polling).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        let waiting = context
+            .runtime
+            .pool_wait(&waiter)
+            .assured("the pending checkout shows as the emitter's wait");
+        assert_eq!(
+            waiting.client,
+            crate::runtime::test_fixtures::named::<ClientName>("database")
+        );
+    }
+    assert!(
+        context.runtime.pool_wait(&waiter).is_none(),
+        "the abandoned checkout ended its wait"
+    );
+
+    let client = pooled_client_key(&context);
+    drop(host);
+    assert!(
+        context.runtime.inner.shared_clients.contains_key(&client),
+        "the emitter keeps the client open through the lease it took"
+    );
+    drop(taken);
+    assert!(
+        !context.runtime.inner.shared_clients.contains_key(&client),
+        "the last lease closes the client"
+    );
+    assert!(
+        !context.runtime.inner.pool_waits.contains_key(&waiter),
+        "the emitter's wait publication ends with its lease"
+    );
+}
+
+/// A client that cannot open fails the emitter's initialization with the connector's own failure
+/// beneath the client, shows as the client that could not open, and leaves nothing leased.
+#[nervix_primitives::test]
+async fn a_pooled_emitter_whose_client_cannot_open_fails_initialization_with_its_typed_cause() {
+    let context = emitter_context();
+
+    let error = context
+        .lease_pooled_client::<nervix_connector_fake::FakePooledClient>(
+            &pooled_client_spec(&[(nervix_connector_fake::REFUSE_OPEN, "")]),
+            pooled_client_bounds(),
+        )
+        .await
+        .err()
+        .assured("the configuration scripts a refusal");
+
+    assert!(matches!(
+        error.current_context(),
+        EmitterRuntimeError::InitializeConnector
+    ));
+    assert_eq!(
+        error
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<nervix_connector_fake::FakePooledClientError>()),
+        Some(&nervix_connector_fake::FakePooledClientError::Refused),
+        "the connector's own failure stays, typed, beneath the client"
+    );
+    assert_eq!(
+        emitter_error_message(&error),
+        "failed to open client 'database'"
+    );
+    assert!(
+        !context
+            .runtime
+            .inner
+            .shared_clients
+            .contains_key(&pooled_client_key(&context))
+    );
+    assert!(
+        !context
+            .runtime
+            .inner
+            .pool_waits
+            .contains_key(&context.registry_key())
+    );
+}
+
+/// A pooled client that refuses its configuration says so with its own typed failure, and the
+/// lease keeps that cause, so the host does not open the emitter again: no later attempt can
+/// change a configuration. A lease that fails without judging the configuration is tried again.
+#[nervix_primitives::test]
+async fn a_pooled_client_that_refuses_its_configuration_is_not_opened_again() {
+    let context = emitter_context();
+
+    // A MongoDB client without its address: the driver is never reached.
+    let refused = context
+        .lease_pooled_client::<nervix_connector_mongodb::MongoDbClient>(
+            &pooled_client_spec(&[]),
+            pooled_client_bounds(),
+        )
+        .await
+        .err()
+        .assured("a MongoDB client names the address it connects to");
+    assert!(
+        refused.frames().any(|frame| matches!(
+            frame.downcast_ref::<nervix_connector::EmitterOpenError>(),
+            Some(nervix_connector::EmitterOpenError::InvalidConfiguration { .. })
+        )),
+        "the connector's refusal of the configuration stays typed beneath the lease: {refused:?}"
+    );
+    assert!(
+        crate::runtime::emitter_publishing::EmitterConnectorState::refuses_configuration(&refused)
+    );
+
+    let unopened = context
+        .lease_pooled_client::<nervix_connector_fake::FakePooledClient>(
+            &pooled_client_spec(&[(nervix_connector_fake::REFUSE_OPEN, "")]),
+            pooled_client_bounds(),
+        )
+        .await
+        .err()
+        .assured("the configuration scripts a refusal");
+    assert!(
+        !crate::runtime::emitter_publishing::EmitterConnectorState::refuses_configuration(
+            &unopened
+        ),
+        "a pool that could not open without judging its configuration is opened again"
+    );
 }

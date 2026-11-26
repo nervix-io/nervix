@@ -1204,16 +1204,25 @@ impl IngestorStatus {
 }
 
 impl Runtime {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a unit's loop host and its connector's handle each resolve the unit's \
+                      status once and publish through the one they kept"
+        )
+    )]
     pub(super) fn ingestor_status(&self, key: &DomainNodeUnitRef) -> Arc<IngestorStatus> {
         if let Some(status) = self.inner.ingestor_statuses.get(key) {
             return status.clone();
         }
-        // Execution preparation serializes this entity's first registration before instances start.
-        let status = Arc::new(IngestorStatus::default());
+        // A unit's loop host and its connector's handle both publish through this status, and
+        // either may be the first to ask, so the entry decides which one status they share.
         self.inner
             .ingestor_statuses
-            .insert(key.clone(), status.clone());
-        status
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(IngestorStatus::default()))
+            .clone()
     }
 
     pub(in crate::runtime) fn record_ingestor_transient_error(

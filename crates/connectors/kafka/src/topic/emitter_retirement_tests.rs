@@ -6,7 +6,8 @@
 //!   the answers to the records it sent, a flush that outlives the finish that started it), for a
 //!   destruction that waits for the producer's polling thread or meets a busy connector worker, and
 //!   for the charge a producer holds for its own retirement.
-//! - **Depends on.** The connector contract, the bounded executor and librdkafka's mock broker.
+//! - **Depends on.** The connector contract and its scripted host, the bounded executor and
+//!   librdkafka's mock broker.
 //! - **Must not know.** Runtime graph ownership, registry Models or cluster placement.
 
 use std::{
@@ -18,9 +19,10 @@ use std::{
 
 use meticulous::ResultExt as _;
 use nervix_connector::{
-    BrokerPublishingMode, EmitterConnector as _, EmitterFinish, EmitterHost, EmitterLifecycle as _,
+    BrokerPublishingMode, EmitterConnector as _, EmitterFinish, EmitterLifecycle as _,
     EmitterRecordId, RecordEmitter as _,
 };
+use nervix_connector_fake::FakeEmitterHost;
 use nervix_execution::{Executor, MemoryClass};
 use nervix_primitives::{
     sync::oneshot,
@@ -31,8 +33,8 @@ use rdkafka::{mocking::MockCluster, producer::DefaultProducerContext};
 use super::{
     KafkaProducer, KafkaTopicEmitter,
     publish_tests::{
-        FAST_RECONNECT, PARTITION_ZERO_KEYS, PollingThreadHold, SilentHost, awaited_hand_over,
-        cluster, confirmed, emitter_config, emitter_on, record, small_payload,
+        FAST_RECONNECT, PARTITION_ZERO_KEYS, PollingThreadHold, awaited_hand_over, cluster,
+        confirmed, emitter_config, emitter_on, record, small_payload,
     },
 };
 use crate::topic::retirement_tests::{
@@ -344,7 +346,7 @@ async fn a_producer_holds_the_charge_of_its_retirement_from_its_creation() {
 
     let mut prepared = KafkaTopicEmitter::open(
         emitter_config(&cluster, &[], BrokerPublishingMode::NoAck),
-        EmitterHost::new(SilentHost::on(executor.clone())),
+        FakeEmitterHost::on(executor.clone()).host(),
     )
     .await
     .assured("network-free configuration does not reserve a native producer");

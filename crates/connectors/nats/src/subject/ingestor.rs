@@ -20,6 +20,14 @@
         reason = "owns the engines and infrastructure boundary declared above"
     )
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        executor,
+        reason = "the NATS subject ingestor runs its client's credential work on its node's \
+                  bounded executor"
+    )
+)]
 
 use async_nats::{Client as NatsClient, Event as NatsEvent, Message as NatsMessage, Subscriber};
 use async_trait::async_trait;
@@ -28,7 +36,8 @@ use futures_util::StreamExt as _;
 use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMessageMetadata, IngestMetadataRow,
     IngestMetadataValues, IngestRowHeaders, IngestorBatch, IngestorBatchRequest, IngestorConnector,
-    IngestorError, IngestorMessage, IngestorReadCancellation, IngestorResult, IngestorResume,
+    IngestorError, IngestorHost, IngestorMessage, IngestorReadCancellation, IngestorResult,
+    IngestorResume,
 };
 use nervix_execution::Executor;
 use nervix_models::{ClientConfigEntry, NatsQueueGroupName, NatsSubjectName};
@@ -74,9 +83,11 @@ type NatsSubjectIngestorResult<T> = Result<T, Report<NatsSubjectIngestorError>>;
 
 /// What one NATS ingestor subscribes to: its resolved client entries, the subject, and the queue
 /// group every instance joins.
+///
+/// The executor its client's credential work runs on reaches each instance through its host
+/// handle.
 #[derive(Clone)]
 pub struct NatsSubjectIngestorPlan {
-    executor: Executor,
     config: Vec<ClientConfigEntry>,
     subject: NatsSubjectName,
     queue_group: NatsQueueGroupName,
@@ -122,22 +133,22 @@ impl NatsSubscription {
 
 impl NatsSubjectIngestorPlan {
     pub fn new(
-        executor: Executor,
         config: Vec<ClientConfigEntry>,
         subject: NatsSubjectName,
         queue_group: NatsQueueGroupName,
     ) -> Self {
         Self {
-            executor,
             config,
             subject,
             queue_group,
         }
     }
 
-    async fn subscribe(&self) -> NatsSubjectIngestorResult<NatsSubscription> {
+    /// Connects a client whose credential work runs on `executor`, and joins the queue group on
+    /// the subject through it.
+    async fn subscribe(&self, executor: &Executor) -> NatsSubjectIngestorResult<NatsSubscription> {
         let (lost, connection_lost) = mpsc::channel(PENDING_LOSS_SIGNALS);
-        let client = Self::client_from_config(&self.executor, &self.config, lost).await?;
+        let client = Self::client_from_config(executor, &self.config, lost).await?;
         let subscriber = client
             .queue_subscribe(
                 self.subject.as_str().to_string(),
@@ -287,6 +298,9 @@ impl IngestorMessage for NatsSubjectIngestorMessage {
 /// One NATS ingestor instance: its queue subscription, absent while suspended or reconnecting.
 pub struct NatsSubjectIngestor {
     plan: NatsSubjectIngestorPlan,
+    /// The node's bounded executor, taken from the host handle the instance opened with, which
+    /// the credential work of every client the instance connects runs on.
+    executor: Executor,
     subscription: Option<NatsSubscription>,
 }
 
@@ -297,9 +311,14 @@ impl IngestorConnector for NatsSubjectIngestor {
 
     type Plan = NatsSubjectIngestorPlan;
 
-    async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
+    async fn open(
+        plan: &Self::Plan,
+        host: &IngestorHost,
+        _instance_index: u64,
+    ) -> IngestorResult<Self> {
         Ok(Self {
             plan: plan.clone(),
+            executor: host.executor(),
             subscription: None,
         })
     }
@@ -313,11 +332,11 @@ impl IngestorConnector for NatsSubjectIngestor {
         Ok(())
     }
 
-    async fn resume(&mut self) -> IngestorResult<IngestorResume> {
+    async fn resume(&mut self, _host: &IngestorHost) -> IngestorResult<IngestorResume> {
         if self.subscription.is_none() {
             let subscription = self
                 .plan
-                .subscribe()
+                .subscribe(&self.executor)
                 .await
                 .change_context(IngestorError::Resume { connector: NATS })?;
             self.subscription = Some(subscription);
@@ -338,6 +357,7 @@ impl BrokerIngestorConnector for NatsSubjectIngestor {
 
     async fn next_batch(
         &mut self,
+        _host: &IngestorHost,
         _request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {
@@ -382,6 +402,7 @@ impl BrokerIngestorConnector for NatsSubjectIngestor {
 mod tests {
     use std::{num::NonZeroUsize, time::Duration};
 
+    use nervix_connector_fake::FakeIngestorHost;
     use nervix_primitives::{sync::oneshot, time::timeout};
 
     use super::*;
@@ -397,6 +418,12 @@ mod tests {
             key: key.to_string(),
             value: value.to_string(),
         }
+    }
+
+    /// The handle a check opens, resumes and reads its instance with: a node that provides the
+    /// bounded executor the instance's client prepares its credentials on.
+    fn host() -> IngestorHost {
+        FakeIngestorHost::on(nervix_execution::Executor::default()).host()
     }
 
     #[test]
@@ -451,20 +478,20 @@ mod tests {
             connection
         });
         let plan = NatsSubjectIngestorPlan::new(
-            nervix_execution::Executor::default(),
             vec![entry("addr", &addr)],
             NatsSubjectName::try_from("events".to_string()).expect("a valid subject"),
             NatsQueueGroupName::try_from("members".to_string()).expect("a valid queue group"),
         );
+        let host = host();
         let request = IngestorBatchRequest {
             max_messages: NonZeroUsize::MIN,
             batch_timeout: None,
         };
-        let mut ingestor = NatsSubjectIngestor::open(&plan, 0)
+        let mut ingestor = NatsSubjectIngestor::open(&plan, &host, 0)
             .await
             .expect("opening a NATS ingestor does not connect");
         ingestor
-            .resume()
+            .resume(&host)
             .await
             .expect("the ingestor subscribes through the stand-in server");
 
@@ -472,7 +499,7 @@ mod tests {
         cancellation.cancel();
         let interrupted = timeout(
             OBSERVATION_BOUND,
-            ingestor.next_batch(request, &cancellation),
+            ingestor.next_batch(&host, request, &cancellation),
         )
         .await
         .expect("a cancelled read ends at once")
@@ -487,7 +514,7 @@ mod tests {
             .expect("the scripted server waits for the delivery to be allowed");
         let batch = timeout(
             OBSERVATION_BOUND,
-            ingestor.next_batch(request, &IngestorReadCancellation::new()),
+            ingestor.next_batch(&host, request, &IngestorReadCancellation::new()),
         )
         .await
         .expect("the delivered message reaches the ingestor")
@@ -524,16 +551,16 @@ mod tests {
             connection.end().await;
         });
         let plan = NatsSubjectIngestorPlan::new(
-            nervix_execution::Executor::default(),
             vec![entry("addr", &addr)],
             NatsSubjectName::try_from("events".to_string()).expect("a valid subject"),
             NatsQueueGroupName::try_from("members".to_string()).expect("a valid queue group"),
         );
+        let host = host();
         let request = IngestorBatchRequest {
             max_messages: NonZeroUsize::MIN,
             batch_timeout: None,
         };
-        let mut ingestor = NatsSubjectIngestor::open(&plan, 0)
+        let mut ingestor = NatsSubjectIngestor::open(&plan, &host, 0)
             .await
             .expect("opening a NATS ingestor does not connect");
         assert!(
@@ -541,14 +568,14 @@ mod tests {
             "an opened ingestor has not subscribed yet"
         );
         let resumed = ingestor
-            .resume()
+            .resume(&host)
             .await
             .expect("the ingestor subscribes through the stand-in server");
         assert_eq!(resumed, IngestorResume::Ready);
 
         let batch = timeout(
             OBSERVATION_BOUND,
-            ingestor.next_batch(request, &IngestorReadCancellation::new()),
+            ingestor.next_batch(&host, request, &IngestorReadCancellation::new()),
         )
         .await
         .expect("the delivered message reaches the ingestor")
@@ -565,7 +592,7 @@ mod tests {
 
         let ended = timeout(
             OBSERVATION_BOUND,
-            ingestor.next_batch(request, &IngestorReadCancellation::new()),
+            ingestor.next_batch(&host, request, &IngestorReadCancellation::new()),
         )
         .await
         .expect("the lost connection ends the wait for the next message");
@@ -586,7 +613,7 @@ mod tests {
         );
 
         let error = ingestor
-            .resume()
+            .resume(&host)
             .await
             .expect_err("the server is down, so the next resume cannot connect");
         assert!(matches!(
@@ -657,6 +684,62 @@ mod tests {
             })
         ));
         assert!(!format!("{error:#}").contains(path));
+        assert_eq!(executor.snapshot().filesystem_storage.admitted, 1);
+        drop(held);
+        assert_eq!(executor.memory(MemoryClass::Credentials).reserved_bytes, 0);
+    }
+
+    /// An instance keeps the executor its host handle hands it when it opens, and the client a
+    /// resume connects runs its credential work there: the read is admitted to that executor's
+    /// filesystem class and refused by its credentials class, which the fixture holds full.
+    #[nervix_primitives::test]
+    async fn an_instance_runs_its_credential_work_on_the_executor_its_host_handle_hands_over() {
+        use nervix_execution::{AdmissionError, Executor, MemoryClass};
+
+        let executor = Executor::default();
+        let held = executor
+            .try_reserve(
+                MemoryClass::Credentials,
+                executor.memory(MemoryClass::Credentials).capacity_bytes,
+            )
+            .expect("the fixture occupies the credentials class without allocating its capacity");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../docker/nats/auth-user.creds"
+        );
+        let plan = NatsSubjectIngestorPlan::new(
+            vec![
+                entry("addr", "nats://127.0.0.1:1"),
+                entry("credentials_file", path),
+            ],
+            NatsSubjectName::try_from("events".to_string()).expect("a valid subject"),
+            NatsQueueGroupName::try_from("members".to_string()).expect("a valid queue group"),
+        );
+        let host = FakeIngestorHost::on(executor.clone()).host();
+        let mut ingestor = NatsSubjectIngestor::open(&plan, &host, 0)
+            .await
+            .expect("opening a NATS ingestor does not connect");
+
+        let error = ingestor
+            .resume(&host)
+            .await
+            .expect_err("no bytes can be read without admission");
+
+        assert!(matches!(
+            error.current_context(),
+            IngestorError::Resume { connector: NATS }
+        ));
+        assert!(matches!(
+            error.downcast_ref::<NatsSubjectIngestorError>(),
+            Some(NatsSubjectIngestorError::ClientPreparation)
+        ));
+        assert!(matches!(
+            error.downcast_ref::<AdmissionError>(),
+            Some(AdmissionError::BudgetExhausted {
+                class: "credentials",
+                ..
+            })
+        ));
         assert_eq!(executor.snapshot().filesystem_storage.admitted, 1);
         drop(held);
         assert_eq!(executor.memory(MemoryClass::Credentials).reserved_bytes, 0);

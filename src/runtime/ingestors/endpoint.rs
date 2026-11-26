@@ -26,6 +26,7 @@ use super::{
     super::*,
     IngestorConnectorStartError, IngestorStartError,
     connector::{IngestorInstance, IngestorStart, RuntimeIngestorHost, run_request_ingestor},
+    connector_host::IngestorEntityServices,
 };
 
 /// The routes one endpoint ingestor receives requests on.
@@ -57,7 +58,11 @@ macro_rules! endpoint_entity {
             const KIND: nervix_models::IngestorEntityKind =
                 nervix_models::IngestorEntityKind::$connector(nervix_models::$entity::Endpoint);
             type Plan = EndpointIntakePlan;
-            async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
+            async fn open(
+                plan: &Self::Plan,
+                _host: &nervix_connector::IngestorHost,
+                _instance_index: u64,
+            ) -> IngestorResult<Self> {
                 Ok(Self(EndpointIntake {
                     runtime: plan.runtime.clone(),
                     routes: plan.routes.clone(),
@@ -208,7 +213,8 @@ impl EndpointIntakeStartPlan {
                 .ingestor_capabilities(NonZeroU64::MIN, acknowledgement.support()),
             acknowledgement,
         };
-        let connector = C::open(&plan.connector, 0)
+        let host = runtime.ingestor_connector_host(ingestor, IngestorEntityServices::default());
+        let connector = C::open(&plan.connector, host.handle(), 0)
             .await
             .change_context_lazy(|| ingestor.initialize_failure())?;
         let instance: Box<dyn IngestorInstance> = Box::new(connector);
@@ -221,6 +227,7 @@ impl EndpointIntakeStartPlan {
             client_mounts: Vec::new(),
             connector_label: C::KIND.connector().keyword().to_ascii_lowercase(),
             domain_offsets: None,
+            connector_host: host,
         })
     }
 }

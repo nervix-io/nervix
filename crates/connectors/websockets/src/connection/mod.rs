@@ -31,6 +31,7 @@ mod signaling;
 pub use ingestor::{
     WebsocketsConnectionIngestor, WebsocketsConnectionIngestorMessage,
     WebsocketsConnectionIngestorPlan, WebsocketsConnectionIngestorPlanError,
+    WebsocketsSignalingProtocol,
 };
 pub use signaling::{
     CompiledSignalingProtocol, SignalingDataEmitter, SignalingFrameEncodeError,

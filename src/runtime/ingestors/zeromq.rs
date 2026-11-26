@@ -22,6 +22,7 @@ use super::{
     super::*,
     IngestorStartError,
     connector::{BrokerIngestorStart, IngestorStart},
+    connector_host::IngestorEntityServices,
 };
 
 const _: () = assert!(matches!(
@@ -41,6 +42,7 @@ impl ZeroMqPullIngestorStartPlan {
             .change_context_lazy(|| ingestor.initialize_failure())?;
         BrokerIngestorStart {
             connector: ZeroMqPullIngestorPlan::new(resolved.entries),
+            host: runtime.ingestor_connector_host(ingestor, IngestorEntityServices::default()),
             instances: NonZeroU64::MIN,
             acknowledgement: mode.acknowledgement(),
             buffered_intake: true,

@@ -21,6 +21,15 @@
     nervix_lint,
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
+#![cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        dns,
+        tls_policy,
+        reason = "the Sentry event emitter dials through its node's resolver under the node's \
+                  outward TLS policy"
+    )
+)]
 
 use std::time::Duration;
 
@@ -32,7 +41,6 @@ use nervix_connector::{
     HttpClientConfig, OfflineClientConfigError, PerRecordOutcome, RecordEmitter,
     client_config_value, physical_time::actual_utc_now,
 };
-use nervix_dns::DnsResolver;
 use nervix_models::{
     ClientConfigEntry, ConnectorKind, MessageErrorOperation, RaisedMessageError,
     RejectedErrorClass, Timestamp,
@@ -52,10 +60,11 @@ const SENTRY_CLIENT_AGENT: &str = concat!("nervix/", env!("CARGO_PKG_VERSION"));
 const SENTRY_RATE_LIMITS_HEADER: &str = "x-sentry-rate-limits";
 
 /// What one Sentry emitter sends with: the entries naming its project DSN and HTTP client settings.
+///
+/// The node resolver its client dials through and the outward TLS policy its handshakes take
+/// reach the emitter through its host handle.
 pub struct SentryEventEmitterConfig {
-    pub tls_policy: nervix_connector::OutwardTlsPolicy,
     pub config: Vec<ClientConfigEntry>,
-    pub dns: DnsResolver,
     /// The plan's resolved platform, used only when the encoded event omits its own.
     pub platform: String,
 }
@@ -108,16 +117,19 @@ enum SentryEventError {
 }
 
 impl SentryEventEmitter {
-    fn prepare(config: SentryEventEmitterConfig, _host: EmitterHost) -> EmitterStartResult<Self> {
-        let config_policy = config.tls_policy;
-        let dns = config.dns;
+    fn prepare(config: SentryEventEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
+        // A node without its resolver cannot open the emitter at all, so that is reported before
+        // anything its configuration says.
+        let dns = host
+            .dns()
+            .change_context(EmitterOpenError::Initialize { connector: SENTRY })?;
+        let tls_policy = host.tls_policy();
         let platform = config.platform;
         let config = config.config.as_slice();
         let dsn = Self::dsn(config)
             .change_context(EmitterOpenError::InvalidConfiguration { connector: SENTRY })?;
         let client = {
-            let mapping_input =
-                HttpClientConfig::new(config, "Sentry", &dns, &config_policy).build();
+            let mapping_input = HttpClientConfig::new(config, "Sentry", &dns, &tls_policy).build();
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
                 Err(error) => Err({
@@ -587,5 +599,66 @@ mod tests {
         );
 
         assert_eq!(delay, Some(Duration::from_secs(20)));
+    }
+
+    /// What an emitter of the fixture project opens with. Opening connects nowhere, so the project
+    /// its DSN names does not have to exist.
+    fn event_config() -> SentryEventEmitterConfig {
+        SentryEventEmitterConfig {
+            config: vec![ClientConfigEntry {
+                key: "dsn".to_owned(),
+                value: "https://key@sentry.invalid/42".to_owned(),
+            }],
+            platform: PLATFORM.to_owned(),
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_on_a_node_without_its_resolver_fails_to_open_and_names_the_resolver() {
+        let opened = <SentryEventEmitter as nervix_connector::EmitterConnector>::open(
+            event_config(),
+            nervix_connector_fake::FakeEmitterHost::default().host(),
+        )
+        .await;
+        let error = match opened {
+            Ok(_) => panic!("an emitter that dials by name needs its node's resolver"),
+            Err(error) => error,
+        };
+
+        // The failure is the node's, not the configuration's, so the host opens the emitter again.
+        assert_eq!(
+            *error.current_context(),
+            EmitterOpenError::Initialize { connector: SENTRY }
+        );
+        assert_eq!(
+            error
+                .frames()
+                .find_map(|frame| frame.downcast_ref::<nervix_connector::HostServiceError>()),
+            Some(&nervix_connector::HostServiceError::DnsNotInstalled)
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn an_emitter_takes_its_resolver_and_tls_policy_from_the_handle_it_is_opened_with() {
+        let dns = nervix_dns::DnsResolver::load(
+            nervix_dns::DnsConfiguration::system(),
+            nervix_dns::DnsSettings::default(),
+        )
+        .await
+        .expect("the host's resolver configuration loads");
+        let opened = <SentryEventEmitter as nervix_connector::EmitterConnector>::open(
+            event_config(),
+            nervix_connector_fake::FakeEmitterHost::default()
+                .with_dns(dns)
+                .host(),
+        )
+        .await
+        .expect("the node provides the resolver the client dials through");
+
+        assert_eq!(
+            opened.envelope_url.as_str(),
+            "https://sentry.invalid/api/42/envelope/"
+        );
+        assert_eq!(opened.platform, PLATFORM);
     }
 }
