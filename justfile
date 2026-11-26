@@ -2445,6 +2445,10 @@ test-client-ruby-run *args:
 coverage-client-ruby output=(cargo_target_dir / "client-ruby.lcov"):
     BOLERO_RANDOM_SEED="${BOLERO_RANDOM_SEED:-2026110803}" cargo llvm-cov --package nervix-client-ruby --features ruby-tests --lib --test columns --test fields --lcov --output-path {{ quote(output) }}
 
+# Run the shared host runtime's unit tests: cancellation and deadlines, failures, batches and views.
+test-client-host *args:
+    cargo test --package nervix-client-host --lib -- {{ args }}
+
 # Run the C ABI's unit tests, which read every accessor as a host does through the header's types.
 test-client-ffi *args:
     cargo test --package nervix-client-ffi --lib -- {{ args }}
@@ -5699,6 +5703,11 @@ coverage-chaos-rate-probe:
 # the checked-in module still equals what this writes.
 chaos-wasm-fixture:
     cargo test --package nervix-wasm --test chaos_branch_counter -- --ignored write_the_branch_counter_module
+
+# Check that the checked-in chaos guest equals what `chaos-wasm-fixture` writes, and drive it through
+# the host for its per-branch counts and its restore from saved state, as `just test` does.
+test-chaos-wasm-fixture:
+    cargo test --package nervix-wasm --test chaos_branch_counter
 
 server *args: build-deps generate-dev-tls
     NERVIX_NODE_ID="${NERVIX_NODE_ID:-node-1}" \

@@ -367,7 +367,11 @@ class Tls:
 
 @final
 class Cancel:
-    """A cancellation token, which also expires `deadline` seconds from now when given one."""
+    """A cancellation token, which also expires `deadline` seconds from now when given one.
+
+    A deadline is at least one millisecond and at most one day; any other raises
+    `InvalidArgumentError`.
+    """
 
     def __init__(self, *, deadline: float | None = None) -> None: ...
     def trigger(self) -> None: ...

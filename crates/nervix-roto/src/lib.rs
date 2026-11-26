@@ -17,6 +17,8 @@
     )
 )]
 
+#[cfg(test)]
+mod properties;
 mod settings;
 
 use std::{cell::RefCell, fmt, panic::AssertUnwindSafe, time::Duration};
@@ -25,12 +27,13 @@ use ahash::{HashMap, HashMapExt};
 use arch_into::ArchInto as _;
 use arrow_arith::boolean;
 use arrow_array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, Datum, FixedSizeListArray, Float32Array,
-    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray, StringArray,
-    TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array, new_null_array,
+    Array, ArrayRef, BinaryArray, BooleanArray, Datum, DurationNanosecondArray, FixedSizeListArray,
+    Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray,
+    StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    new_null_array,
     types::{
-        ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
-        UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+        ArrowPrimitiveType, DurationNanosecondType, Float32Type, Float64Type, Int8Type, Int16Type,
+        Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
     },
 };
 use arrow_schema::{DataType, TimeUnit};
@@ -39,7 +42,10 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
 use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass};
-use nervix_models::{ParseAsType, Timestamp, UdfArgument, UdfLanguage, UdfName, UdfReturn};
+use nervix_models::{
+    DurationLiteralUnit, DurationValue, ParseAsType, Timestamp, UdfArgument, UdfLanguage, UdfName,
+    UdfReturn,
+};
 use nervix_primitives::{
     sync::{Arc, StdArc, blocking::Mutex},
     time::Instant,
@@ -124,14 +130,6 @@ pub enum UdfError {
     CompileCancelled,
     #[error("Roto entry signature is invalid: {0}")]
     Signature(String),
-    /// An argument of a `DURATION` type, which no Roto column bridge reads.
-    #[error(
-        "UDF '{name}' cannot take DURATION argument '{argument}': a UDF does not read a DURATION"
-    )]
-    DurationArgument { name: String, argument: String },
-    /// A `DURATION` result, which no Roto column bridge writes.
-    #[error("UDF '{name}' cannot return a DURATION: a UDF does not write a DURATION")]
-    DurationReturn { name: String },
 }
 
 #[derive(Clone)]
@@ -174,6 +172,7 @@ column_type!(BoolColumn);
 column_type!(StringColumn);
 column_type!(BytesColumn);
 column_type!(DatetimeColumn);
+column_type!(DurationColumn);
 column_type!(VecU8Column);
 column_type!(VecI8Column);
 column_type!(VecU16Column);
@@ -188,6 +187,7 @@ column_type!(VecBoolColumn);
 column_type!(VecStringColumn);
 column_type!(VecBytesColumn);
 column_type!(VecDatetimeColumn);
+column_type!(VecDurationColumn);
 column_type!(AnyColumn);
 
 #[derive(Clone, PartialEq)]
@@ -568,6 +568,7 @@ fn base_library() -> impl Registerable {
     library! {
         #[clone] type NervixArgs = Val<UdfArgs>;
         #[copy] type Timestamp = Val<Timestamp>;
+        #[copy] type Duration = Val<DurationValue>;
         #[copy] type ColumnBuilder = Val<ColumnBuilderFactory>;
         #[clone] type BoolColumnBuilder = Val<BoolColumnBuilder>;
         #[clone] type AnyColumn = Val<AnyColumn>;
@@ -585,6 +586,7 @@ fn base_library() -> impl Registerable {
         #[clone] type StringColumn = Val<StringColumn>;
         #[clone] type BytesColumn = Val<BytesColumn>;
         #[clone] type DatetimeColumn = Val<DatetimeColumn>;
+        #[clone] type DurationColumn = Val<DurationColumn>;
         #[clone] type VecU8Column = Val<VecU8Column>;
         #[clone] type VecI8Column = Val<VecI8Column>;
         #[clone] type VecU16Column = Val<VecU16Column>;
@@ -599,6 +601,7 @@ fn base_library() -> impl Registerable {
         #[clone] type VecStringColumn = Val<VecStringColumn>;
         #[clone] type VecBytesColumn = Val<VecBytesColumn>;
         #[clone] type VecDatetimeColumn = Val<VecDatetimeColumn>;
+        #[clone] type VecDurationColumn = Val<VecDurationColumn>;
 
         impl Val<UdfArgs> {
             fn u8(args: Val<UdfArgs>, index: u64) -> Val<U8Column> { Val(U8Column(column_arg(args, index, &DataType::UInt8))) }
@@ -617,6 +620,9 @@ fn base_library() -> impl Registerable {
             fn datetime(args: Val<UdfArgs>, index: u64) -> Val<DatetimeColumn> {
                 Val(DatetimeColumn(column_arg(args, index, &DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())))))
             }
+            fn duration(args: Val<UdfArgs>, index: u64) -> Val<DurationColumn> {
+                Val(DurationColumn(column_arg(args, index, &DataType::Duration(TimeUnit::Nanosecond))))
+            }
             fn vec_u8(args: Val<UdfArgs>, index: u64) -> Val<VecU8Column> { Val(VecU8Column(untyped_column_arg(args, index))) }
             fn vec_i8(args: Val<UdfArgs>, index: u64) -> Val<VecI8Column> { Val(VecI8Column(untyped_column_arg(args, index))) }
             fn vec_u16(args: Val<UdfArgs>, index: u64) -> Val<VecU16Column> { Val(VecU16Column(untyped_column_arg(args, index))) }
@@ -631,6 +637,7 @@ fn base_library() -> impl Registerable {
             fn vec_string(args: Val<UdfArgs>, index: u64) -> Val<VecStringColumn> { Val(VecStringColumn(untyped_column_arg(args, index))) }
             fn vec_bytes(args: Val<UdfArgs>, index: u64) -> Val<VecBytesColumn> { Val(VecBytesColumn(untyped_column_arg(args, index))) }
             fn vec_datetime(args: Val<UdfArgs>, index: u64) -> Val<VecDatetimeColumn> { Val(VecDatetimeColumn(untyped_column_arg(args, index))) }
+            fn vec_duration(args: Val<UdfArgs>, index: u64) -> Val<VecDurationColumn> { Val(VecDurationColumn(untyped_column_arg(args, index))) }
             fn any(args: Val<UdfArgs>, index: u64) -> Val<AnyColumn> { Val(AnyColumn(untyped_column_arg(args, index))) }
         }
 
@@ -649,6 +656,7 @@ fn base_library() -> impl Registerable {
             fn from_string(value: Val<StringColumn>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_bytes(value: Val<BytesColumn>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_datetime(value: Val<DatetimeColumn>) -> Self { Val(AnyColumn(value.0.0)) }
+            fn from_duration(value: Val<DurationColumn>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_vec_u8(value: Val<VecU8Column>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_vec_i8(value: Val<VecI8Column>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_vec_u16(value: Val<VecU16Column>) -> Self { Val(AnyColumn(value.0.0)) }
@@ -663,6 +671,7 @@ fn base_library() -> impl Registerable {
             fn from_vec_string(value: Val<VecStringColumn>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_vec_bytes(value: Val<VecBytesColumn>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_vec_datetime(value: Val<VecDatetimeColumn>) -> Self { Val(AnyColumn(value.0.0)) }
+            fn from_vec_duration(value: Val<VecDurationColumn>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_any(value: Val<AnyColumn>) -> Self { value }
         }
 
@@ -934,6 +943,94 @@ fn datetime_library() -> impl Registerable {
     }
 }
 
+/// The `Duration` constant of `count` whole `unit`s. A constant beyond the 64-bit nanosecond
+/// range is invalid scalar configuration: it fails the batch, and the column operation it feeds
+/// sees no time at all.
+fn duration_constant(count: i64, unit: DurationLiteralUnit) -> Val<DurationValue> {
+    match DurationValue::of_whole_units(count, unit) {
+        Some(duration) => Val(duration),
+        None => {
+            fatal(format!(
+                "a Duration of {count}{} lies beyond the 64-bit nanosecond range",
+                unit.spelling()
+            ));
+            Val(DurationValue::ZERO)
+        }
+    }
+}
+
+/// A duration column's values as the `I64Column` of nanoseconds they are, sharing its buffers.
+fn duration_nanoseconds(column: &Column) -> Column {
+    let durations = primitive::<DurationNanosecondType>(column);
+    Column(StdArc::new(durations.reinterpret_cast::<Int64Type>()))
+}
+
+/// The DURATION column catalog: what a length of time supports, on the checked kernels the
+/// integer columns use, with a `Duration` scalar for the `_s` forms. A duration times a duration
+/// is no length of time, so only `mul_s` and `div_s` by a whole number scale one.
+fn duration_library() -> impl Registerable {
+    library! {
+        impl Val<DurationColumn> {
+            fn len(value: Val<DurationColumn>) -> u64 { value.0.0.0.len().arch_into() }
+            fn add(value: Val<DurationColumn>, other: Val<DurationColumn>) -> Val<DurationColumn> {
+                Val(DurationColumn(numeric_binary::<DurationNanosecondType>(&value.0.0, &other.0.0, "add", i64::checked_add)))
+            }
+            fn add_s(value: Val<DurationColumn>, other: Val<DurationValue>) -> Val<DurationColumn> {
+                Val(DurationColumn(numeric_scalar::<DurationNanosecondType>(&value.0.0, other.0.nanoseconds(), "add", i64::checked_add)))
+            }
+            fn sub(value: Val<DurationColumn>, other: Val<DurationColumn>) -> Val<DurationColumn> {
+                Val(DurationColumn(numeric_binary::<DurationNanosecondType>(&value.0.0, &other.0.0, "sub", i64::checked_sub)))
+            }
+            fn sub_s(value: Val<DurationColumn>, other: Val<DurationValue>) -> Val<DurationColumn> {
+                Val(DurationColumn(numeric_scalar::<DurationNanosecondType>(&value.0.0, other.0.nanoseconds(), "sub", i64::checked_sub)))
+            }
+            fn mul_s(value: Val<DurationColumn>, factor: i64) -> Val<DurationColumn> {
+                Val(DurationColumn(numeric_scalar::<DurationNanosecondType>(&value.0.0, factor, "mul", i64::checked_mul)))
+            }
+            fn div_s(value: Val<DurationColumn>, divisor: i64) -> Val<DurationColumn> {
+                Val(DurationColumn(numeric_scalar::<DurationNanosecondType>(&value.0.0, divisor, "div", i64::checked_div)))
+            }
+            fn eq(value: Val<DurationColumn>, other: Val<DurationColumn>) -> Val<BoolColumn> {
+                Val(numeric_compare::<DurationNanosecondType>(&value.0.0, &other.0.0, "eq", |a, b| a == b))
+            }
+            fn eq_s(value: Val<DurationColumn>, other: Val<DurationValue>) -> Val<BoolColumn> {
+                Val(numeric_compare_scalar::<DurationNanosecondType>(&value.0.0, other.0.nanoseconds(), |a, b| a == b))
+            }
+            fn lt(value: Val<DurationColumn>, other: Val<DurationColumn>) -> Val<BoolColumn> {
+                Val(numeric_compare::<DurationNanosecondType>(&value.0.0, &other.0.0, "lt", |a, b| a < b))
+            }
+            fn lt_s(value: Val<DurationColumn>, other: Val<DurationValue>) -> Val<BoolColumn> {
+                Val(numeric_compare_scalar::<DurationNanosecondType>(&value.0.0, other.0.nanoseconds(), |a, b| a < b))
+            }
+            fn gt(value: Val<DurationColumn>, other: Val<DurationColumn>) -> Val<BoolColumn> {
+                Val(numeric_compare::<DurationNanosecondType>(&value.0.0, &other.0.0, "gt", |a, b| a > b))
+            }
+            fn gt_s(value: Val<DurationColumn>, other: Val<DurationValue>) -> Val<BoolColumn> {
+                Val(numeric_compare_scalar::<DurationNanosecondType>(&value.0.0, other.0.nanoseconds(), |a, b| a > b))
+            }
+            fn min(value: Val<DurationColumn>) -> Option<Val<DurationValue>> {
+                let shortest = primitive::<DurationNanosecondType>(&value.0.0).iter().flatten().reduce(i64::min)?;
+                Some(Val(DurationValue::from_nanoseconds(shortest)))
+            }
+            fn max(value: Val<DurationColumn>) -> Option<Val<DurationValue>> {
+                let longest = primitive::<DurationNanosecondType>(&value.0.0).iter().flatten().reduce(i64::max)?;
+                Some(Val(DurationValue::from_nanoseconds(longest)))
+            }
+            fn nanos(value: Val<DurationColumn>) -> Val<I64Column> {
+                Val(I64Column(duration_nanoseconds(&value.0.0)))
+            }
+        }
+
+        fn nanos(count: i64) -> Val<DurationValue> { duration_constant(count, DurationLiteralUnit::Nanosecond) }
+        fn micros(count: i64) -> Val<DurationValue> { duration_constant(count, DurationLiteralUnit::Microsecond) }
+        fn millis(count: i64) -> Val<DurationValue> { duration_constant(count, DurationLiteralUnit::Millisecond) }
+        fn seconds(count: i64) -> Val<DurationValue> { duration_constant(count, DurationLiteralUnit::Second) }
+        fn minutes(count: i64) -> Val<DurationValue> { duration_constant(count, DurationLiteralUnit::Minute) }
+        fn hours(count: i64) -> Val<DurationValue> { duration_constant(count, DurationLiteralUnit::Hour) }
+        fn days(count: i64) -> Val<DurationValue> { duration_constant(count, DurationLiteralUnit::Day) }
+    }
+}
+
 fn deterministic_runtime() -> error_stack::Result<Runtime<NoCtx>, UdfError> {
     let mut runtime = Runtime::from_lib(base_library())
         .map_err(|error| Report::new(UdfError::RuntimeRegistration { source: error }))?;
@@ -971,6 +1068,9 @@ fn deterministic_runtime() -> error_stack::Result<Runtime<NoCtx>, UdfError> {
         .map_err(|error| Report::new(UdfError::RuntimeRegistration { source: error }))?;
     runtime
         .add(datetime_library())
+        .map_err(|error| Report::new(UdfError::RuntimeRegistration { source: error }))?;
+    runtime
+        .add(duration_library())
         .map_err(|error| Report::new(UdfError::RuntimeRegistration { source: error }))?;
     Ok(runtime)
 }
@@ -1275,20 +1375,6 @@ pub struct UdfCompileLimits {
     pub budget: Duration,
 }
 
-/// What compiling a domain's UDFs is charged. Roto's compiler allocates the code it generates
-/// itself and the executor keeps it for as long as the domain does, which no transient budget can
-/// stand for, so the charge only admits the compilation onto the bulk workers.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the charge is an admission token for the bulk workers, not a memory estimate, \
-                  since the domain keeps the code Roto generates, so it is the least nonzero \
-                  reservation"
-    )
-)]
-const COMPILE_RESERVATION_BYTES: u64 = 1;
-
 impl UdfExecutor {
     /// Compile `models` on the node's bulk workers under `limits`, checking between two programs
     /// whether the caller stopped waiting.
@@ -1297,10 +1383,10 @@ impl UdfExecutor {
         models: Vec<UdfProgram>,
         limits: UdfCompileLimits,
     ) -> error_stack::Result<Self, UdfError> {
-        let reservation = match executor
-            .reserve(MemoryClass::Bulk, COMPILE_RESERVATION_BYTES)
-            .await
-        {
+        // Roto's compiler allocates the code it generates itself and the executor keeps it for as
+        // long as the domain does, which no transient budget can stand for, so the compilation
+        // takes only the admission token onto the bulk workers.
+        let reservation = match executor.reserve_admission(MemoryClass::Bulk).await {
             Ok(reservation) => reservation,
             Err(error) => return Err(error.change_context(UdfError::CompileExecution)),
         };
@@ -1428,7 +1514,7 @@ fn compile_udf(
             .add(volatile_library())
             .map_err(|error| Report::new(UdfError::RuntimeRegistration { source: error }))?;
     }
-    let wrapper = generated_wrapper(&model)?;
+    let wrapper = generated_wrapper(&model);
     let source = format!("{}\n{wrapper}", model.code);
     let mut blob = match runtime.compile(FileTree::test_file("udf.roto", &source, 0)) {
         Ok(blob) => blob,
@@ -1479,131 +1565,109 @@ fn contains_call(source: &str, function: &str) -> bool {
 }
 
 /// The entry the host calls, which reads each argument through its column bridge and writes the
-/// result through the bridge of its type. A `DURATION` has no bridge, so a signature that names one
-/// is refused with the argument or the result it names.
-fn generated_wrapper(model: &UdfProgram) -> error_stack::Result<String, UdfError> {
+/// result through the bridge of its type.
+fn generated_wrapper(model: &UdfProgram) -> String {
     let mut arguments = Vec::with_capacity(model.arguments.len());
     for (index, argument) in model.arguments.iter().enumerate() {
-        let Some(accessor) = bridge_accessor(&argument.ty) else {
-            return Err(Report::new(UdfError::DurationArgument {
-                name: model.name.to_string(),
-                argument: argument.name.as_str().to_string(),
-            }));
-        };
+        let accessor = bridge_accessor(&argument.ty);
         arguments.push(format!("__nervix_args.{accessor}({index})"));
     }
     let arguments = arguments.join(", ");
-    let Some(conversion) = bridge_conversion(&model.returns.ty) else {
-        return Err(Report::new(UdfError::DurationReturn {
-            name: model.name.to_string(),
-        }));
-    };
-    Ok(format!(
+    let conversion = bridge_conversion(&model.returns.ty);
+    format!(
         "fn __nervix_entry(__nervix_args: NervixArgs) -> AnyColumn {{\n    \
          AnyColumn.{conversion}({}({arguments}))\n}}\n",
         model.name.as_str()
-    ))
+    )
 }
 
-fn bridge_accessor(ty: &ParseAsType) -> Option<&'static str> {
+fn bridge_accessor(ty: &ParseAsType) -> &'static str {
     match ty {
-        ParseAsType::U8 => Some("u8"),
-        ParseAsType::I8 => Some("i8"),
-        ParseAsType::U16 => Some("u16"),
-        ParseAsType::I16 => Some("i16"),
-        ParseAsType::U32 => Some("u32"),
-        ParseAsType::I32 => Some("i32"),
-        ParseAsType::U64 => Some("u64"),
-        ParseAsType::I64 => Some("i64"),
-        ParseAsType::F32 => Some("f32"),
-        ParseAsType::F64 => Some("f64"),
-        ParseAsType::Bool => Some("bool"),
-        ParseAsType::String => Some("string"),
-        ParseAsType::Bytes => Some("bytes"),
-        ParseAsType::Datetime => Some("datetime"),
-        ParseAsType::Duration => None,
+        ParseAsType::U8 => "u8",
+        ParseAsType::I8 => "i8",
+        ParseAsType::U16 => "u16",
+        ParseAsType::I16 => "i16",
+        ParseAsType::U32 => "u32",
+        ParseAsType::I32 => "i32",
+        ParseAsType::U64 => "u64",
+        ParseAsType::I64 => "i64",
+        ParseAsType::F32 => "f32",
+        ParseAsType::F64 => "f64",
+        ParseAsType::Bool => "bool",
+        ParseAsType::String => "string",
+        ParseAsType::Bytes => "bytes",
+        ParseAsType::Datetime => "datetime",
+        ParseAsType::Duration => "duration",
         ParseAsType::Array { element, .. } | ParseAsType::Vec { element } => {
             list_bridge_accessor(element)
         }
     }
 }
 
-fn bridge_conversion(ty: &ParseAsType) -> Option<&'static str> {
+fn bridge_conversion(ty: &ParseAsType) -> &'static str {
     match ty {
-        ParseAsType::U8 => Some("from_u8"),
-        ParseAsType::I8 => Some("from_i8"),
-        ParseAsType::U16 => Some("from_u16"),
-        ParseAsType::I16 => Some("from_i16"),
-        ParseAsType::U32 => Some("from_u32"),
-        ParseAsType::I32 => Some("from_i32"),
-        ParseAsType::U64 => Some("from_u64"),
-        ParseAsType::I64 => Some("from_i64"),
-        ParseAsType::F32 => Some("from_f32"),
-        ParseAsType::F64 => Some("from_f64"),
-        ParseAsType::Bool => Some("from_bool"),
-        ParseAsType::String => Some("from_string"),
-        ParseAsType::Bytes => Some("from_bytes"),
-        ParseAsType::Datetime => Some("from_datetime"),
-        ParseAsType::Duration => None,
+        ParseAsType::U8 => "from_u8",
+        ParseAsType::I8 => "from_i8",
+        ParseAsType::U16 => "from_u16",
+        ParseAsType::I16 => "from_i16",
+        ParseAsType::U32 => "from_u32",
+        ParseAsType::I32 => "from_i32",
+        ParseAsType::U64 => "from_u64",
+        ParseAsType::I64 => "from_i64",
+        ParseAsType::F32 => "from_f32",
+        ParseAsType::F64 => "from_f64",
+        ParseAsType::Bool => "from_bool",
+        ParseAsType::String => "from_string",
+        ParseAsType::Bytes => "from_bytes",
+        ParseAsType::Datetime => "from_datetime",
+        ParseAsType::Duration => "from_duration",
         ParseAsType::Array { element, .. } | ParseAsType::Vec { element } => {
             list_bridge_conversion(element)
         }
     }
 }
 
-fn list_bridge_accessor(element: &ParseAsType) -> Option<&'static str> {
+fn list_bridge_accessor(element: &ParseAsType) -> &'static str {
     match element {
-        ParseAsType::U8 => Some("vec_u8"),
-        ParseAsType::I8 => Some("vec_i8"),
-        ParseAsType::U16 => Some("vec_u16"),
-        ParseAsType::I16 => Some("vec_i16"),
-        ParseAsType::U32 => Some("vec_u32"),
-        ParseAsType::I32 => Some("vec_i32"),
-        ParseAsType::U64 => Some("vec_u64"),
-        ParseAsType::I64 => Some("vec_i64"),
-        ParseAsType::F32 => Some("vec_f32"),
-        ParseAsType::F64 => Some("vec_f64"),
-        ParseAsType::Bool => Some("vec_bool"),
-        ParseAsType::String => Some("vec_string"),
-        ParseAsType::Bytes => Some("vec_bytes"),
-        ParseAsType::Datetime => Some("vec_datetime"),
-        ParseAsType::Duration => None,
-        // A nested list reads through the generic column, unless a DURATION lies beneath it.
-        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => {
-            if element.holds_duration() {
-                None
-            } else {
-                Some("any")
-            }
-        }
+        ParseAsType::U8 => "vec_u8",
+        ParseAsType::I8 => "vec_i8",
+        ParseAsType::U16 => "vec_u16",
+        ParseAsType::I16 => "vec_i16",
+        ParseAsType::U32 => "vec_u32",
+        ParseAsType::I32 => "vec_i32",
+        ParseAsType::U64 => "vec_u64",
+        ParseAsType::I64 => "vec_i64",
+        ParseAsType::F32 => "vec_f32",
+        ParseAsType::F64 => "vec_f64",
+        ParseAsType::Bool => "vec_bool",
+        ParseAsType::String => "vec_string",
+        ParseAsType::Bytes => "vec_bytes",
+        ParseAsType::Datetime => "vec_datetime",
+        ParseAsType::Duration => "vec_duration",
+        // A nested list reads through the generic column.
+        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => "any",
     }
 }
 
-fn list_bridge_conversion(element: &ParseAsType) -> Option<&'static str> {
+fn list_bridge_conversion(element: &ParseAsType) -> &'static str {
     match element {
-        ParseAsType::U8 => Some("from_vec_u8"),
-        ParseAsType::I8 => Some("from_vec_i8"),
-        ParseAsType::U16 => Some("from_vec_u16"),
-        ParseAsType::I16 => Some("from_vec_i16"),
-        ParseAsType::U32 => Some("from_vec_u32"),
-        ParseAsType::I32 => Some("from_vec_i32"),
-        ParseAsType::U64 => Some("from_vec_u64"),
-        ParseAsType::I64 => Some("from_vec_i64"),
-        ParseAsType::F32 => Some("from_vec_f32"),
-        ParseAsType::F64 => Some("from_vec_f64"),
-        ParseAsType::Bool => Some("from_vec_bool"),
-        ParseAsType::String => Some("from_vec_string"),
-        ParseAsType::Bytes => Some("from_vec_bytes"),
-        ParseAsType::Datetime => Some("from_vec_datetime"),
-        ParseAsType::Duration => None,
-        // A nested list writes through the generic column, unless a DURATION lies beneath it.
-        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => {
-            if element.holds_duration() {
-                None
-            } else {
-                Some("from_any")
-            }
-        }
+        ParseAsType::U8 => "from_vec_u8",
+        ParseAsType::I8 => "from_vec_i8",
+        ParseAsType::U16 => "from_vec_u16",
+        ParseAsType::I16 => "from_vec_i16",
+        ParseAsType::U32 => "from_vec_u32",
+        ParseAsType::I32 => "from_vec_i32",
+        ParseAsType::U64 => "from_vec_u64",
+        ParseAsType::I64 => "from_vec_i64",
+        ParseAsType::F32 => "from_vec_f32",
+        ParseAsType::F64 => "from_vec_f64",
+        ParseAsType::Bool => "from_vec_bool",
+        ParseAsType::String => "from_vec_string",
+        ParseAsType::Bytes => "from_vec_bytes",
+        ParseAsType::Datetime => "from_vec_datetime",
+        ParseAsType::Duration => "from_vec_duration",
+        // A nested list writes through the generic column.
+        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => "from_any",
     }
 }
 
@@ -1640,6 +1704,7 @@ fn typed_array_from_ref(array: ArrayRef) -> error_stack::Result<TypedArray, Runt
         {
             downcast!(TimestampNanosecondArray, Datetime)
         }
+        DataType::Duration(TimeUnit::Nanosecond) => downcast!(DurationNanosecondArray, Duration),
         DataType::List(_) | DataType::FixedSizeList(_, _) => Ok(TypedArray::Generic(array)),
         data_type => Err(Report::new(RuntimeError::InvalidBatch {
             message: format!("unsupported UDF Arrow type {data_type:?}"),
@@ -1736,6 +1801,357 @@ mod tests {
         )
     }
 
+    /// A one-argument UDF over a `DURATION`, compiled with the default limits. Its argument is
+    /// required, so a null row reaches the result by strict propagation.
+    fn duration_udf(name: &str, ty: ParseAsType, returns: ParseAsType, code: &str) -> UdfExecutor {
+        UdfExecutor::compile_sync(
+            [model(
+                name,
+                [TestArgument {
+                    name: "wait",
+                    ty,
+                    optional: false,
+                }],
+                returns,
+                false,
+                code,
+            )],
+            default_limits(),
+            None,
+        )
+        .assured("the DURATION bridge registers its Roto column types and catalog")
+    }
+
+    /// Runs `name` over `arguments`, every row selected.
+    fn run(
+        executor: &UdfExecutor,
+        name: &str,
+        arguments: &[TypedArray],
+    ) -> error_stack::Result<InjectedResult, RuntimeError> {
+        let rows = arguments.first().map_or(0, TypedArray::len);
+        executor.inject_with_context(
+            &FunctionName::Udf(name.to_string()),
+            arguments,
+            &RowSelection::All(rows),
+            (0..7).into(),
+            Timestamp::from_unix_nanos(123),
+            RowErrorMask::none(rows),
+        )
+    }
+
+    fn durations(values: Vec<Option<i64>>) -> TypedArray {
+        TypedArray::Duration(DurationNanosecondArray::from(values))
+    }
+
+    #[test]
+    fn a_duration_bridge_returns_every_nanosecond_and_null_it_reads() {
+        let executor = duration_udf(
+            "copy_wait",
+            ParseAsType::Duration,
+            ParseAsType::Duration,
+            "fn copy_wait(wait: DurationColumn) -> DurationColumn { wait }",
+        );
+        let input = durations(vec![
+            Some(i64::MIN),
+            Some(-1),
+            Some(0),
+            Some(1),
+            Some(i64::MAX),
+            None,
+        ]);
+        let result = run(&executor, "copy_wait", std::slice::from_ref(&input))
+            .assured("a DURATION column passes through its bridge");
+        assert_eq!(result.output, input);
+        assert!(result.side_errors.is_empty());
+    }
+
+    #[test]
+    fn duration_columns_add_subtract_and_scale_lengths_of_time_directly() {
+        let executor = duration_udf(
+            "reshape",
+            ParseAsType::Duration,
+            ParseAsType::Duration,
+            "fn reshape(wait: DurationColumn) -> DurationColumn {
+                wait.add(wait).sub_s(millis(250)).mul_s(3).div_s(2).sub(wait)
+            }",
+        );
+        let second = 1_000_000_000;
+        let quarter = 250_000_000;
+        let result = run(
+            &executor,
+            "reshape",
+            &[durations(vec![
+                Some(second),
+                Some(quarter),
+                Some(-second),
+                None,
+            ])],
+        )
+        .assured("duration arithmetic stays inside 64 bits here");
+        // ((2w - 250ms) * 3) / 2 - w
+        assert_eq!(
+            result.output,
+            durations(vec![
+                Some(1_625_000_000),
+                Some(125_000_000),
+                Some(-2_375_000_000),
+                None,
+            ])
+        );
+        assert!(result.side_errors.is_empty());
+    }
+
+    #[test]
+    fn duration_columns_compare_with_columns_and_typed_constants() {
+        let longer = duration_udf(
+            "longer",
+            ParseAsType::Duration,
+            ParseAsType::Bool,
+            "fn longer(wait: DurationColumn) -> BoolColumn { wait.gt_s(seconds(1)) }",
+        );
+        let input = durations(vec![
+            Some(999_999_999),
+            Some(1_000_000_000),
+            Some(1_000_000_001),
+            None,
+        ]);
+        let result =
+            run(&longer, "longer", std::slice::from_ref(&input)).assured("comparisons never fail");
+        assert_eq!(
+            result.output,
+            TypedArray::Boolean(BooleanArray::from(vec![
+                Some(false),
+                Some(false),
+                Some(true),
+                None
+            ]))
+        );
+        for (name, code, expected) in [
+            (
+                "shorter",
+                "fn shorter(wait: DurationColumn) -> BoolColumn { wait.lt_s(seconds(1)) }",
+                vec![Some(true), Some(false), Some(false), None],
+            ),
+            (
+                "exact",
+                "fn exact(wait: DurationColumn) -> BoolColumn { wait.eq_s(millis(1000)) }",
+                vec![Some(false), Some(true), Some(false), None],
+            ),
+            (
+                "unchanged",
+                "fn unchanged(wait: DurationColumn) -> BoolColumn { \
+                 wait.eq(wait).and(wait.lt(wait).not()).and(wait.gt(wait).not()) }",
+                vec![Some(true), Some(true), Some(true), None],
+            ),
+        ] {
+            let executor = duration_udf(name, ParseAsType::Duration, ParseAsType::Bool, code);
+            let result = run(&executor, name, std::slice::from_ref(&input))
+                .assured("comparisons never fail");
+            assert_eq!(
+                result.output,
+                TypedArray::Boolean(BooleanArray::from(expected)),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_unit_constant_is_its_whole_number_of_nanoseconds() {
+        let executor = duration_udf(
+            "all_units",
+            ParseAsType::Duration,
+            ParseAsType::Duration,
+            "fn all_units(wait: DurationColumn) -> DurationColumn {
+                wait.add_s(nanos(1)).add_s(micros(1)).add_s(millis(1)).add_s(seconds(1))
+                    .add_s(minutes(1)).add_s(hours(1)).add_s(days(1)).add_s(days(-1))
+            }",
+        );
+        let result =
+            run(&executor, "all_units", &[durations(vec![Some(0)])]).assured("the sum fits");
+        assert_eq!(result.output, durations(vec![Some(3_661_001_001_001)]));
+    }
+
+    #[test]
+    fn a_duration_result_beyond_64_bits_is_an_error_of_that_row_only() {
+        let doubled = duration_udf(
+            "doubled",
+            ParseAsType::Duration,
+            ParseAsType::Duration,
+            "fn doubled(wait: DurationColumn) -> DurationColumn { wait.mul_s(2) }",
+        );
+        let result = run(
+            &doubled,
+            "doubled",
+            &[durations(vec![Some(i64::MAX), Some(1), None])],
+        )
+        .assured("an overflow is a row error, not a batch failure");
+        assert_eq!(result.output, durations(vec![None, Some(2), None]));
+        assert_eq!(result.side_errors.len(), 1);
+        let (row, error) = &result.side_errors[0];
+        assert_eq!(*row, 0);
+        assert!(
+            matches!(
+                &error.reason,
+                SideErrorReason::Injected {
+                    code: ErrorCode::Overflow,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        let halved = duration_udf(
+            "halved",
+            ParseAsType::Duration,
+            ParseAsType::Duration,
+            "fn halved(wait: DurationColumn) -> DurationColumn { wait.div_s(0) }",
+        );
+        let result = run(&halved, "halved", &[durations(vec![Some(1)])]).assured("a row error");
+        assert_eq!(result.output, durations(vec![None]));
+        assert!(
+            matches!(
+                &result.side_errors[0].1.reason,
+                SideErrorReason::Injected {
+                    code: ErrorCode::DivisionByZero,
+                    ..
+                }
+            ),
+            "{:?}",
+            result.side_errors
+        );
+    }
+
+    #[test]
+    fn a_duration_constant_beyond_64_bits_fails_the_batch() {
+        let executor = duration_udf(
+            "far",
+            ParseAsType::Duration,
+            ParseAsType::Duration,
+            "fn far(wait: DurationColumn) -> DurationColumn { wait.add_s(days(200000)) }",
+        );
+        let failure = run(&executor, "far", &[durations(vec![Some(0)])])
+            .expect_err("200000 days lie beyond 64 bits of nanoseconds");
+        assert!(
+            matches!(
+                failure.current_context(),
+                RuntimeError::InjectedFunctionFailed { function, message }
+                    if function == "far"
+                        && message == "a Duration of 200000d lies beyond the 64-bit nanosecond range"
+            ),
+            "{failure:?}"
+        );
+    }
+
+    #[test]
+    fn duration_min_max_and_nanos_read_the_batch_as_lengths_of_time() {
+        let spread = duration_udf(
+            "spread",
+            ParseAsType::Duration,
+            ParseAsType::Duration,
+            "fn spread(wait: DurationColumn) -> DurationColumn {
+                match wait.min() {
+                    None => wait,
+                    Some(shortest) => match wait.max() {
+                        None => wait,
+                        Some(longest) => wait.sub_s(shortest).add_s(longest),
+                    }
+                }
+            }",
+        );
+        let input = durations(vec![Some(-5), Some(7), None, Some(3)]);
+        let result =
+            run(&spread, "spread", std::slice::from_ref(&input)).assured("the spread fits");
+        assert_eq!(
+            result.output,
+            durations(vec![Some(7), Some(19), None, Some(15)])
+        );
+        let nanos = duration_udf(
+            "wait_nanos",
+            ParseAsType::Duration,
+            ParseAsType::I64,
+            "fn wait_nanos(wait: DurationColumn) -> I64Column { wait.nanos() }",
+        );
+        let result =
+            run(&nanos, "wait_nanos", std::slice::from_ref(&input)).assured("nanos never fails");
+        assert_eq!(
+            result.output,
+            TypedArray::Int64(Int64Array::from(vec![Some(-5), Some(7), None, Some(3)]))
+        );
+    }
+
+    #[test]
+    fn duration_lists_pass_through_their_bridges() {
+        let field = StdArc::new(arrow_schema::Field::new(
+            "item",
+            DataType::Duration(TimeUnit::Nanosecond),
+            false,
+        ));
+        let mut builder = arrow_array::builder::ListBuilder::new(
+            arrow_array::builder::DurationNanosecondBuilder::new(),
+        )
+        .with_field(field);
+        builder.values().append_value(i64::MIN);
+        builder.values().append_value(0);
+        builder.append(true);
+        builder.append(false);
+        builder.values().append_value(i64::MAX);
+        builder.append(true);
+        let list = builder.finish();
+        let executor = duration_udf(
+            "copy_waits",
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::Duration),
+            },
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::Duration),
+            },
+            "fn copy_waits(wait: VecDurationColumn) -> VecDurationColumn { wait }",
+        );
+        let input = TypedArray::Generic(StdArc::new(list));
+        let result = run(&executor, "copy_waits", std::slice::from_ref(&input))
+            .assured("a VEC<DURATION> passes through its bridge");
+        assert_eq!(result.output, input);
+        let two = std::num::NonZeroU32::new(2).assured("two is not zero");
+        let nested = ParseAsType::Vec {
+            element: Box::new(ParseAsType::Array {
+                element: Box::new(ParseAsType::Duration),
+                len: two,
+            }),
+        };
+        assert_eq!(bridge_accessor(&nested), "any");
+        assert_eq!(bridge_conversion(&nested), "from_any");
+    }
+
+    #[test]
+    fn a_udf_function_named_like_a_duration_unit_keeps_its_own_definition() {
+        let executor = UdfExecutor::compile_sync(
+            [model(
+                "shadowed",
+                [TestArgument {
+                    name: "value",
+                    ty: ParseAsType::I64,
+                    optional: false,
+                }],
+                ParseAsType::I64,
+                false,
+                "fn shadowed(value: I64Column) -> I64Column { seconds(value) }
+                fn seconds(value: I64Column) -> I64Column { value.add_s(1) }",
+            )],
+            default_limits(),
+            None,
+        )
+        .assured("a UDF's own function shadows the catalog's constant of the same name");
+        let result = run(
+            &executor,
+            "shadowed",
+            &[TypedArray::Int64(Int64Array::from(vec![Some(41)]))],
+        )
+        .assured("the UDF's own seconds runs");
+        assert_eq!(
+            result.output,
+            TypedArray::Int64(Int64Array::from(vec![Some(42)]))
+        );
+    }
+
     #[test]
     fn compiles_and_executes_i64_column_udf() {
         let executor = UdfExecutor::compile_sync([add_one_model()], default_limits(), None)
@@ -1800,18 +2216,18 @@ mod tests {
             bridge_accessor(&ParseAsType::Vec {
                 element: Box::new(ParseAsType::Bytes),
             }),
-            Some("vec_bytes")
+            "vec_bytes"
         );
         assert_eq!(
             bridge_conversion(&ParseAsType::Vec {
                 element: Box::new(ParseAsType::Bytes),
             }),
-            Some("from_vec_bytes")
+            "from_vec_bytes"
         );
     }
 
     #[test]
-    fn every_type_but_a_duration_has_a_column_bridge_both_ways() {
+    fn every_type_has_a_column_bridge_both_ways() {
         struct Bridge {
             ty: ParseAsType,
             accessor: &'static str,
@@ -1922,16 +2338,22 @@ mod tests {
                 "vec_datetime",
                 "from_vec_datetime",
             ),
+            entry(
+                ParseAsType::Duration,
+                "duration",
+                "from_duration",
+                "vec_duration",
+                "from_vec_duration",
+            ),
         ];
         for scalar in ParseAsType::scalar_variants() {
-            let decided = *scalar == ParseAsType::Duration
-                || bridges.iter().any(|bridge| bridge.ty == *scalar);
-            assert!(decided, "{scalar} has no column bridge decision");
+            let bridged = bridges.iter().any(|bridge| bridge.ty == *scalar);
+            assert!(bridged, "{scalar} has no column bridge");
         }
         for bridge in &bridges {
             let ty = &bridge.ty;
-            assert_eq!(bridge_accessor(ty), Some(bridge.accessor), "{ty}");
-            assert_eq!(bridge_conversion(ty), Some(bridge.conversion), "{ty}");
+            assert_eq!(bridge_accessor(ty), bridge.accessor, "{ty}");
+            assert_eq!(bridge_conversion(ty), bridge.conversion, "{ty}");
             let vec = ParseAsType::Vec {
                 element: Box::new(ty.clone()),
             };
@@ -1940,76 +2362,15 @@ mod tests {
                 len: two,
             };
             for list in [&vec, &array] {
-                assert_eq!(bridge_accessor(list), Some(bridge.list_accessor), "{list}");
-                assert_eq!(
-                    bridge_conversion(list),
-                    Some(bridge.list_conversion),
-                    "{list}"
-                );
+                assert_eq!(bridge_accessor(list), bridge.list_accessor, "{list}");
+                assert_eq!(bridge_conversion(list), bridge.list_conversion, "{list}");
             }
             let nested = ParseAsType::Vec {
                 element: Box::new(array),
             };
-            assert_eq!(bridge_accessor(&nested), Some("any"), "{nested}");
-            assert_eq!(bridge_conversion(&nested), Some("from_any"), "{nested}");
+            assert_eq!(bridge_accessor(&nested), "any", "{nested}");
+            assert_eq!(bridge_conversion(&nested), "from_any", "{nested}");
         }
-        let durations = [
-            ParseAsType::Duration,
-            ParseAsType::Vec {
-                element: Box::new(ParseAsType::Duration),
-            },
-            ParseAsType::Array {
-                element: Box::new(ParseAsType::Duration),
-                len: two,
-            },
-            ParseAsType::Vec {
-                element: Box::new(ParseAsType::Array {
-                    element: Box::new(ParseAsType::Duration),
-                    len: two,
-                }),
-            },
-        ];
-        for ty in &durations {
-            assert_eq!(bridge_accessor(ty), None, "{ty}");
-            assert_eq!(bridge_conversion(ty), None, "{ty}");
-        }
-    }
-
-    #[test]
-    fn a_udf_signature_that_names_a_duration_is_refused_with_its_argument_or_result() {
-        let list = ParseAsType::Vec {
-            element: Box::new(ParseAsType::Duration),
-        };
-        let nested = ParseAsType::Vec {
-            element: Box::new(list.clone()),
-        };
-        for ty in [list, nested] {
-            let mut argument = add_one_model();
-            argument.arguments[0].ty = ty;
-            let refusal = UdfExecutor::compile_sync([argument], default_limits(), None)
-                .err()
-                .assured("no column bridge reads a DURATION argument");
-            assert!(
-                matches!(
-                    refusal.current_context(),
-                    UdfError::DurationArgument { name, argument }
-                        if name == "add_one" && argument == "value"
-                ),
-                "{refusal:?}"
-            );
-        }
-        let mut result = add_one_model();
-        result.returns.ty = ParseAsType::Duration;
-        let refusal = UdfExecutor::compile_sync([result], default_limits(), None)
-            .err()
-            .assured("no column bridge writes a DURATION result");
-        assert!(
-            matches!(
-                refusal.current_context(),
-                UdfError::DurationReturn { name } if name == "add_one"
-            ),
-            "{refusal:?}"
-        );
     }
 
     #[test]

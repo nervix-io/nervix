@@ -92,7 +92,7 @@ use nervix_connector::{
     PerRecordOutcome, RecordEmitter, RejectedEmitterMember, next_retry_delay,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, MqttTopicName, PropertyType};
+use nervix_models::{ClientConfigEntry, MQTT_MAX_REMAINING_LENGTH, MqttTopicName, PropertyType};
 use nervix_primitives::{
     sync::{
         Arc,
@@ -113,18 +113,6 @@ use thiserror::Error;
 use tracing::warn;
 
 const MQTT: &str = "mqtt";
-
-/// The largest Remaining Length an MQTT packet can declare. Its variable byte integer holds at most
-/// four bytes of seven value bits each.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "MQTT encodes Remaining Length as a variable byte integer of at most four \
-                  seven-bit groups, whose largest value is 268,435,455"
-    )
-)]
-const MQTT_MAX_REMAINING_LENGTH: usize = 268_435_455;
 
 /// The quality of service an MQTT emitter publishes at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,7 +257,8 @@ impl MqttPublishFraming {
                 payload_bytes,
             }));
         };
-        if remaining_bytes > MQTT_MAX_REMAINING_LENGTH {
+        let remaining_length: u64 = remaining_bytes.arch_into();
+        if remaining_length > MQTT_MAX_REMAINING_LENGTH {
             return Err(Report::new(MqttRecordError::BeyondProtocol {
                 payload_bytes,
             }));
@@ -888,7 +877,7 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_connector::{ConfirmationWindowError, HostServiceError, PerRecordOutcomeParts};
     use nervix_connector_fake::FakeEmitterHost;
-    use nervix_models::Timestamp;
+    use nervix_models::{MQTT_MAXIMUM_PACKET_BYTES, Timestamp};
 
     use super::*;
     use crate::topic::{scripted_broker::ScriptedBroker, test_fixtures::DnsFixture};
@@ -994,13 +983,16 @@ mod tests {
     #[test]
     fn a_payload_past_the_largest_remaining_length_has_no_packet() {
         let framing = MqttPublishFraming::new(&topic("t"), MqttPublishingMode::Qos0);
+        let largest_remaining: usize = MQTT_MAX_REMAINING_LENGTH.arch_into();
         // Two topic-length bytes, one topic byte and one property-length byte precede the payload.
-        let largest_payload = MQTT_MAX_REMAINING_LENGTH - 4;
+        let largest_payload = largest_remaining - 4;
 
         let largest_packet = framing
             .packet_bytes(largest_payload, 0)
             .expect("the largest remaining length is still a packet");
-        assert_eq!(largest_packet, MQTT_MAX_REMAINING_LENGTH + 5);
+        // The framing measures the vocabulary's largest packet for the largest Remaining Length.
+        let largest_packet: u64 = largest_packet.arch_into();
+        assert_eq!(largest_packet, MQTT_MAXIMUM_PACKET_BYTES);
         for payload_bytes in [largest_payload + 1, usize::MAX] {
             let error = framing
                 .packet_bytes(payload_bytes, 0)
@@ -1160,7 +1152,8 @@ mod tests {
                     (boundary, i64::from(offset))
                 }
                 PayloadLength::NearProtocolLimit(offset) => {
-                    (MQTT_MAX_REMAINING_LENGTH, i64::from(offset))
+                    let largest: usize = MQTT_MAX_REMAINING_LENGTH.arch_into();
+                    (largest, i64::from(offset))
                 }
             };
             let target = i64::try_from(target).assured("the protocol's lengths fit i64");
@@ -1208,7 +1201,8 @@ mod tests {
                 let payload_bytes = case.payload_bytes(header);
                 let remaining = header + payload_bytes;
                 let measured = framing.packet_bytes(payload_bytes, property_bytes);
-                if remaining > MQTT_MAX_REMAINING_LENGTH {
+                let remaining_length: u64 = remaining.arch_into();
+                if remaining_length > MQTT_MAX_REMAINING_LENGTH {
                     let Err(error) = measured else {
                         panic!("a remaining length of {remaining} bytes has no packet");
                     };

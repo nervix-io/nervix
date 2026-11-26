@@ -12,18 +12,7 @@
 )]
 use std::time::Duration;
 
-use nervix_models::{ClusterParameterValues, RemoteAckTiming};
-
-/// The shortest interval a sweep waits between passes.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "one nanosecond is the shortest wait the monotonic clock expresses, and keeps a \
-                  sweep of the shortest retention from waiting no time at all"
-    )
-)]
-const SHORTEST_SWEEP_INTERVAL: Duration = Duration::from_nanos(1);
+use nervix_models::{ClusterParameterValues, RemoteAckTiming, SHORTEST_POSITIVE_DURATION};
 
 /// How long a peer's relay protocol owner keeps one retained item after it last made progress or
 /// was last recorded or consulted: an attempt, an outbound correlation or a channel watermark.
@@ -50,10 +39,11 @@ impl RelayChannelRetention {
         self.0
     }
 
-    /// One tenth of the retention, and never less than one nanosecond: how often a sweep passes so
-    /// that an item is forgotten within a tenth of its retention after that retention ends.
+    /// One tenth of the retention, and never less than the shortest positive duration: how often a
+    /// sweep passes so that an item is forgotten within a tenth of its retention after that
+    /// retention ends, and a sweep of the shortest retention still waits between passes.
     pub fn sweep_interval(self) -> Duration {
-        (self.0 / 10).max(SHORTEST_SWEEP_INTERVAL)
+        (self.0 / 10).max(SHORTEST_POSITIVE_DURATION)
     }
 }
 
@@ -86,7 +76,7 @@ mod tests {
                 ..RemoteAckTiming::default()
             })
             .sweep_interval(),
-            SHORTEST_SWEEP_INTERVAL
+            SHORTEST_POSITIVE_DURATION
         );
     }
 

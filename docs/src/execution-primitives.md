@@ -471,7 +471,11 @@ wait forever. Three tools keep every wait to a moment when the operation holds n
   `GrowingCharge`, so a retry under a larger charge does not count the same bytes twice.
 
 A job whose only allocations are input that carries its own charge takes `Executor::charge_nothing`,
-a charge of no bytes that is granted at once. An operation that holds several classes takes them in
+a charge of no bytes that is granted at once. A job whose memory its caller cannot charge up front,
+such as a compilation whose library keeps the code it generates or a storage job that streams what
+its caller already holds, takes the admission token instead (`Executor::reserve_admission`, one byte,
+`ADMISSION_TOKEN_BYTES`): the least charge that still waits in its class's order, which a charge of
+no bytes never does. An operation that holds several classes takes them in
 one order: state-read and restore metadata before bulk. Work an operation waits for on another
 task, such as a processor's checkpoint a backup cut asks for, runs before the operation takes its
 shares, so the operation never holds a share while that task waits for room of its own.

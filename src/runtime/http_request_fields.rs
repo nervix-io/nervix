@@ -6,10 +6,11 @@
 //!   materialized state; evaluating that program for the rows the route kept, with the execution
 //!   time and state snapshot the rest of the batch used; validating each row's method, then its
 //!   path on the client's origin, then each header write in written order; the message error that
-//!   rejects a row at the first field that failed; what the message error of an admitted
-//!   request rejected later reads: its original source record, the materialized state its batch
-//!   was admitted with, and its attempted codec record; and which part of a delivered request is
-//!   payload: its codec record, never its method, target or headers.
+//!   rejects a row at the first field that failed; what the error route of an admitted request
+//!   that fails later reads, which it hands the emitter's buffer to keep: its original source
+//!   record, the materialized state its batch was admitted with, and its attempted codec record;
+//!   and which part of a delivered request is payload: its codec record, never its method, target
+//!   or headers.
 //! - **Depends on.** The emitter's HTTP emitter plan, the VM's compile and execute API, the
 //!   vocabulary's HTTP request fields, and the node's planned message errors.
 //! - **Must not know.** Which connector sends the requests, how their bodies are encoded, or when
@@ -156,7 +157,10 @@ impl SourceRecords {
     }
 
     /// Row `row`, without copying its values.
-    fn row(&self, row: usize) -> error_stack::Result<RuntimeRow, RuntimeSchemaError> {
+    pub(in crate::runtime) fn row(
+        &self,
+        row: usize,
+    ) -> error_stack::Result<RuntimeRow, RuntimeSchemaError> {
         let Some(metadata) = self.metadata.row(row) else {
             return Err(Report::new(RuntimeSchemaError::RowOutOfBounds {
                 row,
@@ -164,6 +168,12 @@ impl SourceRecords {
             }));
         };
         RuntimeRow::new(self.batch.clone(), row, metadata)
+    }
+
+    /// The logical Arrow bytes of the whole source batch, which these records keep alive however
+    /// few of its rows a caller reads.
+    pub(in crate::runtime) fn estimated_bytes(&self) -> u64 {
+        self.batch.estimated_bytes()
     }
 
     /// The rows `rows` names, in that order. Rows that are every row in order share this batch's
@@ -235,6 +245,15 @@ impl HttpRequestInput {
         }
     }
 
+    /// The source rows the emitter's route built the published rows from, absent when the
+    /// published rows are their own source records.
+    fn into_route_source_rows(self) -> Option<RouteSourceRows> {
+        match self {
+            Self::Published => None,
+            Self::Source { records, rows } => Some(RouteSourceRows::new(records, rows)),
+        }
+    }
+
     /// The source records of `admitted`, the published rows a batch kept, in that order.
     fn admitted(self, admitted: &[usize]) -> error_stack::Result<Self, HttpRequestFieldsError> {
         let (records, rows) = match self {
@@ -257,50 +276,41 @@ impl HttpRequestInput {
     }
 }
 
-/// The rows of one batch whose request fields are all valid, and the request of each.
+/// The rows of one batch whose request fields are all valid, the request of each, and what the
+/// error route of each row reads once its request fails after admission: its original source
+/// record, the materialized state its batch was admitted with and, with a codec, its attempted
+/// codec record, which the emitter keeps only when its message-error policy reads them.
 pub(in crate::runtime) struct AcceptedHttpRequests {
     pub(in crate::runtime) batch: RelayRecordBatch,
     pub(in crate::runtime) requests: AdmittedHttpRequests,
+    pub(in crate::runtime) error_route_inputs: ErrorRouteInputs,
 }
 
-/// The requests of the rows of one admitted batch, and what the message error of a row reads when
-/// its request is rejected after admission: its original source record, the materialized state
-/// its batch was admitted with and, with a codec, its attempted codec record.
+/// The requests of the rows of one admitted batch.
 #[derive(Clone)]
 pub(in crate::runtime) struct AdmittedHttpRequests {
     /// The request of each row, in row order.
     fields: Vec<HttpRequestFields>,
-    /// The original source record of each row.
-    sources: HttpRequestInput,
-    materialized_state: HashMap<String, RuntimeValue>,
+    /// Whether every request carries the codec record of its row as its body.
+    carries_body: bool,
 }
 
 impl AdmittedHttpRequests {
-    /// Requests whose rows are their own source records, admitted without materialized state.
+    /// Requests without a body, whose rows are their own source records.
     #[cfg(test)]
     pub(in crate::runtime) fn published(fields: Vec<HttpRequestFields>) -> Self {
         Self {
             fields,
-            sources: HttpRequestInput::Published,
-            materialized_state: HashMap::default(),
+            carries_body: false,
         }
     }
 
-    /// Requests whose rows are the finalized codec records of rows `rows` of `source`, one for
-    /// each published row in order, admitted without materialized state.
+    /// Requests whose bodies are the finalized codec records of their rows.
     #[cfg(test)]
-    pub(in crate::runtime) fn encoded(
-        fields: Vec<HttpRequestFields>,
-        source: &RelayRecordBatch,
-        rows: Vec<usize>,
-    ) -> Self {
+    pub(in crate::runtime) fn encoded(fields: Vec<HttpRequestFields>) -> Self {
         Self {
             fields,
-            sources: HttpRequestInput::Source {
-                records: SourceRecords::of(source),
-                rows,
-            },
-            materialized_state: HashMap::default(),
+            carries_body: true,
         }
     }
 
@@ -321,9 +331,9 @@ impl AdmittedHttpRequests {
         published: &RelayRecordBatch,
         delivered: &[usize],
     ) -> error_stack::Result<u64, RuntimeSchemaError> {
-        match &self.sources {
-            HttpRequestInput::Published => Ok(0),
-            HttpRequestInput::Source { .. } => published.payload_bytes_of_rows(delivered),
+        match self.carries_body {
+            false => Ok(0),
+            true => published.payload_bytes_of_rows(delivered),
         }
     }
 
@@ -336,25 +346,6 @@ impl AdmittedHttpRequests {
                 .assured("every term counts bytes of values this node already holds in memory");
         }
         bytes
-    }
-
-    /// What the message error of row `row` of `published`, the batch these requests were admitted
-    /// with, reads besides the error itself.
-    pub(in crate::runtime) fn rejected_record(
-        &self,
-        published: &RelayRecordBatch,
-        row: usize,
-    ) -> error_stack::Result<RejectedRecordInput, HttpRequestFieldsError> {
-        let record = self.sources.source_record(published, row)?;
-        let partial_output = match self.sources.publishes_codec_records() {
-            true => finalized_partial_output(&published.batch, row),
-            false => None,
-        };
-        Ok(RejectedRecordInput {
-            record,
-            partial_output,
-            materialized_state: self.materialized_state.clone(),
-        })
     }
 }
 
@@ -677,14 +668,18 @@ impl CompiledHttpRequestFields {
                 return Err(batch_failure(failure.preserved, message_errors, error));
             }
         };
+        let carries_body = sources.publishes_codec_records();
         Ok(PreparedHttpRequests {
             accepted: Some(AcceptedHttpRequests {
                 batch,
                 requests: AdmittedHttpRequests {
                     fields: requests,
-                    sources,
-                    materialized_state: state_snapshot,
+                    carries_body,
                 },
+                error_route_inputs: ErrorRouteInputs::new(
+                    sources.into_route_source_rows(),
+                    state_snapshot,
+                ),
             }),
             message_errors,
         })
@@ -1338,7 +1333,10 @@ mod tests {
             "a later write replaces an earlier one without case, and an empty value is kept"
         );
         assert!(first.estimated_bytes() > 0);
-        let Ok(rejected_later) = accepted.requests.rejected_record(&accepted.batch, 1) else {
+        let Ok(rejected_later) = accepted
+            .error_route_inputs
+            .rejected_record(&accepted.batch, 1)
+        else {
             panic!("an admitted row has its source record");
         };
         assert_eq!(
@@ -1441,7 +1439,10 @@ mod tests {
 
         // A request rejected after admission reads the source record it was prepared from and the
         // codec record it attempted.
-        let Ok(rejected_later) = accepted.requests.rejected_record(&accepted.batch, 0) else {
+        let Ok(rejected_later) = accepted
+            .error_route_inputs
+            .rejected_record(&accepted.batch, 0)
+        else {
             panic!("the admitted row has its source record");
         };
         assert_eq!(
@@ -1457,12 +1458,15 @@ mod tests {
             .expect("a codec request offers its attempted body");
         assert_eq!(attempted.batch().num_rows(), 1);
         assert!(rejected_later.materialized_state.is_empty());
-        let Err(missing) = accepted.requests.rejected_record(&accepted.batch, 1) else {
+        let Err(missing) = accepted
+            .error_route_inputs
+            .rejected_record(&accepted.batch, 1)
+        else {
             panic!("the batch admitted one row");
         };
         assert!(matches!(
             missing.current_context(),
-            HttpRequestFieldsError::MissingSourceRecord { row: 1 }
+            EmitterRuntimeError::MissingSourceRow { row: 1 }
         ));
 
         let [rejected] = prepared.message_errors.as_slice() else {

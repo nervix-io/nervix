@@ -206,6 +206,13 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     },
     #[error("emitter batch row {row} has no HTTP request")]
     MissingHttpRequest { row: usize },
+    #[error("emitter source row count {source_rows} does not match row count {row_count}")]
+    SourceRowCountMismatch {
+        source_rows: usize,
+        row_count: usize,
+    },
+    #[error("emitter batch row {row} has no source row")]
+    MissingSourceRow { row: usize },
     #[error("failed to select the ordering groups of the rows an emitter route kept")]
     SelectOrderingGroups,
     #[error("emitter delivered row {row} is outside batch with {row_count} rows")]
@@ -289,6 +296,8 @@ impl EmitterRuntimeError {
             | Self::OrderingGroupRowOutOfBounds { .. }
             | Self::HttpRequestCountMismatch { .. }
             | Self::MissingHttpRequest { .. }
+            | Self::SourceRowCountMismatch { .. }
+            | Self::MissingSourceRow { .. }
             | Self::SelectOrderingGroups
             | Self::DeliveryRowOutOfBounds { .. }
             | Self::AcknowledgementRowOutOfBounds { .. }
@@ -362,6 +371,8 @@ impl EmitterRuntimeError {
             | Self::OrderingGroupRowOutOfBounds { .. }
             | Self::HttpRequestCountMismatch { .. }
             | Self::MissingHttpRequest { .. }
+            | Self::SourceRowCountMismatch { .. }
+            | Self::MissingSourceRow { .. }
             | Self::SelectOrderingGroups
             | Self::DeliveryRowOutOfBounds { .. }
             | Self::AcknowledgementRowOutOfBounds { .. }
@@ -2300,7 +2311,21 @@ impl EmitterBatchContext<'_> {
             self.observe_sent(&report);
         }
         let execution_now = batch.execution_now();
-        let resolved = batch.resolved_rows();
+        // Every unresolved row's error route reads the source row and state the emitter kept for
+        // it, which the batch can name only while it still holds its rows.
+        let inputs = match batch.unresolved_row_inputs() {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                self.report_general_error(
+                    batch.relay_batch().acks.iter(),
+                    MessageErrorClass::INTERNAL,
+                    &error.change_context(EmitterRuntimeError::SplitFailedBatch {
+                        publish_failure: reason,
+                    }),
+                );
+                return;
+            }
+        };
         let messages = match batch.into_relay_batch().try_into_messages() {
             Ok(messages) => messages,
             Err(error) => {
@@ -2318,10 +2343,16 @@ impl EmitterBatchContext<'_> {
             }
         };
         let mut outcomes = self.interactions.record_outcomes();
-        for (row, message) in messages.into_iter().enumerate() {
-            if resolved.get(row).copied().unwrap_or(false) {
+        for (message, input) in messages.into_iter().zip(inputs) {
+            // A row an earlier attempt resolved has no input, and the failure leaves it alone.
+            let Some(RejectedRecordInput {
+                record,
+                partial_output,
+                materialized_state,
+            }) = input
+            else {
                 continue;
-            }
+            };
             let mut error = raised_message_error(
                 execution_now,
                 failure.class,
@@ -2339,10 +2370,10 @@ impl EmitterBatchContext<'_> {
                     node: self.node,
                     source_route: None,
                     policy: &self.error_policies.message,
-                    message,
+                    message: RelayMessage { record, ..message },
                     error,
-                    partial_output: None,
-                    materialized_state: HashMap::default(),
+                    partial_output,
+                    materialized_state,
                     ingest_metadata: None,
                     execution_now,
                 })
@@ -2524,13 +2555,17 @@ impl EmitterBatchContext<'_> {
                     execution_now,
                 )
                 .await?;
-            return self.with_ordering_groups(publish_batch, ordering_groups);
+            let publish_batch = self.with_ordering_groups(publish_batch, ordering_groups)?;
+            return self.with_error_route_inputs(publish_batch, None, &materialized_values);
         };
 
-        // The request fields of an HTTP emitter with a codec body, and the envelope of any emitter
-        // whose route constructs its records, read the original source record of every finalized
+        // The request fields of an HTTP emitter with a codec body, the envelope of any emitter
+        // whose route constructs its records, and the error route of such an emitter once a kept
+        // record fails after its route ran, read the original source record of every finalized
         // record the route keeps, and the route consumes the source batch.
-        let reads_source_records = self.http_requests.is_some() || self.envelope.is_some();
+        let reads_source_records = self.http_requests.is_some()
+            || self.envelope.is_some()
+            || self.keeps_error_route_inputs();
         let source_records = match (reads_source_records, filter_map.codec_route) {
             (true, true) => Some(SourceRecords::of(&batch)),
             (true, false) | (false, _) => None,
@@ -2618,7 +2653,11 @@ impl EmitterBatchContext<'_> {
                 }
             },
         };
-        self.with_ordering_groups(publish_batch, selected_groups)
+        let publish_batch = self.with_ordering_groups(publish_batch, selected_groups)?;
+        // The same order names the source row the route built every published row from.
+        let built_from =
+            source_records.map(|records| RouteSourceRows::new(records, plan.source_rows));
+        self.with_error_route_inputs(publish_batch, built_from, &materialized_values)
     }
 
     /// Evaluates the request fields of every row `batch` publishes, delivers the message error of
@@ -2655,7 +2694,11 @@ impl EmitterBatchContext<'_> {
         };
         self.deliver_planned_message_errors(prepared.message_errors)
             .await;
-        let AcceptedHttpRequests { batch, requests } = prepared.accepted?;
+        let AcceptedHttpRequests {
+            batch,
+            requests,
+            error_route_inputs,
+        } = prepared.accepted?;
         let publish_batch =
             match EmitterPublishBatch::new(input_relay.clone(), batch, None, execution_now) {
                 Ok(publish_batch) => publish_batch,
@@ -2664,7 +2707,60 @@ impl EmitterBatchContext<'_> {
                     return None;
                 }
             };
-        match publish_batch.with_http_requests(requests) {
+        let publish_batch = match publish_batch.with_http_requests(requests) {
+            Ok(publish_batch) => publish_batch,
+            Err(error) => {
+                self.report_publish_batch_error(error);
+                return None;
+            }
+        };
+        match self.keeps_error_route_inputs() {
+            true => self.keep_error_route_inputs(publish_batch, error_route_inputs),
+            false => Some(publish_batch),
+        }
+    }
+
+    /// Whether the emitter keeps, with every batch it buffers, what the error route of a row reads
+    /// once the row fails after the emitter's route ran. Only an error route that sends to an error
+    /// relay reads a row; `LOG` and `IGNORE` read the error alone.
+    fn keeps_error_route_inputs(&self) -> bool {
+        match self.error_policies.message {
+            MessageErrorPolicy::Dlq { .. } => true,
+            MessageErrorPolicy::Ignore | MessageErrorPolicy::Log => false,
+        }
+    }
+
+    /// `publish_batch` with what the error route of each of its rows reads once the row fails after
+    /// the emitter's route ran, when the emitter keeps it: `built_from`, the source rows the route
+    /// built the published rows from when it built them, and the materialized state of
+    /// `materialized_values` the batch was admitted with.
+    fn with_error_route_inputs(
+        &self,
+        publish_batch: EmitterPublishBatch,
+        built_from: Option<RouteSourceRows>,
+        materialized_values: &HashMap<String, RuntimeValue>,
+    ) -> Option<EmitterPublishBatch> {
+        if !self.keeps_error_route_inputs() {
+            return Some(publish_batch);
+        }
+        let inputs = ErrorRouteInputs::new(
+            built_from,
+            relay_state_snapshot_from_side_inputs(materialized_values),
+        );
+        self.keep_error_route_inputs(publish_batch, inputs)
+    }
+
+    /// `publish_batch` keeping `inputs` for its error route, unless they name nothing its rows do
+    /// not hold themselves.
+    fn keep_error_route_inputs(
+        &self,
+        publish_batch: EmitterPublishBatch,
+        inputs: ErrorRouteInputs,
+    ) -> Option<EmitterPublishBatch> {
+        if inputs.is_empty() {
+            return Some(publish_batch);
+        }
+        match publish_batch.with_error_route_inputs(inputs) {
             Ok(publish_batch) => Some(publish_batch),
             Err(error) => {
                 self.report_publish_batch_error(error);

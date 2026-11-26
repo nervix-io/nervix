@@ -468,8 +468,8 @@ mod tests {
         assert_eq!(sent.messages, 1, "the refused request is not sent");
         assert_eq!(sent.bytes, 0, "a request without a body carries no payload");
 
-        let (encoded, _completions) = batch_admitted(&[7, 8], |requests, published| {
-            AdmittedHttpRequests::encoded(requests, published, vec![0, 1])
+        let (encoded, _completions) = batch_admitted(&[7, 8], |requests, _| {
+            AdmittedHttpRequests::encoded(requests)
         });
         let sent =
             sent_by_a_flush_refusing_the_first(HttpRequestBody::Encoded(json_codec()), encoded)

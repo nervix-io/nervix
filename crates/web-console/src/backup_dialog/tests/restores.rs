@@ -10,8 +10,9 @@ use futures_util::FutureExt as _;
 use leptos::prelude::{GetUntracked as _, Owner};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    CommandDisposition, LeaderRedirect, NodeEndpoints, OutcomeOrigin, RestoreDisposition,
-    RestoreMessage, RestoreReply, RestoreUploadFailure, SessionPacing, UnknownOutcomeCause,
+    CommandDisposition, LeaderRedirect, NodeEndpoints, OutcomeOrigin, RestoreChunk,
+    RestoreDisposition, RestoreMessage, RestoreReply, RestoreUploadFailure, SessionPacing,
+    UnknownOutcomeCause,
     websocket::{ServerRestoreWebSocketCodec, WebSocketData},
 };
 use nervix_models::{
@@ -30,7 +31,7 @@ use crate::{
         },
         restore_stream::{
             DRAIN_POLL, MEASURE_SLICE_BYTES, RestoreEnd, RestoreStreamError, RestoreUpload,
-            drain_polls, measure_archive, queued_bytes_limit, restore_chunk_bytes,
+            drain_polls, measure_archive, queued_bytes_limit,
         },
     },
     pacing::ConsolePacing,
@@ -52,7 +53,7 @@ fn request_timeout() -> Duration {
 
 /// The length of an archive that streams as three chunks, the last one short.
 fn archive_length() -> usize {
-    let two_chunks = restore_chunk_bytes(&SESSION_LIMITS)
+    let two_chunks = RestoreChunk::largest_bytes(&SESSION_LIMITS)
         .checked_mul(2)
         .assured("two chunks of a quarter mebibyte fit usize");
     two_chunks

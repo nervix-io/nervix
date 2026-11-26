@@ -187,6 +187,43 @@ expressions at a later domain time. Explicit source event timestamps remain unch
 whose public contract is observation time, such as OTEL `observed_time_unix_nano`, read actual UTC
 only at the external export boundary.
 
+## Error routes
+
+An emitter's `ON MESSAGE ERROR SEND TO <relay> SET ...` route is written against the emitter's
+input, whichever row error it handles. It reads the failed row's original source record as
+`input`, the materialized state its batch was read with as `relay_state.<relay>`, and the
+structured `error`. When the emitter's route builds the record it publishes, a codec record or a
+client consumer emitter's `TO SCHEMA` record, the error route also reads that record as
+`partial_output`. Its fields are those of the codec's or the `TO SCHEMA` schema, every one optional:
+a field the route had not built when the row failed reads as null, so the error relay field it is
+written to is `OPTIONAL`. An emitter whose route builds no record offers no `partial_output`.
+
+```plexus
+CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+  TO SCHEMA outgoing
+    MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+  INHERIT id
+  SET cents = input.amount * 100
+  BATCH MAX MESSAGES 16 MAX SIZE 1MiB
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR SEND TO failed_orders
+    SET id = input.id,
+        amount = input.amount,
+        cents = partial_output.cents,
+        code = error.class
+  ON GENERAL ERROR LOG;
+```
+
+The route reads the same scopes for every row error the emitter raises: a failure of its own route,
+a record its codec cannot encode, a destination or an application that refuses a record, a publish
+that fails for good, and a row given up under [`GIVE UP AFTER`](#giving-up). Its error record stays
+in the source row's branch. To hand a row that fails after its route ran to a `SEND TO` route, the
+emitter keeps, with every batch it holds, the source rows its route built the batch's records from,
+sharing the source batch rather than copying it, and the batch's materialized state. `LOG` and
+`IGNORE` read neither, so an emitter with either policy keeps nothing more than the records it
+publishes. What the emitter keeps for its error route is bounded by its `FLUSH` policy, as
+[Emitter Batching](./emitter-batching.md#from-a-validated-policy-to-a-payload) describes.
+
 ## Emitter instances
 
 An emitter runs one instance unless its statement writes `INSTANCES`:
@@ -465,7 +502,9 @@ repeating a confirmed ACK is idempotent while its bounded result is retained. `r
 route's message error policy to every batch member with a bounded, non-sensitive reason. With
 [`GIVE UP AFTER`](#giving-up), a batch whose attempts keep ending in a retry, a timeout or a lost
 consumer stops being offered once the limit has passed since its first such attempt, and its
-members fail as `unavailable`. An
+members fail as `unavailable`. An `ON MESSAGE ERROR SEND TO` route reads each failed member's source
+row as `input` and the row the emitter constructed in the `TO SCHEMA` schema as `partial_output`, as
+[Error routes](#error-routes) describes. An
 `ATTACHED` emitter keeps its source acknowledgement waiting for the application ACK; a `DETACHED`
 emitter keeps its existing earlier source boundary. There is no durable consumer cursor or
 delivery history: an owner loss can require upstream replay, and a lost ACK can duplicate an
@@ -621,9 +660,9 @@ names the request field, `method` or `path`, beside the fields its expression re
 failure has the operation `invoke` and the zero-based position of its invocation. A record whose
 body the codec cannot encode when a flush releases it is rejected the same way with the operation
 `encode`. The message never quotes a method, target or header value. The error handler of every
-such rejection, and of any later rejection of an admitted request, reads the original input and the
-materialized state its batch was admitted with; with a codec it also reads the attempted record as
-`partial_output`.
+such rejection, and of any later rejection, failed publish or give-up of an admitted request, reads
+the original input and the materialized state its batch was admitted with; with a codec it also
+reads the attempted record as `partial_output`.
 
 The method keeps its spelling. The request goes to exactly the normalized target: encoded
 separators such as `%2F`, repeated query parameters, a literal `+`, and the empty query of a

@@ -1728,6 +1728,20 @@ table depths the session schema's frame layouts fix, and the 64 KiB below which 
 copies a frame out of the read buffer (rule F-9). It takes each session limit's default and bounds
 from that limit's own setting definition rather than restating them.
 
+Fixed values that must agree have one definition, and the others derive from it or are checked
+against it when the code compiles. Every wait, cadence, grace and deadline a derivation divides
+from a positive budget floors at the shortest positive duration, one nanosecond, which
+`nervix-models` defines once for the vocabulary, the interconnect and the runtime. The longest
+wait a client takes, one day, bounds the Rust client's deadlines and backoffs, a host library's
+cancellation token and every web console wait, and the token also takes the Rust client's
+shortest deadline, one millisecond. The largest restore chunk, 256 KiB, is one value as well:
+`nervix-client-wire` applies its rule, the smaller of it and half the session frame, for the Rust
+client and the console alike, and the console's restore frame capacity is counted in it. MQTT's
+largest packet derives from its largest Remaining Length and its largest fixed header. A job whose
+memory its caller cannot charge up front, such as a compilation whose library keeps the code it
+generates, takes the executor's admission token, one byte of its memory class: the least charge
+that still waits in the class's order, where a charge of nothing never waits.
+
 The `nervix::hidden_tunable` compiler diagnostic enforces this section. It refuses a numeric
 constant of a governed type, such as `Duration`, an unsigned or signed integer, `f64`, `NonZero`
 or `ByteUnit`, that is neither a setting definition's default, a class group's default nor a

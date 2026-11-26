@@ -11,18 +11,9 @@
 use std::time::Duration;
 
 use meticulous::OptionExt as _;
-
-/// The shortest positive duration. A deadline or delay projected from a positive budget is never
-/// shorter, so a budget too short to divide still projects one that has not already passed.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "a Duration counts whole nanoseconds, so one nanosecond is the shortest positive \
-                  duration"
-    )
-)]
-pub(crate) const SHORTEST_POSITIVE_DURATION: Duration = Duration::from_nanos(1);
+// A deadline or delay projected from a positive budget is never shorter, so a budget too short to
+// divide still projects one that has not already passed.
+use nervix_models::SHORTEST_POSITIVE_DURATION;
 
 /// An operation's relationship to the configured request budget, never another local timeout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -21,6 +21,16 @@ def test_a_token_refuses_a_deadline_that_is_not_a_finite_number_of_seconds() -> 
         assert "deadline" in refused.value.message
 
 
+def test_a_token_refuses_a_deadline_shorter_than_a_millisecond_or_longer_than_a_day() -> None:
+    for seconds in (0.0, 0.0009, 86_400.001):
+        with pytest.raises(nx.InvalidArgumentError) as refused:
+            nx.Cancel(deadline=seconds)
+        assert refused.value.kind == nx.FailureKind.INVALID_ARGUMENT
+        assert "deadline" in refused.value.message
+    for seconds in (0.001, 86_400.0):
+        nx.Cancel(deadline=seconds)
+
+
 def test_a_connect_ends_at_its_deadline_against_a_listener_that_never_answers(
     silent_listener: SilentListener,
 ) -> None:

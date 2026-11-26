@@ -41,10 +41,7 @@ use nervix_client_wire::{
     RestoreDisposition, RestoreReply, RestoreStart, RestoreUploadFailure, SessionLimits,
     websocket::{CONSOLE_RESTORE_PATH, ClientRestoreWebSocketCodec, WebSocketData},
 };
-use nervix_models::{
-    ArchiveDigest, CommandExecutionReference, RestoreArchive, Timestamp,
-    WebConsoleRestoreFrameCapacity,
-};
+use nervix_models::{ArchiveDigest, CommandExecutionReference, RestoreArchive, Timestamp};
 use thiserror::Error;
 use url::Url;
 
@@ -53,14 +50,6 @@ use super::{
     redirect_chain::{NextAttempt, RedirectChain},
 };
 use crate::{pacing::ConsolePacing, web_console_websocket_url_from_base};
-
-/// The archive bytes one restore frame carries under `limits`, as the native clients send them:
-/// the smaller of the largest restore chunk and half the session frame limit the leader announced.
-pub(crate) fn restore_chunk_bytes(limits: &SessionLimits) -> usize {
-    let largest = usize::try_from(WebConsoleRestoreFrameCapacity::CHUNK_BYTES)
-        .assured("a quarter mebibyte fits usize on every target");
-    largest.min(limits.frame_bytes() / 2)
-}
 
 /// Archive bytes one read of the file digests at a time.
 #[cfg_attr(
@@ -100,7 +89,7 @@ pub(crate) fn drain_polls(request_timeout: Duration) -> u128 {
 /// The bytes the browser may hold queued on a restore's connection before the stream waits for it
 /// to drain: the announced restore frame capacity at the chunk size `limits` allow.
 pub(crate) fn queued_bytes_limit(frame_capacity: NonZeroU64, limits: &SessionLimits) -> u64 {
-    let chunk = u64::try_from(restore_chunk_bytes(limits))
+    let chunk = u64::try_from(RestoreChunk::largest_bytes(limits))
         .assured("a chunk of at most a quarter mebibyte is counted in u64 on every target");
     frame_capacity.get().checked_mul(chunk).assured(
         "the frame capacity is validated so its largest chunks fit the browser's 32-bit queue \
@@ -632,7 +621,7 @@ impl<F: ArchiveFile> RestoreUpload<F> {
             return Err(Report::new(RestoreStreamError::Transport));
         }
         let total = self.archive.total_bytes.get();
-        let chunk_bytes = u64::try_from(restore_chunk_bytes(&limits))
+        let chunk_bytes = u64::try_from(RestoreChunk::largest_bytes(&limits))
             .assured("a chunk of a quarter mebibyte is counted in u64 on every target");
         let mut sent = 0_u64;
         while sent < total {

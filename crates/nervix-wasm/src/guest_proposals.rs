@@ -243,7 +243,7 @@ mod tests {
     async fn needed_by(wasm: &'static [u8]) -> Option<RefusedWasmProposals> {
         let executor = Executor::default();
         let reservation = executor
-            .reserve(MemoryClass::Bulk, 1)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .expect("an idle executor admits one byte of bulk memory");
         executor

@@ -27,7 +27,7 @@ use nervix_models::{
     ModelName, NodeEndpoint, NodePrerequisites, NodeRef, OwnershipStateRecoveryOutcome,
     OwnershipStateReset, PrerequisiteMismatch, RelayName, RemoteAckRegistration,
     RemoteAckResolution, RemoteRuntimeRecordMetadata, ReportedError, ResourceName,
-    SubscriptionBinding, Timestamp, Unit, WasmStateResetScope,
+    SHORTEST_POSITIVE_DURATION, SubscriptionBinding, Timestamp, Unit, WasmStateResetScope,
 };
 use nervix_primitives::sync::{mpsc, watch};
 use rkyv::{Archive, Deserialize, Serialize};
@@ -204,7 +204,7 @@ impl TransportOptions {
     pub(crate) fn relay_progress_send_timeout(&self, captured: Duration) -> Duration {
         (self.request_timeout / 10)
             .min(self.progress_timeout)
-            .max(settings::SHORTEST_POSITIVE_DURATION)
+            .max(SHORTEST_POSITIVE_DURATION)
             .min(captured)
     }
 
@@ -221,7 +221,7 @@ impl TransportOptions {
             .verified("at most one thousand thousandths fit the original delay");
         base.checked_sub(reduction)
             .verified("a jitter fraction of at most one thousand cannot exceed its base")
-            .max(settings::SHORTEST_POSITIVE_DURATION)
+            .max(SHORTEST_POSITIVE_DURATION)
     }
 
     pub(crate) fn validate(&self) -> Result<(), Report<TransportError>> {

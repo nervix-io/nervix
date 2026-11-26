@@ -158,19 +158,6 @@ pub struct IcebergTableEmitterConfig {
     pub writer: String,
 }
 
-/// What one staging append or staged-file measurement job is charged: a token that admits the job
-/// onto the filesystem workers, not an estimate of its memory.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the charge is an admission token for the filesystem workers, not a memory \
-                  estimate, so it is the least nonzero reservation: a zero request takes no \
-                  permit and never waits"
-    )
-)]
-const STAGED_WRITE_RESERVATION_BYTES: u64 = 1;
-
 /// The Iceberg emitter, which appends each mapped batch to a local Arrow IPC staging file and
 /// appends every staged batch to its table in one catalog commit.
 pub struct IcebergTableEmitter {
@@ -1008,8 +995,10 @@ impl IcebergTableEmitter {
         schema: StdArc<arrow_schema::Schema>,
         batches: Vec<RecordBatch>,
     ) -> EmitterWriteResult<staging::Staged> {
+        // The append allocates nothing beyond the batches it streams, so it takes only the
+        // admission token onto the filesystem workers.
         let reservation = executor
-            .reserve(MemoryClass::Bulk, STAGED_WRITE_RESERVATION_BYTES)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .change_context(EmitterWriteError::Publish { connector: ICEBERG })?;
         let target = target.clone();
@@ -1347,9 +1336,11 @@ impl IcebergTableEmitter {
         let projected = projection
             .project(staged)
             .map_err(IcebergColumnError::publish_failure)?;
+        // Measuring the staged file allocates nothing the caller can charge up front, so it takes
+        // only the admission token onto the filesystem workers.
         let reservation = self
             .executor
-            .reserve(MemoryClass::Bulk, STAGED_WRITE_RESERVATION_BYTES)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .change_context(EmitterWriteError::Publish { connector: ICEBERG })?;
         self.executor

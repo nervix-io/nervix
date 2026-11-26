@@ -426,7 +426,9 @@ the complete reported cause; do not parse it to choose recovery.
 
 Several Java threads can share a session. No Java monitor is held while a native call waits, so
 another thread can execute a command or trigger its cancellation token. A field builder or batch
-builder is used from one thread at a time. Token deadlines are finite, nonnegative seconds.
+builder is used from one thread at a time. A token's deadline is a number of seconds from one
+millisecond through one day, the deadlines the Rust client accepts; any other is an
+`InvalidArgumentException`.
 
 ```java
 {{#include ../../tests/client_conformance/java/suite/cluster/ClusterTests.java:threads}}

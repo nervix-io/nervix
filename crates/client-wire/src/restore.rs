@@ -4,10 +4,11 @@
 use bytes::Bytes;
 use error_stack::Report;
 use flatbuffers::WIPOffset;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    ArchiveDigest, CommandExecutionReference, RestoreArchive, RestoreMode, RestoreReport,
-    RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers, Timestamp,
+    ArchiveDigest, CommandExecutionReference, LARGEST_RESTORE_CHUNK_BYTES, RestoreArchive,
+    RestoreMode, RestoreReport, RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain,
+    RestoredUsers, Timestamp,
 };
 
 use crate::{
@@ -120,6 +121,15 @@ pub struct RestoreChunk {
 }
 
 impl RestoreChunk {
+    /// The most archive bytes one chunk carries under `limits`, as every client sends them: the
+    /// largest restore chunk, or half the frame limit when that is smaller, which leaves the frame
+    /// room for its envelope.
+    pub fn largest_bytes(limits: &SessionLimits) -> usize {
+        let largest = usize::try_from(LARGEST_RESTORE_CHUNK_BYTES)
+            .assured("a quarter mebibyte fits usize on every target");
+        largest.min(limits.frame_bytes() / 2)
+    }
+
     pub fn encode(
         bytes: &[u8],
         limits: &SessionLimits,
