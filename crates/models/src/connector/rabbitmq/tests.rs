@@ -398,6 +398,7 @@ fn exchange_emission_declares_its_locator_routing_key_and_the_queue_emitters_con
             RuntimeCapability::Property { name: "type" },
             RuntimeCapability::Property { name: "app_id" },
             RuntimeCapability::Property { name: "user_id" },
+            RuntimeCapability::ExternalCode,
             RuntimeCapability::StalledPeer(DeadlineKey::Timeout),
             RuntimeCapability::StalledPeer(DeadlineKey::ConnectTimeout),
         ]
