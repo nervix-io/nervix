@@ -125,6 +125,84 @@ Feature: Cluster licensing release and transfer
       | 1            |
       | 3            |
 
+  Scenario Outline: A release ends an operator's refresh that waits for an unreachable service on <cluster_size> nodes
+    Given an HTTPS licensing test service is available
+    And a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      ALTER CLUSTER SET LICENSING_RETRY_BACKOFF_MAX = 2s, LICENSING_REQUEST_TIMEOUT = 5s;
+      """
+    And a persistent license is activated through the running quorum
+    And the licensing service becomes unreachable
+    And these Plexus commands begin executing in the background as "refresh"
+      """
+      REFRESH LICENSE;
+      """
+    Then the current leader node is saved as placeholder "refresh_leader"
+    And node "{{refresh_leader}}" observability metric "nervix_licensing_requests_total" with labels eventually reaches at least 1
+      """
+      operation="activation.refresh"
+      outcome="unreachable"
+      """
+    When these Plexus commands begin executing in the background as "release"
+      """
+      RELEASE LICENSE;
+      """
+    Then within "30s" background Plexus execution "release" reaches a successful outcome
+    And within "30s" background Plexus execution "refresh" fails with "the cluster no longer holds the activation this refresh was for"
+    When the licensing service becomes reachable
+    Then node "node-1" eventually describes this license without a selected domain
+      """
+      mode: free
+      policy: free
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A release waits for a key rotation still pending and commits once the rotation finishes on <cluster_size> nodes
+    Given an HTTPS licensing test service is available
+    And a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      ALTER CLUSTER SET LICENSING_RETRY_BACKOFF_MAX = 2s, LICENSING_REQUEST_TIMEOUT = 5s;
+      """
+    And a persistent license is activated through the running quorum
+    And the licensing service becomes unreachable
+    And these Plexus commands begin executing in the background as "rotation"
+      """
+      ROTATE LICENSE CLUSTER KEY;
+      """
+    Then the current leader node is saved as placeholder "rotation_leader"
+    And node "{{rotation_leader}}" observability metric "nervix_licensing_requests_total" with labels eventually reaches at least 1
+      """
+      operation="activation.rotate_key"
+      outcome="unreachable"
+      """
+    When these Plexus commands begin executing in the background as "release"
+      """
+      RELEASE LICENSE;
+      """
+    # The pending rotation finishes with the service first, so the release cannot commit while
+    # the service stays unreachable.
+    Then background Plexus execution "release" is still running after "5s"
+    When the licensing service becomes reachable
+    Then within "30s" background Plexus execution "rotation" reaches a successful outcome
+    And within "30s" background Plexus execution "release" reaches a successful outcome
+    And node "node-1" eventually has cluster key generation 2
+    And node "node-1" eventually describes this license without a selected domain
+      """
+      mode: free
+      policy: free
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: The former cluster observes transfer and a rebuilt cluster activates anew on <cluster_size> nodes
     Given an HTTPS licensing test service is available
     And the licensing service allows one persistent activation
