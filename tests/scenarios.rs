@@ -18876,6 +18876,41 @@ async fn then_named_background_plexus_execution_is_still_running_after(
     }
 }
 
+/// The named background execution must end within `within` with a failure whose message contains
+/// `expected`.
+#[then(expr = "within {string} background Plexus execution {string} fails with {string}")]
+async fn then_within_named_background_plexus_execution_fails_with(
+    world: &mut ScenarioWorld,
+    within: String,
+    name: String,
+    expected: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let bound = parse_duration_text(&within).expect("the step's bound is a valid duration");
+    let task = world
+        .named_background_plexus
+        .remove(&name)
+        .unwrap_or_else(|| panic!("background Plexus execution '{name}' must be active"));
+    let outcome = nervix_primitives::time::timeout(bound, task)
+        .await
+        .unwrap_or_else(|_| {
+            panic!("background Plexus execution '{name}' did not finish within {within}")
+        })
+        .assured("the background Plexus task is owned by this scenario");
+    let error = match outcome {
+        Ok(output) => panic!(
+            "background Plexus execution '{name}' succeeded while it was meant to fail with \
+             {expected:?}: {output}"
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains(&expected),
+        "background Plexus execution '{name}' failed with {error:?}, not with {expected:?}"
+    );
+    world.last_command_error = Some(error);
+}
+
 #[then(expr = "within {string} background Plexus execution {string} reaches a successful outcome")]
 async fn then_within_named_background_plexus_execution_reaches_a_successful_outcome(
     world: &mut ScenarioWorld,

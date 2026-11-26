@@ -286,8 +286,9 @@ that bound. A signed acknowledgement replaces the grant; an administrator extens
 deadline. No metric or licensing deadline removes existing domains or cluster members.
 An invalid or unverifiable response increments `rejected_by_cluster`; typed service refusals increment
 `refused_by_service`, and failed transport attempts record `unreachable` or `timeout`. A request is
-`committed` after its verified decision applies. Counters describe attempts on this process and
-supply no licensing authority.
+`committed` after its verified decision applies. When an operator's release supersedes a refresh,
+before or after its answer arrives, that ending counts no outcome; its earlier failed attempts
+keep theirs. Counters describe attempts on this process and supply no licensing authority.
 
 See [Cluster Licensing](node-settings.md#cluster-licensing) for `DESCRIBE LICENSE` and the
 committed node/domain usage definitions.
