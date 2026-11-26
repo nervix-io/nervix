@@ -12,6 +12,7 @@
 )]
 
 use indexmap::IndexMap;
+use nervix_models::DiscardedWorkKind;
 
 use super::*;
 
@@ -1005,6 +1006,7 @@ impl Runtime {
         );
         let runtime = self.clone();
         let shutdown_rx = shutdown_tx.subscribe();
+        let mut discard_rx = self.reingestor_discard_receiver(domain, &input.reingestor);
         let force_flush = self.force_flush_participant(domain, quiesce_counters.clone());
         let dispatcher = self.inner.remote_dispatcher.load();
         let input_metrics = self.inner.metrics.resolve_node_input_metrics(
@@ -1074,11 +1076,25 @@ impl Runtime {
                 "the registry validated this input, and a non-empty input list builds an \
                  interaction",
             );
+            let mut discard_open = true;
+            let mut discarded = None;
             loop {
                 nervix_primitives::task::consume_budget().await;
                 let output_deadlines = task_output_buffers.deadlines();
                 let has_output_deadlines = !output_deadlines.is_empty();
                 let work = nervix_primitives::select! {
+                    changed = discard_rx.changed(), if discard_open => {
+                        if changed.is_err() {
+                            discard_open = false;
+                            continue;
+                        }
+                        let requested = discard_rx.borrow_and_update().clone();
+                        if let Some(answer) = requested {
+                            discarded = Some(answer);
+                            break;
+                        }
+                        continue;
+                    }
                     result = wait_for_branch_buffer_deadlines(&domain_clock, output_deadlines),
                         if has_output_deadlines =>
                     {
@@ -1232,6 +1248,25 @@ impl Runtime {
                     }
                 }
             }
+            // A drop destroys the reingestor at once: what it took in and has not handed on is
+            // released as done, and nothing more is published.
+            if let Some(answer) = discarded {
+                let mut released = entity_drop::DiscardedWorkCounts::default();
+                interaction.release_held_input_as_done(
+                    DiscardedWorkKind::UnprocessedMessages,
+                    &mut released,
+                );
+                for key in task_output_buffers.keys() {
+                    for batch in task_output_buffers.take(&key) {
+                        released.release_batch(DiscardedWorkKind::UnprocessedMessages, batch);
+                    }
+                }
+                answer
+                    .send(released)
+                    .await
+                    .means_peer_left("reingestor drop requester");
+                return;
+            }
             runtime
                 .flush_reingestor_outputs(
                     output_flush_context,
@@ -1242,7 +1277,68 @@ impl Runtime {
                 .await;
         })
     }
+
+    /// The signal by which a drop asks every task of `reingestor` in `domain` to destroy itself,
+    /// shared by the tasks of each of its inputs.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a reingestor task takes its drop signal once, as it starts"
+        )
+    )]
+    fn reingestor_discard_receiver(
+        &self,
+        domain: &DomainName,
+        reingestor: &ReingestorName,
+    ) -> watch::Receiver<Option<ReingestorDiscardAnswer>> {
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Reingestor, reingestor);
+        self.inner
+            .reingestor_discards
+            .entry(key)
+            .or_insert_with(|| watch::channel(None).0)
+            .subscribe()
+    }
+
+    /// Asks every running task of `reingestor` in `domain` to destroy itself, and answers what
+    /// they released as done. A task that does not answer within the stop grace answers nothing.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "the drop that destroys the reingestor signals its tasks once"
+        )
+    )]
+    pub(super) async fn discard_reingestor_tasks(
+        &self,
+        domain: &DomainName,
+        reingestor: &NodeRef,
+        tasks: usize,
+    ) -> entity_drop::DiscardedWorkCounts {
+        let mut released = entity_drop::DiscardedWorkCounts::default();
+        let key = DomainNodeRef::new(domain.clone(), reingestor.clone());
+        let Some((_, signal)) = self.inner.reingestor_discards.remove(&key) else {
+            return released;
+        };
+        let Some(capacity) = std::num::NonZeroUsize::new(tasks) else {
+            return released;
+        };
+        let (answer, mut answers) = mpsc::channel(capacity.get());
+        signal.send_replace(Some(answer));
+        let deadline = Instant::now() + self.task_stop_grace();
+        for _ in 0..tasks {
+            nervix_primitives::task::consume_budget().await;
+            match nervix_primitives::time::timeout_at(deadline, answers.recv()).await {
+                Ok(Some(task_released)) => released.merge(task_released),
+                Ok(None) | Err(_) => break,
+            }
+        }
+        released
+    }
 }
+
+/// Where a reingestor task a drop destroys answers what it released as done.
+pub(super) type ReingestorDiscardAnswer = mpsc::Sender<entity_drop::DiscardedWorkCounts>;
 
 #[cfg(test)]
 #[cfg_attr(

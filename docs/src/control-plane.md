@@ -246,7 +246,9 @@ Within a transaction, each consecutive run of model mutations can mix `CREATE`,
 mutation: all operations are evaluated in written order against one candidate model map, the
 complete domain graph is revalidated, and one atomic storage batch persists the base-to-final
 result. Drop/recreate and multi-ALTER sequences are therefore classified jointly; cancelling
-changes can produce a no-op.
+changes can produce a no-op. A drop that the base-to-final diff keeps is a hard operation: it is
+`DYNAMIC`, every node destroys the dropped entity at once with what it holds, and the answer reports
+what was discarded, as the drop statements in the [Plexus Overview](plexus-overview.md) describe.
 A failure writes nothing and does
 not swap the active registry state. This supports coordinated wire-schema, internal-schema, codec,
 relay, processor, emitter, ingestor, generator, placement, and dependent-node migrations without

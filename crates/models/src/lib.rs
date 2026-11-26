@@ -44,6 +44,7 @@ mod emitter;
 mod emitter_batch;
 mod emitter_envelope;
 mod emitter_instances;
+mod entity_drop;
 mod entity_labels;
 mod execution_unit;
 mod expression;
@@ -302,6 +303,7 @@ pub use emitter_envelope::{
 pub use emitter_instances::{
     EmitterInstances, EmitterInstancingCapability, SingleEmitterReason, SingleInstanceRefusal,
 };
+pub use entity_drop::{DiscardedWork, DiscardedWorkKind};
 pub use entity_labels::*;
 pub use execution_unit::{Unit, UnitIndexError, UnitKind};
 pub use expression::{

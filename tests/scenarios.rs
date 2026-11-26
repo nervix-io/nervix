@@ -20371,7 +20371,66 @@ async fn when_named_client_executes_commands(
         .get(&name)
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
-    for command in plexus_statements(&commands) {
+    let Some(outcome) = execute_named_client_statements(&client, &name, &commands).await else {
+        return;
+    };
+    world.last_command_output = Some(outcome.message.clone());
+    world.last_client_outcome = Some(outcome);
+}
+
+/// Run Plexus through a named client and require it to finish inside a bound, which is how a
+/// scenario states that one command waited for nothing. The scenario's active session, and the
+/// subscription it holds, stay as they were, so what that subscription receives across the command
+/// stays observable. A command that outlasts the bound fails the step with every node's
+/// description of the domain. The last output holds every message of the last statement's answer.
+#[when(expr = "within {string} client {string} executes these Plexus commands")]
+async fn when_named_client_executes_commands_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    name: String,
+    #[step] step: &Step,
+) {
+    let limit = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    world.last_command_error = None;
+    world.last_command_output = None;
+    world.last_client_outcome = None;
+    let name = expand_placeholders(world, &name);
+    let commands = expand_placeholders(world, docstring(step));
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let started = Instant::now();
+    let completed = nervix_primitives::time::timeout(
+        limit,
+        execute_named_client_statements(&client, &name, &commands),
+    )
+    .await;
+    let Ok(last_outcome) = completed else {
+        let descriptions = stalled_command_domain_descriptions(world).await;
+        panic!(
+            "client '{name}' Plexus commands did not complete within {limit:?}: {commands}; the \
+             domain as each node describes it: {descriptions:#?}"
+        );
+    };
+    world.last_cluster_operation_elapsed = Some(started.elapsed());
+    let Some(outcome) = last_outcome else {
+        return;
+    };
+    world.last_command_output = Some(crate::common::cluster::flatten_outcome_messages(&outcome));
+    world.last_client_outcome = Some(outcome);
+}
+
+/// Runs each statement of `commands` through the named client in order, requires each to
+/// succeed, and answers the last statement's outcome.
+async fn execute_named_client_statements(
+    client: &Client,
+    name: &str,
+    commands: &str,
+) -> Option<ClientCommandOutcome> {
+    let mut last_outcome = None;
+    for command in plexus_statements(commands) {
         nervix_primitives::task::consume_budget().await;
         let outcome = client
             .execute(command.clone())
@@ -20382,9 +20441,9 @@ async fn when_named_client_executes_commands(
             "client '{name}' command must succeed: {command}: {}",
             outcome.message
         );
-        world.last_command_output = Some(outcome.message.clone());
-        world.last_client_outcome = Some(outcome);
+        last_outcome = Some(outcome);
     }
+    last_outcome
 }
 
 #[when(expr = "client {string} submits this Plexus command request")]

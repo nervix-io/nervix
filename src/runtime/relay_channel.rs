@@ -1017,6 +1017,40 @@ pub(in crate::runtime) struct RelayConsumerQueue<T> {
     admitted: AtomicUsize,
     /// The waker of this consumer's only receiver, since a [`RelayReceiver`] cannot be cloned.
     delivered: AtomicWaker,
+    /// Set before the queue closes when its consumer left the fan-out because a drop destroyed
+    /// it: a publisher that can no longer deliver here then releases this consumer's share of the
+    /// batch as done, and the batches delivered before the close go back to the departing
+    /// consumer, which releases them.
+    released_on_departure: AtomicBool,
+}
+
+/// The consumers one publication selected that left the fan-out releasing their share as done, as
+/// a drop does, without taking the batch: the publisher resolves one share of every message for
+/// each of them.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) struct RelayDepartures {
+    pub(in crate::runtime) released: usize,
+}
+
+impl RelayDepartures {
+    fn count(&mut self, outcome: RelayDeliveryOutcome) {
+        if let RelayDeliveryOutcome::ReleasedOnDeparture = outcome {
+            self.released = self
+                .released
+                .checked_add(1)
+                .assured("a publication selects fewer consumers than usize::MAX");
+        }
+    }
+}
+
+/// What handing a batch to one consumer did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayDeliveryOutcome {
+    Delivered,
+    /// The consumer left the fan-out; the batch it did not take is dropped.
+    Left,
+    /// The consumer left the fan-out releasing its share as done, which the publisher resolves.
+    ReleasedOnDeparture,
 }
 
 /// Counts one publisher as waiting for admission until its wait returns or is cancelled.
@@ -1246,7 +1280,10 @@ impl<T> RelayBroadcast<T> {
 
 impl<T: Clone> RelayBroadcast<T> {
     /// Delivers `batch` to every consumer registered when publishing begins.
-    pub(in crate::runtime) async fn broadcast(&self, batch: T) -> Result<(), RelayFanoutClosed<T>> {
+    pub(in crate::runtime) async fn broadcast(
+        &self,
+        batch: T,
+    ) -> Result<RelayDepartures, RelayFanoutClosed<T>> {
         self.publication().broadcast(batch).await
     }
 }
@@ -1262,8 +1299,13 @@ impl<T: Clone, Selection: RelayConsumerSelection<T>> RelayPublication<'_, T, Sel
     /// Delivers `batch` to every consumer this publication counted.
     ///
     /// Waits while any of those consumers is at capacity. A consumer that leaves during the wait is
-    /// skipped, and the batch comes back only when no consumer is left to take it.
-    pub(in crate::runtime) async fn broadcast(self, batch: T) -> Result<(), RelayFanoutClosed<T>> {
+    /// skipped, and the batch comes back only when no consumer is left to take it. The answer
+    /// counts the consumers that left releasing their share as done without taking the batch,
+    /// whose shares the caller resolves.
+    pub(in crate::runtime) async fn broadcast(
+        self,
+        batch: T,
+    ) -> Result<RelayDepartures, RelayFanoutClosed<T>> {
         let Self {
             fanout,
             consumers,
@@ -1279,8 +1321,12 @@ impl<T: Clone, Selection: RelayConsumerSelection<T>> RelayPublication<'_, T, Sel
             }
         }
         let Some(first_full) = first_full else {
-            return RelayConsumerQueue::deliver_each(selected.iter(), batch)
-                .map_err(|batch| RelayFanoutClosed { batch });
+            return RelayConsumerQueue::deliver_each(
+                selected.iter(),
+                batch,
+                RelayDepartures::default(),
+            )
+            .map_err(|batch| RelayFanoutClosed { batch });
         };
 
         // A consumer is at capacity and the wait may be long, so the consumer list is held by
@@ -1292,12 +1338,15 @@ impl<T: Clone, Selection: RelayConsumerSelection<T>> RelayPublication<'_, T, Sel
             fanout,
             consumers: reserved.iter().collect(),
         };
+        let mut departures = RelayDepartures::default();
         for consumer in remaining {
             if fanout.admit(consumer).await {
                 admitted.consumers.push(consumer);
+            } else {
+                departures.count(consumer.departure());
             }
         }
-        RelayConsumerQueue::deliver_each(std::mem::take(&mut admitted.consumers), batch)
+        RelayConsumerQueue::deliver_each(std::mem::take(&mut admitted.consumers), batch, departures)
             .map_err(|batch| RelayFanoutClosed { batch })
     }
 }
@@ -1374,6 +1423,7 @@ impl<T> RelayConsumerQueue<T> {
             batches: ConcurrentQueue::unbounded(),
             admitted: AtomicUsize::new(0),
             delivered: AtomicWaker::new(),
+            released_on_departure: AtomicBool::new(false),
         }
     }
 
@@ -1418,12 +1468,29 @@ impl<T> RelayConsumerQueue<T> {
     }
 
     /// Hands one admitted batch to this consumer and wakes its receiver.
-    fn deliver(&self, batch: T) {
+    fn deliver(&self, batch: T) -> RelayDeliveryOutcome {
         match self.batches.push(batch) {
-            Ok(()) => self.delivered.wake(),
+            Ok(()) => {
+                self.delivered.wake();
+                RelayDeliveryOutcome::Delivered
+            }
             // The queue is unbounded, so a push fails only once the receiver has left. The
             // rejected batch is dropped here, and its admission is returned.
-            Err(PushError::Closed(_) | PushError::Full(_)) => self.release_admission(),
+            Err(PushError::Closed(_) | PushError::Full(_)) => {
+                self.release_admission();
+                self.departure()
+            }
+        }
+    }
+
+    /// How this consumer left the fan-out, once its queue is closed. Acquire: the departing
+    /// consumer set the flag before it closed the queue, and the closed queue the caller observed
+    /// publishes that store.
+    fn departure(&self) -> RelayDeliveryOutcome {
+        if self.released_on_departure.load(Ordering::Acquire) {
+            RelayDeliveryOutcome::ReleasedOnDeparture
+        } else {
+            RelayDeliveryOutcome::Left
         }
     }
 
@@ -1459,20 +1526,24 @@ impl<T: Clone> RelayConsumerQueue<T> {
     fn deliver_each<'consumer>(
         consumers: impl IntoIterator<Item = &'consumer Arc<Self>>,
         batch: T,
-    ) -> Result<(), T>
+        mut departures: RelayDepartures,
+    ) -> Result<RelayDepartures, T>
     where
         T: 'consumer,
     {
         let mut consumers = consumers.into_iter();
         let Some(mut current) = consumers.next() else {
+            if departures.released > 0 {
+                return Ok(departures);
+            }
             return Err(batch);
         };
         for next in consumers {
-            current.deliver(batch.clone());
+            departures.count(current.deliver(batch.clone()));
             current = next;
         }
-        current.deliver(batch);
-        Ok(())
+        departures.count(current.deliver(batch));
+        Ok(departures)
     }
 }
 
@@ -1584,6 +1655,28 @@ impl<T> RelayReceiver<T> {
     }
 }
 
+impl<T> RelayReceiver<T> {
+    /// Leaves the fan-out as the drop that destroys this consumer does, and answers the batches
+    /// delivered here that it has not taken, whose shares the caller releases as done. A
+    /// publisher that selected this consumer and can no longer deliver to it releases its share
+    /// as done instead, so each share is resolved once: by whichever side holds the batch when
+    /// the queue closes.
+    pub(in crate::runtime) fn depart_releasing(&mut self) -> Vec<T> {
+        // Release: the flag is visible to every publisher that observes the queue closed below.
+        self.consumer
+            .released_on_departure
+            .store(true, Ordering::Release);
+        self.fanout.deregister(&self.consumer);
+        self.consumer.batches.close();
+        self.fanout.admission.notify_waiters();
+        let mut delivered = Vec::new();
+        while let Ok(batch) = self.take() {
+            delivered.push(batch);
+        }
+        delivered
+    }
+}
+
 impl<T> Drop for RelayReceiver<T> {
     fn drop(&mut self) {
         // Leave the consumer list before closing the queue, so a publisher that loads the list
@@ -1628,7 +1721,70 @@ mod tests {
 
     use meticulous::ResultExt as _;
 
-    use super::{RelayBroadcast, RelayTryRecv};
+    use super::{RelayBroadcast, RelayDepartures, RelayTryRecv};
+
+    #[nervix_primitives::test]
+    async fn a_consumer_that_departs_releasing_takes_back_what_was_delivered_to_it() {
+        let channel = RelayBroadcast::with_capacity(capacity(2));
+        let mut departing = channel.new_receiver();
+        let mut staying = channel.new_receiver();
+        let delivered = channel
+            .broadcast(1)
+            .await
+            .assured("both consumers have room");
+        assert_eq!(delivered, RelayDepartures::default());
+
+        assert_eq!(departing.depart_releasing(), vec![1]);
+        assert_eq!(staying.try_recv(), RelayTryRecv::Batch(1));
+        // A publication after the departure selects only the consumer that stays.
+        let after = channel
+            .broadcast(2)
+            .await
+            .assured("the staying consumer has room");
+        assert_eq!(after, RelayDepartures::default());
+        assert_eq!(staying.try_recv(), RelayTryRecv::Batch(2));
+        assert_eq!(departing.try_recv(), RelayTryRecv::Closed);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_publication_that_selected_a_released_consumer_reports_its_departure() {
+        let channel = RelayBroadcast::with_capacity(capacity(1));
+        let mut departing = channel.new_receiver();
+        let mut staying = channel.new_receiver();
+        channel
+            .broadcast(0)
+            .await
+            .assured("both consumers have room");
+        assert_eq!(staying.try_recv(), RelayTryRecv::Batch(0));
+
+        // The departing consumer is at capacity, so the publication waits for its room.
+        let publication = channel.broadcast(1);
+        tokio::pin!(publication);
+        assert!(futures_util::poll!(publication.as_mut()).is_pending());
+        assert_eq!(departing.depart_releasing(), vec![0]);
+        let delivered = publication.await.assured("the staying consumer has room");
+        assert_eq!(delivered, RelayDepartures { released: 1 });
+        assert_eq!(staying.try_recv(), RelayTryRecv::Batch(1));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_consumer_that_leaves_without_releasing_reports_no_departure() {
+        let channel = RelayBroadcast::with_capacity(capacity(1));
+        let leaving = channel.new_receiver();
+        let mut staying = channel.new_receiver();
+        channel
+            .broadcast(0)
+            .await
+            .assured("both consumers have room");
+        assert_eq!(staying.try_recv(), RelayTryRecv::Batch(0));
+        let publication = channel.broadcast(1);
+        tokio::pin!(publication);
+        assert!(futures_util::poll!(publication.as_mut()).is_pending());
+        drop(leaving);
+        let delivered = publication.await.assured("the staying consumer has room");
+        assert_eq!(delivered, RelayDepartures::default());
+        assert_eq!(staying.try_recv(), RelayTryRecv::Batch(1));
+    }
 
     #[nervix_primitives::test]
     async fn audiences_isolate_dedicated_consumers_and_share_one_common_queue() {

@@ -1231,6 +1231,19 @@ impl EmitterLifecycle for IcebergTableEmitter {
         self.staged_rows
     }
 
+    fn release_staged_as_done(&mut self) -> u64 {
+        let released = self.staged_rows;
+        for batch in std::mem::take(&mut self.staged_batches) {
+            if let Some(acknowledgements) = batch.acknowledgements {
+                acknowledgements.acknowledge();
+            }
+        }
+        self.staged_rows = 0;
+        self.staged_bytes = 0;
+        // The staging files stay in the emitter's staging directory, which its end removes.
+        released
+    }
+
     /// Removes every staged batch and the staging files that held them, and hands their
     /// acknowledgements back to the host. A commit in progress ends with them: the data files it
     /// already wrote under the table location stay there unreferenced, as after any commit that

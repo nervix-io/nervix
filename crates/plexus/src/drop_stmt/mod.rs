@@ -1,145 +1,39 @@
+//! The `DROP` statement: removing one domain entity of any kind, and removing a node from the
+//! cluster.
+//!
+//! Layer: language.
+//! - **Owns.** The `DROP` grammar, its parse and completion entry points.
+//! - **Depends on.** Shared language tokens and the composed kind-and-name reference every
+//!   statement that addresses one domain entity shares.
+//! - **Must not know.** Registry state, what a drop removes at runtime or how its answer reads.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
-use nervix_models::{DropModel, DropNode, ModelKind};
+use nervix_models::{DropModel, DropNode};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, boxed_choice, client_ref, cluster_node_name,
-        codec_ref, correlator_ref, deduplicator_ref, emitter_ref, endpoint_ref, inferencer_ref,
-        ingestor_ref, into_parse_error, junction_ref, kw, lex_input, placement_ref, reingestor_ref,
-        relay_ref, reorderer_ref, schema_ref, suggest_from, tok, udf_ref, vhost_ref,
-        wire_avro_schema_ref, wire_cbor_schema_ref, wire_json_schema_ref,
+        LexedInput, ParseError, ParseFromSourceError, cluster_node_name, into_parse_error, kw,
+        lex_input, model_ref, suggest_from, tok,
     },
 };
 
+/// `DROP <kind> <name>` for every kind of domain entity, each kind named by the composed keyword
+/// phrase of its `CREATE` head, as every statement that addresses one entity names it.
 pub fn drop_parser<'src>()
 -> impl Parser<'src, &'src [Token], DropModel, extra::Err<ParseError<'src>>> + Clone {
-    let target = boxed_choice!(
-        kw(Identifier::Schema)
-            .ignore_then(schema_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Schema,
-                name: name.into(),
-            }),
-        kw(Identifier::Wire)
-            .ignore_then(kw(Identifier::Json))
-            .ignore_then(kw(Identifier::Schema))
-            .ignore_then(wire_json_schema_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::WireJsonSchema,
-                name: name.into(),
-            }),
-        kw(Identifier::Wire)
-            .ignore_then(kw(Identifier::Cbor))
-            .ignore_then(kw(Identifier::Schema))
-            .ignore_then(wire_cbor_schema_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::WireCborSchema,
-                name: name.into(),
-            }),
-        kw(Identifier::Wire)
-            .ignore_then(kw(Identifier::Avro))
-            .ignore_then(kw(Identifier::Schema))
-            .ignore_then(wire_avro_schema_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::WireAvroSchema,
-                name: name.into(),
-            }),
-        kw(Identifier::Codec)
-            .ignore_then(codec_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Codec,
-                name: name.into(),
-            }),
-        kw(Identifier::Client)
-            .ignore_then(client_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Client,
-                name: name.into(),
-            }),
-        kw(Identifier::Vhost)
-            .ignore_then(vhost_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Vhost,
-                name: name.into(),
-            }),
-        kw(Identifier::Endpoint)
-            .ignore_then(endpoint_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Endpoint,
-                name: name.into(),
-            }),
-        kw(Identifier::Ingestor)
-            .ignore_then(ingestor_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Ingestor,
-                name: name.into(),
-            }),
-        kw(Identifier::Reingestor)
-            .ignore_then(reingestor_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Reingestor,
-                name: name.into(),
-            }),
-        kw(Identifier::Reorderer)
-            .ignore_then(reorderer_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Reorderer,
-                name: name.into(),
-            }),
-        kw(Identifier::Inferencer)
-            .ignore_then(inferencer_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Inferencer,
-                name: name.into(),
-            }),
-        kw(Identifier::Relay)
-            .ignore_then(relay_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Relay,
-                name: name.into(),
-            }),
-        kw(Identifier::Junction)
-            .ignore_then(junction_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Junction,
-                name: name.into(),
-            }),
-        kw(Identifier::Deduplicator)
-            .ignore_then(deduplicator_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Deduplicator,
-                name: name.into(),
-            }),
-        kw(Identifier::Correlator)
-            .ignore_then(correlator_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Correlator,
-                name: name.into(),
-            }),
-        kw(Identifier::Emitter)
-            .ignore_then(emitter_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Emitter,
-                name: name.into(),
-            }),
-        kw(Identifier::Placement)
-            .ignore_then(placement_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Placement,
-                name: name.into(),
-            }),
-        kw(Identifier::Udf)
-            .ignore_then(udf_ref())
-            .map(|name| DropModel {
-                kind: ModelKind::Udf,
-                name: name.into(),
-            }),
-    );
-
     kw(Identifier::Drop)
-        .ignore_then(target)
+        .ignore_then(model_ref())
+        .map(|target| DropModel {
+            kind: target.kind,
+            name: target.identifier,
+        })
         .then_ignore(tok(Token::Semicolon).or_not())
 }
 
@@ -179,7 +73,7 @@ pub fn suggest_drop(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::ClusterNodeName;
+    use nervix_models::{ClusterNodeName, ModelKind};
 
     use super::*;
     use crate::lexer::lex;
@@ -278,21 +172,113 @@ mod tests {
     }
 
     #[test]
-    fn suggests_entity_keywords_after_drop() {
+    fn parses_a_drop_of_every_kind_its_create_head_names_with_a_phrase() {
+        for (source, kind, name) in [
+            (
+                "DROP WINDOW PROCESSOR counted;",
+                ModelKind::WindowProcessor,
+                "counted",
+            ),
+            (
+                "DROP WASM PROCESSOR counting_guest;",
+                ModelKind::WasmProcessor,
+                "counting_guest",
+            ),
+            (
+                "DROP GENERATOR heartbeat;",
+                ModelKind::Generator,
+                "heartbeat",
+            ),
+            ("DROP HASH MAP zip_codes;", ModelKind::Lookup, "zip_codes"),
+            (
+                "DROP PARAMETRIZER by_tenant;",
+                ModelKind::Parametrizer,
+                "by_tenant",
+            ),
+            (
+                "DROP SIGNALING PROTOCOL protobuf_subscribe;",
+                ModelKind::SignalingProtocol,
+                "protobuf_subscribe",
+            ),
+        ] {
+            let parsed = parse_drop(source).expect("parse should succeed");
+            assert_eq!(parsed.kind, kind, "{source}");
+            assert_eq!(parsed.name.as_str(), name, "{source}");
+        }
+    }
+
+    #[test]
+    fn rejects_a_drop_with_a_partial_kind_phrase() {
+        for source in [
+            "DROP WINDOW counted;",
+            "DROP PROCESSOR counted;",
+            "DROP WASM counting_guest;",
+            "DROP HASH zip_codes;",
+            "DROP MAP zip_codes;",
+            "DROP SIGNALING protobuf_subscribe;",
+            "DROP PROTOCOL protobuf_subscribe;",
+        ] {
+            assert!(parse_drop(source).is_err(), "{source} must not parse");
+        }
+    }
+
+    #[test]
+    fn suggests_every_entity_kind_after_drop() {
         let input = "DROP ";
         let suggestions = suggest_drop(input, input.len());
-        assert!(suggestions.contains(&"SCHEMA".to_string()));
-        assert!(suggestions.contains(&"WIRE".to_string()));
-        assert!(suggestions.contains(&"CODEC".to_string()));
-        assert!(suggestions.contains(&"CLIENT".to_string()));
-        assert!(suggestions.contains(&"VHOST".to_string()));
-        assert!(suggestions.contains(&"ENDPOINT".to_string()));
-        assert!(suggestions.contains(&"INGESTOR".to_string()));
-        assert!(suggestions.contains(&"RELAY".to_string()));
-        assert!(suggestions.contains(&"JUNCTION".to_string()));
-        assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
-        assert!(suggestions.contains(&"EMITTER".to_string()));
-        assert!(suggestions.contains(&"PLACEMENT".to_string()));
-        assert!(suggestions.contains(&"UDF".to_string()));
+        for phrase in [
+            "SCHEMA",
+            "PARAMETRIZER",
+            "WIRE JSON SCHEMA",
+            "WIRE CBOR SCHEMA",
+            "WIRE AVRO SCHEMA",
+            "CODEC",
+            "CLIENT",
+            "VHOST",
+            "ENDPOINT",
+            "SIGNALING PROTOCOL",
+            "GENERATOR",
+            "INGESTOR",
+            "REINGESTOR",
+            "REORDERER",
+            "INFERENCER",
+            "WASM PROCESSOR",
+            "RELAY",
+            "HASH MAP",
+            "JUNCTION",
+            "DEDUPLICATOR",
+            "CORRELATOR",
+            "WINDOW PROCESSOR",
+            "EMITTER",
+            "PLACEMENT",
+            "UDF",
+        ] {
+            assert!(
+                suggestions.contains(&phrase.to_string()),
+                "{phrase} missing from {suggestions:?}"
+            );
+        }
+        // A phrase completes as one item, never as its first word alone.
+        for word in ["WINDOW", "WASM", "HASH", "SIGNALING", "PROCESSOR", "MAP"] {
+            assert!(
+                !suggestions.contains(&word.to_string()),
+                "{word} leaked into {suggestions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn completes_the_reference_of_each_phrase_kind_without_leaking_other_kinds() {
+        for (input, reference) in [
+            ("DROP WINDOW PROCESSOR ", "ref:window_processor"),
+            ("DROP WASM PROCESSOR ", "ref:wasm_processor"),
+            ("DROP GENERATOR ", "ref:generator"),
+            ("DROP HASH MAP ", "ref:lookup"),
+            ("DROP PARAMETRIZER ", "ref:parametrizer"),
+            ("DROP SIGNALING PROTOCOL ", "ref:signaling_protocol"),
+        ] {
+            let suggestions = suggest_drop(input, input.len());
+            assert_eq!(suggestions, vec![reference.to_string()], "{input}");
+        }
     }
 }
