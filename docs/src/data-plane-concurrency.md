@@ -2539,7 +2539,8 @@ within the declared local graph; annotations are reviewed architectural assertio
 resolves to a method carrying `nervix::host_service(<service>, ...)` when the narrowest
 `nervix::host_services(...)` contract of the calling owner does not list that service, or when no
 such contract covers the owner. The narrowest contracted function, impl, type, module or crate
-decides, and a narrower contract replaces a wider one instead of extending it. A method of an
+decides, and a narrower contract replaces a wider one instead of extending it. An owner whose
+nearest `nervix::layer` contract is `harness` is outside the rule and declares nothing. A method of an
 unrelated type with the same name carries no contract and reaches no host service. A public method
 with a receiver on a type marked `nervix::value(host_handle, ...)` must name its service, which
 `nervix::invalid_contract` enforces at the method. The rule follows resolved definitions through

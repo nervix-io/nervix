@@ -41,3 +41,10 @@ pub mod connector {
     /// A call written in an authored macro is refused where it was written.
     pub fn authored_macro(host: &Host) -> u32 { reach!(host) }
 }
+
+/// Only a harness is outside the rule: a product layer without a contract is refused like any
+/// other owner.
+#[cfg_attr(nervix_lint, nervix::layer(engine, reason = "a product engine, not a harness"))]
+pub mod engine {
+    pub fn uncontracted(host: &super::Host) -> u32 { host.dns() }
+}

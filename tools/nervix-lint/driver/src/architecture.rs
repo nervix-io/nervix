@@ -237,35 +237,86 @@ fn consumes_plans(tcx: TyCtxt<'_>, mut definition: DefId) -> bool {
     }
 }
 
+/// The item a source contract is written on, as the placement rules of the contracts read it.
+struct ContractOwner {
+    /// A struct, enum or union.
+    named_type: bool,
+    /// A function, a method or a trait's method.
+    callable: bool,
+    /// The crate or a module.
+    module: bool,
+    /// An implementation block.
+    implementation: bool,
+    /// A trait definition.
+    trait_definition: bool,
+}
+
+impl ContractOwner {
+    fn of(owner: &Node<'_>) -> Self {
+        let named_type = matches!(owner, Node::Item(item) if matches!(item.kind,
+            rustc_hir::ItemKind::Struct(..) | rustc_hir::ItemKind::Enum(..) | rustc_hir::ItemKind::Union(..)));
+        let callable = matches!(
+            owner,
+            Node::Item(rustc_hir::Item {
+                kind: rustc_hir::ItemKind::Fn { .. },
+                ..
+            }) | Node::ImplItem(rustc_hir::ImplItem {
+                kind: rustc_hir::ImplItemKind::Fn(..),
+                ..
+            }) | Node::TraitItem(rustc_hir::TraitItem {
+                kind: rustc_hir::TraitItemKind::Fn(..),
+                ..
+            })
+        );
+        let module = matches!(
+            owner,
+            Node::Crate(_)
+                | Node::Item(rustc_hir::Item {
+                    kind: rustc_hir::ItemKind::Mod(..),
+                    ..
+                })
+        );
+        let implementation = matches!(
+            owner,
+            Node::Item(rustc_hir::Item {
+                kind: rustc_hir::ItemKind::Impl(..),
+                ..
+            })
+        );
+        let trait_definition = matches!(
+            owner,
+            Node::Item(rustc_hir::Item {
+                kind: rustc_hir::ItemKind::Trait { .. },
+                ..
+            })
+        );
+        Self {
+            named_type,
+            callable,
+            module,
+            implementation,
+            trait_definition,
+        }
+    }
+
+    /// Whether the owner is one whose items a scoped contract covers: the crate, a module, a type,
+    /// a function, an implementation or a trait.
+    fn scopes_items(&self) -> bool {
+        self.module
+            || self.named_type
+            || self.callable
+            || self.implementation
+            || self.trait_definition
+    }
+}
+
 pub fn validate(cx: &LateContext<'_>, node: HirId, attribute: &AttrItem) {
     let path = &attribute.path.segments;
     let Some(name) = path.get(1) else {
         return;
     };
     let owner = cx.tcx.hir_node(node);
-    let named_type = matches!(owner, Node::Item(item) if matches!(item.kind,
-        rustc_hir::ItemKind::Struct(..) | rustc_hir::ItemKind::Enum(..) | rustc_hir::ItemKind::Union(..)));
-    let callable = matches!(
-        owner,
-        Node::Item(rustc_hir::Item {
-            kind: rustc_hir::ItemKind::Fn { .. },
-            ..
-        }) | Node::ImplItem(rustc_hir::ImplItem {
-            kind: rustc_hir::ImplItemKind::Fn(..),
-            ..
-        }) | Node::TraitItem(rustc_hir::TraitItem {
-            kind: rustc_hir::TraitItemKind::Fn(..),
-            ..
-        })
-    );
-    let module = matches!(
-        owner,
-        Node::Crate(_)
-            | Node::Item(rustc_hir::Item {
-                kind: rustc_hir::ItemKind::Mod(..),
-                ..
-            })
-    );
+    let placement = ContractOwner::of(&owner);
     let contract = kind(attribute);
     let valid = match name.as_str() {
         "constant" => {
@@ -284,30 +335,11 @@ pub fn validate(cx: &LateContext<'_>, node: HirId, attribute: &AttrItem) {
             ) && contract.is_some_and(|kind| kind.as_str() == "fixed")
         }
         "layer" => {
-            (module
-                || named_type
-                || callable
-                || matches!(
-                    owner,
-                    Node::Item(rustc_hir::Item {
-                        kind: rustc_hir::ItemKind::Impl(..),
-                        ..
-                    }) | Node::Item(rustc_hir::Item {
-                        kind: rustc_hir::ItemKind::Trait { .. },
-                        ..
-                    })
-                ))
+            placement.scopes_items()
                 && contract.is_some_and(|kind| Layer::parse(kind.as_str()).is_some())
         }
         "value" => {
-            (named_type
-                || matches!(
-                    owner,
-                    Node::Item(rustc_hir::Item {
-                        kind: rustc_hir::ItemKind::Trait { .. },
-                        ..
-                    })
-                ))
+            (placement.named_type || placement.trait_definition)
                 && contract.is_some_and(|kind| {
                     matches!(
                         kind.as_str(),
@@ -316,8 +348,8 @@ pub fn validate(cx: &LateContext<'_>, node: HirId, attribute: &AttrItem) {
                 })
         }
         "identity" => {
-            (named_type
-                || callable
+            (placement.named_type
+                || placement.callable
                 || matches!(
                     owner,
                     Node::Field(_)
@@ -328,20 +360,14 @@ pub fn validate(cx: &LateContext<'_>, node: HirId, attribute: &AttrItem) {
                         })
                 ))
                 && contract.is_some_and(|kind| kind.as_str() == "node")
-                && (!named_type
+                && (!placement.named_type
                     || layer(cx.tcx, node.owner.def_id.to_def_id()) == Some(Layer::Vocabulary))
         }
         "input" => {
-            (module
-                || named_type
-                || callable
-                || matches!(
-                    owner,
-                    Node::Item(rustc_hir::Item {
-                        kind: rustc_hir::ItemKind::Trait { .. },
-                        ..
-                    })
-                ))
+            (placement.module
+                || placement.named_type
+                || placement.callable
+                || placement.trait_definition)
                 && contract.is_some_and(|kind| kind.as_str() == "plans")
         }
         "state" => {
@@ -349,26 +375,11 @@ pub fn validate(cx: &LateContext<'_>, node: HirId, attribute: &AttrItem) {
                 && contract.is_some_and(|kind| matches!(kind.as_str(), "installed" | "mutable"))
         }
         "host_service" => {
-            callable
+            placement.callable
                 && contract
                     .is_some_and(|kind| nervix_lint_report::rules::host_service(kind.as_str()))
         }
-        "host_services" => {
-            (module
-                || named_type
-                || callable
-                || matches!(
-                    owner,
-                    Node::Item(rustc_hir::Item {
-                        kind: rustc_hir::ItemKind::Impl(..),
-                        ..
-                    }) | Node::Item(rustc_hir::Item {
-                        kind: rustc_hir::ItemKind::Trait { .. },
-                        ..
-                    })
-                ))
-                && listed_services(attribute).is_some()
-        }
+        "host_services" => placement.scopes_items() && listed_services(attribute).is_some(),
         _ => return,
     };
     let count = tool_attributes(cx.tcx, node, path).len();
@@ -558,7 +569,11 @@ impl ArchitectureRules {
                 _ => {}
             }
         }
-        if let Some(service) = host_service(cx.tcx, definition) {
+        // A harness sits outside the product layer order: a test asserts what a handle hands over
+        // and a scripted connector stands in for any real one, so neither declares services.
+        if let Some(service) = host_service(cx.tcx, definition)
+            && layer(cx.tcx, owner.to_def_id()) != Some(Layer::Harness)
+        {
             let refusal = match declared_services(cx.tcx, owner.to_def_id()) {
                 Some(services) if services.contains(&service) => None,
                 Some(_) => Some(format!(

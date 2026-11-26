@@ -320,6 +320,7 @@ fn undeclared_host_services_are_diagnosed_at_each_reach_and_across_metadata() {
             "Host::dns",
             "host.dns()",
             "host.dns()",
+            "host.dns()",
             "host.executor()"
         ]
     );
