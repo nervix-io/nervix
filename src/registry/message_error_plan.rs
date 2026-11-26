@@ -78,7 +78,7 @@ pub(crate) enum MessageErrorPlanError {
     RelayNotFound { node: NodeRef, relay: RelayName },
     #[error("{node:?} message-error route reads missing codec '{codec}'")]
     CodecNotFound { node: NodeRef, codec: CodecName },
-    #[error("{node:?} message-error route reads missing client input schema '{schema}'")]
+    #[error("{node:?} message-error route reads missing client schema '{schema}'")]
     ClientSchemaNotFound { node: NodeRef, schema: SchemaName },
     #[error("{node:?} message-error route has no {scope} input relay")]
     InputNotDeclared { node: NodeRef, scope: &'static str },
@@ -118,6 +118,31 @@ impl MessageErrorPlanContext<'_> {
             }));
         };
         Ok(codec_plan.schema.clone())
+    }
+
+    /// The schema an emitter's error route reads as `partial_output`: the record its route builds,
+    /// which is its codec's for a codec body and its output schema for a client consumer emitter.
+    /// An emitter whose route builds no record offers none.
+    fn emitter_partial_output_schema(
+        &self,
+        node: &NodeRef,
+        emitter: &nervix_models::CreateEmitter,
+    ) -> Result<Option<Arc<CompiledSchema>>, Report<MessageErrorPlanError>> {
+        if let Some(codec) = emitter.body.codec() {
+            return self.codec_schema(node, codec).map(Some);
+        }
+        let nervix_models::EmitterEntity::Client(nervix_models::ClientEmitter::Consumer(consumer)) =
+            emitter.connector.as_ref()
+        else {
+            return Ok(None);
+        };
+        let Some(schema) = self.activation.schemas.get(&consumer.schema) else {
+            return Err(Report::new(MessageErrorPlanError::ClientSchemaNotFound {
+                node: node.clone(),
+                schema: consumer.schema.clone(),
+            }));
+        };
+        Ok(Some(schema.clone()))
     }
 
     /// The schema an ingestor's rows carry before route construction: the one its transport's
@@ -294,9 +319,7 @@ impl MessageErrorRouteSpecs {
                 Model::Emitter(model) => {
                     schemas.input = Some(context.input(node, model.from.first(), "input")?);
                     schemas.current_branching = context.branch_from(node, model.from.first())?;
-                    if let Some(codec) = model.body.codec() {
-                        schemas.partial_output = Some(context.codec_schema(node, codec)?);
-                    }
+                    schemas.partial_output = context.emitter_partial_output_schema(node, model)?;
                     context.add_route(
                         node,
                         None,
@@ -420,6 +443,12 @@ mod tests {
             )),
             with_dlq(emitter("emitter", "events", "json", "broker")),
             with_dlq(parsed_model(
+                "CREATE CLIENT CONSUMER EMITTER app_output FROM events TO SCHEMA payload MODE ACK \
+                 SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s INHERIT ALL BATCH \
+                 MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
+                 ERROR LOG;",
+            )),
+            with_dlq(parsed_model(
                 "CREATE REORDERER order_events FROM events BY input.value MAX TIME 10s UNBRANCHED \
                  TO out INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
             )),
@@ -447,7 +476,7 @@ mod tests {
         let (domain, nodes, activation) = fixture();
         let plans = MessageErrorRouteSpecs::from_scheduled_nodes(&domain, &nodes, &activation)
             .expect("every owner should have a route plan");
-        assert_eq!(plans.routes.len(), 11);
+        assert_eq!(plans.routes.len(), 12);
         for route in &plans.routes {
             assert_eq!(route.program.inner.set.len(), 2);
             assert_eq!(route.key.error_relay, named::<RelayName>("errors"));
@@ -485,6 +514,26 @@ mod tests {
             .map(|(target, _)| target.field.as_str())
             .collect::<Vec<_>>();
         assert_eq!(targets, ["value", "operation"]);
+        // A client consumer emitter's route builds its output schema's record, which its error
+        // route reads as partial_output, as a codec emitter's reads its codec's record.
+        let consumer = plans
+            .routes
+            .iter()
+            .find(|route| route.key.node.identifier == named::<ModelName>("app_output"))
+            .expect("the client consumer emitter's route is planned");
+        let partial_output = consumer
+            .compile_schemas
+            .partial_output
+            .as_ref()
+            .expect("a client consumer emitter offers its output record");
+        assert_eq!(
+            partial_output.arrow_schema(),
+            activation
+                .schemas
+                .get(&named::<SchemaName>("payload"))
+                .expect("the output schema is active")
+                .arrow_schema()
+        );
     }
 
     #[test]
@@ -529,6 +578,33 @@ mod tests {
         assert!(matches!(
             error.current_context(),
             MessageErrorPlanError::CodecNotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn classifies_a_missing_client_output_schema_at_plan_creation() {
+        let (domain, mut nodes, activation) = fixture();
+        let node = nodes
+            .get_mut(&NodeRef::new(
+                ModelKind::Emitter,
+                named::<ModelName>("app_output"),
+            ))
+            .expect("the client consumer emitter is scheduled");
+        let Model::Emitter(emitter) = node.config.as_mut() else {
+            panic!("the scheduled node is an emitter");
+        };
+        let nervix_models::EmitterEntity::Client(nervix_models::ClientEmitter::Consumer(consumer)) =
+            emitter.connector.as_mut()
+        else {
+            panic!("the fixture emitter is a client consumer");
+        };
+        consumer.schema = named("unknown_schema");
+        let error = MessageErrorRouteSpecs::from_scheduled_nodes(&domain, &nodes, &activation)
+            .expect_err("a missing output schema must fail planning");
+        assert!(matches!(
+            error.current_context(),
+            MessageErrorPlanError::ClientSchemaNotFound { schema, .. }
+                if schema.as_str() == "unknown_schema"
         ));
     }
 }

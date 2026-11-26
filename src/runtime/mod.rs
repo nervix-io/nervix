@@ -467,7 +467,7 @@ use domain_execution::{
 use domain_rebuild::branch_relays_from_plans;
 use emitter_buffer::{
     DeliveredAcknowledgements, EmitterBatchBuffer, EmitterBufferedMessages, EmitterPublication,
-    EmitterPublishBatch, PublishReport, RowToPack,
+    EmitterPublishBatch, ErrorRouteInputs, PublishReport, RouteSourceRows, RowToPack,
 };
 use emitter_client::{ClientConsumerConnector, ClientPayload};
 use emitter_connectors::EmitterConnectorStarter;

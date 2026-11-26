@@ -618,7 +618,9 @@ current connection, retry and deadline limits.
   PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`, a required `BATCH` row and
   byte limit, and an explicit `FLUSH` policy. It constructs exactly that schema as native Arrow;
   a sensitive input needs explicit leakage, and a row whose encoded IPC cannot fit alone follows
-  `ON MESSAGE ERROR`. There is no external client, codec, header operation, or direct `VALUES`
+  `ON MESSAGE ERROR`. Its `ON MESSAGE ERROR SEND TO` route reads each failed row's source record as
+  `input` and the constructed record as the all-optional `partial_output` of the output schema.
+  There is no external client, codec, header operation, or direct `VALUES`
   body. An attached emitter holds ingestor acknowledgement until the application ACKs; a detached
   emitter releases it earlier. Consumers compete for output and are volatile across
   session or owner loss. The Rust client may restore a matching consumer handle with a fresh
