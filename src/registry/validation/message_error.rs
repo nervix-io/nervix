@@ -34,8 +34,8 @@ use crate::registry::{
         processor::processor_first_input_relay,
         schema::{
             all_optional_binding_for_internal_schema, arrow_schema_for_internal_schema,
-            compile_binding_with_internal_schema, readonly_binding_for_internal_schema,
-            schema_sensitivity_for_internal_schema,
+            compile_binding_with_internal_schema, expect_schema_model,
+            readonly_binding_for_internal_schema, schema_sensitivity_for_internal_schema,
         },
         vm::udf_compile_options,
         wire::{ingestor_input_schema, schema_for_ack_model, schema_for_codec_model},
@@ -239,11 +239,7 @@ pub(in crate::registry) fn validate_model_message_error_policies(
             )
         }
         Model::Emitter(node) => {
-            let partial_output = node
-                .body
-                .codec()
-                .map(|codec| schema_for_codec_model(domain, identifier, models, codec))
-                .transpose()?;
+            let partial_output = emitter_partial_output_schema(domain, identifier, models, node)?;
             for input_relay in node.from.relays() {
                 let input = schema_for_ack_model(domain, identifier, models, input_relay)?;
                 let branch = relay_declared_branch(domain, identifier, models, input_relay)?;
@@ -264,6 +260,26 @@ pub(in crate::registry) fn validate_model_message_error_policies(
         }
         _ => Ok(()),
     }
+}
+
+/// The schema an emitter's error route reads as `partial_output`: the record its route builds,
+/// which is its codec's for a codec body and its output schema for a client consumer emitter. An
+/// emitter whose route builds no record offers none.
+fn emitter_partial_output_schema<'a>(
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &'a ModelIndex,
+    emitter: &nervix_models::CreateEmitter,
+) -> Result<Option<&'a CreateSchema>, Report<RegistryError>> {
+    if let Some(codec) = emitter.body.codec() {
+        return schema_for_codec_model(domain, identifier, models, codec).map(Some);
+    }
+    let nervix_models::EmitterEntity::Client(nervix_models::ClientEmitter::Consumer(consumer)) =
+        emitter.connector.as_ref()
+    else {
+        return Ok(None);
+    };
+    expect_schema_model(domain, identifier, models, &consumer.schema).map(Some)
 }
 
 fn validate_transforming_processor_message_errors(
@@ -557,6 +573,57 @@ mod tests {
             )
             .expect_err("correlator error construction must not expose input");
         assert!(format!("{error:?}").contains("input"));
+        let _ = fs::remove_dir_all(invalid_path);
+    }
+
+    fn parsed(source: &str) -> Model {
+        let statement = nervix_plexus::server_statement::parse_server_statement(source)
+            .expect("test model should parse");
+        let nervix_models::Statement::Create(create) = statement else {
+            panic!("test source should create a model");
+        };
+        create
+            .body
+            .try_map_resource_versions(|resource, requested| match requested {
+                nervix_models::RequestedResourceVersion::Number(version) => Ok(version),
+                nervix_models::RequestedResourceVersion::Latest => Err(resource.clone()),
+            })
+            .expect("test sources name explicit resource versions")
+    }
+
+    #[test]
+    fn a_client_consumer_error_route_reads_its_output_record_as_all_optional_partial_output() {
+        let models_reading = |cents: &str| {
+            vec![
+                parsed("CREATE SCHEMA incoming (id STRING, amount I64);"),
+                parsed("CREATE SCHEMA outgoing (id STRING, cents I64);"),
+                parsed("CREATE SCHEMA failed_order (id STRING, amount I64, cents I64 OPTIONAL);"),
+                parsed("CREATE RELAY orders SCHEMA incoming UNBRANCHED;"),
+                parsed("CREATE RELAY failed_orders SCHEMA failed_order UNBRANCHED;"),
+                parsed(&format!(
+                    "CREATE CLIENT CONSUMER EMITTER app_output FROM orders TO SCHEMA outgoing \
+                     MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s \
+                     INHERIT id SET cents = input.amount * 100 BATCH MAX MESSAGES 16 MAX SIZE \
+                     1MiB FLUSH IMMEDIATE ON MESSAGE ERROR SEND TO failed_orders SET id = \
+                     input.id, amount = input.amount, cents = {cents} ON GENERAL ERROR LOG;"
+                )),
+            ]
+        };
+        let domain = DomainName::parse("default").expect("valid domain");
+
+        let valid_path = temp_db_path();
+        Registry::open(&valid_path)
+            .expect("registry should open")
+            .apply_batch(&domain, models_reading("partial_output.cents"))
+            .expect("a client consumer error route reads the record its route built");
+        let _ = fs::remove_dir_all(valid_path);
+
+        let invalid_path = temp_db_path();
+        let error = Registry::open(&invalid_path)
+            .expect("registry should open")
+            .apply_batch(&domain, models_reading("partial_output.amount"))
+            .expect_err("partial_output holds only the fields of the output schema");
+        assert!(format!("{error:?}").contains("partial_output"));
         let _ = fs::remove_dir_all(invalid_path);
     }
 

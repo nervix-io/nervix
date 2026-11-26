@@ -1,8 +1,8 @@
 //! Serialize licensing requests, give the turn to waiting operators and hurry retries.
 //!
 //! Layer: control plane.
-//! - **Owns.** One request turn per node, the operators waiting for it, and the retry wakeups of
-//!   the attempt that holds it.
+//! - **Owns.** One request turn per node, the operators waiting for it, the retry wakeups of the
+//!   attempt that holds it, and the order of the commits that end or depend on the activation.
 //! - **Depends on.** Selected async mutual exclusion, value publication, notification and pure
 //!   future polling.
 //! - **Must not know.** HTTP, signed documents, policy grants or graph execution.
@@ -20,6 +20,12 @@
 //! A service notification hurries a refresh between retries the same way but never makes a release
 //! give its turn away, and an attempt that takes the turn represents every notification that
 //! preceded it.
+//!
+//! An operator's release commits locally without the turn, so it never waits behind a request to
+//! the licensing service. Three commits that end or depend on the cluster's activation take one
+//! order instead (`activation_commit`): the release, the start of a key rotation and a refreshed
+//! decision. That order is held only around those consensus writes, never while a request waits
+//! for the service, and a holder of the turn takes it after the turn, never the reverse.
 
 use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -33,6 +39,9 @@ use nervix_recovery::Discarded as _;
 #[derive(Default)]
 pub(in crate::application) struct LicensingRequests {
     turn: Mutex<()>,
+    /// The order of the commits that end or depend on the cluster's activation: a release, the
+    /// start of a key rotation and a refreshed decision.
+    activation_commits: Mutex<()>,
     /// The operator requests for the turn, published to the attempt that holds it.
     operators: watch::Sender<OperatorRequests>,
     /// The operator requests the attempt holding the turn has already been hurried for. Only that
@@ -141,6 +150,13 @@ impl LicensingRequests {
         let operators = *self.operators.borrow();
         self.begin_turn(operators);
         turn
+    }
+
+    /// Take the order of a commit that ends or depends on the cluster's activation. It never
+    /// waits for the request turn: a holder of the turn takes this order only around a consensus
+    /// write and gives it back before it asks the licensing service anything.
+    pub(super) async fn activation_commit(&self) -> MutexGuard<'_, ()> {
+        self.activation_commits.lock().await
     }
 
     pub(super) async fn foreground(&self) -> MutexGuard<'_, ()> {
@@ -363,6 +379,41 @@ mod tests {
         drop(first);
         let second = second.await;
         drop(second);
+    }
+
+    #[nervix_primitives::test]
+    async fn an_activation_commit_never_waits_for_an_attempt_holding_the_turn() {
+        let requests = LicensingRequests::default();
+        let refresh = requests.background().await;
+        let mut operator = std::pin::pin!(requests.foreground());
+        assert!(futures_util::poll!(&mut operator).is_pending());
+        let release = requests.activation_commit().now_or_never().assured(
+            "a release's commit takes its order while a refresh holds the turn and an operator \
+             waits for it",
+        );
+        drop(release);
+        assert!(requests.turn.try_lock().is_err());
+        drop(refresh);
+        let operator = timeout(Duration::from_secs(1), operator)
+            .await
+            .assured("the operator takes the turn the refresh gave back");
+        drop(operator);
+    }
+
+    #[nervix_primitives::test]
+    async fn commits_that_end_or_depend_on_the_activation_take_their_order_one_at_a_time() {
+        let requests = LicensingRequests::default();
+        let release = requests.activation_commit().await;
+        let mut rotation = std::pin::pin!(requests.activation_commit());
+        assert!(
+            futures_util::poll!(&mut rotation).is_pending(),
+            "a rotation cannot start while a release commits"
+        );
+        drop(release);
+        let rotation = timeout(Duration::from_secs(1), rotation)
+            .await
+            .assured("the rotation starts once the release committed");
+        drop(rotation);
     }
 
     #[nervix_primitives::test]

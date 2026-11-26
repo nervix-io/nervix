@@ -4,13 +4,18 @@ Labels describe named entities in Nervix. They are a map of string keys to strin
 through Plexus and committed with the entity. Each owner keeps its own labels. Labels have no
 effect on permissions, authentication, placement, or metric dimensions.
 
-Domains, logical resources, cluster users and every domain Model support labels. Models include
-schemas, all wire-schema kinds, clients, ingestors, emitters, processors, relays, configured
-branches, virtual hosts, endpoints, codecs, signaling protocols, generators, lookups, UDFs and
-placement definitions. Models and resource versions do not inherit labels from their domain or
+Domains, logical resources, cluster users and every domain Model support labels. The Models are
+schemas, the three wire-schema kinds, codecs, clients, virtual hosts, endpoints, signaling
+protocols, parametrizers, relays, ingestors, reingestors, generators, hash maps, junctions,
+deduplicators, correlators, reorderers, window processors, inferencers, WASM processors, emitters,
+placements and UDFs. Models and resource versions do not inherit labels from their domain or
 resource. Runtime branches, partitions, execution instances, resource versions, sessions and
 subscriptions have no label maps. Physical node tags follow the
-[node settings](node-settings.md) contract.
+[node settings](node-settings.md#tags) contract.
+
+[Entity Label Architecture](entity-labels-architecture.md) describes how labels are built, why
+they are plain values with no inheritance and no meaning of their own, and how they differ from
+node tags and metric labels.
 
 ## Keys, Values And Limits
 
@@ -91,8 +96,10 @@ and `REVERT` lifecycle. A transaction applies resource edits in statement order,
 to a resource created earlier in that transaction. The attached session reads its staged labels.
 Other sessions observe committed labels until the commit applies the edit. Conflicting edits
 follow the same candidate and commit checks as configuration changes. Reversion discards queued
-changes. Domain and user label edits are administrative commands and are refused inside a
-transaction. Their reads show committed labels even in a session with an attached transaction.
+changes. Like every change to a domain's Models, a Model label edit is refused while the domain is
+paused by an alteration or is stopping. Domain and user label edits are administrative commands
+and are refused inside a transaction. Their reads show committed labels even in a session with an
+attached transaction.
 
 `SHOW LABELS` returns one bounded typed result containing the resolved owner identity, complete
 label map and a committed revision or an explicitly staged transaction view. `FORMAT TEXT` is
@@ -105,9 +112,10 @@ The result also carries the committed policy revision and the four limits captur
 A client validates the received complete set against that policy and its transport's outer bounds.
 
 `DESCRIBE DOMAIN` and `DESCRIBE RESOURCE <name>` include labels in the text and typed result.
-Individual resource version descriptions omit labels. Model `DESCRIBE` and canonical
-`SHOW CREATE` expose the same metadata where those commands exist. Canonical creation text
-preserves every key and exact value.
+Individual resource version descriptions omit labels. Every Model `DESCRIBE` shows the entity's
+labels: as a `labels:` line holding the map as JSON, or, for `DESCRIBE INFERENCER`, in the
+canonical definition it prints. Canonical `SHOW CREATE` exposes the same metadata, and canonical
+creation text preserves every key and exact value.
 
 ## Execution And Durability
 

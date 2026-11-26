@@ -96,7 +96,7 @@ Clearing the guest's own fields is an ordinary application-state mutation that t
 Each input or output payload is one size-prefixed FlatBuffer whose root is the
 `Message` union in
 [`nervix_wasm.fbs`](../../crates/nervix-wasm-protocol/schema/nervix_wasm.fbs).
-Every buffer carries the `NVWY` file identifier. The ABI function's size
+Every buffer carries the `NVWZ` file identifier. The ABI function's size
 argument or return value must agree with the internal FlatBuffers size prefix.
 Arrow IPC values are FlatBuffers byte vectors and are read as borrowed slices
 without deserializing or copying them. Crossing the WebAssembly linear-memory
@@ -329,6 +329,12 @@ state restoration changes subsequent keep/drop decisions. Preserved rows carry
 their complete input row sidecars, including `source_token`, and unchanged
 fields are emitted as input-column references. Dropped rows are listed in the
 emitted envelope's `acked` sidecar.
+
+When its input has a `DURATION` field named `wait`, the Rust guest also sums the
+`wait` of every row it accepts into a total it saves after the row ordinal, so
+its state is sixteen bytes instead of eight. A required `DURATION` destination
+field named `total_wait` receives, for each preserved row, the total after that
+row, and the guest describes the total as its one-row `waits` section.
 
 Sentinel first values exercise the error paths in both guests: `-100` routes a
 message error, `-200` reports a global error, `-300` fails the batch with a

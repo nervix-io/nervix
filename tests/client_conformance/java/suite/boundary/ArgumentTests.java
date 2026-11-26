@@ -25,6 +25,15 @@ public final class ArgumentTests {
                 assertThrows(Nervix.InvalidArgumentException.class, () -> options.connectionAttemptDelay(seconds));
             }
         }
+        // A token accepts the deadlines the Rust client accepts: one millisecond through one day.
+        for (double seconds : new double[] {0, 0.0009, 86_400.001}) {
+            assertThrows(Nervix.InvalidArgumentException.class, () -> Nervix.Cancel.deadline(seconds));
+        }
+        for (double seconds : new double[] {0.001, 86_400}) {
+            try (var accepted = Nervix.Cancel.deadline(seconds)) {
+                assertNotNull(accepted);
+            }
+        }
         // ANCHOR: lifetimes
         var fields = new Nervix.Fields();
         fields.close();

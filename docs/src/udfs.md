@@ -43,10 +43,8 @@ CREATE [IF NOT EXISTS] UDF <name>
 ```
 
 A declaration has between one and eight arguments. Argument and return types use the schema type
-grammar: every scalar type but `DURATION`, `VEC<T>`, and `ARRAY<T, n>` are accepted. No column
-bridge reads or writes a `DURATION` yet, so `CREATE UDF` refuses a signature that names one, alone
-or as a list element, with an error naming the argument (`UDF 'f' in domain 'd' cannot take
-DURATION argument 'value'`) or the result (`UDF 'f' in domain 'd' cannot return a DURATION`). Code is bounded by the committed `UDF_CODE_BYTES` cluster parameter, 64 KiB by default.
+grammar: every scalar type, `VEC<T>`, and `ARRAY<T, n>` are accepted. Code is bounded by the
+committed `UDF_CODE_BYTES` cluster parameter, 64 KiB by default.
 The declared signature must exactly match the named Roto entry function; implicit casts are never
 inserted.
 
@@ -71,9 +69,27 @@ CREATE UDF risk_band
 
 The Roto column names for scalar declarations are `U8Column`, `I8Column`, `U16Column`,
 `I16Column`, `U32Column`, `I32Column`, `U64Column`, `I64Column`, `F32Column`, `F64Column`,
-`BoolColumn`, `StringColumn`, `BytesColumn`, and `DatetimeColumn`. A one-level sequence uses
-`VecU8Column` through `VecDatetimeColumn`, including `VecBytesColumn`; deeper nesting uses
-`AnyColumn`. A bytes column carries Arrow `Binary` values directly.
+`BoolColumn`, `StringColumn`, `BytesColumn`, `DatetimeColumn`, and `DurationColumn`. A one-level
+sequence uses `VecU8Column` through `VecDurationColumn`, including `VecBytesColumn`; deeper nesting
+uses `AnyColumn`. A bytes column carries Arrow `Binary` values directly.
+
+A duration column carries Arrow `Duration(Nanosecond)` values, each a signed 64-bit count of
+nanoseconds, which Roto's `i64` holds exactly; no value is narrowed or rounded on the way in or out.
+A UDF computes with a duration directly, with the operations listed under
+[Roto column operations](#roto-column-operations), and writes a constant length of time with a
+unit function:
+
+```plexus
+CREATE UDF padded_wait
+  WITH ROTO_0_13
+  ARGS (wait DURATION)
+  RETURNS DURATION
+  CODE $roto$
+    fn padded_wait(wait: DurationColumn) -> DurationColumn {
+        wait.add_s(millis(250))
+    }
+  $roto$;
+```
 
 ## Calling UDFs
 
@@ -178,13 +194,23 @@ The `ROTO_0_13` catalog currently includes:
 - boolean columns: `and`, `or`, `not`, plus string-column `select`;
 - string columns: `trim`, `contains_s`, `regexp_replace`, and the slow-path `get`;
 - `I64Column.cast_f64()` and `DatetimeColumn.lt_s(Timestamp)`;
+- duration columns: `add` and `sub` with another duration column and their `_s` forms with a
+  `Duration`, `mul_s` and `div_s` by an `i64`, `eq`, `lt`, `gt` and their `_s` forms, batch
+  `min`/`max` as a `Duration`, and `nanos()`, which gives the same values as an `I64Column` of
+  nanoseconds without copying them. A duration multiplied by a duration is not a length of time,
+  so no such operation exists;
+- `Duration` constants: `nanos`, `micros`, `millis`, `seconds`, `minutes`, `hours` and `days`,
+  each taking an `i64` count of its unit, such as `seconds(30)`. A UDF that defines a function of
+  one of these names keeps its own;
 - `VecStringColumn.contains_s`;
 - string `coalesce`, `when_s(...).when_s(...).otherwise_s(...)`, and `reject_where_s`;
 - `ColumnBuilder.bool`, `push`, `push_null`, and `finish` for explicit per-row fallback code;
 - volatile `now`, `rand_f64`, and `uuid_v4`.
 
-Arithmetic overflow, division by zero, and explicit rejection produce per-row errors. Invalid
-scalar configuration such as a malformed regular expression fails the batch.
+Arithmetic overflow, division by zero, and explicit rejection produce per-row errors. A duration
+result beyond the 64-bit nanosecond range, about 106,751 days either side of zero, is an overflow
+like any other. Invalid scalar configuration such as a malformed regular expression, or a
+`Duration` constant outside that range such as `days(200000)`, fails the batch.
 
 Use column operations whenever possible. `get` and a builder are the explicit slow path for logic
 that has no vectorized kernel.

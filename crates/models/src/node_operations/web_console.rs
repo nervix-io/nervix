@@ -23,7 +23,7 @@ use rkyv::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::NodeOperationalError;
+use super::{LARGEST_RESTORE_CHUNK_BYTES, LONGEST_CLIENT_WAIT, NodeOperationalError};
 use crate::{NodeCapabilities, Setting, SettingDefinition, settings::archive};
 
 /// The resolution of a browser timer: the shortest wait the web console takes, and the unit every
@@ -37,18 +37,8 @@ use crate::{NodeCapabilities, Setting, SettingDefinition, settings::archive};
 )]
 pub const BROWSER_TIMER_RESOLUTION: Duration = Duration::from_millis(1);
 
-/// The longest wait the web console takes.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the node settings chapter bounds every web console wait at 24 hours, as the \
-                  Rust client library bounds its deadlines and backoffs"
-    )
-)]
-pub const LONGEST_WEB_CONSOLE_WAIT: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// Refuses a web console wait a browser timer cannot keep exactly, or one beyond the longest wait.
+/// Refuses a web console wait a browser timer cannot keep exactly, or one beyond the longest wait
+/// a client takes.
 fn validate_wait(
     setting: &'static str,
     value: Duration,
@@ -58,12 +48,12 @@ fn validate_wait(
         .checked_rem(BROWSER_TIMER_RESOLUTION.as_nanos())
         .assured("the timer resolution is a positive duration");
     let whole_milliseconds = below_resolution == 0;
-    if !whole_milliseconds || value < BROWSER_TIMER_RESOLUTION || value > LONGEST_WEB_CONSOLE_WAIT {
+    if !whole_milliseconds || value < BROWSER_TIMER_RESOLUTION || value > LONGEST_CLIENT_WAIT {
         return Err(Report::new(NodeOperationalError::WebConsoleWait {
             setting,
             value,
             minimum: BROWSER_TIMER_RESOLUTION,
-            maximum: LONGEST_WEB_CONSOLE_WAIT,
+            maximum: LONGEST_CLIENT_WAIT,
         }));
     }
     Ok(())
@@ -203,19 +193,6 @@ impl WebConsoleRestoreFrameCapacity {
     )]
     pub const DEFAULT: u64 = 4;
 
-    /// The most archive bytes one restore frame carries: a stream's chunk is the smaller of this
-    /// and half the session frame limit the leader announced.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "the backup and restore chapter's limits cap restore chunks from the Rust \
-                      client and the console alike at 256 KiB, or half the session frame when \
-                      that is smaller"
-        )
-    )]
-    pub const CHUNK_BYTES: u32 = 256 * 1024;
-
     /// The most frames whose largest chunks the browser can count as queued: it reports a
     /// WebSocket's queued bytes as a 32-bit count.
     #[cfg_attr(
@@ -226,7 +203,7 @@ impl WebConsoleRestoreFrameCapacity {
                       every frame the queue admits at the largest restore chunk"
         )
     )]
-    pub const MAXIMUM: u32 = u32::MAX / Self::CHUNK_BYTES;
+    pub const MAXIMUM: u32 = u32::MAX / LARGEST_RESTORE_CHUNK_BYTES;
 }
 
 impl SettingDefinition for WebConsoleRestoreFrameCapacity {
@@ -474,7 +451,7 @@ mod tests {
         for value in [
             Duration::ZERO,
             Duration::from_micros(1500),
-            LONGEST_WEB_CONSOLE_WAIT + BROWSER_TIMER_RESOLUTION,
+            LONGEST_CLIENT_WAIT + BROWSER_TIMER_RESOLUTION,
         ] {
             let refused = WebConsoleCapabilities::resolve(WebConsoleCapabilityValues {
                 request_timeout: Some(value),
@@ -489,7 +466,7 @@ mod tests {
                 }
             ));
         }
-        for value in [BROWSER_TIMER_RESOLUTION, LONGEST_WEB_CONSOLE_WAIT] {
+        for value in [BROWSER_TIMER_RESOLUTION, LONGEST_CLIENT_WAIT] {
             let accepted = WebConsoleCapabilities::resolve(WebConsoleCapabilityValues {
                 request_timeout: Some(value),
                 ..Default::default()

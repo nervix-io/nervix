@@ -92,9 +92,9 @@ pub use datetime::{
 };
 pub use error::{
     BytesOperation, CollectionLimit, CompileError, CompileErrorCode, DatetimeOperation,
-    DivisionOperation, ErrorCode, FloatOperation, IntegerOperation, IpOperation, RowErrorLengths,
-    RowErrorMask, RowErrors, RuntimeError, ShiftOperation, SideError, SideErrorReason,
-    TextOperation, UrlOperation,
+    DivisionOperation, DurationOperation, ErrorCode, FloatOperation, IntegerOperation, IpOperation,
+    RowErrorLengths, RowErrorMask, RowErrors, RuntimeError, ShiftOperation, SideError,
+    SideErrorReason, TextOperation, UrlOperation,
 };
 pub use extremum::{ClampBoundsDefect, Extremum};
 pub use frontend::{

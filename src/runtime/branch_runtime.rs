@@ -35,6 +35,26 @@ use super::*;
 )]
 const BRANCH_HANDOFF_CAPACITY: usize = 1;
 
+/// How a branched route of an ingestor or a reingestor ends when its owner stops it.
+///
+/// A route has no time limit of its own: only the operation that stops it does. A planned stop
+/// finishes the work in the route's hands however long that takes, and only an enforced operation
+/// ends it at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum RouteStop {
+    /// The route takes its remaining input, waits for every branch's dispatch in hand and every
+    /// one queued behind it, then writes its final branch snapshot and removes its branches.
+    Finish,
+    /// An enforced operation ends the route at once: the delivery of every branch ends, every
+    /// batch the route still holds or has not taken yet is refused with a reason, and the route
+    /// still writes its final branch snapshot and removes its branches.
+    Now,
+}
+
+/// Why an enforced stop refuses a batch its branched route held or had not taken yet.
+pub(super) const ENFORCED_ROUTE_STOP: &str =
+    "an enforced stop ended the branched route before it delivered this batch";
+
 /// Every way a branched entrypoint fails to take one input into the concrete branch it belongs to,
 /// before the input's routes buffer it. The ingestor or reingestor names itself when it reports
 /// the failure, and the acknowledgements of the input fail with it.
@@ -98,6 +118,9 @@ pub(super) struct PendingMaterializedBatch {
 
 pub(super) struct MaterializedBatchWaitContext<'a> {
     pub(super) shutdown_rx: &'a mut watch::Receiver<bool>,
+    /// The waiting task's own stop, apart from its domain's shutdown, when it has one. A wait for
+    /// required state ends on it as it ends on the shutdown.
+    pub(super) stop: Option<&'a CancellationToken>,
     pub(super) wait_for_required_state: bool,
     pub(super) quiesce_work: Option<&'a mut NodeQuiesceWorkGuard>,
 }
@@ -194,13 +217,15 @@ pub(super) struct BranchExecutionRuntime {
     pub(super) sender: mpsc::Sender<BranchedEntrypointInput>,
     pub(super) checkpoints:
         mpsc::Sender<oneshot::Sender<OwnershipHandoffResult<PersistedRuntimeStateEntry>>>,
-    pub(super) shutdown: watch::Sender<bool>,
+    /// How the branch lifecycle task is asked to end; `None` while it runs.
+    stop: watch::Sender<Option<RouteStop>>,
     pub(super) task: nervix_primitives::sync::blocking::Mutex<Option<JoinHandle<()>>>,
 }
 
 pub(super) struct IngestorRouteRuntime {
     pub(super) sender: mpsc::Sender<BranchedEntrypointInput>,
-    pub(super) shutdown: watch::Sender<bool>,
+    /// How the route task is asked to end; `None` while it runs.
+    stop: watch::Sender<Option<RouteStop>>,
     pub(super) task: nervix_primitives::sync::blocking::Mutex<Option<JoinHandle<()>>>,
     pub(super) branch_runtime: Arc<BranchExecutionRuntime>,
 }
@@ -233,6 +258,7 @@ pub(super) struct IngestorRouteTask {
     pub(super) remote_ack_timing: SharedRemoteAckTiming,
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct BranchExecutionDispatchContext<'a> {
     pub(super) runtime_handle: &'a Runtime,
     pub(super) domain: &'a DomainName,
@@ -311,6 +337,17 @@ impl BranchDispatchLanes {
         for dispatch in queued {
             for ack in dispatch.batch.acks.iter() {
                 ack.no_ack(reason.to_string());
+            }
+        }
+    }
+
+    /// Refuses every batch queued behind a branch's dispatch in hand, for every branch.
+    fn reject_all_queued(&mut self, reason: &str) {
+        for (_, queued) in self.queued.drain() {
+            for dispatch in queued {
+                for ack in dispatch.batch.acks.iter() {
+                    ack.no_ack(reason.to_string());
+                }
             }
         }
     }
@@ -1156,6 +1193,40 @@ impl IngestorRouteTask {
         self.flush_all().await;
     }
 
+    /// Refuses, for an enforced stop, every batch this route buffered and every one it has not
+    /// taken yet, so nothing it held reaches a branch.
+    async fn refuse_held(&mut self, input: &mut mpsc::Receiver<BranchedEntrypointInput>) {
+        input.close();
+        while let Some(message) = input.recv().await {
+            nervix_primitives::task::consume_budget().await;
+            for ack in message.acks.iter() {
+                ack.no_ack(ENFORCED_ROUTE_STOP.to_string());
+            }
+        }
+        for (_, pending) in self.pending.drain() {
+            self.quiesce.remove_batches(pending.batches.len());
+            for batch in pending.batches {
+                for ack in batch.acks.iter() {
+                    ack.no_ack(ENFORCED_ROUTE_STOP.to_string());
+                }
+            }
+        }
+    }
+
+    /// Ends this route as `stop` asks: a planned stop hands everything it holds and has not taken
+    /// yet to its branches, and an enforced stop refuses all of it.
+    async fn end(
+        &mut self,
+        stop: RouteStop,
+        input: &mut mpsc::Receiver<BranchedEntrypointInput>,
+        domain_clock: &DomainClock,
+    ) {
+        match stop {
+            RouteStop::Finish => self.drain_and_flush(input, domain_clock).await,
+            RouteStop::Now => self.refuse_held(input).await,
+        }
+    }
+
     pub(super) fn flush_deadlines(&self) -> Vec<BranchBufferDeadline> {
         self.pending
             .values()
@@ -1174,7 +1245,7 @@ impl IngestorRouteTask {
     pub(super) async fn run(
         mut self,
         mut input: mpsc::Receiver<BranchedEntrypointInput>,
-        mut shutdown_rx: watch::Receiver<bool>,
+        mut stop_rx: watch::Receiver<Option<RouteStop>>,
         mut force_flush: DomainForceFlushParticipant,
     ) {
         let domain_clock = match self.runtime_handle.bind_domain_clock(&self.domain) {
@@ -1215,10 +1286,17 @@ impl IngestorRouteTask {
             let has_flush_deadlines = !flush_deadlines.is_empty();
             nervix_primitives::select! {
                 biased;
-                // A signalled stop and a dropped sender both mean the owner is gone, and this
-                // arm drains and finishes either way, so the outcome carries nothing to read.
-                _ = shutdown_rx.changed() => {
-                    self.drain_and_flush(&mut input, &domain_clock).await;
+                changed = stop_rx.changed() => {
+                    let stop = match changed {
+                        // The runtime that owned this route is gone without asking for an ending,
+                        // so the route finishes what it holds.
+                        Err(_) => RouteStop::Finish,
+                        Ok(()) => match *stop_rx.borrow_and_update() {
+                            Some(stop) => stop,
+                            None => continue,
+                        },
+                    };
+                    self.end(stop, &mut input, &domain_clock).await;
                     break;
                 }
                 completion = force_flush.changed(), if !ownership_frozen => {
@@ -1287,10 +1365,10 @@ impl IngestorRouteRuntime {
             expiration_scan_interval,
         );
         let (sender, input) = mpsc::channel(BRANCH_HANDOFF_CAPACITY);
-        let (shutdown, shutdown_rx) = watch::channel(false);
+        let (stop, stop_rx) = watch::channel(None);
         let runtime = Arc::new(Self {
             sender,
-            shutdown,
+            stop,
             task: nervix_primitives::sync::blocking::Mutex::new(None),
             branch_runtime: branch_runtime.clone(),
         });
@@ -1311,7 +1389,7 @@ impl IngestorRouteRuntime {
                 pending: HashMap::default(),
                 quiesce,
             }
-            .run(input, shutdown_rx, force_flush),
+            .run(input, stop_rx, force_flush),
         );
         *runtime.task.lock() = Some(task);
         runtime
@@ -1321,13 +1399,22 @@ impl IngestorRouteRuntime {
         self.sender.clone()
     }
 
-    pub(super) async fn shutdown(&self, wait: TaskStopWait) {
-        self.shutdown.send_replace(true);
+    /// Stops this route as `stop` asks and waits until it and its branches have ended, with no
+    /// limit of its own.
+    ///
+    /// A planned stop hands what the route task buffered to the branches before they finish, so
+    /// the route task ends first. An enforced stop tells the branches first, so their deliveries
+    /// end while the route task refuses what it held.
+    pub(in crate::runtime) async fn stop(&self, stop: RouteStop) {
+        if stop == RouteStop::Now {
+            self.branch_runtime.request_stop(stop);
+        }
+        self.stop.send_replace(Some(stop));
         let task = self.task.lock().take();
         if let Some(task) = task {
             task.join_after_shutdown("branch entrypoint").await;
         }
-        self.branch_runtime.shutdown(wait).await;
+        self.branch_runtime.stop(stop).await;
     }
 }
 
@@ -1541,6 +1628,50 @@ impl BranchExecutionRuntime {
         .await;
     }
 
+    /// Ends the route as `stop` asks, with no limit of its own. Either way the route stops taking
+    /// input and every dispatch in hand completes, so the branches it removes afterwards hold
+    /// nothing in flight.
+    ///
+    /// A planned stop dispatches the input it had not taken yet and every batch queued behind a
+    /// branch's dispatch in hand, however long their deliveries wait. An enforced stop ends the
+    /// delivery of every branch at once and refuses those batches with a reason.
+    async fn end_route(
+        context: BranchExecutionDispatchContext<'_>,
+        stop: RouteStop,
+        input: &mut mpsc::Receiver<BranchedEntrypointInput>,
+        instances: &mut EntrypointBranches,
+        lanes: &mut BranchDispatchLanes,
+        next_deadline: &mut Option<Timestamp>,
+    ) {
+        input.close();
+        match stop {
+            RouteStop::Finish => {
+                while let Some(message) = input.recv().await {
+                    nervix_primitives::task::consume_budget().await;
+                    Self::enqueue_prepared_inputs(context, instances, vec![message], lanes).await;
+                }
+            }
+            RouteStop::Now => {
+                while let Some(message) = input.recv().await {
+                    nervix_primitives::task::consume_budget().await;
+                    for ack in message.acks.iter() {
+                        ack.no_ack(ENFORCED_ROUTE_STOP.to_string());
+                    }
+                }
+                for (_, branch) in instances.instances() {
+                    branch.delivery_lifetime.cancel();
+                }
+                lanes.reject_all_queued(ENFORCED_ROUTE_STOP);
+            }
+        }
+        // A planned stop starts each queued batch as the dispatch ahead of it completes. After an
+        // enforced stop nothing is queued, and every dispatch in hand ends with its delivery.
+        while let Some(completion) = lanes.pending.next().await {
+            nervix_primitives::task::consume_budget().await;
+            Self::finish_dispatch(context, instances, lanes, next_deadline, completion).await;
+        }
+    }
+
     /// Routes one dispatch failure through the entrypoint's own error policy.
     ///
     /// Ingestors own a general error policy for their own intake, while every other branch
@@ -1667,13 +1798,13 @@ impl BranchExecutionRuntime {
         // input from ingestor/re-ingestor
         let (sender, mut input) = mpsc::channel(BRANCH_HANDOFF_CAPACITY);
         let (checkpoints, mut checkpoint_requests) = mpsc::channel(BRANCH_HANDOFF_CAPACITY);
-        let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let (stop, mut stop_rx) = watch::channel(None);
         let runtime = Arc::new(Self {
             domain: domain.clone(),
             ingestor: ingestor.clone(),
             sender,
             checkpoints,
-            shutdown,
+            stop,
             task: nervix_primitives::sync::blocking::Mutex::new(None),
         });
         runtime_handle.register_branch_lifecycle_metrics(&domain, template.parametrizer.as_ref());
@@ -1957,44 +2088,32 @@ impl BranchExecutionRuntime {
                         )
                         .await;
                     }
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            input.close();
-                            while let Some(message) = input.recv().await {
-                                nervix_primitives::task::consume_budget().await;
-                                Self::enqueue_prepared_inputs(
-                                    BranchExecutionDispatchContext {
-                                        runtime_handle: &runtime_handle,
-                                        domain: &domain,
-                                        ingestor: &ingestor,
-                                        template: &template,
-                                        domain_clock: &domain_clock,
-                                    },
-                                    &mut instances,
-                                    vec![message],
-                                    &mut lanes,
-                                )
-                                .await;
-                            }
-                            while let Some(completion) = lanes.pending.next().await {
-                                nervix_primitives::task::consume_budget().await;
-                                Self::finish_dispatch(
-                                    BranchExecutionDispatchContext {
-                                        runtime_handle: &runtime_handle,
-                                        domain: &domain,
-                                        ingestor: &ingestor,
-                                        template: &template,
-                                        domain_clock: &domain_clock,
-                                    },
-                                    &mut instances,
-                                    &mut lanes,
-                                    &mut next_branch_deadline,
-                                    completion,
-                                )
-                                .await;
-                            }
-                            break;
-                        }
+                    changed = stop_rx.changed() => {
+                        let stop = match changed {
+                            // The runtime that owned this route is gone without asking for an
+                            // ending, so the route finishes what it holds.
+                            Err(_) => RouteStop::Finish,
+                            Ok(()) => match *stop_rx.borrow_and_update() {
+                                Some(stop) => stop,
+                                None => continue,
+                            },
+                        };
+                        Self::end_route(
+                            BranchExecutionDispatchContext {
+                                runtime_handle: &runtime_handle,
+                                domain: &domain,
+                                ingestor: &ingestor,
+                                template: &template,
+                                domain_clock: &domain_clock,
+                            },
+                            stop,
+                            &mut input,
+                            &mut instances,
+                            &mut lanes,
+                            &mut next_branch_deadline,
+                        )
+                        .await;
+                        break;
                     }
                     _ = freeze.changed(), if ownership_frozen => {}
                     result = wait_for_branch_deadline(
@@ -2073,6 +2192,15 @@ impl BranchExecutionRuntime {
         self.sender.clone()
     }
 
+    /// Asks the branch lifecycle task to end as `stop` says, without waiting for it.
+    pub(super) fn request_stop(&self, stop: RouteStop) {
+        self.stop.send_replace(Some(stop));
+    }
+
+    /// Stops the branch lifecycle task as `stop` asks and waits until it has ended, with no limit
+    /// of its own: a planned stop finishes the dispatch of every branch, and an enforced one ends
+    /// their deliveries at once. Either way the task writes its final branch snapshot and removes
+    /// its branches before it ends.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -2080,58 +2208,28 @@ impl BranchExecutionRuntime {
             reason = "install or terminate the one branch lifecycle task and its join handle"
         )
     )]
-    pub(super) async fn shutdown(&self, wait: TaskStopWait) {
-        self.shutdown.send_replace(true);
-        let Some(mut task) = self.task.lock().take() else {
+    pub(super) async fn stop(&self, stop: RouteStop) {
+        self.request_stop(stop);
+        let task = self.task.lock().take();
+        let Some(task) = task else {
             return;
         };
-
-        let stopped = wait
-            .wait(&mut task, |waited| {
+        match task.await {
+            Ok(()) => {}
+            Err(error) if error.is_cancelled() => {
                 warn!(
                     domain = self.domain.as_str(),
                     ingestor = self.ingestor.as_str(),
-                    waited = %humantime::format_duration(waited),
-                    "branched ingestor task is still finishing the work it holds; waiting for it"
+                    "branched ingestor task was cancelled"
                 );
-            })
-            .await;
-        match stopped {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                if error.is_cancelled() {
-                    warn!(
-                        domain = self.domain.as_str(),
-                        ingestor = self.ingestor.as_str(),
-                        "branched ingestor task was cancelled"
-                    );
-                } else {
-                    warn!(
-                        domain = self.domain.as_str(),
-                        ingestor = self.ingestor.as_str(),
-                        error = %error,
-                        "branched ingestor task join failed"
-                    );
-                }
             }
-            Err(grace) => {
+            Err(error) => {
                 warn!(
                     domain = self.domain.as_str(),
                     ingestor = self.ingestor.as_str(),
-                    grace_period = %humantime::format_duration(grace),
-                    "branched ingestor task exceeded shutdown grace period; aborting"
+                    error = %error,
+                    "branched ingestor task join failed"
                 );
-                task.abort();
-                if let Err(error) = task.await
-                    && !error.is_cancelled()
-                {
-                    warn!(
-                        domain = self.domain.as_str(),
-                        ingestor = self.ingestor.as_str(),
-                        error = %error,
-                        "aborted branched ingestor task join failed"
-                    );
-                }
             }
         }
     }

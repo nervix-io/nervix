@@ -50,6 +50,17 @@ pub(super) enum LicensingOperationError {
     Execution,
     #[error("licensing consensus proposal failed")]
     Consensus,
+    #[error("the cluster no longer holds the activation this refresh was for")]
+    Superseded,
+}
+
+/// What a refresh did with the activation it was for.
+enum RefreshOutcome {
+    /// A newer verified decision committed, or an automatic refresh found none needed.
+    Done,
+    /// The cluster no longer holds the activation: an operator's release, which commits without
+    /// the request turn, ended it while the refresh waited.
+    Superseded,
 }
 
 impl SessionServiceImpl {
@@ -187,7 +198,10 @@ impl SessionServiceImpl {
         &self,
     ) -> Result<(), Report<LicensingOperationError>> {
         let _turn = self.inner.licensing_requests.foreground().await;
-        self.refresh_license_once(RefreshTrigger::Explicit).await
+        match self.refresh_license_once(RefreshTrigger::Explicit).await? {
+            RefreshOutcome::Done => Ok(()),
+            RefreshOutcome::Superseded => Err(Report::new(LicensingOperationError::Superseded)),
+        }
     }
 
     async fn refresh_license_in_background(
@@ -195,14 +209,22 @@ impl SessionServiceImpl {
         hint: Option<RefreshHint>,
     ) -> Result<(), Report<LicensingOperationError>> {
         let _turn = self.inner.licensing_requests.background().await;
-        self.refresh_license_once(RefreshTrigger::Automatic(hint))
-            .await
+        match self
+            .refresh_license_once(RefreshTrigger::Automatic(hint))
+            .await?
+        {
+            RefreshOutcome::Done => {}
+            RefreshOutcome::Superseded => {
+                tracing::debug!("automatic licensing refresh ended with the activation it was for");
+            }
+        }
+        Ok(())
     }
 
     async fn refresh_license_once(
         &self,
         trigger: RefreshTrigger,
-    ) -> Result<(), Report<LicensingOperationError>> {
+    ) -> Result<RefreshOutcome, Report<LicensingOperationError>> {
         self.finish_cluster_key_rotation().await?;
         let state = self
             .inner
@@ -211,26 +233,43 @@ impl SessionServiceImpl {
             .licensing_snapshot()
             .initialized
             .ok_or_else(|| Report::new(LicensingOperationError::Uninitialized))?;
-        let operation = client::refresh(&state)
-            .ok_or_else(|| Report::new(nervix_consensus::LicenseDecisionError::NotActivated))
-            .change_context(LicensingOperationError::Rejected)?;
+        let Some(operation) = client::refresh(&state) else {
+            // A release commits without the request turn, so an automatic refresh can take the
+            // turn after the activation it was started for ended.
+            if let RefreshTrigger::Automatic(_) = trigger {
+                return Ok(RefreshOutcome::Superseded);
+            }
+            return Err(
+                Report::new(nervix_consensus::LicenseDecisionError::NotActivated)
+                    .change_context(LicensingOperationError::Rejected),
+            );
+        };
         let nervix_consensus::LicensingMode::Activated(activation) = &state.record.mode else {
             unreachable!("refresh operation requires activation")
         };
         if let RefreshTrigger::Automatic(_) = trigger
             && !trigger.needs_refresh(&state, clock::observe(self.inner.runtime.fault_injection()))
         {
-            return Ok(());
+            return Ok(RefreshOutcome::Done);
         }
         let expected_revision = activation.decision.revision;
+        let activation_id = activation.binding.activation_id;
         let request_id = clock::request_id(self.inner.runtime.fault_injection());
         let client = client::LicensingClient::new(self)
             .await
             .change_context(LicensingOperationError::Request)?;
-        let response = client
-            .perform(&state, operation, request_id)
-            .await
-            .change_context(LicensingOperationError::Request)?;
+        let response = match client.perform(&state, operation, request_id).await {
+            Ok(response) => response,
+            Err(error)
+                if matches!(
+                    error.current_context(),
+                    client::LicensingRequestError::Superseded
+                ) =>
+            {
+                return Ok(RefreshOutcome::Superseded);
+            }
+            Err(error) => return Err(error.change_context(LicensingOperationError::Request)),
+        };
         let environment = client.environment;
         let received_at = clock::observe(self.inner.runtime.fault_injection());
         let executor = self.inner.runtime.executor();
@@ -274,12 +313,21 @@ impl SessionServiceImpl {
             }
         };
         self.commit_licensing_trust(&received).await?;
-        match self
+        // A release commits without the request turn. The decision applies in the order the
+        // release's commit takes too, and only while the cluster still holds the activation it
+        // refreshed, so a release that committed first is never reported as a refused decision.
+        let order = self.inner.licensing_requests.activation_commit().await;
+        let committed = self.inner.consensus.observer().licensing_snapshot();
+        if !notifications::holds_activation(committed.initialized.as_ref(), activation_id) {
+            return Ok(RefreshOutcome::Superseded);
+        }
+        let applied = self
             .inner
             .consensus
             .apply_license_decision(received, expected_revision)
-            .await
-        {
+            .await;
+        drop(order);
+        match applied {
             Ok(()) => {
                 self.inner.licensing.record_request(
                     nervix_licensing_protocol::requests::Operation::Refresh,
@@ -287,7 +335,7 @@ impl SessionServiceImpl {
                     clock::observe(self.inner.runtime.fault_injection()),
                 );
                 tracing::info!("licensing decision refresh committed");
-                Ok(())
+                Ok(RefreshOutcome::Done)
             }
             Err(error) => {
                 let context = if error

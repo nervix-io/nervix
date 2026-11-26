@@ -19,7 +19,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{ClusterParameterError, ClusterParameterKey, ClusterParameterValues};
-use crate::{ClusterParameters, SettingDefinition};
+use crate::{ClusterParameters, SHORTEST_POSITIVE_DURATION, SettingDefinition};
 
 /// How long an unobserved member remains available.
 pub struct NodeUnavailabilityTimeout;
@@ -53,7 +53,7 @@ impl SettingDefinition for ProbeTimeout {
     const DERIVATION: Option<&'static str> =
         Some("node-unavailability-timeout / 10, at least one timer nanosecond");
     fn default_value(context: &ClusterParameterValues) -> Duration {
-        (context.node_unavailability_timeout() / 10).max(Duration::from_nanos(1))
+        (context.node_unavailability_timeout() / 10).max(SHORTEST_POSITIVE_DURATION)
     }
     fn validate(_: &Duration, _: &ClusterParameterValues) -> Result<(), Report<Infallible>> {
         Ok(())

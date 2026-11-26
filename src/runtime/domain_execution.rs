@@ -301,8 +301,8 @@ pub(super) struct DomainExecution {
     pub(super) endpoint_routes: HashMap<EndpointName, EndpointRoute>,
     pub(super) node_tasks: HashMap<NodeUnitRef, ScheduledNodeTask>,
     pub(super) emitter_tasks: HashMap<NodeUnitRef, ScheduledEmitterTask>,
-    pub(super) generator_tasks: HashMap<NodeUnitRef, JoinHandle<()>>,
-    pub(super) reingestor_tasks: HashMap<NodeRef, Vec<JoinHandle<()>>>,
+    pub(super) generator_tasks: HashMap<NodeUnitRef, GeneratorTask>,
+    pub(super) reingestor_tasks: HashMap<NodeRef, Vec<ReingestorTask>>,
     /// Placement-derived tasks grouped by the scheduled node whose assignment owns them, so a
     /// reassignment can replace one node's replication runtime without disturbing its siblings.
     pub(super) placement_tasks: HashMap<NodeUnitRef, PlacementTasks>,

@@ -297,7 +297,7 @@ pub(in crate::application::observation) struct RecordedCensus {
 mod tests {
     use std::num::NonZeroU16;
 
-    use nervix_execution::Executor;
+    use nervix_execution::{ADMISSION_TOKEN_BYTES, Executor};
 
     use super::*;
 
@@ -316,7 +316,7 @@ mod tests {
             owners: BTreeMap::new(),
             memory: GrowingCharge::new(
                 executor
-                    .try_reserve(MemoryClass::Bulk, 1)
+                    .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
                     .assured("bounded fixture admission"),
             ),
             max_bytes,
@@ -362,7 +362,7 @@ mod tests {
                     };
                     let mut inspection = fixture(&executor, case.count, 1_048_576);
                     let admission = executor
-                        .try_reserve(MemoryClass::Bulk, 1)
+                        .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
                         .assured("bounded job admission");
                     let holder = case.holder;
                     let claimant = case.claimant;
@@ -445,7 +445,7 @@ mod tests {
                     NonZeroU16::new(4).assured("four is positive"),
                 ),
                 executor
-                    .try_reserve(MemoryClass::Bulk, 1)
+                    .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
                     .assured("the empty bulk class admits the census"),
                 1_048_576,
             );
@@ -459,7 +459,7 @@ mod tests {
                 }
             });
             let charge = executor
-                .try_reserve(MemoryClass::Bulk, 1)
+                .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
                 .assured("bounded job admission");
             let inspection = executor
                 .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
@@ -511,7 +511,7 @@ mod tests {
         let executor = Executor::default();
         let mut inspection = fixture(&executor, 8, 1);
         let admission = executor
-            .try_reserve(MemoryClass::Bulk, 1)
+            .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
             .assured("bounded job admission");
         executor
             .run_cpu(CpuClass::Bulk, admission, move |_charge, cancellation| {

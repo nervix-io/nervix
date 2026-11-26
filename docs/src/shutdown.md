@@ -585,9 +585,11 @@ cannot complete, because the schedule assigns fewer replicas than it was capture
 longer executes the processor, fails and negatively acknowledges what it held.
 
 Runtime teardown gives each processor task a stop grace, and the processor task gives each of its
-branch tasks one of its own. Each branched ingestor task gets the same task stop grace: a delivery
-it still holds when that grace ends, such as one to a peer that is stopping with this node, is cut
-with the task, as the save's cuts are. A processor task still stopping its branches when its grace ends is
+branch tasks one of its own. A branched ingestor or reingestor route has no grace: the save stops
+it as a completed domain stop's teardown does, and it finishes the delivery of every branch.
+Terminal teardown ends every branched route no save stopped at once, as an enforced stop ends it:
+a delivery it still holds, such as one to a peer that is stopping with this node, is cut, as the
+save's cuts are. A processor task still stopping its branches when its grace ends is
 ended together with every branch task it holds. A branch still waiting for its checkpoint therefore
 never outlives its node: it cannot keep the node's runtime database open past terminal teardown,
 continue a checkpoint, or settle acknowledgements after the node stopped. Its unreleased
@@ -1169,6 +1171,16 @@ ended, its stop tells the checkpoint writer of each placement's state to make it
 waits for those writes and for the last write of each of its deduplicator, window and stateful
 inferencer branches, which a branch ended at its grace left to its snapshot task, before teardown
 moves to the next domain.
+
+The routes of an ingestor or a reingestor that divide rows into branches have no grace of their
+own. A domain's stop ends an ingestor's routes when it stops the ingestor, before the domain's
+other tasks, and a reingestor's routes once the domain's other tasks have ended. Each route takes
+the input it was handed, waits for every branch's delivery in hand and every one queued behind it,
+writes its final branch snapshot and removes its branches, however long those deliveries wait. A
+delivery that waits on a peer ends at that peer's request deadline, or when failure detection judges
+the peer gone. An enforced stop ends the routes at once instead: the delivery of every branch ends,
+every batch a route still holds is refused with a reason, and the route still writes its final
+branch snapshot and removes its branches.
 
 ### A Domain's Stop
 

@@ -2346,6 +2346,16 @@ the batch is presented again.
 
 ### Emitter And Emitter Rejections
 
+Every row error an emitter raises, whether its route, its codec, its destination or application,
+a publish that fails for good or its `GIVE UP AFTER` ended the row, hands the emitter's error route
+the row's original source record as `input`, the record the emitter's route built, if it built
+one, as the all-optional `partial_output`, and the materialized-state snapshot its batch was
+admitted with, as [The Message Error Record](#the-message-error-record) promises. The error route
+is checked against the emitter's input schema and, for `partial_output`, its codec's or client
+consumer's `TO SCHEMA` schema, so it builds its record from what it was written against;
+[Error routes](./emitters.md#error-routes) describes what an emitter keeps to answer a row that
+fails after its route ran.
+
 A batch payload's rejection becomes one message error per member, each a copy of the emitter's
 structured error: the members share its reference, so an operator can see that they failed
 together, while each keeps its own occurrence time and branch. A prepared row request's rejection,

@@ -714,6 +714,16 @@ static void test_boundary_fields_and_arguments(void) {
                                   NULL, &session), NX_ERROR_INVALID_ARGUMENT);
     REQUIRE(session == NULL);
     suite_kind(nx_cancel_with_deadline(UINT64_MAX, NULL), NX_ERROR_INVALID_ARGUMENT);
+    /* A token accepts the deadlines the Rust client accepts: one millisecond through one day. */
+    nx_cancel *outside = NULL;
+    suite_kind(nx_cancel_with_deadline(0, &outside), NX_ERROR_INVALID_ARGUMENT);
+    suite_kind(nx_cancel_with_deadline(86400001, &outside), NX_ERROR_INVALID_ARGUMENT);
+    REQUIRE(outside == NULL);
+    suite_check(nx_cancel_with_deadline(1, &outside));
+    HOLD(nx_cancel, outside);
+    nx_cancel *longest = NULL;
+    suite_check(nx_cancel_with_deadline(86400000, &longest));
+    HOLD(nx_cancel, longest);
 }
 
 /* ABI enums are signed discriminants: every named state is positive and distinguishable from

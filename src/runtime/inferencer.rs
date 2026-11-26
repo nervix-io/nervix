@@ -193,8 +193,10 @@ pub(crate) fn onnx_environment() -> error_stack::Result<&'static Environment, &'
 pub(crate) async fn probe_onnx_runtime(
     executor: &Executor,
 ) -> error_stack::Result<OnnxRuntimeDetection, OnnxRuntimeProbeError> {
+    // ONNX Runtime allocates what the probe loads itself, which no transient budget can stand
+    // for, so the probe takes only the admission token onto the bulk workers.
     let reservation = executor
-        .reserve(MemoryClass::Bulk, SESSION_LOAD_RESERVATION_BYTES)
+        .reserve_admission(MemoryClass::Bulk)
         .await
         .change_context(OnnxRuntimeProbeError::Execution)?;
     executor
@@ -466,18 +468,6 @@ fn report_native_diagnostic(
         }
     }
 }
-
-/// What loading a model is charged. ONNX Runtime allocates a session's memory itself and keeps it
-/// for as long as the inferencer holds the session, which no transient budget can stand for, so
-/// the charge only admits the load onto the bulk workers.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "one byte is an admission token for one inference session load job"
-    )
-)]
-const SESSION_LOAD_RESERVATION_BYTES: u64 = 1;
 
 struct RuntimeTensorSlice {
     shape: Vec<usize>,

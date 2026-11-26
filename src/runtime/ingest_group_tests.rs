@@ -30,7 +30,7 @@ use nervix_primitives::{
 use super::*;
 use crate::{
     runtime::{
-        branch_runtime::BranchExecutionRuntime,
+        branch_runtime::{BranchExecutionRuntime, ENFORCED_ROUTE_STOP},
         test_fixtures::{FilledCpuClass, single_worker_executor},
     },
     runtime_ack::{AckOutcome, AckProgress, AckRootTracker, AckSet},
@@ -1462,13 +1462,305 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         .expect("runtime consumer should remain open");
     assert_eq!(batch.message_count(), 1);
 
-    branched_runtime
-        .shutdown(crate::runtime::entity_gate::TaskStopWait::Teardown {
-            grace: crate::runtime::entity_gate::task_stop_grace(
-                nervix_models::DomainDrainTimeout::DEFAULT,
-            ),
+    branched_runtime.stop(RouteStop::Finish).await;
+    owner_task
+        .stop(TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
         })
-        .await;
+        .await
+        .expect("relay owner should stop");
+}
+
+/// One unbranched relay whose one runtime consumer nobody reads yet, so deliveries into it wait
+/// for room once its buffers are full, and the branch template of a route of the ingestor
+/// `notifications_ingestor` that delivers into it.
+struct UnreadRelay {
+    runtime: Runtime,
+    domain: DomainName,
+    fan_in: RelayRuntimeFanIn,
+    owner_task: RelayOwnerTask,
+    template: BranchInstanceTemplate,
+}
+
+impl UnreadRelay {
+    fn start() -> Self {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
+        let root_relay = named("notifications");
+        let fanout = RelayBoundaryFanout::direct_with_capacity(nonzero_capacity(1));
+        let fan_in =
+            RelayRuntimeFanIn::new(fanout.runtime_consumer_receiver_for_mode(AckMode::Attached));
+        let services = Arc::new(RelayBoundaryServices::new(
+            fanout,
+            1,
+            0,
+            Vec::new(),
+            None,
+            RelayBranchPresences::single(Arc::new(BranchPresence::new())),
+            nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
+        ));
+        let owner_task = runtime
+            .spawn_relay_owner_task(
+                &domain,
+                &root_relay,
+                Unit::SINGLE,
+                services.clone(),
+                RelayRetention::default(),
+            )
+            .expect("a whole relay schedules its single unit");
+        let template = BranchInstanceTemplate {
+            revision: ProcessorPlanRevision::new(),
+            owner: NodeUnitRef::new(
+                NodeRef::new(
+                    ModelKind::Ingestor,
+                    named::<ModelName>("notifications_ingestor"),
+                ),
+                Unit::SINGLE,
+            ),
+            root_relay: root_relay.clone(),
+            parametrizer: None,
+            branch_ttl: None,
+            branch_max_instances: None,
+            error_policies: ErrorPolicies::handled_by_log(),
+            relays: [(root_relay, RelayProcessorRelayTemplate { services })]
+                .into_iter()
+                .collect(),
+            processors: HashMap::default(),
+            wasm_state_reset: None,
+            partition_transition: None,
+        };
+        Self {
+            runtime,
+            domain,
+            fan_in,
+            owner_task,
+            template,
+        }
+    }
+}
+
+/// The schema of the rows the tests below hand a route.
+fn user_schema() -> Arc<CompiledSchema> {
+    test_schema(&[("user_id", ParseAsType::U32)])
+}
+
+/// Hands `route` one row per user id and returns each row's acknowledgement completion, in the
+/// same order.
+async fn send_user_rows(
+    route: &mpsc::Sender<BranchedEntrypointInput>,
+    user_ids: std::ops::RangeInclusive<u32>,
+) -> Vec<AckCompletion> {
+    let schema = user_schema();
+    let mut completions = Vec::new();
+    for user_id in user_ids {
+        let (acks, completion) = AckSet::root();
+        let batch = RelayRecordBatch::single(
+            schema.clone(),
+            None,
+            test_runtime_row([("user_id".to_string(), RuntimeValue::U32(user_id))]),
+            acks.attached(),
+        )
+        .expect("ingestor output batch should build");
+        route
+            .send(batch)
+            .await
+            .expect("the route takes input while it runs");
+        acks.ack_success();
+        completions.push(completion);
+    }
+    completions
+}
+
+/// Waits for each of `completions` and asserts that an enforced stop refused it with its reason.
+async fn assert_refused_by_the_enforced_stop(completions: Vec<AckCompletion>) {
+    for completion in completions {
+        match timeout(Duration::from_secs(1), completion.wait())
+            .await
+            .expect("the row's acknowledgement resolves with the stop")
+        {
+            AckOutcome::NoAck(reason) => assert_eq!(reason, ENFORCED_ROUTE_STOP),
+            other => panic!("the row must be refused with the stop's reason, got {other:?}"),
+        }
+    }
+}
+
+/// A branched entrypoint of one unbranched relay whose one runtime consumer nobody reads yet, so
+/// the entrypoint's deliveries wait for room once the relay's buffers are full.
+struct UnreadEntrypoint {
+    fan_in: RelayRuntimeFanIn,
+    owner_task: RelayOwnerTask,
+    branched: Arc<BranchExecutionRuntime>,
+}
+
+impl UnreadEntrypoint {
+    fn start() -> Self {
+        let UnreadRelay {
+            runtime,
+            domain,
+            fan_in,
+            owner_task,
+            template,
+        } = UnreadRelay::start();
+        let branched = BranchExecutionRuntime::new(
+            runtime,
+            domain,
+            named("notifications_ingestor"),
+            template,
+            Duration::from_secs(30),
+        );
+        Self {
+            fan_in,
+            owner_task,
+            branched,
+        }
+    }
+
+    /// Hands the entrypoint one row per user id and returns each row's acknowledgement
+    /// completion, in the same order.
+    async fn send(&self, user_ids: std::ops::RangeInclusive<u32>) -> Vec<AckCompletion> {
+        send_user_rows(&self.branched.sender(), user_ids).await
+    }
+
+    /// Reads rows from the relay until `count` arrived, acknowledging each batch, and returns
+    /// their user ids in the order they arrived.
+    async fn receive(&mut self, count: usize) -> Vec<RuntimeValue> {
+        let mut delivered = Vec::new();
+        while delivered.len() < count {
+            let batch = timeout(Duration::from_secs(60), self.fan_in.recv())
+                .await
+                .expect("each row reaches the consumer once it reads")
+                .expect("the consumer stays open");
+            for index in 0..batch.record_batch().num_rows() {
+                let row = batch.runtime_row(index).expect("one Arrow row");
+                delivered.push(row_value(&row, "user_id").expect("every row carries its user id"));
+            }
+            batch.ack_success();
+        }
+        delivered
+    }
+}
+
+/// More rows than the relay's buffers hold, so the last of them wait behind a delivery in hand.
+const ROWS_PAST_THE_RELAY_BUFFERS: u32 = 8;
+
+/// A planned stop of a branched route has no limit of its own: it waits for every delivery in
+/// hand and every batch queued behind it, however long the relay keeps them waiting, and loses
+/// none of them.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_planned_route_stop_finishes_every_delivery_however_long_it_waits() {
+    let mut entrypoint = UnreadEntrypoint::start();
+    let completions = entrypoint.send(1..=ROWS_PAST_THE_RELAY_BUFFERS).await;
+    let branched = entrypoint.branched.clone();
+    let stop =
+        nervix_primitives::task::spawn(async move { branched.stop(RouteStop::Finish).await });
+
+    nervix_primitives::time::sleep(Duration::from_secs(60)).await;
+    assert!(
+        !stop.is_finished(),
+        "the stop waits for the deliveries the relay holds back, past any grace"
+    );
+
+    let delivered = entrypoint.receive(completions.len()).await;
+    timeout(Duration::from_secs(60), stop)
+        .await
+        .expect("the stop ends once every delivery is in")
+        .expect("the stop does not panic");
+    let expected = (1..=ROWS_PAST_THE_RELAY_BUFFERS)
+        .map(RuntimeValue::U32)
+        .collect::<Vec<_>>();
+    assert_eq!(delivered, expected, "every row arrives once, in order");
+    for completion in completions {
+        assert_eq!(
+            timeout(Duration::from_secs(60), completion.wait())
+                .await
+                .expect("each acknowledgement resolves"),
+            AckOutcome::Ack
+        );
+    }
+    entrypoint
+        .owner_task
+        .stop(TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
+        .await
+        .expect("relay owner should stop");
+}
+
+/// An enforced stop ends a branched route at once: the delivery in hand ends and every batch
+/// queued behind it is refused with the stop's reason, without waiting for the relay.
+#[nervix_primitives::test(start_paused = true)]
+async fn an_enforced_route_stop_ends_its_deliveries_at_once_and_refuses_what_it_holds() {
+    let entrypoint = UnreadEntrypoint::start();
+    let completions = entrypoint.send(1..=ROWS_PAST_THE_RELAY_BUFFERS).await;
+    let UnreadEntrypoint {
+        fan_in,
+        owner_task,
+        branched,
+        ..
+    } = entrypoint;
+
+    timeout(Duration::from_secs(1), branched.stop(RouteStop::Now))
+        .await
+        .expect("an enforced stop waits for no delivery the relay holds back");
+
+    let last = completions.into_iter().last().expect("the test sends rows");
+    assert_refused_by_the_enforced_stop(vec![last]).await;
+    // The consumer leaves, so the relay owner stops holding what reached it before the stop.
+    drop(fan_in);
+    owner_task
+        .stop(TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
+        .await
+        .expect("relay owner should stop");
+}
+
+/// An enforced stop refuses, with its reason, both what an ingestor's route still buffers for its
+/// flush and what it had not taken yet, and none of it reaches the relay.
+#[nervix_primitives::test(start_paused = true)]
+async fn an_enforced_route_stop_refuses_what_the_routes_flush_still_holds() {
+    let UnreadRelay {
+        runtime,
+        domain,
+        mut fan_in,
+        owner_task,
+        template,
+    } = UnreadRelay::start();
+    let route = IngestorRouteRuntime::new(
+        runtime,
+        domain,
+        named("notifications_ingestor"),
+        IngestorRouteTemplate {
+            branch: template,
+            ack_boundary: BranchInstanceAckBoundary::Preserve,
+            // The route's flush never comes due within the test, so a row it took stays in its
+            // buffer until the stop.
+            flush_policy: RuntimeFlushPolicy::Each {
+                interval: Duration::from_secs(3600),
+                max_batch_size: u64::MAX,
+            },
+        },
+        Duration::from_secs(30),
+    );
+    let mut completions = send_user_rows(&route.sender(), 1..=1).await;
+    // The route takes the first row into its flush buffer before the test goes on.
+    nervix_primitives::time::sleep(Duration::from_millis(1)).await;
+    // Nothing yields between this send and the stop, so the route has not taken this row yet.
+    completions.extend(send_user_rows(&route.sender(), 2..=2).await);
+
+    timeout(Duration::from_secs(1), route.stop(RouteStop::Now))
+        .await
+        .expect("an enforced stop waits for nothing");
+
+    assert_refused_by_the_enforced_stop(completions).await;
+    assert!(
+        timeout(Duration::from_secs(1), fan_in.recv())
+            .await
+            .is_err(),
+        "no refused row reaches the relay"
+    );
+    drop(fan_in);
     owner_task
         .stop(TaskStopWait::Teardown {
             grace: Duration::from_secs(1),
@@ -1623,13 +1915,7 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
         assert_eq!(key_label(&beta.key), r#"{"tenant":"beta"}"#);
         assert_eq!(beta.message_count(), 2);
 
-        route_runtime
-            .shutdown(crate::runtime::entity_gate::TaskStopWait::Teardown {
-                grace: crate::runtime::entity_gate::task_stop_grace(
-                    nervix_models::DomainDrainTimeout::DEFAULT,
-                ),
-            })
-            .await;
+        route_runtime.stop(RouteStop::Finish).await;
         owner_task
             .stop(TaskStopWait::Teardown {
                 grace: Duration::from_secs(1),

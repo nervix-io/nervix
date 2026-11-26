@@ -241,7 +241,7 @@ never represented by an empty key.
 
 ```text
 "U8" | "I8" | "U16" | "I16" | "U32" | "I32" | "U64" | "I64"
-| "Bool" | "String" | "Bytes" | "Datetime" | "F32" | "F64"
+| "Bool" | "String" | "Bytes" | "Datetime" | "F32" | "F64" | "Duration"
 ```
 
 Container variants use the nested `ProcessorType.element` table; arrays also
@@ -252,21 +252,25 @@ ProcessorType { kind: Array, element: ProcessorType, array_len: u32 }
 ProcessorType { kind: Vec, element: ProcessorType }
 ```
 
-The guest protocol has no `DURATION` type yet. `CREATE WASM PROCESSOR` refuses a processor whose
-input or output relay schema holds a `DURATION` field, alone or as a list element, with an error
-naming the field: `WASM processor 'p' in domain 'd' cannot pass DURATION field 'wait' to its guest`.
-
 `Datetime` values are Arrow `Timestamp(Nanosecond)` values at the wire boundary.
+`Duration` values, a `DURATION` field's, are Arrow `Duration(Nanosecond)` arrays: each is a signed
+64-bit count of nanoseconds, the whole range a `DURATION` holds, negative lengths included.
 `Bytes` values are Arrow `Binary` arrays and retain arbitrary octets without UTF-8 conversion.
 Treat nanosecond integers as a boundary format and convert them to your guest's
-typed timestamp representation immediately after decoding.
+typed timestamp or duration representation immediately after decoding. A guest returns a
+`DURATION` the same way, as a `Duration(Nanosecond)` column, and may declare one in a section of its
+[state description](#state-description).
 
 Treat this as configuration for the branch instance. Store what you need in guest state; reject it only when the processor cannot run correctly.
 
 ## Batch Envelope
 
 Every input, output, init, or bundled guest-state payload is one size-prefixed
-FlatBuffer. Its root is the `Message` union and its file identifier is `NVWY`.
+FlatBuffer. Its root is the `Message` union and its file identifier is `NVWZ`.
+The identifier names the protocol's version: a change to the guest ABI, such as a new
+`ProcessorTypeKind`, moves it. A guest built against an earlier identifier rejects the host's first
+message, and the host rejects every message such a guest sends, each with the identifier error;
+neither side reads the earlier form. Rebuild the guest against the current SDK or schema.
 The ABI size and internal size prefix must agree exactly. Arrow IPC payloads
 are FlatBuffers byte vectors. Generated Rust and Go accessors return slices
 into the FlatBuffer, avoiding a deserialization copy. Crossing WebAssembly

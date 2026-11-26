@@ -18,6 +18,29 @@ struct StoppingTask {
     task: JoinHandle<()>,
 }
 
+
+/// How a stop of every domain execution on this node ends their branched routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum ExecutionsStop {
+    /// The save of what the node holds: each domain's routes end as that domain's stop asks, so a
+    /// planned stop finishes the delivery of every branch.
+    Save,
+    /// Terminal teardown of the executions no save stopped: every branched route ends at once, as
+    /// an enforced stop ends it. The save already let the work in motion finish, and what a peer
+    /// still holds back here is what terminal teardown cuts, so the node never waits for a peer
+    /// that is itself stopping.
+    TerminalTeardown,
+}
+
+impl ExecutionsStop {
+    fn route_stop(self, runtime: &Runtime, domain: &DomainName) -> RouteStop {
+        match self {
+            Self::Save => runtime.domain_route_stop(domain),
+            Self::TerminalTeardown => RouteStop::Now,
+        }
+    }
+}
+
 impl Runtime {
     pub(crate) fn data_plane_settings(&self) -> nervix_models::DataPlaneSettings {
         self.inner.data_plane
@@ -914,12 +937,32 @@ impl Runtime {
     }
 
     /// Stops `execution` and waits for its tasks. Every emitter task the stop ends finishes its
-    /// emitter by `emitter_finish_deadline`, which it learns before the shutdown is signalled.
+    /// emitter by `emitter_finish_deadline`, which it learns before the shutdown is signalled, and
+    /// every branched route of a reingestor ends as the domain's stop asks.
     pub(in crate::runtime) async fn stop_domain_execution(
         &self,
         domain: &DomainName,
         execution: DomainExecution,
         emitter_finish_deadline: Instant,
+    ) {
+        let route_stop = self.domain_route_stop(domain);
+        self.stop_domain_execution_ending_routes(
+            domain,
+            execution,
+            emitter_finish_deadline,
+            route_stop,
+        )
+        .await;
+    }
+
+    /// Stops `execution` as [`Self::stop_domain_execution`] does, with every branched route of a
+    /// reingestor ending as `route_stop` asks.
+    async fn stop_domain_execution_ending_routes(
+        &self,
+        domain: &DomainName,
+        execution: DomainExecution,
+        emitter_finish_deadline: Instant,
+        route_stop: RouteStop,
     ) {
         // An enforced stop ends the domain's tasks at once and leaves the last snapshot of every
         // branch state as it was.
@@ -998,7 +1041,7 @@ impl Runtime {
         for (entity, task) in execution.generator_tasks {
             generators.push(StoppingTask {
                 owner: IngestorName::from(&entity.node.identifier),
-                task,
+                task: task.into_task(),
             });
         }
         self.await_shutdown_tasks_together(generators, domain, "generator")
@@ -1008,7 +1051,7 @@ impl Runtime {
             for task in tasks {
                 reingestors.push(StoppingTask {
                     owner: IngestorName::from(&entity.identifier),
-                    task,
+                    task: task.into_task(),
                 });
             }
         }
@@ -1060,9 +1103,11 @@ impl Runtime {
         for key in quiesce_keys {
             self.inner.node_quiesce_counters.remove(&key);
         }
+        // A reingestor's routes have no grace of their own: each finishes the delivery of every
+        // branch, or ends them at once when the stop is enforced.
         for (identifier, runtimes) in execution.branched_entrypoints {
             for runtime in runtimes {
-                runtime.shutdown(self.teardown_task_stop()).await;
+                runtime.stop(route_stop).await;
                 info!(
                     domain = domain.as_str(),
                     entrypoint = identifier.as_str(),
@@ -1086,8 +1131,8 @@ impl Runtime {
     }
 
     pub(super) async fn abort_domain_execution_start(&self, domain: &DomainName) {
-        self.stop_domain_ingestors(domain, self.teardown_task_stop())
-            .await;
+        let route_stop = self.domain_route_stop(domain);
+        self.stop_domain_ingestors(domain, route_stop).await;
         if let Some((_, mut execution)) = self.inner.executions.remove(domain) {
             execution.routing.deactivate();
             self.stop_domain_execution(domain, execution, self.emitter_finish_deadline())
@@ -1095,12 +1140,12 @@ impl Runtime {
         }
     }
 
-    /// Stops every unit of `domain`'s ingestors on this node, each unit's branched tasks as `wait`
-    /// says.
+    /// Stops every unit of `domain`'s ingestors on this node, each unit's branched routes as
+    /// `route_stop` asks.
     pub(in crate::runtime) async fn stop_domain_ingestors(
         &self,
         domain: &DomainName,
-        wait: TaskStopWait,
+        route_stop: RouteStop,
     ) {
         let ingestors = self
             .inner
@@ -1116,7 +1161,7 @@ impl Runtime {
                     domain,
                     &IngestorName::from(key.entity.identifier()),
                     key.unit,
-                    wait,
+                    route_stop,
                 )
                 .await
             {
@@ -1132,10 +1177,12 @@ impl Runtime {
 
     /// Stops every domain execution this node still runs: it ends the client ingestor endpoints,
     /// stops each domain's ingestors and then each execution, whose emitters finish by
-    /// `emitter_finish_deadline` and whose placements write their final checkpoints.
+    /// `emitter_finish_deadline` and whose placements write their final checkpoints. Their
+    /// branched routes end as `stop` says.
     pub(in crate::runtime) async fn stop_domain_executions(
         &self,
         emitter_finish_deadline: Instant,
+        stop: ExecutionsStop,
     ) {
         self.end_client_ingestor_endpoints(ClientProducerEndReason::ShuttingDown)
             .await;
@@ -1145,18 +1192,20 @@ impl Runtime {
             .iter()
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
-        // This is the terminal teardown of every execution, so a branched ingestor task gets the
-        // task stop grace: the work it still holds, such as a delivery to a peer that stopped
-        // with this node, is what the stop cuts.
         for domain in &domains {
-            self.stop_domain_ingestors(domain, self.teardown_task_stop())
+            self.stop_domain_ingestors(domain, stop.route_stop(self, domain))
                 .await;
         }
         for domain in &domains {
             if let Some((_, mut execution)) = self.inner.executions.remove(domain) {
                 execution.routing.deactivate();
-                self.stop_domain_execution(domain, execution, emitter_finish_deadline)
-                    .await;
+                self.stop_domain_execution_ending_routes(
+                    domain,
+                    execution,
+                    emitter_finish_deadline,
+                    stop.route_stop(self, domain),
+                )
+                .await;
             }
             self.clear_domain_ingestor_quiescence(domain);
         }
@@ -1166,7 +1215,11 @@ impl Runtime {
     /// it holds already stopped its executions; any other execution stops here as a completed
     /// stop's teardown stops it, with its emitters finishing within the domain drain timeout.
     pub(crate) async fn shutdown(&self) {
-        Box::pin(self.stop_domain_executions(self.emitter_finish_deadline())).await;
+        Box::pin(self.stop_domain_executions(
+            self.emitter_finish_deadline(),
+            ExecutionsStop::TerminalTeardown,
+        ))
+        .await;
         // Every branch task has ended, in time or at a stop grace, and the snapshot task of each
         // deduplicator and window branch is writing what its branch published last. Those tasks
         // hold this runtime and its storage, so the runtime waits for each of them here, while

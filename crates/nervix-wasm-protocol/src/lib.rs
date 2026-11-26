@@ -208,10 +208,18 @@ pub enum ProcessorType {
     String,
     Bytes,
     Datetime,
+    /// A `DURATION`: Arrow `Duration(Nanosecond)` values, each a signed 64-bit count of
+    /// nanoseconds.
+    Duration,
     F32,
     F64,
-    Array { element: Box<Self>, len: u32 },
-    Vec { element: Box<Self> },
+    Array {
+        element: Box<Self>,
+        len: u32,
+    },
+    Vec {
+        element: Box<Self>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -793,6 +801,11 @@ fn build_processor_type<'a, A: Allocator + 'a>(
             element: None,
             array_len: 0,
         },
+        ProcessorType::Duration => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::Duration,
+            element: None,
+            array_len: 0,
+        },
         ProcessorType::F32 => wire::ProcessorTypeArgs {
             kind: wire::ProcessorTypeKind::F32,
             element: None,
@@ -983,6 +996,7 @@ fn decode_processor_type(ty: wire::ProcessorType<'_>) -> Result<ProcessorType, P
         wire::ProcessorTypeKind::String => ProcessorType::String,
         wire::ProcessorTypeKind::Bytes => ProcessorType::Bytes,
         wire::ProcessorTypeKind::Datetime => ProcessorType::Datetime,
+        wire::ProcessorTypeKind::Duration => ProcessorType::Duration,
         wire::ProcessorTypeKind::F32 => ProcessorType::F32,
         wire::ProcessorTypeKind::F64 => ProcessorType::F64,
         wire::ProcessorTypeKind::Array => {

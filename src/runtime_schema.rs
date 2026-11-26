@@ -776,10 +776,7 @@ impl CompiledSchema {
                 .iter()
                 .map(|field| WasmProcessorField {
                     name: field.name.clone(),
-                    ty: WasmProcessorType::try_from(&field.ty).assured(
-                        "the registry refuses a WASM processor whose schemas hold a DURATION \
-                         before any plan is built from its Model",
-                    ),
+                    ty: WasmProcessorType::from(&field.ty),
                     optional: field.optional,
                 })
                 .collect(),

@@ -653,6 +653,7 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
                 state_purges: BTreeMap::new(),
                 gate_relays: Vec::new(),
                 forced_recovery_relays: Vec::new(),
+                stop_order: crate::registry::SwapStopOrder::default(),
             },
         )
         .await
@@ -779,6 +780,7 @@ async fn scheduled_entity_swap_reinstalls_state_schema_fingerprints() {
                 state_purges: BTreeMap::new(),
                 gate_relays: Vec::new(),
                 forced_recovery_relays: Vec::new(),
+                stop_order: crate::registry::SwapStopOrder::default(),
             },
         )
         .await

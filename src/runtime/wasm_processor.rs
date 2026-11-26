@@ -1296,6 +1296,7 @@ mod tests {
             ("bool", ParseAsType::Bool),
             ("string", ParseAsType::String),
             ("datetime", ParseAsType::Datetime),
+            ("duration", ParseAsType::Duration),
             ("f32", ParseAsType::F32),
             ("f64", ParseAsType::F64),
             (
@@ -1332,6 +1333,12 @@ mod tests {
                     chrono::DateTime::parse_from_rfc3339("2026-07-13T12:34:56Z")
                         .expect("timestamp must parse"),
                 ),
+            ),
+            (
+                "duration".to_string(),
+                RuntimeValue::Duration(nervix_models::DurationValue::from_nanoseconds(
+                    -1_500_000_000,
+                )),
             ),
             ("f32".to_string(), RuntimeValue::F32(OrderedFloat(1.5))),
             ("f64".to_string(), RuntimeValue::F64(OrderedFloat(2.5))),

@@ -56,7 +56,42 @@ pub(super) struct PlannedReingestorInput {
 #[derive(Default)]
 pub(super) struct ReingestorRuntimes {
     pub(super) branched_entrypoints: HashMap<ModelName, Vec<Arc<IngestorRouteRuntime>>>,
-    pub(super) tasks: HashMap<NodeRef, Vec<JoinHandle<()>>>,
+    pub(super) tasks: HashMap<NodeRef, Vec<ReingestorTask>>,
+}
+
+/// The running task of one reingestor input and its own stop.
+pub(super) struct ReingestorTask {
+    /// Cancelled to stop this task while its domain keeps running. Its relay interaction then
+    /// drains the input the task already received, a wait for required materialized state ends as
+    /// a domain shutdown ends it, and the task flushes its output into its routes before it ends.
+    stop: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+impl ReingestorTask {
+    /// Stops this reingestor input and waits until its task has ended, with no limit of its own:
+    /// the task drains the input it already received and flushes its output into its routes
+    /// first.
+    pub(super) async fn stop(self) {
+        let Self { stop, task } = self;
+        stop.cancel();
+        task.join_after_shutdown("reingestor").await;
+    }
+
+    /// The task alone, for a stop that ends it through a signal of its own instead: a domain stop
+    /// through the domain's shutdown signal, or a drop through the reingestor's discard signal.
+    pub(super) fn into_task(self) -> JoinHandle<()> {
+        self.task
+    }
+
+    /// A handle for `task`, which stands for a reingestor input's task in tests of what stops it.
+    #[cfg(test)]
+    pub(super) fn standing_for(task: JoinHandle<()>) -> Self {
+        Self {
+            stop: CancellationToken::new(),
+            task,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -992,7 +1027,7 @@ impl Runtime {
         task_branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
         input: BoundReingestorInput,
         receiver: RelayRuntimeFanIn,
-    ) -> JoinHandle<()> {
+    ) -> ReingestorTask {
         let metrics_dirty =
             self.branch_metrics_mark(domain, ModelKind::Reingestor, &input.reingestor);
         let task_domain = domain.clone();
@@ -1006,6 +1041,8 @@ impl Runtime {
         );
         let runtime = self.clone();
         let shutdown_rx = shutdown_tx.subscribe();
+        let stop = CancellationToken::new();
+        let task_stop = stop.clone();
         let mut discard_rx = self.reingestor_discard_receiver(domain, &input.reingestor);
         let force_flush = self.force_flush_participant(domain, quiesce_counters.clone());
         let dispatcher = self.inner.remote_dispatcher.load();
@@ -1018,15 +1055,21 @@ impl Runtime {
             None,
         );
 
-        nervix_primitives::task::spawn(async move {
+        let task = nervix_primitives::task::spawn(async move {
             // The installation that started this reingestor publishes its domain's routing once
-            // the whole domain is in place; a stop, or the domain dropping its sender, ends the wait.
-            let mut routing_stop = shutdown_rx.clone();
+            // the whole domain is in place. A stop of the reingestor, or the domain dropping its
+            // sender, ends the wait.
+            let mut routing_shutdown = shutdown_rx.clone();
+            let routing_stop = task_stop.clone();
             let stopped = async move {
-                routing_stop
-                    .wait_for(|stopped| *stopped)
-                    .await
-                    .discarded("a signalled stop and a dropped domain sender both end the wait");
+                nervix_primitives::select! {
+                    signalled = routing_shutdown.wait_for(|stopped| *stopped) => {
+                        signalled.discarded(
+                            "a signalled stop and a dropped domain sender both end the wait",
+                        );
+                    }
+                    () = routing_stop.cancelled() => {}
+                }
             };
             let Some(shared_routing) = runtime.wait_for_domain_routing(&task_domain, stopped).await
             else {
@@ -1064,11 +1107,12 @@ impl Runtime {
                 ),
                 None => RelayInteractionInput::immediate(task_from_relay.clone(), receiver),
             };
-            let mut interaction = RelayInteraction::new(
+            let mut interaction = RelayInteraction::with_stop(
                 vec![interaction_input],
                 shutdown_rx,
                 Some(force_flush),
                 Some(quiesce_counters.clone()),
+                task_stop.clone(),
             )
             .verified(
                 "the registry validated this input, and a non-empty input list builds an \
@@ -1202,6 +1246,7 @@ impl Runtime {
                                 batch,
                                 MaterializedBatchWaitContext {
                                     shutdown_rx: interaction.shutdown_receiver(),
+                                    stop: Some(&task_stop),
                                     wait_for_required_state,
                                     quiesce_work: work.as_mut(),
                                 },
@@ -1273,7 +1318,8 @@ impl Runtime {
                     ReingestorOutputFlush::All,
                 )
                 .await;
-        })
+        });
+        ReingestorTask { stop, task }
     }
 
     /// The signal by which a drop asks every task of `reingestor` in `domain` to destroy itself,
@@ -1534,13 +1580,7 @@ mod tests {
                 ),
             ]
         );
-        route_runtime
-            .shutdown(crate::runtime::entity_gate::TaskStopWait::Teardown {
-                grace: crate::runtime::entity_gate::task_stop_grace(
-                    nervix_models::DomainDrainTimeout::DEFAULT,
-                ),
-            })
-            .await;
+        route_runtime.stop(RouteStop::Finish).await;
         owner_task
             .stop(TaskStopWait::Teardown {
                 grace: Duration::from_secs(1),
@@ -2096,13 +2136,7 @@ mod tests {
             AckOutcome::Ack
         );
 
-        branched_runtime
-            .shutdown(crate::runtime::entity_gate::TaskStopWait::Teardown {
-                grace: crate::runtime::entity_gate::task_stop_grace(
-                    nervix_models::DomainDrainTimeout::DEFAULT,
-                ),
-            })
-            .await;
+        branched_runtime.stop(RouteStop::Finish).await;
         owner_task
             .stop(TaskStopWait::Teardown {
                 grace: Duration::from_secs(1),
@@ -2111,124 +2145,207 @@ mod tests {
             .expect("relay owner should stop");
     }
 
+    /// A reingestor task whose one route buffers its output on a cadence that never comes due:
+    /// logical time holds still, so only a force flush or a stop releases what it buffers.
+    struct BufferingReingestor {
+        runtime: Runtime,
+        domain: DomainName,
+        schema: Arc<CompiledSchema>,
+        clock_lifecycle: DomainClockLifecycle,
+        shutdown_tx: watch::Sender<bool>,
+        broadcast: RelayBroadcast<RelayRecordBatch>,
+        output_rx: mpsc::Receiver<BranchedEntrypointInput>,
+        output_counters: Arc<NodeQuiesceCounters>,
+        task: ReingestorTask,
+    }
+
+    impl BufferingReingestor {
+        fn start() -> Self {
+            use nervix_models::{DomainClockState, DomainTimeRate};
+
+            let runtime = Runtime::default();
+            let domain = domain("default");
+            let input_relay = named::<RelayName>("orders");
+            let output_relay = named::<RelayName>("tenant_orders");
+            let reingestor = named::<ReingestorName>("tenant_partition");
+            let schema = test_schema(&[
+                ("tenant", ParseAsType::String),
+                ("user_id", ParseAsType::U32),
+            ]);
+            // Actual UTC stays before the mapping's origin, so logical time holds still: the
+            // route's 10s cadence never comes due.
+            let clock_lifecycle = DomainClockLifecycle::new(domain.clone());
+            clock_lifecycle.install_paced(
+                0,
+                DomainClockState::new(
+                    Timestamp::from_unix_nanos(i64::MAX),
+                    Timestamp::from_unix_nanos(0),
+                    DomainTimeRate::ONE,
+                ),
+            );
+            let (execution_shutdown, _) = watch::channel(false);
+            runtime.install_domain_execution(
+                &domain,
+                DomainExecution {
+                    mqtt_ingestor_clients: HashMap::default(),
+                    revision: test_execution_revision(&domain, Vec::new()),
+                    start_version: 0,
+                    domain_clock: clock_lifecycle
+                        .bind()
+                        .expect("the fixture installs its controlled domain clock"),
+                    shutdown: execution_shutdown,
+                    routing: runtime.stage_domain_routing(
+                        &domain,
+                        DomainRoutingSnapshot {
+                            relay_schemas: [
+                                (input_relay.clone(), schema.clone()),
+                                (output_relay.clone(), schema.clone()),
+                            ]
+                            .into_iter()
+                            .collect(),
+                            relay_branchings: [
+                                (input_relay.clone(), ResolvedBranching::unbranched()),
+                                (output_relay.clone(), ResolvedBranching::unbranched()),
+                            ]
+                            .into_iter()
+                            .collect(),
+                            ..DomainRoutingSnapshot::default()
+                        },
+                    ),
+
+                    branched_entrypoints: HashMap::default(),
+                    endpoint_routes: HashMap::default(),
+                    node_tasks: HashMap::default(),
+                    emitter_tasks: HashMap::default(),
+                    generator_tasks: HashMap::default(),
+                    reingestor_tasks: HashMap::default(),
+                    placement_tasks: HashMap::default(),
+                    relay_state_tasks: BTreeMap::default(),
+                    relay_owner_tasks: BTreeMap::default(),
+                    tasks: Vec::new(),
+                },
+            );
+            let (shutdown_tx, _) = watch::channel(false);
+            let broadcast = RelayBroadcast::with_capacity(nonzero_capacity(4));
+            let fan_in = RelayRuntimeFanIn::new(broadcast.new_receiver());
+            let (output_tx, output_rx) = mpsc::channel(4);
+            let plan = EntrypointTestDomain {
+                relays: &["orders", "tenant_orders"],
+                fields: &[
+                    ("tenant", ParseAsType::String),
+                    ("user_id", ParseAsType::U32),
+                ],
+                branch_fields: &[],
+            }
+            .plan_reingestor(
+                &domain,
+                CreateReingestor {
+                    labels: Default::default(),
+                    name: reingestor.clone(),
+                    from: ProcessorInputs::single(input_relay.clone()),
+                    output_routes: with_inherit_all(ProcessorOutputs::single(output_relay.clone()))
+                        .with_flush_policy(FlushPolicy::Each {
+                            interval: "10s".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        })
+                        .with_branch(OutputBranch::Unbranched),
+                    mode: AckMode::Attached,
+                    filter_where: None,
+                    materialized_state: Vec::new(),
+                },
+            );
+            let routing = runtime
+                .domain_routing(&domain)
+                .expect("the test domain routing is installed")
+                .load_full();
+            let input = ExecutionBuildDeps::from_routing(
+                &domain,
+                &routing,
+                nervix_vm::VmSettings::default(),
+            )
+            .bind_reingestor_input(
+                &plan,
+                &plan.inputs[0],
+                nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
+            )
+            .expect("the planned reingestor input binds");
+            let output_counters = runtime
+                .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Reingestor, &reingestor));
+            let task = runtime.spawn_reingestor_task(
+                &domain,
+                &shutdown_tx,
+                [(output_relay.clone(), output_tx)].into_iter().collect(),
+                input,
+                fan_in,
+            );
+            Self {
+                runtime,
+                domain,
+                schema,
+                clock_lifecycle,
+                shutdown_tx,
+                broadcast,
+                output_rx,
+                output_counters,
+                task,
+            }
+        }
+
+        fn input_batch(&self, user_id: u32, acks: AckSet) -> RelayRecordBatch {
+            RelayRecordBatch::single(
+                self.schema.clone(),
+                None,
+                test_runtime_row([
+                    (
+                        "tenant".to_string(),
+                        RuntimeValue::String("acme".to_string()),
+                    ),
+                    ("user_id".to_string(), RuntimeValue::U32(user_id)),
+                ]),
+                acks,
+            )
+            .expect("input batch should build")
+        }
+
+        /// Delivers one input row for `user_id` and returns its acknowledgement's completion.
+        async fn deliver(&self, user_id: u32) -> AckCompletion {
+            let (acks, completion) = AckSet::root();
+            self.broadcast
+                .broadcast(self.input_batch(user_id, acks.attached()))
+                .await
+                .expect("input should broadcast");
+            acks.ack_success();
+            completion
+        }
+    }
+
+    /// The user ids of `batch`, in row order.
+    fn user_ids(batch: &RelayRecordBatch) -> Vec<RuntimeValue> {
+        let mut ids = Vec::new();
+        for index in 0..batch.record_batch().num_rows() {
+            let row = batch
+                .runtime_row(index)
+                .expect("an output batch row is an Arrow row");
+            ids.push(row_value(&row, "user_id").expect("every output row carries its user id"));
+        }
+        ids
+    }
+
     #[nervix_primitives::test]
     async fn reingestor_force_and_shutdown_flush_buffered_routes() {
         use futures_util::FutureExt as _;
-        use nervix_models::{DomainClockState, DomainTimeRate};
 
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        let input_relay = named::<RelayName>("orders");
-        let output_relay = named::<RelayName>("tenant_orders");
-        let reingestor = named::<ReingestorName>("tenant_partition");
-        let schema = test_schema(&[
-            ("tenant", ParseAsType::String),
-            ("user_id", ParseAsType::U32),
-        ]);
-        // Actual UTC stays before the mapping's origin, so logical time holds still: the route's
-        // 10s cadence never comes due, and only the force flush or the shutdown can release what
-        // the reingestor buffers.
-        let clock_lifecycle = DomainClockLifecycle::new(domain.clone());
-        clock_lifecycle.install_paced(
-            0,
-            DomainClockState::new(
-                Timestamp::from_unix_nanos(i64::MAX),
-                Timestamp::from_unix_nanos(0),
-                DomainTimeRate::ONE,
-            ),
-        );
-        let (execution_shutdown, _) = watch::channel(false);
-        runtime.install_domain_execution(
-            &domain,
-            DomainExecution {
-                mqtt_ingestor_clients: HashMap::default(),
-                revision: test_execution_revision(&domain, Vec::new()),
-                start_version: 0,
-                domain_clock: clock_lifecycle
-                    .bind()
-                    .expect("the fixture installs its controlled domain clock"),
-                shutdown: execution_shutdown,
-                routing: runtime.stage_domain_routing(
-                    &domain,
-                    DomainRoutingSnapshot {
-                        relay_schemas: [
-                            (input_relay.clone(), schema.clone()),
-                            (output_relay.clone(), schema.clone()),
-                        ]
-                        .into_iter()
-                        .collect(),
-                        relay_branchings: [
-                            (input_relay.clone(), ResolvedBranching::unbranched()),
-                            (output_relay.clone(), ResolvedBranching::unbranched()),
-                        ]
-                        .into_iter()
-                        .collect(),
-                        ..DomainRoutingSnapshot::default()
-                    },
-                ),
-
-                branched_entrypoints: HashMap::default(),
-                endpoint_routes: HashMap::default(),
-                node_tasks: HashMap::default(),
-                emitter_tasks: HashMap::default(),
-                generator_tasks: HashMap::default(),
-                reingestor_tasks: HashMap::default(),
-                placement_tasks: HashMap::default(),
-                relay_state_tasks: BTreeMap::default(),
-                relay_owner_tasks: BTreeMap::default(),
-                tasks: Vec::new(),
-            },
-        );
-        let (shutdown_tx, _) = watch::channel(false);
-        let broadcast = RelayBroadcast::with_capacity(nonzero_capacity(4));
-        let fan_in = RelayRuntimeFanIn::new(broadcast.new_receiver());
-        let (output_tx, mut output_rx) = mpsc::channel(4);
-        let plan = EntrypointTestDomain {
-            relays: &["orders", "tenant_orders"],
-            fields: &[
-                ("tenant", ParseAsType::String),
-                ("user_id", ParseAsType::U32),
-            ],
-            branch_fields: &[],
-        }
-        .plan_reingestor(
-            &domain,
-            CreateReingestor {
-                labels: Default::default(),
-                name: reingestor.clone(),
-                from: ProcessorInputs::single(input_relay.clone()),
-                output_routes: with_inherit_all(ProcessorOutputs::single(output_relay.clone()))
-                    .with_flush_policy(FlushPolicy::Each {
-                        interval: "10s".to_string(),
-                        max_batch_size: "1MiB".to_string(),
-                    })
-                    .with_branch(OutputBranch::Unbranched),
-                mode: AckMode::Attached,
-                filter_where: None,
-                materialized_state: Vec::new(),
-            },
-        );
-        let routing = runtime
-            .domain_routing(&domain)
-            .expect("the test domain routing is installed")
-            .load_full();
-        let input =
-            ExecutionBuildDeps::from_routing(&domain, &routing, nervix_vm::VmSettings::default())
-                .bind_reingestor_input(
-                    &plan,
-                    &plan.inputs[0],
-                    nervix_models::DataPlaneSettings::default().immediate_flush_minimum(),
-                )
-                .expect("the planned reingestor input binds");
-        let output_counters = runtime
-            .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Reingestor, &reingestor));
-        let task = runtime.spawn_reingestor_task(
-            &domain,
-            &shutdown_tx,
-            [(output_relay.clone(), output_tx)].into_iter().collect(),
-            input,
-            fan_in,
-        );
+        let BufferingReingestor {
+            runtime,
+            domain,
+            schema,
+            clock_lifecycle,
+            shutdown_tx,
+            broadcast,
+            mut output_rx,
+            output_counters,
+            task,
+        } = BufferingReingestor::start();
         let input_batch = |user_id, acks| {
             RelayRecordBatch::single(
                 schema.clone(),
@@ -2336,7 +2453,7 @@ mod tests {
         shutdown_tx
             .send(true)
             .expect("reingestor shutdown receiver should remain open");
-        timeout(Duration::from_secs(10), task)
+        timeout(Duration::from_secs(10), task.into_task())
             .await
             .expect("reingestor should stop after draining input")
             .expect("reingestor task should not panic");
@@ -2393,6 +2510,61 @@ mod tests {
             counters.admitted_work(),
             1,
             "the reingestor must hold exactly the buffered output batch"
+        );
+    }
+
+    /// A reingestor task stopped on its own, as a swap stops the reingestor it replaces, drains
+    /// the input it already received and flushes everything its route buffered before it ends,
+    /// while its domain keeps running.
+    #[nervix_primitives::test]
+    async fn a_reingestor_task_stopped_on_its_own_drains_its_input_and_flushes_its_output() {
+        let reingestor = BufferingReingestor::start();
+        let first = reingestor.deliver(1).await;
+        wait_until_one_output_is_buffered(&reingestor.clock_lifecycle, &reingestor.output_counters)
+            .await;
+        let second = reingestor.deliver(2).await;
+
+        let BufferingReingestor {
+            shutdown_tx,
+            mut output_rx,
+            output_counters,
+            task,
+            ..
+        } = reingestor;
+        timeout(Duration::from_secs(10), task.stop())
+            .await
+            .expect("the task ends once it drained its input and flushed its output");
+
+        assert!(
+            !*shutdown_tx.borrow(),
+            "the task stopped on its own, while its domain keeps running"
+        );
+        let mut delivered = Vec::new();
+        while delivered.len() < 2 {
+            let output = timeout(Duration::from_secs(10), output_rx.recv())
+                .await
+                .expect("the stop publishes every buffered and drained row")
+                .expect("the route stays open");
+            delivered.extend(user_ids(&output));
+            output.ack_success();
+        }
+        assert_eq!(
+            delivered,
+            vec![RuntimeValue::U32(1), RuntimeValue::U32(2)],
+            "the row it had buffered and the row it had received but not taken both leave, once"
+        );
+        for completion in [first, second] {
+            assert_eq!(
+                timeout(Duration::from_secs(10), completion.wait())
+                    .await
+                    .expect("each input acknowledges once its output is acknowledged"),
+                AckOutcome::Ack
+            );
+        }
+        assert_eq!(
+            output_counters.admitted_work(),
+            0,
+            "nothing stays buffered once the task ended"
         );
     }
 
@@ -2524,7 +2696,7 @@ mod tests {
         shutdown_tx
             .send(true)
             .expect("reingestor shutdown receiver should remain open");
-        timeout(Duration::from_secs(10), task)
+        timeout(Duration::from_secs(10), task.into_task())
             .await
             .expect("reingestor should stop after its shutdown")
             .expect("reingestor task should not panic");

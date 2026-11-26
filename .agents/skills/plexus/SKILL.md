@@ -609,7 +609,12 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
     literal;
   - a `DURATION` literal is one or more parts, each a number with its unit `ns`, `us`, `ms`, `s`,
     `m`, `h` or `d` written right after it (`30s`, `1h 30m`); months, years, weeks and spellings
-    such as `min` are refused, and a duration converts to and from no other type;
+    such as `min` are refused, and a cast converts a duration to and from no other type;
+  - durations take only `+`, `-` and unary `-`, a `DATETIME` moves by a duration
+    (`input.sent_at + 30s`) and two `DATETIME` values subtract to a `DURATION`; a duration becomes
+    a whole number only through `duration_floor`, `duration_ceil` or `duration_round` and a number
+    a duration only through `to_duration`, each with a full unit name (`'second'`), and a result
+    outside its type fails the message;
   - `NOT` binds tighter than comparisons and `AS` tighter than unary minus: write `NOT (a > b)` and
     `(-128) AS I8`;
   - a field, call, or `SET`/`INHERIT` target named like a reserved word (`end`, `from`, `in`, `all`,
@@ -708,6 +713,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - Call UDFs only through `udf::<name>(...)`, keep arguments exact-typed, and use `VOLATILE` only
   when the body needs the domain clock or randomness. Roto UDFs are trusted native code; keep
   untrusted custom processing in WASM.
+- A `DURATION` UDF argument or result is a `DurationColumn` (`VecDurationColumn` for a list) in the
+  Roto signature. Compute with its own operations and write a constant with a unit function such as
+  `seconds(30)`; see `User-Defined Functions` → `Roto column operations`.
 - Include Roto `test` blocks with every agent-generated UDF. Creation runs those tests and rejects
   the UDF without persisting it when any test rejects.
 - Select `BRANCHED BY <parametrizer>` or `UNBRANCHED` explicitly. Normal processors preserve their named
@@ -1027,6 +1035,12 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   are node-wide and do not inherit route-local `FLUSH`.
 - Declare the error relay with the input route's exact parametrizer, or unbranched for an
   unbranched input. See `Runtime Nodes` for the branch and error-record contract.
+- Write an emitter's `ON MESSAGE ERROR SEND TO ... SET` against the emitter's input: every row
+  error, a destination's or application's refusal, a failed publish and a give-up included, reads
+  the source row as `input`. An emitter whose route builds its record, with `ENCODE USING` or a
+  client consumer's `TO SCHEMA`, also offers that record as the all-optional `partial_output`, so
+  assign its fields only to `OPTIONAL` error-relay fields. See
+  [Error routes](../../../docs/src/emitters.md#error-routes).
 - Require explicit sensitive-value leakage for external emission. Never place real credentials in
   an example unless the user explicitly supplied and requested them; prefer obvious placeholders.
 - Preserve connector configuration as the documented string key/value surface. Do not translate

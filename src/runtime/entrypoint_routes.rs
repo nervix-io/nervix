@@ -1114,17 +1114,11 @@ mod tests {
         );
         for runtimes in runtimes.branched_entrypoints.into_values() {
             for runtime in runtimes {
-                runtime
-                    .shutdown(crate::runtime::entity_gate::TaskStopWait::Teardown {
-                        grace: crate::runtime::entity_gate::task_stop_grace(
-                            nervix_models::DomainDrainTimeout::DEFAULT,
-                        ),
-                    })
-                    .await;
+                runtime.stop(RouteStop::Finish).await;
             }
         }
         for task in runtimes.tasks.into_values().flatten() {
-            task.abort();
+            task.into_task().abort();
         }
     }
 

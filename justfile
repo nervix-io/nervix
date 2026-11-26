@@ -2263,6 +2263,11 @@ test-list-shapes *args: build-deps build-plexus-format build-test-cli build-dead
 coverage-vm-list-shapes output=(cargo_target_dir / "vm-list-shapes.lcov"):
     cargo llvm-cov --package nervix-vm --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- list_shape
 
+# Measure the expression VM's unit tests and kernel properties, for a patch to the VM, through the
+# configured compiler cache.
+coverage-vm output=(cargo_target_dir / "vm.lcov") *args:
+    cargo llvm-cov --no-clean --package nervix-vm --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
 # Run the WASM host, guest SDK and ABI protocol unit tests, which live in their own crates rather
 # than the server lib. The host tests drive the bundled Rust and Go reference guests.
 test-wasm *args: wasm-processor-guests
@@ -2446,6 +2451,10 @@ test-client-ruby-run *args:
 # Collect the binding itself, executed by embedded Ruby, in the ordinary coverage toolchain.
 coverage-client-ruby output=(cargo_target_dir / "client-ruby.lcov"):
     BOLERO_RANDOM_SEED="${BOLERO_RANDOM_SEED:-2026110803}" cargo llvm-cov --package nervix-client-ruby --features ruby-tests --lib --test columns --test fields --lcov --output-path {{ quote(output) }}
+
+# Run the shared host runtime's unit tests: cancellation and deadlines, failures, batches and views.
+test-client-host *args:
+    cargo test --package nervix-client-host --lib -- {{ args }}
 
 # Run the C ABI's unit tests, which read every accessor as a host does through the header's types.
 test-client-ffi *args:
@@ -5707,6 +5716,11 @@ coverage-chaos-rate-probe:
 # the checked-in module still equals what this writes.
 chaos-wasm-fixture:
     cargo test --package nervix-wasm --test chaos_branch_counter -- --ignored write_the_branch_counter_module
+
+# Check that the checked-in chaos guest equals what `chaos-wasm-fixture` writes, and drive it through
+# the host for its per-branch counts and its restore from saved state, as `just test` does.
+test-chaos-wasm-fixture:
+    cargo test --package nervix-wasm --test chaos_branch_counter
 
 server *args: build-deps generate-dev-tls
     NERVIX_NODE_ID="${NERVIX_NODE_ID:-node-1}" \

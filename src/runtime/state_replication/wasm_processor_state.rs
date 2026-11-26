@@ -17,15 +17,16 @@
     )
 )]
 
+use nervix_models::SHORTEST_POSITIVE_DURATION;
+
 use super::*;
-use crate::runtime::entity_gate::SHORTEST_WAIT;
 
 impl Runtime {
     /// How long a wait for replica confirmations sleeps when no replica report wakes it before it
     /// reads what the replicas hold again: one tenth of the replication poll, never less than
-    /// [`SHORTEST_WAIT`].
+    /// [`SHORTEST_POSITIVE_DURATION`].
     fn replica_confirmation_recheck(&self) -> Duration {
-        (self.inner.state_replication_poll_interval / 10).max(SHORTEST_WAIT)
+        (self.inner.state_replication_poll_interval / 10).max(SHORTEST_POSITIVE_DURATION)
     }
 
     /// Wait until every assigned replica has installed the branch lifecycle that authorizes a

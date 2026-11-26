@@ -167,7 +167,8 @@ its tests and benchmarks use to build Models from text.
 ### The Semantic Catalog
 
 `crates/nervix-vm/src/semantics.rs` owns every operation's meaning; its focused `semantics/catalog.rs`
-module registers builtin names. Registration
+module registers builtin names, and `semantics/temporal.rs` classifies duration and datetime
+arithmetic. Registration
 is a set of exhaustive `match` expressions over closed enums, not a runtime table, so a builtin that
 misses a decision does not compile. For each builtin the catalog and its neighbours decide:
 
@@ -261,21 +262,30 @@ Three mechanisms avoid repeated work. None of them changes a result.
 **Constant folding.** `compile_expr` folds an expression only when all of these hold:
 
 - it is not volatile and its dependency scope is `Constant`
-- it cannot fail and has no side effects
+- it has no side effects
 - the folder produces a non-null value
 
-A folded value becomes one `Literal` instruction. The folder is deliberately small. It folds only:
+A folded value becomes one `Literal` instruction. An operation that can fail folds only through
+the lane contract its kernel applies, and the folder declines exactly where that contract fails the
+lane: the expression then executes, and every row that evaluates it reports the error, as for any
+constant that fails. The folder is deliberately small. It folds only:
 
 - among builtins, `lower`, `upper`, `trim`, `length`, `coalesce`, `is_null`, `nullif`,
   `is_nan`, `is_finite`, `is_infinite`, the bitwise functions, `bit_count`, `contains`,
-  `starts_with`, `ends_with`, `is_ip_address`, and `is_url`
-- among binary operators, comparisons, `AND`, and `OR`
+  `starts_with`, `ends_with`, `is_ip_address`, `is_url`, `duration_floor`, `duration_ceil`,
+  `duration_round`, and `to_duration`
+- among binary operators, comparisons, `AND`, `OR`, and `+` and `-` over two `DURATION` values
+- among unary operators, `NOT` and `-` over a `DURATION`
 
-Casts, arithmetic, membership, ranges, JSON, and every other builtin are never folded.
+Casts, numeric arithmetic, membership, ranges, JSON, and every other builtin are never folded. No
+`DATETIME` is a literal, so no other temporal form meets two folded values.
 
 Folding applies the catalog's value contracts rather than calling the runtime kernels, so a folded
-call and an executed call agree by construction. `trim` and `length` are the exception: each has a
-separate folding implementation beside its kernel. A new folding arm must reuse a catalog contract
+call and an executed call agree by construction. The duration operators fold through
+`Arithmetic::integer_lane` and `SignedInteger::lane_negation`, the lanes the checked kernels
+compute, and the duration conversions through `UnitRounding::whole_units` and
+`UnitLength::duration`, the lanes of their kernels. `trim` and `length` are the exception: each has
+a separate folding implementation beside its kernel. A new folding arm must reuse a catalog contract
 rather than add a second implementation.
 
 Three kinds of constant argument are prepared while the call is lowered: a regular-expression
@@ -463,6 +473,7 @@ All paths are relative to the repository root.
 | `crates/nervix-vm/src/program.rs` | `Program`, `Expr`, `FunctionName`, and resolved datetime calls |
 | `crates/nervix-vm/src/semantics.rs` | The semantic catalog: lowerings, semantics, signatures, arm execution, and shared value contracts |
 | `crates/nervix-vm/src/semantics/catalog.rs` | Exhaustive builtin registration, preserving the root descriptor API |
+| `crates/nervix-vm/src/semantics/temporal.rs` | `TemporalArithmetic`, the six binary forms of `DURATION` and `DATETIME` arithmetic that typing and dispatch both classify through |
 | `crates/nervix-vm/src/compiler.rs` | Type and sensitivity checking, folding, sharing, register allocation, instruction emission, and optimization |
 | `crates/nervix-vm/src/ir.rs` | `CompiledProgram`, `CompiledPredicate`, instructions, registers, and bindings |
 | `crates/nervix-vm/src/runtime.rs` | Execution, register banks, scalar sharing, conditional arms, the builtin dispatch, and the list, cast, and most string kernels |
@@ -472,7 +483,7 @@ All paths are relative to the repository root.
 | `crates/simd-kernels/src/flags.rs` | Packing the checked lanes' per-lane failure bytes into bitmap words at the selected SIMD level |
 | `crates/simd-kernels/src/checked.rs`, `benches/checked_lanes.rs` | Checked integer addition, subtraction and multiplication in vector registers at the selected SIMD level, returning each lane's value together with the failure words, and their measurement beside the lane loop they replaced |
 | `crates/simd-kernels/src/division.rs`, `division/lanes.rs`, `benches/constant_division.rs` | Constant integer divisors prepared once per call, exact reciprocal quotient and remainder kernels, and comparisons with scalar reciprocal and checked division loops |
-| `crates/nervix-vm/src/datetime.rs` and `datetime/` | Fixed-unit datetime kernels, calendar arithmetic, time zones, and formats |
+| `crates/nervix-vm/src/datetime.rs` and `datetime/` | Fixed-unit datetime kernels, calendar arithmetic, time zones, formats, and the `DURATION` operators and conversions in `datetime/duration.rs` |
 | `crates/nervix-vm/src/text_column.rs` | The bounded builder for `STRING` and `BYTES` values whose length an argument chooses |
 | `crates/nervix-vm/src/text_search.rs`, `regexp.rs` | Splitting, joining, `LIKE`, `contains_any`, NFC normalization, and regular expressions with their caches |
 | `crates/nervix-vm/src/membership.rs`, `extremum.rs`, `count.rs` | `IN` sets, `greatest`, `least`, and `clamp`, and integer counts read without narrowing |
@@ -846,8 +857,8 @@ about vector instructions it supports.
 | Class | Examples | Claim |
 | --- | --- | --- |
 | Arrow compute kernel | Boolean logic, `STRING`/`BYTES`/`DATETIME`/`DURATION` comparisons, `LIKE`/`ILIKE`, `contains`/`starts_with`/`ends_with`, casts, `CASE`/`coalesce`/`nullif` selection, filter/take/zip/interleave, UTC `date_part`, `bitwise_and`/`or`/`xor`, list `sum` per row | Whatever Arrow 58.4's kernels do; Nervix adds none of its own |
-| Explicit SIMD lanes | Checked `+` and `-` over `I8`, `U8`, `I16`, `U16`, `I32`, `U32`, `I64`, and `U64`, checked `*` below 64 bits, integer column-by-scalar `/` and `%` below 64 bits, and `I64` column-by-scalar `/` | `nervix-simd-kernels` selects the vector instructions once per process, with a scalar fallback, and every level computes the same lanes; the [SIMD kernels 07 report](https://app.clickup.com/t/86bc85vc3) and [08 report](https://app.clickup.com/t/86bc85vcf) inspect the generated code |
-| One pass over value buffers | Integer division by a column, `U64` column-by-scalar `/` and `%` and `I64` column-by-scalar `%` with a prepared reciprocal, checked `*` over `I64` and `U64`, checked float arithmetic, numeric comparisons, fixed-width `IN`, `abs`/`sign`/negation, `ceil`/`floor`/`round`/`trunc`, `sqrt`, shifts, classification, fixed-unit `date_trunc`/`date_bin`/`date_add`/`date_diff`, `to_unix`/`from_unix`, `length`/`octet_length`/`bit_length`, ASCII `lower`/`upper`, list `count` | Written so LLVM may auto-vectorize the loop for the target CPU; no claim that it does |
+| Explicit SIMD lanes | Checked `+` and `-` over `I8`, `U8`, `I16`, `U16`, `I32`, `U32`, `I64`, and `U64`, and through the `I64` lanes over `DURATION` and `DATETIME`, checked `*` below 64 bits, integer column-by-scalar `/` and `%` below 64 bits, and `I64` column-by-scalar `/` | `nervix-simd-kernels` selects the vector instructions once per process, with a scalar fallback, and every level computes the same lanes; the [SIMD kernels 07 report](https://app.clickup.com/t/86bc85vc3) and [08 report](https://app.clickup.com/t/86bc85vcf) inspect the generated code |
+| One pass over value buffers | Integer division by a column, `U64` column-by-scalar `/` and `%` and `I64` column-by-scalar `%` with a prepared reciprocal, checked `*` over `I64` and `U64`, checked float arithmetic, numeric comparisons, fixed-width `IN`, `abs`/`sign`/negation, `ceil`/`floor`/`round`/`trunc`, `sqrt`, shifts, classification, fixed-unit `date_trunc`/`date_bin`/`date_add`/`date_diff`, `to_unix`/`from_unix`, `DURATION` negation, `duration_floor`/`duration_ceil`/`duration_round`/`to_duration`, `length`/`octet_length`/`bit_length`, ASCII `lower`/`upper`, list `count` | Written so LLVM may auto-vectorize the loop for the target CPU; no claim that it does |
 | Library with runtime SIMD dispatch | JSON structure (simd-json), base64 (base64-simd), hexadecimal (faster-hex), `sha256` (AWS-LC through the [cryptography boundary](cryptography.md#digests-and-randomness), with CPU instruction detection) | The library selects instructions at run time; `xxh3_64` selects them when the binary is built |
 | Irregular, per row | Transcendental math, `round(value, digits)`, zoned and calendar datetimes, datetime formatting and parsing, Unicode case mapping and NFC, regular expressions, Aho-Corasick, substring and padding functions, `md5`, IP and URL parsing, JSON path walk and conversion, most list functions, UUIDs | Batch API with optimized substeps; scalar work per row |
 
@@ -1042,8 +1053,19 @@ The reference owns each family's contract. These notes describe its implementati
   - Classification never fails.
 - **Temporal.** A `DATETIME` is signed nanoseconds since the epoch in an Arrow UTC timestamp.
   A `DURATION` is a signed count of nanoseconds in an Arrow `Duration(Nanosecond)` array. It
-  compares and orders through Arrow's comparison kernels, as a `DATETIME` does, and takes no
-  arithmetic and no conversion.
+  compares and orders through Arrow's comparison kernels, as a `DATETIME` does, and converts to
+  and from no other type by a cast.
+  - `TemporalArithmetic` in the catalog names the six binary forms the two types take, and both
+    the compiler's typing and the runtime's dispatch classify an operator and its operand types
+    through it; unary `-` types a `DURATION` to itself. Every form is exact `i64` arithmetic on nanoseconds: `datetime::duration` reads a
+    `DATETIME` or `DURATION` operand as an `I64` array over the same value and validity buffers,
+    without a copy and in the operand's own column or scalar shape, and runs the checked integer
+    sums and differences, the explicit SIMD lanes of the `I64` operators. Negation is the checked
+    integer negation. A lane whose result leaves `i64` fails, so an instant outside the `DATETIME`
+    range and a duration longer than a `DURATION` holds are row errors, never wrapped values.
+  - `duration_floor`, `duration_ceil`, and `duration_round` divide by one unit prepared as a
+    `SignedDivisor` once per call, and round from the truncated quotient and remainder;
+    `to_duration` multiplies in `i128` and fails a lane that does not fit `i64`.
   - Fixed units compute in checked lanes.
   - Calendar units and zones use Jiff with the IANA database it bundles, and never read the host's
     zone or locale.
@@ -1564,8 +1586,9 @@ Treat this as the checklist for a new builtin, or for a new family.
 
    A datetime function resolves its literal arguments at lowering instead.
 3. **Decide folding.** Either add a folding arm that applies a shared catalog contract, or list
-   the function in `fold_builtin_call`'s refusals. Never fold anything that can fail, is volatile,
-   or reads execution-local state.
+   the function in `fold_builtin_call`'s refusals. Never fold anything that is volatile or reads
+   execution-local state. Fold a function that can fail only through the lane contract its kernel
+   applies, declining wherever that contract fails the lane, as the duration conversions do.
 4. **Decide `can_error` honestly.** A builtin that pushes a row error must declare `can_error`.
    Otherwise the compiler shares it and gives it no selection, so the errors of unselected `CASE`
    arms would leak into error handling.

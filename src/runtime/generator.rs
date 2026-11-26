@@ -558,12 +558,15 @@ impl Runtime {
         }
     }
 
+    /// Starts the task of one generator unit. It ends when its domain stops or when the returned
+    /// handle stops it, and either way it first finishes the occurrence in hand and flushes what
+    /// its routes buffered.
     pub(in crate::runtime) fn spawn_generator_task(
         &self,
         domain: &DomainName,
         shutdown_tx: &watch::Sender<bool>,
         spec: GeneratorTaskSpec,
-    ) -> error_stack::Result<JoinHandle<()>, GeneratorError> {
+    ) -> error_stack::Result<GeneratorTask, GeneratorError> {
         let GeneratorTaskSpec {
             name,
             unit,
@@ -630,6 +633,8 @@ impl Runtime {
             NodeUnitRef::new(NodeRef::new(ModelKind::Generator, &name), unit),
         );
         let mut shutdown_rx = shutdown_tx.subscribe();
+        let stop = CancellationToken::new();
+        let task_stop = stop.clone();
         let mut domain_status_rx = self.inner.domain_status_changed.subscribe();
         let mut local_intake_rx = self.inner.local_intake.subscribe();
         let generator_activity = self.generator_activity_tracker(domain);
@@ -691,9 +696,15 @@ impl Runtime {
                         .await;
                     quiesce_activity.take();
                     activity.set_active(false);
-                    shutdown_rx.wait_for(|stopped| *stopped).await.discarded(
-                        "a signalled stop and a dropped domain sender both end this generator",
-                    );
+                    nervix_primitives::select! {
+                        stopped = shutdown_rx.wait_for(|stopped| *stopped) => {
+                            stopped.discarded(
+                                "a signalled stop and a dropped domain sender both end this \
+                                 generator",
+                            );
+                        }
+                        () = task_stop.cancelled() => {}
+                    }
                     break;
                 }
                 if source_gate.is_closed() {
@@ -717,6 +728,7 @@ impl Runtime {
                                 break;
                             }
                         }
+                        () = task_stop.cancelled() => break,
                     }
                     if quiesce_activity.is_none() {
                         quiesce_activity =
@@ -744,6 +756,7 @@ impl Runtime {
                                 break;
                             }
                         }
+                        () = task_stop.cancelled() => break,
                         changed = domain_status_rx.changed() => {
                             if changed.is_err() {
                                 break;
@@ -1154,6 +1167,7 @@ impl Runtime {
                             break;
                         }
                     }
+                    () = task_stop.cancelled() => break,
                     occurrence = logical_occurrence_wake => {
                         match occurrence {
                             Ok(occurrence) => pending_occurrence = Some(occurrence),
@@ -1204,7 +1218,38 @@ impl Runtime {
                 )
                 .await;
         });
-        Ok(task)
+        Ok(GeneratorTask { stop, task })
+    }
+}
+
+/// The running task of one generator unit and its own stop.
+pub(in crate::runtime) struct GeneratorTask {
+    stop: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+impl GeneratorTask {
+    /// Stops this generator unit and waits until its task has ended, with no limit of its own:
+    /// the task finishes the occurrence in hand and flushes what its routes buffered first.
+    pub(in crate::runtime) async fn stop(self) {
+        let Self { stop, task } = self;
+        stop.cancel();
+        task.join_after_shutdown("generator").await;
+    }
+
+    /// The task alone, for a stop that does not use the unit's own: a domain stop ends it through
+    /// the domain's shutdown signal, and a drop destroys it at once with what it holds.
+    pub(in crate::runtime) fn into_task(self) -> JoinHandle<()> {
+        self.task
+    }
+
+    /// A handle for `task`, which stands for a generator unit's task in tests of what stops it.
+    #[cfg(test)]
+    pub(in crate::runtime) fn standing_for(task: JoinHandle<()>) -> Self {
+        Self {
+            stop: CancellationToken::new(),
+            task,
+        }
     }
 }
 

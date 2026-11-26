@@ -1380,7 +1380,7 @@ mod tests {
     ) -> T {
         let executor = runtime.executor().clone();
         let reservation = executor
-            .reserve(MemoryClass::Bulk, 1)
+            .reserve_admission(MemoryClass::Bulk)
             .await
             .assured("the storage job is admitted");
         executor

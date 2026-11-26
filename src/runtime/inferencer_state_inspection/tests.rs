@@ -6,7 +6,7 @@
 use std::{borrow::Cow, num::NonZeroU32};
 
 use arrow_array::{Array as _, Float32Array, ListArray, StringArray, UInt64Array};
-use nervix_execution::Executor;
+use nervix_execution::{ADMISSION_TOKEN_BYTES, Executor};
 use nervix_models::{
     InferencerStateInitial, InferencerTensorDimension, InferencerTensorElementType,
     InferencerTensorRepresentation, InferencerTensorSchema, SchemaField,
@@ -156,7 +156,7 @@ async fn read_for(
     let fixtures = branches.to_vec();
     let plan = plan.clone();
     let memory = executor
-        .try_reserve(MemoryClass::Bulk, 1)
+        .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
         .assured("fixture admission");
     executor
         .run_cpu(CpuClass::Bulk, memory, move |memory, cancellation| {

@@ -62,7 +62,7 @@ Keep detailed grammar in those chapters when reviewing a configuration.
 | Configuration backups, their archives, bounded waits and exact-reference recovery, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore`; cut timeout phases and their elapsed measurements: `Backup And Restore Architecture` → `Observability` |
 | Metrics and runtime inspection | `Metrics And Observability` |
 | Transport attempts, endpoint outcomes, acknowledgements and retries in `/metrics` and `DESCRIBE` | [Connector Interaction Metrics](../../../../docs/src/metrics-and-observability.md#connector-interaction-metrics) |
-| Domain entity labels, bounded metadata, staged inspection and execution continuity | `Entity Labels` |
+| Labels on Models, domains, logical resources and users: bounded metadata, staged inspection and execution continuity | `Entity Labels` |
 | Emitter record outcomes, retries, acquisition, pool waits, finish outcomes and current failure | `Metrics And Observability` → `Emitter outcomes and lifecycle` |
 | Persistent-command history size, retry-fence age and admission refusal metrics | `Metrics And Observability` → `Command Execution History` |
 | Full graph examples | `Examples` |
@@ -618,7 +618,9 @@ current connection, retry and deadline limits.
   PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`, a required `BATCH` row and
   byte limit, and an explicit `FLUSH` policy. It constructs exactly that schema as native Arrow;
   a sensitive input needs explicit leakage, and a row whose encoded IPC cannot fit alone follows
-  `ON MESSAGE ERROR`. There is no external client, codec, header operation, or direct `VALUES`
+  `ON MESSAGE ERROR`. Its `ON MESSAGE ERROR SEND TO` route reads each failed row's source record as
+  `input` and the constructed record as the all-optional `partial_output` of the output schema.
+  There is no external client, codec, header operation, or direct `VALUES`
   body. An attached emitter holds ingestor acknowledgement until the application ACKs; a detached
   emitter releases it earlier. Consumers compete for output and are volatile across
   session or owner loss. The Rust client may restore a matching consumer handle with a fresh

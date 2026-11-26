@@ -15,7 +15,8 @@ use std::{convert::Infallible, time::Duration};
 use error_stack::Report;
 use meticulous::ResultExt as _;
 use nervix_models::{
-    ClusterParameterValues, ClusterParameters, ProbeTimeout, Setting, SettingDefinition,
+    ClusterParameterValues, ClusterParameters, ProbeTimeout, SHORTEST_POSITIVE_DURATION, Setting,
+    SettingDefinition,
 };
 
 /// Half the unavailability budget between HTTP/2 pings.
@@ -29,7 +30,7 @@ impl SettingDefinition for PingInterval {
     const DERIVATION: Option<&'static str> =
         Some("node-unavailability-timeout / 2, at least one timer nanosecond");
     fn default_value(context: &ClusterParameterValues) -> Duration {
-        (context.node_unavailability_timeout() / 2).max(Duration::from_nanos(1))
+        (context.node_unavailability_timeout() / 2).max(SHORTEST_POSITIVE_DURATION)
     }
     fn validate(_: &Duration, _: &ClusterParameterValues) -> Result<(), Report<Infallible>> {
         Ok(())
@@ -47,7 +48,7 @@ impl SettingDefinition for PingTimeout {
     const DERIVATION: Option<&'static str> =
         Some("node-unavailability-timeout / 4, at least one timer nanosecond");
     fn default_value(context: &ClusterParameterValues) -> Duration {
-        (context.node_unavailability_timeout() / 4).max(Duration::from_nanos(1))
+        (context.node_unavailability_timeout() / 4).max(SHORTEST_POSITIVE_DURATION)
     }
     fn validate(_: &Duration, _: &ClusterParameterValues) -> Result<(), Report<Infallible>> {
         Ok(())

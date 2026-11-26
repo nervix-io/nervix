@@ -559,30 +559,6 @@ pub(crate) enum RegistryError {
         codec: ModelName,
         field: FieldName,
     },
-    /// The guest protocol has no `DURATION` type, so a WASM processor whose input or output schema
-    /// holds one is refused before its guest is loaded.
-    #[error(
-        "WASM processor '{processor}' in domain '{domain}' cannot pass DURATION field '{field}' \
-         to its guest: a WASM guest does not read or write a DURATION"
-    )]
-    WasmDurationField {
-        domain: DomainName,
-        processor: ModelName,
-        field: FieldName,
-    },
-    /// No column bridge reads a `DURATION` argument, so the UDF is refused before it compiles.
-    #[error(
-        "UDF '{udf}' in domain '{domain}' cannot take DURATION argument '{argument}': a UDF does \
-         not read a DURATION"
-    )]
-    UdfDurationArgument {
-        domain: DomainName,
-        udf: ModelName,
-        argument: FieldName,
-    },
-    /// No column bridge writes a `DURATION` result, so the UDF is refused before it compiles.
-    #[error("UDF '{udf}' in domain '{domain}' cannot return a DURATION: a UDF does not write one")]
-    UdfDurationReturn { domain: DomainName, udf: ModelName },
     #[error("parametrizer '{parametrizer}' in domain '{domain}' uses BYTES in field '{field}'")]
     BranchFieldContainsBytes {
         domain: DomainName,

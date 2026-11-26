@@ -1,10 +1,11 @@
-//! Tests for lowering calendar, time zone and format datetime calls.
+//! Tests for lowering calendar, time zone, format and duration datetime calls.
 //!
 //! Layer: test harness.
 //!
-//! - **Owns.** The units, zones, compiled formats and parsers a datetime call lowers its literal
-//!   arguments into, the row-valued arguments it keeps, and the typed failure of every literal
-//!   argument that does not select a computation, with the messages that name what a call accepts.
+//! - **Owns.** The units, zones, compiled formats, parsers and bin widths a datetime call lowers
+//!   its literal arguments into, the row-valued arguments it keeps, and the typed failure of every
+//!   literal argument that does not select a computation, with the messages that name what a call
+//!   accepts.
 //! - **Depends on.** The VM frontend, the Plexus expression parser, and the compiled datetime
 //!   constants.
 //! - **Must not know.** Compilation, execution, or registers.
@@ -14,8 +15,10 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use meticulous::ResultExt as _;
-use nervix_models::Expression as ModelExpression;
+use std::num::NonZeroU64;
+
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::{DurationValue, Expression as ModelExpression};
 
 use super::{
     ArgumentCount, DatetimeLiteral, FrontendErrorKind, FrontendResult, SemanticScopePolicy,
@@ -26,8 +29,9 @@ use crate::{
         DatetimeFormat, DatetimeParser, FormatDefect, ParseFormat, TextExpectation, UnreadableText,
     },
     program::{
-        CalendarUnit, DatePart, DatetimeFunction, DatetimeFunctionName, DatetimeUnit,
-        Disambiguation, Expr, FieldRef, FixedTimeUnit, FunctionName, SpannedExpr, Zone,
+        CalendarUnit, DateBinWidth, DatePart, DatetimeFunction, DatetimeFunctionName, DatetimeUnit,
+        Disambiguation, DurationUnit, Expr, FieldRef, FixedTimeUnit, FunctionName, SpannedExpr,
+        UnitRounding, Zone,
     },
 };
 
@@ -411,4 +415,196 @@ fn calendar_zone_and_format_failures_name_what_the_call_accepts() {
         crate::SideErrorReason::UnreadableDatetime(unreadable).to_string(),
         "parse_datetime input does not match its format at byte 4: expected '-'"
     );
+}
+
+fn bin_width(count: u64, unit: FixedTimeUnit) -> DateBinWidth {
+    let count = NonZeroU64::new(count).assured("test widths are positive");
+    DateBinWidth::new(count, unit).assured("test widths fit i64 nanoseconds")
+}
+
+#[test]
+fn duration_conversions_and_a_duration_bin_width_resolve_their_literals_when_lowered() {
+    let calls = [
+        (
+            "duration_floor('second', input.wait)",
+            DatetimeFunction::DurationUnits {
+                unit: DurationUnit::Second,
+                rounding: UnitRounding::Floor,
+            },
+            vec!["wait"],
+        ),
+        (
+            "DURATION_CEIL('Minute', input.wait)",
+            DatetimeFunction::DurationUnits {
+                unit: DurationUnit::Minute,
+                rounding: UnitRounding::Ceil,
+            },
+            vec!["wait"],
+        ),
+        (
+            "duration_round('day', input.wait)",
+            DatetimeFunction::DurationUnits {
+                unit: DurationUnit::Day,
+                rounding: UnitRounding::Round,
+            },
+            vec!["wait"],
+        ),
+        (
+            "to_duration('nanosecond', input.count)",
+            DatetimeFunction::ToDuration(DurationUnit::Nanosecond),
+            vec!["count"],
+        ),
+        (
+            "date_bin(15m, input.occurred_at, input.origin)",
+            DatetimeFunction::DateBin(bin_width(900_000_000_000, FixedTimeUnit::Nanosecond)),
+            vec!["occurred_at", "origin"],
+        ),
+        (
+            "date_bin(1h 30m, input.occurred_at, input.origin)",
+            DatetimeFunction::DateBin(bin_width(5_400_000_000_000, FixedTimeUnit::Nanosecond)),
+            vec!["occurred_at", "origin"],
+        ),
+        (
+            "date_bin('minute', 15, input.occurred_at, input.origin)",
+            DatetimeFunction::DateBin(bin_width(15, FixedTimeUnit::Minute)),
+            vec!["occurred_at", "origin"],
+        ),
+    ];
+    for (source, function, args) in calls {
+        let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(lowered(source), (function, args), "{source}");
+    }
+    // Both forms of a width bin identically, whichever way the width is written.
+    assert_eq!(
+        bin_width(900_000_000_000, FixedTimeUnit::Nanosecond).nanoseconds(),
+        bin_width(15, FixedTimeUnit::Minute).nanoseconds()
+    );
+}
+
+#[test]
+fn duration_conversion_and_duration_width_failures_have_semantic_contexts() {
+    let failures = [
+        (
+            "duration_floor('week', input.wait)",
+            FrontendErrorKind::UnknownTimeUnit {
+                function: DatetimeFunctionName::DurationFloor,
+                unit: "week".to_string(),
+            },
+        ),
+        (
+            "duration_round('seconds', input.wait)",
+            FrontendErrorKind::UnknownTimeUnit {
+                function: DatetimeFunctionName::DurationRound,
+                unit: "seconds".to_string(),
+            },
+        ),
+        (
+            "to_duration('month', input.count)",
+            FrontendErrorKind::UnknownTimeUnit {
+                function: DatetimeFunctionName::ToDuration,
+                unit: "month".to_string(),
+            },
+        ),
+        (
+            "duration_ceil(input.unit, input.wait)",
+            FrontendErrorKind::NonLiteralDatetimeArgument {
+                function: DatetimeFunctionName::DurationCeil,
+                argument: DatetimeLiteral::TimeUnit,
+            },
+        ),
+        (
+            "to_duration('second')",
+            FrontendErrorKind::DatetimeArity {
+                function: DatetimeFunctionName::ToDuration,
+                expected: ArgumentCount { fewest: 2, most: 2 },
+                found: 1,
+            },
+        ),
+        (
+            "duration_floor('second', input.wait, 'UTC')",
+            FrontendErrorKind::DatetimeArity {
+                function: DatetimeFunctionName::DurationFloor,
+                expected: ArgumentCount { fewest: 2, most: 2 },
+                found: 3,
+            },
+        ),
+        (
+            "date_bin(0s, input.occurred_at, input.origin)",
+            FrontendErrorKind::NonPositiveDateBinDuration {
+                width: DurationValue::ZERO,
+            },
+        ),
+        (
+            "date_bin(-90s, input.occurred_at, input.origin)",
+            FrontendErrorKind::NonPositiveDateBinDuration {
+                width: DurationValue::from_nanoseconds(-90_000_000_000),
+            },
+        ),
+        (
+            "date_bin(input.width, input.occurred_at, input.origin)",
+            FrontendErrorKind::NonLiteralDatetimeArgument {
+                function: DatetimeFunctionName::DateBin,
+                argument: DatetimeLiteral::DurationWidth,
+            },
+        ),
+        (
+            "date_bin(15, input.occurred_at, input.origin)",
+            FrontendErrorKind::NonLiteralDatetimeArgument {
+                function: DatetimeFunctionName::DateBin,
+                argument: DatetimeLiteral::DurationWidth,
+            },
+        ),
+        (
+            "date_bin(input.occurred_at, input.origin)",
+            FrontendErrorKind::DatetimeArity {
+                function: DatetimeFunctionName::DateBin,
+                expected: ArgumentCount { fewest: 3, most: 4 },
+                found: 2,
+            },
+        ),
+    ];
+    for (source, kind) in failures {
+        assert_failure(
+            lower_expression(&expression(source), SemanticScopePolicy::read_only("input")),
+            &kind,
+        );
+    }
+}
+
+#[test]
+fn duration_conversion_and_duration_width_failures_name_what_the_call_accepts() {
+    let messages = [
+        (
+            FrontendErrorKind::UnknownTimeUnit {
+                function: DatetimeFunctionName::DurationFloor,
+                unit: "week".to_string(),
+            },
+            "function 'duration_floor' does not accept time unit 'week'; expected one of \
+             nanosecond, microsecond, millisecond, second, minute, hour, day",
+        ),
+        (
+            FrontendErrorKind::NonPositiveDateBinDuration {
+                width: DurationValue::from_nanoseconds(-90_000_000_000),
+            },
+            "function 'date_bin' requires a positive width, found -1m 30s",
+        ),
+        (
+            FrontendErrorKind::NonLiteralDatetimeArgument {
+                function: DatetimeFunctionName::DateBin,
+                argument: DatetimeLiteral::DurationWidth,
+            },
+            "function 'date_bin' requires its width to be a DURATION literal",
+        ),
+        (
+            FrontendErrorKind::DatetimeArity {
+                function: DatetimeFunctionName::DateBin,
+                expected: ArgumentCount { fewest: 3, most: 4 },
+                found: 2,
+            },
+            "function 'date_bin' expects 3 or 4 arguments, found 2",
+        ),
+    ];
+    for (kind, message) in messages {
+        assert_eq!(kind.to_string(), message);
+    }
 }

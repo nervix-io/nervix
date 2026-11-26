@@ -1,4 +1,4 @@
-//! Shared domain entity metadata grammar.
+//! Shared entity metadata grammar for Models, domains, logical resources and users.
 //!
 //! Layer: language.
 //! - **Owns.** The common trailing creation clause and the typed SET LABELS edit and SHOW LABELS

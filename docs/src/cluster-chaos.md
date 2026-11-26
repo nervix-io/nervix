@@ -242,8 +242,9 @@ The baseline graph has three parts:
 The packaged server loads the guest's WebAssembly text directly, so a run needs no guest toolchain.
 The run uploads exactly that file with the packaged CLI's `UPLOAD RESOURCE` and records its SHA-256
 and size under `fixtures.wasm`. `just chaos-wasm-fixture` regenerates the module from the current
-guest ABI. The `nervix-wasm` package's `chaos_branch_counter` test, part of `just test`, fails while
-the checked-in module differs from what the generator writes. The same test drives the module
+guest ABI. The `nervix-wasm` package's `chaos_branch_counter` test, part of `just test` and run alone
+by `just test-chaos-wasm-fixture`, fails while the checked-in module differs from what the generator
+writes. The same test drives the module
 through the host to prove its per-branch counts and its restore from saved state.
 
 The inferencer's model is a checked-in ONNX file, written by `scripts/train_simple_onnx.py`. The

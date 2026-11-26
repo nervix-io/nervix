@@ -33,10 +33,11 @@ two of them, and orders them by length; text, the CLI and the web console show o
 literal form. A duration converts to and from no other type: no `AS` or `TRY_CAST` reads one from a
 number, text or `DATETIME`, or turns one into them. A `DURATION` field travels through relays and
 between nodes, into processor and materialized state, branch keys, backups and restores like any
-other field. No codec reads or writes one: a codec whose schema holds a `DURATION`, in a field or as
-the element of a list, is refused when it is created, with the field named, and so is a WASM
-processor whose guest would read or write one, a UDF that takes or returns one, and a database
-emitter that writes one into a column.
+other field. A WASM guest reads and writes one as an Arrow `Duration(Nanosecond)` column
+([WASM Processor Guests](wasm-processor-guests.md#init-payload)), and a Roto UDF takes and returns
+one as a `DurationColumn` ([User-Defined Functions](udfs.md#declaration)). No codec reads or writes
+one: a codec whose schema holds a `DURATION`, in a field or as the element of a list, is refused when
+it is created, with the field named, and so is a database emitter that writes one into a column.
 
 `BYTES` holds arbitrary octets in an Arrow `Binary` column. It is distinct from `STRING`. Use
 `bytes_from_utf8` and `bytes_to_utf8` for explicit text conversion, or `hex_decode` and

@@ -479,7 +479,7 @@ mod tests {
         let payload = encode_branch_lru_snapshot(&entries).assured("a current lifecycle encodes");
         let executor = nervix_execution::Executor::default();
         let reservation = executor
-            .reserve(nervix_execution::MemoryClass::Bulk, 1)
+            .reserve_admission(nervix_execution::MemoryClass::Bulk)
             .await
             .assured("the job is admitted");
         let walked = executor
@@ -554,7 +554,7 @@ mod tests {
             .to_vec();
         let executor = nervix_execution::Executor::default();
         let reservation = executor
-            .reserve(nervix_execution::MemoryClass::Bulk, 1)
+            .reserve_admission(nervix_execution::MemoryClass::Bulk)
             .await
             .assured("the job is admitted");
         executor

@@ -13,9 +13,9 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    ArrayRef, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int8Array,
-    Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
-    TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    ArrayRef, BinaryArray, BooleanArray, DurationNanosecondArray, FixedSizeListArray, Float32Array,
+    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray, RecordBatch,
+    StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow_buffer::{NullBuffer, OffsetBuffer};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
@@ -95,6 +95,25 @@ impl Columns<'_> {
                     .collect();
                 Arc::new(TimestampNanosecondArray::from(values).with_timezone("+00:00"))
             }
+            ProcessorType::Duration => {
+                // Both ends of the signed range, zero and an arbitrary length, nulls included.
+                let values: Vec<_> = validity
+                    .iter()
+                    .map(|valid| {
+                        if *valid {
+                            let arbitrary = self.0.entropy().any_i64();
+                            Some(
+                                self.0
+                                    .entropy()
+                                    .pick([i64::MIN, -1, 0, i64::MAX, arbitrary]),
+                            )
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                Arc::new(DurationNanosecondArray::from(values))
+            }
             ProcessorType::F32 => {
                 let bits = u32::from_le_bytes(std::array::from_fn(|_| self.0.entropy().byte()));
                 scalar!(
@@ -172,17 +191,21 @@ impl Columns<'_> {
     fn batch(&mut self, rows: usize) -> RecordBatch {
         let mut fields = Vec::new();
         let mut columns = Vec::new();
-        for kind in 0..16 {
+        for kind in 0..=WasmValues::VEC_KIND {
             let ty = match kind {
-                14 => ProcessorType::Array {
+                WasmValues::ARRAY_KIND => ProcessorType::Array {
                     element: Box::new(ProcessorType::Vec {
-                        element: Box::new(WasmValues::scalar(self.0.entropy().byte() % 14)),
+                        element: Box::new(WasmValues::scalar(
+                            self.0.entropy().byte() % WasmValues::SCALAR_KINDS,
+                        )),
                     }),
                     len: 3,
                 },
-                15 => ProcessorType::Vec {
+                WasmValues::VEC_KIND => ProcessorType::Vec {
                     element: Box::new(ProcessorType::Array {
-                        element: Box::new(WasmValues::scalar(self.0.entropy().byte() % 14)),
+                        element: Box::new(WasmValues::scalar(
+                            self.0.entropy().byte() % WasmValues::SCALAR_KINDS,
+                        )),
                         len: 2,
                     }),
                 },

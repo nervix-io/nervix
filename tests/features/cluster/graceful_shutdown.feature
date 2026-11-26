@@ -1810,8 +1810,8 @@ Feature: Graceful shutdown
       {"id":1,"tenant":"acme"}
       """
     Then the remote relay admission pause for domain "{{domain}}" is reached
-    # Terminal teardown gives the task its stop grace and then cuts the delivery it holds, however
-    # long the peer would keep that delivery waiting.
+    # Terminal teardown ends the branched route at once, as an enforced stop does, however long the
+    # peer would keep that delivery waiting.
     When node "node-1" is stopped while timing shutdown
     Then the last cluster operation completes within "30s"
     When the remote relay admission pause for domain "{{domain}}" is released

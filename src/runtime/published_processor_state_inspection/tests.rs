@@ -11,7 +11,7 @@ use arrow_array::{
     types::{TimestampNanosecondType, UInt64Type},
 };
 use arrow_schema::{DataType, Field};
-use nervix_execution::Executor;
+use nervix_execution::{ADMISSION_TOKEN_BYTES, Executor};
 use nervix_models::ParseAsType;
 
 use super::*;
@@ -34,7 +34,7 @@ async fn page(
 ) -> ProcessorStatePage {
     let executor = Executor::default();
     let memory = executor
-        .try_reserve(MemoryClass::Bulk, 1)
+        .try_reserve(MemoryClass::Bulk, ADMISSION_TOKEN_BYTES)
         .expect("bounded fixture admission");
     let after = if offset == 0 {
         None

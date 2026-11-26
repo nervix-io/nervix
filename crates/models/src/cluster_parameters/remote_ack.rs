@@ -8,7 +8,7 @@
 use meticulous::OptionExt as _;
 
 use super::*;
-use crate::ClusterParameters;
+use crate::{ClusterParameters, SHORTEST_POSITIVE_DURATION};
 
 pub struct RemoteAckAliveInterval;
 impl RemoteAckAliveInterval {
@@ -93,25 +93,13 @@ pub struct RemoteAckTiming {
     pub remote_relay_total_timeout: Duration,
 }
 impl RemoteAckTiming {
-    /// The shortest retry cadence, which keeps a sub-microsecond alive interval from rounding its
-    /// cadence to zero.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "a Duration counts whole nanoseconds, so one nanosecond is the shortest \
-                      cadence that is not zero"
-        )
-    )]
-    const CADENCE_FLOOR: Duration = Duration::from_nanos(1);
-
     /// The first wait before a sender asks again after a failed send or a capacity refusal, and
     /// the wait between two sends of a report or outcome another node needs: a quarter of the
     /// alive interval, 25 milliseconds at the default, so a retry comes four times as often as the
-    /// sender reports the delivery's records alive. A one-nanosecond floor keeps a
-    /// sub-microsecond policy from rounding the cadence to zero.
+    /// sender reports the delivery's records alive. The shortest positive duration floors it, so a
+    /// sub-microsecond policy never rounds the cadence to zero.
     pub fn retry_interval(self) -> Duration {
-        (self.remote_ack_alive_interval / 4).max(Self::CADENCE_FLOOR)
+        (self.remote_ack_alive_interval / 4).max(SHORTEST_POSITIVE_DURATION)
     }
 
     /// The longest wait a held delivery's backoff reaches before it asks for its grant again:

@@ -14,18 +14,6 @@ use std::time::Duration;
 
 use nervix_primitives::time::Instant;
 
-/// The shortest positive duration. A delay projected from a positive interval is never shorter,
-/// so an interval too short to divide still projects one that has not already passed.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "a Duration counts whole nanoseconds, so one nanosecond is the shortest positive \
-                  duration"
-    )
-)]
-pub(crate) const SHORTEST_POSITIVE_DURATION: Duration = Duration::from_nanos(1);
-
 /// What may end one exchange with another node before it is answered, beyond liveness.
 ///
 /// The transport ends every exchange whose peer or connection is gone: its HTTP/2 pings and

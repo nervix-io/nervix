@@ -254,7 +254,7 @@ pub(crate) fn completion_probe(tokens: &[Token], source: &str) -> bool {
             ..
         ] | [
             Token::Word(Word::KnownWord {
-                iden: Identifier::Set | Identifier::Drop | Identifier::Show,
+                iden: Identifier::Set | Identifier::Show,
                 ..
             }),
             Token::Word(Word::KnownWord {

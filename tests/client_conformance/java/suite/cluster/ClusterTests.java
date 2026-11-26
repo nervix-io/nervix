@@ -160,7 +160,7 @@ public final class ClusterTests {
     }
 
     @Test
-    void cancellationAndDeadlineKeepThePreparedIdentityForRecovery() {
+    void cancellationAndDeadlineKeepThePreparedIdentityForRecovery() throws Exception {
         String schema = cluster.unique("recovered");
         // ANCHOR: recover_execution
         try (var execution = session.prepare("CREATE SCHEMA " + schema + " (id U32);", null);
@@ -177,7 +177,9 @@ public final class ClusterTests {
             }
         }
         // ANCHOR_END: recover_execution
-        try (var execution = session.prepare("LIST DOMAINS;", null); var expired = Nervix.Cancel.deadline(0)) {
+        // The token's deadline, the shortest one accepts, passes before the call starts.
+        try (var execution = session.prepare("LIST DOMAINS;", null); var expired = Nervix.Cancel.deadline(0.001)) {
+            Thread.sleep(10);
             var failure = assertThrows(Nervix.DeadlineException.class, () -> session.execute(execution, expired));
             assertEquals(execution.reference(), failure.executionReference());
             try (var cancel = deadline(); var outcome = session.execute(execution, cancel)) {

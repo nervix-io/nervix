@@ -392,7 +392,7 @@ Feature: Duration values
       | 1            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: A codec or a UDF that would carry a DURATION is refused when it is applied
+  Scenario Outline: A codec that would carry a DURATION is refused when it is applied
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -413,36 +413,6 @@ Feature: Duration values
       | 3            | CREATE WIRE CBOR SCHEMA timed_cbor MODE STRICT (id text, wait integer); CREATE WIRE CBOR CODEC timed_cbor_codec FROM WIRE SCHEMA timed_cbor TO SCHEMA timed;                 | codec 'timed_cbor_codec' in domain '{{domain}}' cannot carry DURATION field 'wait'  | VEC<DURATION> |
       | 1            | CREATE WIRE AVRO SCHEMA timed_avro MODE STRICT (id string, wait long); CREATE WIRE AVRO CODEC timed_avro_codec FROM WIRE SCHEMA timed_avro TO SCHEMA timed;                  | codec 'timed_avro_codec' in domain '{{domain}}' cannot carry DURATION field 'wait'  | VEC<DURATION> |
       | 3            | CREATE JAQ JSON CODEC timed_jaq TO SCHEMA timed WITH JAQ TRANSFORMATIONS ON INGESTION '.';                                                                                   | codec 'timed_jaq' in domain '{{domain}}' cannot carry DURATION field 'wait'         | VEC<DURATION> |
-      | 1            | CREATE UDF wait_of WITH ROTO_0_13 ARGS (value DURATION) RETURNS I64 CODE $roto$ fn wait_of(value: I64Column) -> I64Column { value } $roto$;                                  | UDF 'wait_of' in domain '{{domain}}' cannot take DURATION argument 'value'          | VEC<DURATION> |
-      | 3            | CREATE UDF wait_for WITH ROTO_0_13 ARGS (value I64) RETURNS DURATION CODE $roto$ fn wait_for(value: I64Column) -> I64Column { value } $roto$;                                | UDF 'wait_for' in domain '{{domain}}' cannot return a DURATION                      | VEC<DURATION> |
-
-  Scenario Outline: A WASM processor whose guest would read a DURATION is refused when it is applied
-    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
-    And a <cluster_size> node nervix cluster is started
-    And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these Plexus commands
-      """
-      CREATE UNPACED DOMAIN {{domain}};
-      CREATE RESOURCE guest;
-      UPLOAD RESOURCE guest VERSION '{{wasm_processor}}';
-      CREATE SCHEMA metric (value I32);
-      CREATE SCHEMA timed_metric (value I32, wait DURATION);
-      CREATE RELAY metrics SCHEMA metric UNBRANCHED;
-      CREATE RELAY timed_metrics SCHEMA timed_metric UNBRANCHED;
-      """
-    When these Plexus commands fail with "<diagnostic>"
-      """
-      CREATE WASM PROCESSOR filtering FROM <input> COLLECT FOR 10ms MAX BATCH SIZE 1MiB
-        DETACHED USING RESOURCE guest VERSION 1 FILE 'processors/filter_even.wasm'
-        MAX FUEL 1000000000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096
-        UNBRANCHED TO <output> SET value = value
-        ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
-      """
-
-    Examples:
-      | cluster_size | input         | output        | diagnostic                                                                                       |
-      | 1            | timed_metrics | metrics       | WASM processor 'filtering' in domain '{{domain}}' cannot pass DURATION field 'wait' to its guest |
-      | 3            | metrics       | timed_metrics | WASM processor 'filtering' in domain '{{domain}}' cannot pass DURATION field 'wait' to its guest |
 
   Scenario Outline: A database emitter declares a DURATION column value rejected when it is applied
     Given a <cluster_size> node nervix cluster is started
@@ -494,4 +464,3 @@ Feature: Duration values
       | 3            | timed_events | wait = 106752d            | does not fit a DURATION                                      |
       | 1            | timed_events | wait = 30 AS DURATION     | converts to no other type                                    |
       | 3            | plain_events | count = input.wait AS I64 | converts to no other type                                    |
-      | 1            | timed_events | wait = input.wait + 1s    | operator Add is not valid for Duration(Nanosecond)           |

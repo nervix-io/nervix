@@ -60,8 +60,9 @@ the Rust client's `a_prepared_command_completes_on_a_host_thread_with_half_a_jav
 
 Every wait accepts an optional cancellation token. Another host thread can trigger it. Its
 optional physical deadline bounds that call independently of connection, request and retry
-deadlines in `ConnectOptions`. The host token accepts at most one day, the longest deadline the
-Rust client accepts, and checks monotonic-clock overflow. A triggered token wins over a simultaneously ready result; cancellation and deadline
+deadlines in `ConnectOptions`. The host token accepts the deadlines the Rust client accepts, from
+its shortest deadline, one millisecond, through the longest wait a client takes, one day, and
+refuses any other as an invalid argument; it also checks monotonic-clock overflow. A triggered token wins over a simultaneously ready result; cancellation and deadline
 expiry have distinct failure kinds. A Ruby interrupt cancels the current call's child token,
 leaving sibling calls and their shared parent token intact.
 

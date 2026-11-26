@@ -42,7 +42,9 @@ use nervix_client_wire::{
     WireEncodeError,
     grpc::{FrameRejection, RESTORE_BACKUP_PATH},
 };
-use nervix_models::{ArchiveDigest, CommandExecutionReference, Restore, RestoreArchive};
+use nervix_models::{
+    ArchiveDigest, CommandExecutionReference, LARGEST_RESTORE_CHUNK_BYTES, Restore, RestoreArchive,
+};
 use nervix_primitives::{
     stream::{StreamExt as _, wrappers::ReceiverStream},
     sync::{Arc, mpsc},
@@ -60,18 +62,6 @@ use crate::{
     upload::{expand_user_path, upload_status_is_retryable},
 };
 
-/// Archive bytes one restore frame carries.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the client implementation manual (rule W-1) and Backup And Restore's limits \
-                  publish 256 KiB as the largest restore chunk the Rust client sends, which half \
-                  a smaller session frame lowers"
-    )
-)]
-const RESTORE_CHUNK_BYTES: usize = 256 * 1024;
-
 /// The request identity of a restore's start frame. Every attempt is a stream of its own that
 /// exactly one reply answers, so the identity only has to be non-zero.
 const RESTORE_REQUEST_ID: RequestId = RequestId::new(NonZeroU64::MIN);
@@ -82,7 +72,9 @@ async fn measure_archive(path: PathBuf) -> io::Result<RestoreDigest> {
     let measure = nervix_primitives::task::spawn_blocking(move || -> io::Result<RestoreDigest> {
         let mut file = std::fs::File::open(&path)?;
         let mut hasher = blake3::Hasher::new();
-        let mut buffer = vec![0_u8; RESTORE_CHUNK_BYTES];
+        // The archive is read in buffers of the largest restore chunk.
+        let buffer_bytes: usize = LARGEST_RESTORE_CHUNK_BYTES.arch_into();
+        let mut buffer = vec![0_u8; buffer_bytes];
         let mut length = 0_u64;
         loop {
             let read = file.read(&mut buffer)?;
@@ -697,7 +689,7 @@ impl RestoreFeed {
             Ok(Err(_)) => return Feeding::CallEnded,
             Err(_) => return Feeding::Stalled,
         }
-        let mut buffer = vec![0_u8; RESTORE_CHUNK_BYTES.min(limits.frame_bytes() / 2)];
+        let mut buffer = vec![0_u8; RestoreChunk::largest_bytes(&limits)];
         let mut remaining = archive_bytes.get();
         let mut completion = Some(archive_sent);
         loop {

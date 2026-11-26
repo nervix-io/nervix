@@ -964,53 +964,103 @@ impl Runtime {
         self.install_state_identities_from_nodes(&revision.domain, revision.nodes.values());
     }
 
+    /// Publishes the identity `revision` gives each unit of `node`, leaving the identity of every
+    /// other unit as installed. A part a swap stops before it installs every identity writes its
+    /// last state under the identity its replacement reads, as it would once all are installed.
+    pub(in crate::runtime) fn install_state_identities_of(
+        &self,
+        revision: &ExecutionRevision,
+        node: &NodeRef,
+    ) {
+        let Some(scheduled) = revision.nodes.get(node) else {
+            return;
+        };
+        let start_version = self.identity_start_version(&revision.domain);
+        for (unit, execution) in &scheduled.units {
+            self.publish_scheduled_unit_identity(
+                &revision.domain,
+                start_version,
+                scheduled,
+                *unit,
+                execution,
+            );
+        }
+    }
+
     fn install_state_identities_from_nodes<'a>(
         &self,
         domain: &DomainName,
         nodes: impl Iterator<Item = &'a ExecutionNode>,
     ) {
-        let start_version = match self.inner.domains.get(domain) {
-            Some(state) => state.start_version,
-            None => 0,
-        };
+        let start_version = self.identity_start_version(domain);
         let mut scheduled = HashSet::default();
         for node in nodes {
-            let node_ref =
-                DomainNodeRef::node_in(domain.clone(), node.kind(), node.identifier.clone());
             for (unit, execution) in &node.units {
-                let executors = execution
-                    .assigned_nodes
-                    .iter()
-                    .filter(|owner| {
-                        node.executes_on_every_cluster_node
-                            || execution
-                                .primary_node
-                                .as_ref()
-                                .is_none_or(|primary| primary == *owner)
-                    })
-                    .cloned()
-                    .collect();
-                let replicas = execution.replica_nodes().into_iter().cloned().collect();
-                let key = DomainNodeUnitRef::new(node_ref.clone(), *unit);
-                self.publish_unit_state_assignment(
-                    key.clone(),
-                    ScheduledStateAssignment {
-                        identity: ScheduledStateIdentity {
-                            schema_fingerprint: Self::state_schema_fingerprint(node, start_version),
-                            inferencer_model: node.inferencer_model,
-                            wasm_state_generations: execution.wasm_state_generations.clone(),
-                        },
-                        checkpoint_owners: Some(CheckpointOwners {
-                            primary: execution.execution_node().cloned(),
-                            executors,
-                            replicas,
-                        }),
-                    },
+                let key = self.publish_scheduled_unit_identity(
+                    domain,
+                    start_version,
+                    node,
+                    *unit,
+                    execution,
                 );
                 scheduled.insert(key);
             }
         }
         self.retain_state_identities(domain, &scheduled);
+    }
+
+    /// The start of `domain` that qualifies the identity of its materialized relay state: the
+    /// installed start, or the first one before any is installed.
+    fn identity_start_version(&self, domain: &DomainName) -> u64 {
+        match self.inner.domains.get(domain) {
+            Some(state) => state.start_version,
+            None => 0,
+        }
+    }
+
+    /// Publishes the identity and checkpoint owners the schedule gives `unit` of `node`, and
+    /// returns the unit.
+    fn publish_scheduled_unit_identity(
+        &self,
+        domain: &DomainName,
+        start_version: u64,
+        node: &ExecutionNode,
+        unit: Unit,
+        execution: &ExecutionUnit,
+    ) -> DomainNodeUnitRef {
+        let executors = execution
+            .assigned_nodes
+            .iter()
+            .filter(|owner| {
+                node.executes_on_every_cluster_node
+                    || execution
+                        .primary_node
+                        .as_ref()
+                        .is_none_or(|primary| primary == *owner)
+            })
+            .cloned()
+            .collect();
+        let replicas = execution.replica_nodes().into_iter().cloned().collect();
+        let key = DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(domain.clone(), node.kind(), node.identifier.clone()),
+            unit,
+        );
+        self.publish_unit_state_assignment(
+            key.clone(),
+            ScheduledStateAssignment {
+                identity: ScheduledStateIdentity {
+                    schema_fingerprint: Self::state_schema_fingerprint(node, start_version),
+                    inferencer_model: node.inferencer_model,
+                    wasm_state_generations: execution.wasm_state_generations.clone(),
+                },
+                checkpoint_owners: Some(CheckpointOwners {
+                    primary: execution.execution_node().cloned(),
+                    executors,
+                    replicas,
+                }),
+            },
+        );
+        key
     }
 
     #[cfg(test)]

@@ -1145,6 +1145,13 @@ while it holds it, so its backoff still spaces every later retry. An operator's 
 hurries the attempt it makes. A notification hurries a refresh retry the same way but never makes
 a release give its turn away, and a queued attempt consumes the notification that preceded its
 turn. Failed refreshes retain their pending work and respect retry timing.
+An operator's release commits without the turn, so it never waits behind a request in flight. The
+commits that end or depend on the activation (the release, the start of a key rotation and a
+refreshed decision) take one commit order instead, held only around their consensus writes and
+never while a request waits for the service. A release that finds a key rotation pending takes the
+turn and finishes the rotation first. A refresh ends once the cluster no longer holds the
+activation it was for, and its decision applies only while the cluster still holds that
+activation, so a release that committed first is never reported as a refused decision.
 The coalesced hint retains its activation and the revisions reported by a sync. After acquiring
 the request turn, an automatic refresh compares that requirement with the fresh committed
 observation. A foreground response that already covers those decision, conditions and trust

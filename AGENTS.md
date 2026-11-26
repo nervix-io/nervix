@@ -184,12 +184,15 @@ violates instead of softening the contract to match today's imports.
   replication mechanisms.
 - The registry validates domains, references, schemas, branches, capabilities and execution
   contracts before a graph becomes active.
-- Entity labels are bounded control-plane metadata owned and committed with their domain Model.
-  Metadata-only edits preserve execution and state identities, tasks, allowances, resource
-  bindings, connections, buffers and acknowledgement outcomes, with no pause, flush, rebuild or
-  relocation. Stored schedules and captured archives retain the complete metadata; execution
-  plans and recurring record paths consume none of it. [Entity Labels](docs/src/entity-labels.md)
-  owns validation, transactions, inspection and durability.
+- A change that passed validation commits, and nothing after the commit fails it on a node:
+  everything after the commit is scheduling and connector behavior. Whatever is structurally wrong
+  is found before the commit, a WASM module and every plan and program included. An external
+  system that does not answer never fails a committed change; it is the entity's transient error,
+  which the entity retries. Placement after the commit belongs to the scheduler, which starts the
+  new instance and then removes the old one. A check that can run before the commit moves there,
+  and a check that runs after it and can fail the change is removed, never added. An existing one
+  is debt recorded on ClickUp, never extended or copied, and a test never injects a failure into a
+  step that cannot fail after the commit.
 - Gossip carries only membership-scoped state: identities and endpoints, prerequisites, admission
   verdicts, cluster parameters, termination and subscription interest. Application progress stays
   in one incarnation-bound local record and travels by typed interconnect reports and queries;
@@ -574,8 +577,11 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   drain and force flush, terminal teardown, startup recovery.
 - [Typed States And Validation Boundaries](docs/src/typed-states.md): how a missing value, state
   variant, required identity, conversion failure or boundary representation is modeled or validated.
-- [Entity Labels](docs/src/entity-labels.md): domain Model metadata, bounded key/value sets,
-  label statements and inspection, transaction effects, execution identity and archive fidelity.
+- [Entity Label Architecture](docs/src/entity-labels-architecture.md): the label vocabulary and
+  its owners, the captured limit policy and every place it is checked, each owner's commit path,
+  inspection and its revisions, what a label-only change leaves alone, labels in stored state and
+  archives, and adding a labelled entity. [Entity Labels](docs/src/entity-labels.md) owns the
+  statements, the limits and the guarantees an operator relies on.
 - [Node Settings](docs/src/node-settings.md): setting declarations, defaults, derivations,
   fixed-value contracts, validation, carriers, change procedures, capability sizing, settings
   enforcement. [Sizing A Node](docs/src/sizing.md) owns what an operator sizes a node and a
@@ -638,6 +644,44 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - Every order that follows the data may rely on it, such as the order in which a change stops the
   parts it replaces. No placement, scheduling, runtime or rendering path keeps a case for a loop in
   one domain graph; a view that overlays a graph before and after a change still meets cycles.
+
+### Entity labels
+
+- A label set is one `EntityLabels` map of exact keys to exact UTF-8 values. It is a field of the
+  record that describes its entity: every domain Model payload, the domain record, the logical
+  resource's catalog entry and the user record. It is committed and removed with that record. No
+  second copy, side map keyed by entity, managed label definition or inherited set exists, no
+  value is trimmed or normalized, and no key carries meaning: labels grant, select and place
+  nothing.
+- Every entity an operator creates by name and Nervix persists carries labels: each domain Model
+  kind, a domain, a logical resource and a cluster user. A resource version, a runtime branch, a
+  partition, a session and a cluster node carry none. A change that adds a Model kind, a connector
+  or entity variant, or another named owner delivers in the same change its trailing `LABELS`
+  creation clause through the shared grammar, `SET LABELS` and `SHOW LABELS` on its established
+  reference, its canonical text, the labels in every `DESCRIBE` it has, its archive records and
+  its console form.
+- The four `ENTITY_LABELS_MAX_*` cluster parameters bound a set. The complete resulting set is
+  validated against one captured committed policy before any effect, and again at every boundary
+  that decodes a stored or transmitted set. Nothing truncates or repairs a set, and a limit
+  reduction that a committed set exceeds is refused.
+- A change that edits only labels is control-plane metadata. It changes no execution or state
+  identity, plan, task, allowance, resource binding, connection, buffer or acknowledgement
+  outcome, needs no pause, flush, rebuild or relocation, and commits while a unit's owner is
+  unavailable. Whatever decides how an entity runs, such as a fingerprint, a change
+  classification, a plan or an endpoint contract, reads the Model's execution configuration,
+  which holds no labels. No data-plane path, metric label or automatic log field reads a label.
+- Inspection is one typed result: the typed owner, the complete map, a committed revision or an
+  explicit staged transaction view, and the captured policy. Text and JSON are projections of it.
+  Every client and host binding exposes the typed result, and none parses display text.
+- Stored schedules, snapshots and archives keep every included entity's labels exactly, under
+  their existing scope rules.
+- Label evidence runs through production owners and generated coverage. An interleaving of
+  commit, inspection, drop or recreation is a Shuttle check over the replicated state's label
+  owner, and a representation that carries labels has its registered Bolero property. Coverage of
+  entity kinds comes from the exhaustive Model generator, the vocabulary declarations and the
+  grammar, never from a list of kinds a test keeps by hand: the description scenario of
+  `tests/features/runtime/entity_labels.feature` is held to every Model kind the grammar can
+  describe.
 
 ### Types and sensitivity
 
@@ -959,6 +1003,25 @@ rules state.
   deadlines](docs/src/connector-contract.md#bounds-and-deadlines)); these rules govern exchanges
   between Nervix nodes and between a node's own tasks.
 
+### Time limits belong to whole operations
+
+- A time limit bounds a whole operation, never a unit of work inside it, and how the operation
+  started decides it. An operation an operator requested waits until it completes or is cancelled,
+  or until a limit the operator wrote. A node's termination follows its termination timeout. A
+  change Nervix starts itself follows the declared setting that bounds such changes. A wait on the
+  outside world or on a peer ends at that system's declared deadline, or when failure detection
+  judges the peer gone.
+- A unit of work, such as a task, a branch, a route or the handover of a unit, has no limit of its
+  own. Told to stop, it finishes the work in its hands and then ends; an enforced operation or a
+  failure ends it at once, with no grace either. No stop aborts a unit because a grace of its own
+  ran out.
+- A stop that would wait for something only its own operation releases, such as the operation's own
+  hold, is repaired by the order of the operation, never by a timer.
+- Every limit is a setting of the operation that owns it, a fixed contract or a derivation its
+  contract fixes ([Node Settings](#node-settings)). An existing grace of a unit of work, or a limit
+  derived as a ratio of another setting, is a defect recorded on ClickUp against its repair task,
+  never extended, copied or cited as precedent.
+
 ### Observability
 
 - `info` is reserved for lifecycle, topology, startup, shutdown, administration and unusual state
@@ -1003,13 +1066,16 @@ rules state.
   a session limit at session open, a heartbeat at link open), and the peer uses the announced value,
   never its own default or an assumption that nodes agree.
 - A value computed from other settings or the machine is a named derivation on its owner, never a
-  flag of its own. Whatever mirrors a setting (the charge for a buffer it sizes, a chunk, a
-  deadline, a restated default or bound) takes it from the resolved setting or its definition, and a
-  charge covers what is allocated at every valid value. Defaults and bounds are written once, in the
-  owning definition, and dependent defaults stay `Option` at the edge until resolved against typed
-  context. An explicit value is kept exactly and refused when it does not fit, never rounded,
-  clamped or reduced. Operator-supplied relationships are validated before I/O, and transitions at
-  commit.
+  flag of its own. A derivation states a relationship its owner's contract fixes, such as a failure
+  detector's timeout following its heartbeat. A fraction, multiple or offset of another setting
+  picked to reproduce a convenient default is a hidden tunable however it is named; the
+  `nervix::hidden_tunable` diagnostic does not see arithmetic on a setting, so review owns this.
+  Whatever mirrors a setting (the charge for a buffer it sizes, a chunk, a deadline, a restated
+  default or bound) takes it from the resolved setting or its definition, and a charge covers what
+  is allocated at every valid value. Defaults and bounds are written once, in the owning definition,
+  and dependent defaults stay `Option` at the edge until resolved against typed context. An explicit
+  value is kept exactly and refused when it does not fit, never rounded, clamped or reduced.
+  Operator-supplied relationships are validated before I/O, and transitions at commit.
 - Before any listener binds or store opens, the
   [startup preflight](docs/src/node-settings.md#the-startup-preflight) checks what the node needs
   from its environment, such as memory against its budgets, its directories and its resolver, and a

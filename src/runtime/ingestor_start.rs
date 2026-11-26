@@ -358,7 +358,7 @@ impl Runtime {
         ingestor: &IngestorName,
     ) -> error_stack::Result<(), RuntimeError> {
         for unit in self.running_ingestor_units(domain, ingestor) {
-            self.stop_ingestor_unit(domain, ingestor, unit, self.planned_task_stop())
+            self.stop_ingestor_unit(domain, ingestor, unit, RouteStop::Finish)
                 .await?;
         }
         Ok(())
@@ -379,15 +379,14 @@ impl Runtime {
             .collect::<Vec<_>>()
     }
 
-    /// Stops `unit` of `ingestor` on this node. Its source tasks end by closing their sources, and
-    /// its branched tasks stop as `wait` says: a planned operation waits for the work they hold,
-    /// and terminal teardown gives them the task stop grace.
+    /// Stops one locally running unit of `ingestor`: its sources end, and its branched routes end
+    /// as `route_stop` asks, with no limit of their own.
     pub(in crate::runtime) async fn stop_ingestor_unit(
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
         unit: Unit,
-        wait: TaskStopWait,
+        route_stop: RouteStop,
     ) -> error_stack::Result<(), RuntimeError> {
         let key = DomainNodeUnitRef::new(
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
@@ -422,7 +421,7 @@ impl Runtime {
                 .await;
         }
         for branched in branched {
-            branched.shutdown(wait).await;
+            branched.stop(route_stop).await;
         }
 
         let placement = RuntimeStatePlacement {
@@ -1079,7 +1078,7 @@ mod tests {
                 &domain("default"),
                 &named::<IngestorName>("mqtt_notifications"),
                 Unit::try_instance(2).assured("the fixture index fits the execution-unit range"),
-                runtime.planned_task_stop(),
+                RouteStop::Finish,
             )
             .await
             .expect_err("no ingestor runs before one starts");

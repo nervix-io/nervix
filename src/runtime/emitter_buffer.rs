@@ -2,10 +2,12 @@
 //!
 //! Layer: data plane.
 //! - **Owns.** The emitter's buffer of released batches with their source relay and branch, the
-//!   request an HTTP emitter admitted each row with and what a later rejection of the row reads,
-//!   message and byte accounting, where every row stands in its publication and which rows its emitter
-//!   delivered, what a flush reports as sent, the batch payloads, HTTP requests and prepared row
-//!   requests retained for the rows they carry, and flush cadence.
+//!   request an HTTP emitter admitted each row with, what the error route of a row that fails after
+//!   the emitter's route ran reads (the source row the route built it from, the record it built and
+//!   the materialized state its batch was admitted with) and the bound on what the buffer keeps for
+//!   it, message and byte accounting, where every row stands in its publication and which rows its
+//!   emitter delivered, what a flush reports as sent, the batch payloads, HTTP requests and prepared
+//!   row requests retained for the rows they carry, and flush cadence.
 //! - **Depends on.** Relay batches and their acknowledgements, the emitter's flush policy, and the
 //!   domain clock its cadence is resolved against.
 //! - **Must not know.** Which connector publishes the batches, how their rows are encoded or
@@ -90,6 +92,10 @@ pub(super) struct EmitterPublishBatch {
     /// The request every row was admitted with, present only for an emitter that publishes through
     /// an HTTP emitter.
     http_requests: Option<AdmittedHttpRequests>,
+    /// What the error route of every row reads once the row fails after the emitter's route ran,
+    /// present only for an emitter whose message-error policy sends to an error relay and whose
+    /// rows need more than they hold themselves.
+    error_route_inputs: Option<ErrorRouteInputs>,
     /// Where every row stands in its publication.
     rows: Vec<BufferedRow>,
     /// When the emitter's `GIVE UP AFTER` stops retrying this batch.
@@ -165,6 +171,137 @@ const BYTES_IN_MEMORY: &str =
 const DELIVERED_ROWS: &str =
     "delivered rows are distinct rows of their batch, read from its states one per row";
 
+/// The source rows a route built the published rows of one batch from, one for each published row
+/// in row order. They share the source batch's columns rather than copying them.
+#[derive(Clone)]
+pub(in crate::runtime) struct RouteSourceRows {
+    records: SourceRecords,
+    /// The source row of each published row, in row order.
+    rows: Vec<usize>,
+}
+
+impl RouteSourceRows {
+    pub(in crate::runtime) fn new(records: SourceRecords, rows: Vec<usize>) -> Self {
+        Self { records, rows }
+    }
+
+    /// The source row published row `row` was built from, without copying its values.
+    fn source_row(&self, row: usize) -> EmitterRuntimeResult<RuntimeRow> {
+        let Some(source_row) = self.rows.get(row) else {
+            return Err(Report::new(EmitterRuntimeError::MissingSourceRow { row }));
+        };
+        self.records
+            .row(*source_row)
+            .change_context(EmitterRuntimeError::MissingSourceRow { row })
+    }
+}
+
+/// What the error route of each row of one batch reads besides the error once the row fails after
+/// the emitter's route ran: the source row the route built the row from, when the route built
+/// one, and the materialized state the batch was admitted with. The record the route built is the
+/// row the batch publishes, so it is never kept twice.
+#[derive(Clone)]
+pub(in crate::runtime) struct ErrorRouteInputs {
+    /// Absent when the published rows are their own source rows.
+    built_from: Option<RouteSourceRows>,
+    materialized_state: HashMap<String, RuntimeValue>,
+}
+
+impl ErrorRouteInputs {
+    pub(in crate::runtime) fn new(
+        built_from: Option<RouteSourceRows>,
+        materialized_state: HashMap<String, RuntimeValue>,
+    ) -> Self {
+        Self {
+            built_from,
+            materialized_state,
+        }
+    }
+
+    /// Whether these inputs name nothing beyond what the published rows hold themselves.
+    pub(in crate::runtime) fn is_empty(&self) -> bool {
+        self.built_from.is_none() && self.materialized_state.is_empty()
+    }
+
+    /// The bytes these inputs keep alive: the Arrow data of the whole source batch the route built
+    /// from, which they hold however few of its rows they name, and the state snapshot.
+    fn retained_bytes(&self) -> u64 {
+        let source_bytes = match &self.built_from {
+            Some(built_from) => built_from.records.estimated_bytes(),
+            None => 0,
+        };
+        source_bytes
+            .checked_add(state_bytes(&self.materialized_state))
+            .assured(BYTES_IN_MEMORY)
+    }
+
+    /// What the error route of row `row` of `published`, the batch these inputs were kept with,
+    /// reads besides the error: the source row the route built it from and the built row as
+    /// `partial_output`, or the row itself when the route built none, with the state snapshot.
+    pub(in crate::runtime) fn rejected_record(
+        &self,
+        published: &RelayRecordBatch,
+        row: usize,
+    ) -> EmitterRuntimeResult<RejectedRecordInput> {
+        let (record, partial_output) = match &self.built_from {
+            Some(built_from) => (
+                built_from.source_row(row)?,
+                finalized_partial_output(&published.batch, row),
+            ),
+            None => (
+                published
+                    .runtime_row(row)
+                    .change_context(EmitterRuntimeError::EncodeBatch)?,
+                None,
+            ),
+        };
+        Ok(RejectedRecordInput {
+            record,
+            partial_output,
+            materialized_state: self.materialized_state.clone(),
+        })
+    }
+}
+
+/// The bytes a materialized-state snapshot holds: each name and the data of each value.
+fn state_bytes(state: &HashMap<String, RuntimeValue>) -> u64 {
+    let mut bytes = 0_u64;
+    for (name, value) in state {
+        let name_bytes: u64 = name.len().arch_into();
+        bytes = bytes
+            .checked_add(name_bytes)
+            .assured(BYTES_IN_MEMORY)
+            .checked_add(value_bytes(value))
+            .assured(BYTES_IN_MEMORY);
+    }
+    bytes
+}
+
+/// The bytes one value holds: the text of a string, the values of a list, and the width a column
+/// of its type stores it in otherwise.
+fn value_bytes(value: &RuntimeValue) -> u64 {
+    match value {
+        RuntimeValue::String(text) => text.len().arch_into(),
+        RuntimeValue::Array(values) | RuntimeValue::Vec(values) => {
+            let mut bytes = 0_u64;
+            for value in values {
+                bytes = bytes
+                    .checked_add(value_bytes(value))
+                    .assured(BYTES_IN_MEMORY);
+            }
+            bytes
+        }
+        RuntimeValue::U8(_) | RuntimeValue::I8(_) | RuntimeValue::Bool(_) => 1,
+        RuntimeValue::U16(_) | RuntimeValue::I16(_) => 2,
+        RuntimeValue::U32(_) | RuntimeValue::I32(_) | RuntimeValue::F32(_) => 4,
+        RuntimeValue::U64(_)
+        | RuntimeValue::I64(_)
+        | RuntimeValue::F64(_)
+        | RuntimeValue::Datetime(_)
+        | RuntimeValue::Duration(_) => 8,
+    }
+}
+
 impl EmitterPublishBatch {
     pub(super) fn from_input(
         source_relay: RelayName,
@@ -180,6 +317,7 @@ impl EmitterPublishBatch {
             ordering_groups: None,
             envelopes: None,
             http_requests: None,
+            error_route_inputs: None,
             rows: vec![BufferedRow::Pending; row_count],
             give_up: GiveUpClock::NotStarted,
         }
@@ -208,6 +346,7 @@ impl EmitterPublishBatch {
             ordering_groups: None,
             envelopes: None,
             http_requests: None,
+            error_route_inputs: None,
             rows: vec![BufferedRow::Pending; row_count],
             give_up: GiveUpClock::NotStarted,
         })
@@ -318,18 +457,34 @@ impl EmitterPublishBatch {
             .ok_or_else(|| Report::new(EmitterRuntimeError::MissingHttpRequest { row }))
     }
 
-    /// What the message error of row `row` reads besides the error once the row is rejected after
-    /// admission. An HTTP request's error reads its original source record, its attempted codec
-    /// record and the materialized state its batch was admitted with; any other row's reads the
-    /// row as this batch holds it.
+    /// This batch with what the error route of each of its rows reads once the row fails after the
+    /// emitter's route ran.
+    pub(super) fn with_error_route_inputs(
+        mut self,
+        inputs: ErrorRouteInputs,
+    ) -> EmitterRuntimeResult<Self> {
+        let row_count = self.batch.batch.batch().num_rows();
+        if let Some(built_from) = &inputs.built_from
+            && built_from.rows.len() != row_count
+        {
+            return Err(Report::new(EmitterRuntimeError::SourceRowCountMismatch {
+                source_rows: built_from.rows.len(),
+                row_count,
+            }));
+        }
+        self.error_route_inputs = Some(inputs);
+        Ok(self)
+    }
+
+    /// What the message error of row `row` reads besides the error once the row is rejected or
+    /// fails after admission: what the emitter kept for its error route, or, for an emitter that
+    /// kept nothing because no policy of it reads more, the row as this batch holds it.
     pub(super) fn rejected_record_input(
         &self,
         row: usize,
     ) -> EmitterRuntimeResult<RejectedRecordInput> {
-        if let Some(requests) = &self.http_requests {
-            return requests
-                .rejected_record(&self.batch, row)
-                .change_context(EmitterRuntimeError::EncodeBatch);
+        if let Some(inputs) = &self.error_route_inputs {
+            return inputs.rejected_record(&self.batch, row);
         }
         let record = self
             .batch
@@ -340,6 +495,33 @@ impl EmitterPublishBatch {
             partial_output: None,
             materialized_state: HashMap::default(),
         })
+    }
+
+    /// What the message error of each row reads once the emitter fails this batch as a whole, in
+    /// row order, as [`Self::rejected_record_input`] names it: nothing for a row already resolved,
+    /// which the failure leaves alone.
+    pub(super) fn unresolved_row_inputs(
+        &self,
+    ) -> EmitterRuntimeResult<Vec<Option<RejectedRecordInput>>> {
+        let mut inputs = Vec::with_capacity(self.rows.len());
+        for (row, state) in self.rows.iter().enumerate() {
+            let input = match state.is_resolved() {
+                true => None,
+                false => Some(self.rejected_record_input(row)?),
+            };
+            inputs.push(input);
+        }
+        Ok(inputs)
+    }
+
+    /// The bytes this batch keeps for its error route beside what it publishes. The buffer bounds
+    /// them apart from the batch's own bytes, and they are never part of what the emitter reports
+    /// as sent.
+    fn retained_bytes(&self) -> u64 {
+        match &self.error_route_inputs {
+            Some(inputs) => inputs.retained_bytes(),
+            None => 0,
+        }
     }
 
     /// The ordering group row `row` is published under, absent when the emitter declares none, or
@@ -544,6 +726,7 @@ impl EmitterPublishBatch {
     }
 
     /// Whether each row is resolved, so a failure that takes the batch back routes only the rest.
+    #[cfg(test)]
     pub(super) fn resolved_rows(&self) -> Vec<bool> {
         self.rows.iter().map(|row| row.is_resolved()).collect()
     }
@@ -828,6 +1011,9 @@ pub(super) struct EmitterBatchBuffer {
     row_requests: PreparedPayloads<RowRequestBody>,
     pending_messages: u64,
     pending_bytes: u64,
+    /// The bytes the pending batches keep for their error routes, which the flush policy's
+    /// `MAX BATCH SIZE` bounds apart from `pending_bytes`.
+    retained_bytes: u64,
     cadence: BranchBufferTimer,
     buffered_messages: Arc<EmitterBufferedMessages>,
     observations: Option<EmitterWork>,
@@ -858,6 +1044,7 @@ impl EmitterBatchBuffer {
             row_requests: PreparedPayloads::observed(&context.interactions),
             pending_messages: 0,
             pending_bytes: 0,
+            retained_bytes: 0,
             cadence: BranchBufferTimer::default(),
             buffered_messages,
             observations: Some(context.interactions.work()),
@@ -964,6 +1151,7 @@ impl EmitterBatchBuffer {
             row_requests: PreparedPayloads::default(),
             pending_messages: 0,
             pending_bytes: 0,
+            retained_bytes: 0,
             cadence: BranchBufferTimer::default(),
             buffered_messages,
             observations: None,
@@ -984,7 +1172,11 @@ impl EmitterBatchBuffer {
         };
         self.retain(batch);
         self.arm_cadence(context, flush_policy)?;
-        Ok(flush_policy.size_boundary_reached(self.pending_bytes))
+        // What the batches keep for their error routes has an allowance of its own, so a buffer
+        // holds at most about twice the bound, and batching changes only where the kept rows
+        // outweigh the records the emitter publishes.
+        Ok(flush_policy.size_boundary_reached(self.pending_bytes)
+            || flush_policy.size_boundary_reached(self.retained_bytes))
     }
 
     /// Retains a batch whose release the caller already owns.
@@ -1012,6 +1204,10 @@ impl EmitterBatchBuffer {
         self.pending_bytes = self
             .pending_bytes
             .checked_add(batch.estimated_bytes())
+            .assured("both counts estimate bytes of batches this node already holds in memory");
+        self.retained_bytes = self
+            .retained_bytes
+            .checked_add(batch.retained_bytes())
             .assured("both counts estimate bytes of batches this node already holds in memory");
         self.pending.push(batch);
         self.update_buffered_messages();
@@ -1064,6 +1260,7 @@ impl EmitterBatchBuffer {
         self.row_requests.clear();
         self.pending_messages = 0;
         self.pending_bytes = 0;
+        self.retained_bytes = 0;
         self.cadence.clear();
         self.update_buffered_messages();
         pending
@@ -1077,6 +1274,7 @@ impl EmitterBatchBuffer {
         self.row_requests.clear();
         self.pending_messages = 0;
         self.pending_bytes = 0;
+        self.retained_bytes = 0;
         self.cadence.clear();
         self.update_buffered_messages();
     }
@@ -1114,6 +1312,7 @@ impl EmitterBatchBuffer {
             row_requests,
             pending_messages,
             pending_bytes,
+            retained_bytes,
             cadence,
             buffered_messages,
             observations,
@@ -1139,6 +1338,9 @@ impl EmitterBatchBuffer {
                     .assured("retired messages were included when their batch entered this buffer");
                 *pending_bytes = pending_bytes
                     .checked_sub(batch.estimated_bytes())
+                    .assured("retired bytes were included when their batch entered this buffer");
+                *retained_bytes = retained_bytes
+                    .checked_sub(batch.retained_bytes())
                     .assured("retired bytes were included when their batch entered this buffer");
                 positions.push(None);
             } else {
@@ -1246,6 +1448,7 @@ impl EmitterBatchBuffer {
             row_requests,
             pending_messages,
             pending_bytes,
+            retained_bytes,
             cadence,
             buffered_messages,
             observations,
@@ -1262,6 +1465,9 @@ impl EmitterBatchBuffer {
                     .assured("given-up messages were counted when their batch entered this buffer");
                 *pending_bytes = pending_bytes
                     .checked_sub(batch.estimated_bytes())
+                    .assured("given-up bytes were counted when their batch entered this buffer");
+                *retained_bytes = retained_bytes
+                    .checked_sub(batch.retained_bytes())
                     .assured("given-up bytes were counted when their batch entered this buffer");
                 positions.push(None);
                 given_up.push(batch);
@@ -1686,11 +1892,10 @@ mod tests {
                 .expect("one request for each row");
         let with_body =
             EmitterPublishBatch::from_batch(published.clone(), Timestamp::from_unix_nanos(100))
-                .with_http_requests(AdmittedHttpRequests::encoded(
-                    vec![request_fields(), request_fields()],
-                    &published,
-                    vec![0, 1],
-                ))
+                .with_http_requests(AdmittedHttpRequests::encoded(vec![
+                    request_fields(),
+                    request_fields(),
+                ]))
                 .expect("one request for each row");
 
         for mut batch in [without_body.clone(), with_body.clone()] {
@@ -1731,11 +1936,10 @@ mod tests {
 
         let mut partly =
             EmitterPublishBatch::from_batch(published.clone(), Timestamp::from_unix_nanos(100))
-                .with_http_requests(AdmittedHttpRequests::encoded(
-                    vec![request_fields(), request_fields()],
-                    &published,
-                    vec![0, 1],
-                ))
+                .with_http_requests(AdmittedHttpRequests::encoded(vec![
+                    request_fields(),
+                    request_fields(),
+                ]))
                 .expect("one request for each row");
         partly
             .mark_rejected(0)
@@ -2498,5 +2702,320 @@ mod tests {
             AckOutcome::NoAck("emitter dropped buffered batch".to_string())
         );
         assert_eq!(reported_messages.load(Ordering::Acquire), 0);
+    }
+
+    /// The source batch `orders (order_id STRING, amount I64)`, one row for each of `rows`.
+    fn orders(rows: &[(&str, i64)]) -> RelayRecordBatch {
+        let schema = crate::runtime::test_fixtures::test_schema(&[
+            ("order_id", nervix_models::ParseAsType::String),
+            ("amount", nervix_models::ParseAsType::I64),
+        ]);
+        let mut messages = Vec::with_capacity(rows.len());
+        for (order_id, amount) in rows {
+            messages.push(RelayMessage {
+                key: None,
+                record: test_runtime_row([
+                    (
+                        "order_id".to_string(),
+                        RuntimeValue::String((*order_id).to_string()),
+                    ),
+                    ("amount".to_string(), RuntimeValue::I64(*amount)),
+                ])
+                .with_ingested_at_watermarks(Timestamp::from_unix_nanos(30)),
+                acks: AckSet::empty(),
+            });
+        }
+        RelayRecordBatch::from_messages(schema, messages)
+            .expect("the test rows match the orders schema")
+    }
+
+    /// The `invoice (reference STRING)` records an emitter's route built, one for each of
+    /// `references`.
+    fn invoices(references: &[&str]) -> RelayRecordBatch {
+        let schema = crate::runtime::test_fixtures::test_schema(&[(
+            "reference",
+            nervix_models::ParseAsType::String,
+        )]);
+        let mut messages = Vec::with_capacity(references.len());
+        for reference in references {
+            messages.push(RelayMessage {
+                key: None,
+                record: test_runtime_row([(
+                    "reference".to_string(),
+                    RuntimeValue::String((*reference).to_string()),
+                )])
+                .with_ingested_at_watermarks(Timestamp::from_unix_nanos(30)),
+                acks: AckSet::empty(),
+            });
+        }
+        RelayRecordBatch::from_messages(schema, messages)
+            .expect("the test rows match the invoice schema")
+    }
+
+    /// The materialized state a batch of these tests was admitted with.
+    fn north_state() -> HashMap<String, RuntimeValue> {
+        HashMap::from_iter([(
+            "relay_state.settings.label".to_string(),
+            RuntimeValue::String("north-ready".to_string()),
+        )])
+    }
+
+    /// The text value of field `field` of `record`.
+    fn text(record: &RuntimeRow, field: &str) -> String {
+        match record.value(field) {
+            Ok(Some(RuntimeValue::String(value))) => value,
+            other => panic!("field '{field}' is not a text value: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_row_that_fails_after_its_route_ran_reads_its_source_row_its_built_record_and_its_state() {
+        let source = orders(&[("n1", 7), ("dropped", 0), ("n2", 9)]);
+        // The route kept source rows 2 and 0, in that order, and built one invoice from each.
+        let batch = EmitterPublishBatch::from_batch(
+            invoices(&["inv-n2", "inv-n1"]),
+            Timestamp::from_unix_nanos(100),
+        )
+        .with_error_route_inputs(ErrorRouteInputs::new(
+            Some(RouteSourceRows::new(SourceRecords::of(&source), vec![2, 0])),
+            north_state(),
+        ))
+        .expect("one source row for each published row");
+
+        for (row, order_id, amount, reference) in [(0, "n2", 9, "inv-n2"), (1, "n1", 7, "inv-n1")] {
+            let input = batch
+                .rejected_record_input(row)
+                .expect("a published row has the source row it was built from");
+            assert_eq!(text(&input.record, "order_id"), order_id);
+            assert_eq!(
+                input.record.value("amount").expect("readable amount"),
+                Some(RuntimeValue::I64(amount)),
+                "the error route reads a field only the source row has"
+            );
+            let built = input
+                .partial_output
+                .expect("the error route reads the record the route built");
+            assert_eq!(built.batch().num_rows(), 1);
+            let field = built
+                .batch()
+                .schema()
+                .field_with_name("reference")
+                .expect("the built record keeps its fields")
+                .clone();
+            assert!(
+                field.is_nullable(),
+                "every partial_output field is optional"
+            );
+            let references = built
+                .batch()
+                .column_by_name("reference")
+                .expect("the built record has its reference")
+                .as_any()
+                .downcast_ref::<arrow_array::StringArray>()
+                .expect("a reference is text")
+                .value(0)
+                .to_string();
+            assert_eq!(references, reference);
+            assert_eq!(input.materialized_state, north_state());
+        }
+        let Err(missing) = batch.rejected_record_input(2) else {
+            panic!("the batch publishes two rows");
+        };
+        assert_eq!(
+            *missing.current_context(),
+            EmitterRuntimeError::MissingSourceRow { row: 2 }
+        );
+        let Err(mismatch) =
+            EmitterPublishBatch::from_batch(invoices(&["inv-n1"]), Timestamp::from_unix_nanos(100))
+                .with_error_route_inputs(ErrorRouteInputs::new(
+                    Some(RouteSourceRows::new(SourceRecords::of(&source), vec![0, 2])),
+                    HashMap::default(),
+                ))
+        else {
+            panic!("every published row needs exactly one source row");
+        };
+        assert_eq!(
+            *mismatch.current_context(),
+            EmitterRuntimeError::SourceRowCountMismatch {
+                source_rows: 2,
+                row_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn a_row_its_route_did_not_build_reads_itself_with_the_state_its_emitter_kept() {
+        let published = orders(&[("n1", 7)]);
+        let keeps_nothing =
+            EmitterPublishBatch::from_batch(published.clone(), Timestamp::from_unix_nanos(100));
+        let input = keeps_nothing
+            .rejected_record_input(0)
+            .expect("the row is its own source row");
+        assert_eq!(text(&input.record, "order_id"), "n1");
+        assert!(input.partial_output.is_none());
+        assert!(input.materialized_state.is_empty());
+
+        let keeps_state =
+            EmitterPublishBatch::from_batch(published, Timestamp::from_unix_nanos(100))
+                .with_error_route_inputs(ErrorRouteInputs::new(None, north_state()))
+                .expect("state needs no source rows");
+        let input = keeps_state
+            .rejected_record_input(0)
+            .expect("the row is its own source row");
+        assert_eq!(text(&input.record, "order_id"), "n1");
+        assert!(
+            input.partial_output.is_none(),
+            "a route that built nothing offers no partial_output"
+        );
+        assert_eq!(input.materialized_state, north_state());
+        assert!(ErrorRouteInputs::new(None, HashMap::default()).is_empty());
+    }
+
+    #[test]
+    fn a_batch_failed_as_a_whole_hands_every_unresolved_row_its_source_row() {
+        let source = orders(&[("n1", 7), ("s1", 8), ("n2", 9)]);
+        let mut batch = EmitterPublishBatch::from_batch(
+            invoices(&["inv-n1", "inv-s1", "inv-n2"]),
+            Timestamp::from_unix_nanos(100),
+        )
+        .with_error_route_inputs(ErrorRouteInputs::new(
+            Some(RouteSourceRows::new(
+                SourceRecords::of(&source),
+                vec![0, 1, 2],
+            )),
+            north_state(),
+        ))
+        .expect("one source row for each published row");
+        batch
+            .mark_delivered(1, DeliveredAcknowledgements::Host)
+            .expect("the second row can be delivered");
+
+        let inputs = batch
+            .unresolved_row_inputs()
+            .expect("every unresolved row has its source row");
+
+        assert_eq!(inputs.len(), 3, "one entry for each row, in row order");
+        assert!(inputs[1].is_none(), "a delivered row is not failed again");
+        for (input, order_id) in [(&inputs[0], "n1"), (&inputs[2], "n2")] {
+            let input = input.as_ref().expect("an unresolved row is failed");
+            assert_eq!(text(&input.record, "order_id"), order_id);
+            assert!(input.partial_output.is_some());
+            assert_eq!(input.materialized_state, north_state());
+        }
+    }
+
+    #[test]
+    fn what_a_batch_keeps_for_its_error_route_has_a_flush_allowance_of_its_own() {
+        let source = orders(&[("n1", 7), ("s1", 8)]);
+        let published = invoices(&["inv-1", "inv-2"]);
+        let state_bytes: u64 =
+            ("relay_state.settings.label".len() + "north-ready".len()).arch_into();
+        let plain =
+            EmitterPublishBatch::from_batch(published.clone(), Timestamp::from_unix_nanos(100));
+        let keeping = EmitterPublishBatch::from_batch(published, Timestamp::from_unix_nanos(100))
+            .with_error_route_inputs(ErrorRouteInputs::new(
+                Some(RouteSourceRows::new(SourceRecords::of(&source), vec![0, 1])),
+                north_state(),
+            ))
+            .expect("one source row for each published row");
+
+        assert_eq!(plain.retained_bytes(), 0);
+        assert_eq!(
+            keeping.retained_bytes(),
+            source.estimated_bytes() + state_bytes,
+            "the whole source batch stays alive, with the state snapshot"
+        );
+        assert_eq!(
+            keeping.estimated_bytes(),
+            plain.estimated_bytes(),
+            "what the batch keeps for its error route is not what it publishes"
+        );
+        let mut sent_plain = plain.clone();
+        let mut sent_keeping = keeping.clone();
+        for row in 0..2 {
+            sent_plain
+                .mark_delivered(row, DeliveredAcknowledgements::Host)
+                .expect("every row can be delivered");
+            sent_keeping
+                .mark_delivered(row, DeliveredAcknowledgements::Host)
+                .expect("every row can be delivered");
+        }
+        assert_eq!(
+            sent_keeping.delivered_report().map(|report| report.bytes),
+            sent_plain.delivered_report().map(|report| report.bytes),
+            "the sent bytes count only the published records"
+        );
+
+        // The bound is reached by what the batches keep for their error routes, while what they
+        // publish stays below it.
+        assert!(keeping.estimated_bytes() * 2 < keeping.retained_bytes());
+        let context = emitter_context();
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
+            interval: Duration::from_secs(60),
+            max_batch_size: keeping.retained_bytes(),
+        });
+        assert!(
+            !buffer.push(&context, plain).expect("the batch must buffer"),
+            "a batch that keeps nothing counts only its published bytes"
+        );
+        assert!(
+            buffer
+                .push(&context, keeping)
+                .expect("the batch must buffer"),
+            "what the batches keep reached the bound"
+        );
+        assert_eq!(
+            buffer.retained_bytes,
+            source.estimated_bytes() + state_bytes
+        );
+        let drained = buffer.drain_pending();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(buffer.retained_bytes, 0);
+        assert_eq!(buffer.pending_bytes, 0);
+    }
+
+    #[test]
+    fn a_kept_state_snapshot_counts_its_names_and_the_data_of_its_values() {
+        let state = HashMap::from_iter([
+            ("relay_state.a.flag".to_string(), RuntimeValue::Bool(true)),
+            ("relay_state.a.small".to_string(), RuntimeValue::U16(7)),
+            ("relay_state.a.count".to_string(), RuntimeValue::I32(-3)),
+            ("relay_state.a.total".to_string(), RuntimeValue::I64(9)),
+            (
+                "relay_state.a.seen".to_string(),
+                RuntimeValue::Datetime(
+                    chrono::DateTime::parse_from_rfc3339("2026-11-26T00:00:00Z")
+                        .expect("the test datetime parses"),
+                ),
+            ),
+            (
+                "relay_state.a.tags".to_string(),
+                RuntimeValue::Vec(vec![
+                    RuntimeValue::String("ab".to_string()),
+                    RuntimeValue::String("c".to_string()),
+                ]),
+            ),
+            (
+                "relay_state.a.pair".to_string(),
+                RuntimeValue::Array(vec![
+                    RuntimeValue::U8(1),
+                    RuntimeValue::F64(OrderedFloat(2.5)),
+                ]),
+            ),
+        ]);
+        let names: usize = state.keys().map(String::len).sum();
+        // A flag, a 16-bit, a 32-bit, a 64-bit and a datetime value, two strings and a pair.
+        let values: usize = 1 + 2 + 4 + 8 + 8 + (2 + 1) + (1 + 8);
+        let expected: u64 = (names + values).arch_into();
+        assert_eq!(state_bytes(&state), expected);
+
+        let kept = ErrorRouteInputs::new(None, state);
+        assert!(!kept.is_empty());
+        assert_eq!(
+            kept.retained_bytes(),
+            expected,
+            "rows that are their own source rows keep only the state"
+        );
     }
 }

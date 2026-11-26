@@ -68,6 +68,9 @@ pub(super) struct EntitySwapJournal {
     /// replaces nothing, so there is nothing to put back.
     previous: Option<Arc<ExecutionRevision>>,
     steps: Vec<EntitySwapStep>,
+    /// The ingestor units the swap stopped before it held any relay. Its later steps do not stop
+    /// them again, and a failed swap starts them through the steps that recorded their stops.
+    stopped_before_holds: BTreeSet<DomainNodeUnitRef>,
 }
 
 /// The position of a step of kind `S` in an [`EntitySwapJournal`], held by a swap that records
@@ -267,7 +270,18 @@ impl EntitySwapJournal {
         Self {
             previous,
             steps: Vec::new(),
+            stopped_before_holds: BTreeSet::new(),
         }
+    }
+
+    /// Records that the swap stopped the ingestor unit `unit` before it held any relay.
+    pub(super) fn record_stopped_before_holds(&mut self, unit: DomainNodeUnitRef) {
+        self.stopped_before_holds.insert(unit);
+    }
+
+    /// Whether the swap stopped the ingestor unit `unit` before it held any relay.
+    pub(super) fn stopped_before_holds(&self, unit: &DomainNodeUnitRef) -> bool {
+        self.stopped_before_holds.contains(unit)
     }
 
     /// Records `step` before the operations it describes, and returns where to complete it.
@@ -577,7 +591,11 @@ impl Runtime {
         domain: &DomainName,
         journal: EntitySwapJournal,
     ) -> bool {
-        let EntitySwapJournal { previous, steps } = journal;
+        let EntitySwapJournal {
+            previous,
+            steps,
+            stopped_before_holds: _,
+        } = journal;
         let Some(previous) = previous else {
             return true;
         };
@@ -1080,14 +1098,15 @@ impl Runtime {
                 ),
                 None => (Vec::new(), Vec::new()),
             };
+            // The replacement started under the swap's hold on its input relays, so it received
+            // nothing and stops at once.
             for task in tasks {
                 nervix_primitives::task::consume_budget().await;
-                task.abort();
-                task.join_after_shutdown("scheduled node").await;
+                task.stop().await;
             }
             for runtime in entrypoints {
                 nervix_primitives::task::consume_budget().await;
-                runtime.shutdown(self.planned_task_stop()).await;
+                runtime.stop(RouteStop::Finish).await;
             }
             for services in replacement.registered {
                 services.remove_local_runtime_consumer(replacement.mode);
@@ -1182,8 +1201,7 @@ impl Runtime {
                 .get_mut(restore.domain)
                 .and_then(|mut execution| execution.generator_tasks.remove(&owner));
             if let Some(task) = task {
-                task.abort();
-                task.join_after_shutdown("generator").await;
+                task.stop().await;
             }
         }
         if !previous_stopped {
@@ -1216,7 +1234,8 @@ impl Runtime {
             .spawn_generator_task(restore.domain, &restore.shutdown, spec)
             .change_context(EntitySwapRestoreError::StartPrevious)?;
         let Some(mut execution) = self.inner.executions.get_mut(restore.domain) else {
-            task.abort();
+            // The domain's execution is gone, so the task just started has nothing to run for.
+            task.into_task().abort();
             return Err(Report::new(EntitySwapRestoreError::ExecutionUnavailable));
         };
         execution.generator_tasks.insert(owner.clone(), task);

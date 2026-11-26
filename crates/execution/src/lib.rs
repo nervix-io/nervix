@@ -98,7 +98,7 @@ pub use settings::{
 pub use crate::{
     cancellation::{Cancellation, Cancelled},
     capacity_waits::CapacityWaits,
-    executor::{ExecutionFailure, Executor, ExecutorSnapshot},
+    executor::{ADMISSION_TOKEN_BYTES, ExecutionFailure, Executor, ExecutorSnapshot},
     growing::Attempt,
     limits::{
         ConnectorStorageWorkers, CpuClass, ExecutionConfig, ExecutionConfigError, MemoryBudgets,

@@ -78,6 +78,11 @@ tier = "boundary"
 
 [[test]]
 host = "python"
+identity = "boundary/test_cancellation.py::test_a_token_refuses_a_deadline_shorter_than_a_millisecond_or_longer_than_a_day"
+tier = "boundary"
+
+[[test]]
+host = "python"
 identity = "boundary/test_cancellation.py::test_a_connect_ends_at_its_deadline_against_a_listener_that_never_answers"
 tier = "boundary"
 

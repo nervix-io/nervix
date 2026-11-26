@@ -173,7 +173,11 @@ impl Runtime {
             }
         }
         debug!("the save stops every domain execution, which writes its final checkpoints");
-        Box::pin(self.stop_domain_executions(self.emitter_finish_deadline())).await;
+        Box::pin(self.stop_domain_executions(
+            self.emitter_finish_deadline(),
+            super::runtime_lifecycle::ExecutionsStop::Save,
+        ))
+        .await;
         info!(
             elapsed = ?started.elapsed(),
             "this node saved what it holds"
