@@ -163,14 +163,15 @@ async fn a_gossip_probe_of_an_earlier_run_never_moves_a_node_that_runs_elsewhere
     interconnect.register_outbound_target(node.clone(), elsewhere.clone());
 
     // The probe restores its route before it waits for a stream to the node, so one poll covers
-    // everything it does to the node's target.
-    let probe = gossip.exchange(address, vec![2]);
-    let mut probe = std::pin::pin!(probe);
-    assert!(
-        futures_util::poll!(probe.as_mut()).is_pending(),
-        "the probe waits for the endpoint the node is reached at, where nothing listens"
-    );
-    drop(probe);
+    // everything it does to the node's target. The probe ends with this block.
+    {
+        let probe = gossip.exchange(address, vec![2]);
+        let mut probe = std::pin::pin!(probe);
+        assert!(
+            futures_util::poll!(probe.as_mut()).is_pending(),
+            "the probe waits for the endpoint the node is reached at, where nothing listens"
+        );
+    }
 
     assert_eq!(
         interconnect.restore_outbound_target(node.clone(), probed),
