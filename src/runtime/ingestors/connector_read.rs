@@ -60,7 +60,7 @@ impl ReadEnd {
     /// after one the loop stops, or starts its next turn, at once.
     pub(super) async fn wait_for_retry(
         self,
-        host: &mut IngestorHost,
+        host: &mut IngestorLoopHost,
         shutdown: &mut watch::Receiver<bool>,
         delay: Duration,
     ) -> bool {
@@ -92,7 +92,7 @@ impl<M> BrokerRead<M> {
     /// What the loop does with this read. A batch the ingestor contract forbids, an empty one or an
     /// interruption the host did not ask for, is reported, and what it carries is still taken in.
     /// Payloads the ingestor dropped for their size are counted, and the loop reads again.
-    pub(super) fn into_outcome(self, host: &IngestorHost) -> ReadOutcome<M> {
+    pub(super) fn into_outcome(self, host: &IngestorLoopHost) -> ReadOutcome<M> {
         let outcome = match &self.batch {
             Ok(IngestorBatch::Messages(messages)) if !messages.is_empty() => {
                 IngestorReadOutcome::Delivered
@@ -136,7 +136,7 @@ impl<M> BrokerRead<M> {
 /// rather than being dropped with the read.
 pub(super) async fn read_batch<C>(
     connector: &mut C,
-    host: &mut IngestorHost,
+    host: &mut IngestorLoopHost,
     shutdown: &mut watch::Receiver<bool>,
     request: IngestorBatchRequest,
 ) -> BrokerRead<C::Message>
@@ -222,7 +222,7 @@ pub(super) async fn maintain_held_transport(
 /// change or a stop needs the loop back and ends the hold. The host counts every hold and how
 /// long it lasted.
 pub(super) async fn hold_for_allowance(
-    host: &mut IngestorHost,
+    host: &mut IngestorLoopHost,
     shutdown: &mut watch::Receiver<bool>,
     until: Instant,
     maintenance: Option<&mut dyn IngestorReadHold>,

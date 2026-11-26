@@ -270,7 +270,7 @@ impl RedeliveryHost {
 impl nervix_connector::ConnectorEventProvider for RedeliveryHost {}
 
 #[async_trait]
-impl IngestorHostServices for RedeliveryHost {
+impl IngestorLoopServices for RedeliveryHost {
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
     fn record_read_payloads(&self, _payloads: usize, _bytes: u64) {}
 
@@ -387,7 +387,7 @@ async fn lose_the_connection_of_the_first_message(
     let (shutdown, shutdown_rx) = watch::channel(false);
     run_ingestor_instance_with_retry(
         RedeliveringIngestor::new(broker.clone()),
-        IngestorHost::new(RedeliveryHost::new(broker.clone(), true)),
+        IngestorLoopHost::new(RedeliveryHost::new(broker.clone(), true)),
         sequential_policy(position_class),
         shutdown_rx,
         nervix_connector::RetryBackoffSettings::default(),
@@ -522,7 +522,7 @@ async fn successful_upgrades_keep_read_failure_backoff_until_a_batch_is_delivere
         let (shutdown, shutdown_rx) = watch::channel(false);
         run_ingestor_instance_with_retry(
             connector,
-            IngestorHost::new(RedeliveryHost::new(broker.clone(), false)),
+            IngestorLoopHost::new(RedeliveryHost::new(broker.clone(), false)),
             policy,
             shutdown_rx,
             nervix_connector::RetryBackoffSettings::default(),

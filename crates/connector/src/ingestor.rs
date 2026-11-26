@@ -613,7 +613,7 @@ impl IngestorBatchAcknowledgement {
                   acknowledgements"
     )
 )]
-pub trait IngestorHostServices: crate::ConnectorEventProvider + Send + 'static {
+pub trait IngestorLoopServices: crate::ConnectorEventProvider + Send + 'static {
     /// Observes one completed broker read or host-interrupted read, without changing its outcome.
     fn record_read(&self, outcome: IngestorReadOutcome);
     /// Counts raw transport payloads before decoding or graph admission, never internal replay.
@@ -679,8 +679,8 @@ pub trait IngestorHostServices: crate::ConnectorEventProvider + Send + 'static {
 }
 
 /// Task-local host services an ingestor loop drives without exposing a runtime type.
-pub struct IngestorHost {
-    services: Box<dyn IngestorHostServices>,
+pub struct IngestorLoopHost {
+    services: Box<dyn IngestorLoopServices>,
 }
 
 /// The bounded observation of one transport read or scheduled poll.
@@ -693,7 +693,7 @@ pub enum IngestorReadOutcome {
     Interrupted,
 }
 
-impl IngestorHost {
+impl IngestorLoopHost {
     /// Resolves one declared observation at connector construction.
     #[cfg_attr(
         nervix_lint,
@@ -713,7 +713,7 @@ impl IngestorHost {
     pub fn record_read_payloads(&self, payloads: usize, bytes: u64) {
         self.services.record_read_payloads(payloads, bytes);
     }
-    pub fn new(services: impl IngestorHostServices) -> Self {
+    pub fn new(services: impl IngestorLoopServices) -> Self {
         Self {
             services: Box::new(services),
         }
@@ -838,7 +838,7 @@ impl IngestorHost {
 /// had no room for traffic its transport does not hold back, such as MQTT publishes at QoS 0.
 ///
 /// The task that drops such a payload polls the connection apart from the host's loop and its
-/// [`IngestorHost`], so the host resolves one report for the ingestor's execution unit when it
+/// [`IngestorLoopHost`], so the host resolves one report for the ingestor's execution unit when it
 /// composes the connector and hands it over in the connector's plan. Each connection keeps a clone
 /// and records every drop through it at once, also while the host waits on a batch's
 /// acknowledgement trees, without naming a metrics type, resolving labels or reaching a registry.

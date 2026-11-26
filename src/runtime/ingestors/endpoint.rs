@@ -18,8 +18,8 @@
 use async_trait::async_trait;
 use error_stack::ResultExt as _;
 use nervix_connector::{
-    IngestorAckPolicy, IngestorConnector, IngestorHost, IngestorHostServices as _, IngestorPlan,
-    IngestorResult,
+    IngestorAckPolicy, IngestorConnector, IngestorLoopHost, IngestorLoopServices as _,
+    IngestorPlan, IngestorResult,
 };
 
 use super::{
@@ -80,7 +80,7 @@ macro_rules! endpoint_entity {
                 host.mark_ready();
                 Box::pin(run_request_ingestor(
                     *self,
-                    IngestorHost::new(host),
+                    IngestorLoopHost::new(host),
                     shutdown,
                 ))
             }

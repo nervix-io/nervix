@@ -83,7 +83,7 @@ impl ChannelHost {
 impl nervix_connector::ConnectorEventProvider for ChannelHost {}
 
 #[async_trait]
-impl IngestorHostServices for ChannelHost {
+impl IngestorLoopServices for ChannelHost {
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
     fn record_read_payloads(&self, _payloads: usize, _bytes: u64) {}
 
@@ -212,7 +212,7 @@ impl IngestorHostServices for ChannelHost {
 }
 
 #[async_trait]
-impl PacedIngestorHostServices for ChannelHost {
+impl PacedIngestorLoopServices for ChannelHost {
     fn record_poll(&self, _outcome: nervix_connector::IngestorReadOutcome, _elapsed: Duration) {}
 
     /// The channel double takes in a whole poll at once: the checks drive polls of one message.
@@ -337,7 +337,7 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
             IngestorFamily::Broker => {
                 nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
                     connector,
-                    IngestorHost::new(host),
+                    IngestorLoopHost::new(host),
                     BrokerIngestorPolicy {
                         error_retry: nervix_models::DataPlaneSettings::default()
                             .ingestor_error_retry(),
@@ -364,7 +364,7 @@ fn engagement_during_dispatch(family: IngestorFamily, cause: IngestorQuiesceCaus
             )),
             IngestorFamily::Request => nervix_primitives::task::spawn(run_request_ingestor(
                 connector,
-                IngestorHost::new(host),
+                IngestorLoopHost::new(host),
                 shutdown_rx,
             )),
         };
@@ -472,7 +472,7 @@ fn interrupted_gathering(cause: ReadInterruptionCause) {
         let (shutdown, shutdown_rx) = watch::channel(false);
         let loop_task = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
             GatheringIngestor::new(receiver, events.clone(), signals.clone()),
-            IngestorHost::new(RecordingHost::new(events.clone(), control.clone())),
+            IngestorLoopHost::new(RecordingHost::new(events.clone(), control.clone())),
             gathering_policy(3),
             shutdown_rx,
             nervix_connector::RetryBackoffSettings::default(),
@@ -589,7 +589,7 @@ fn spent_allowance_hold(meets: HoldMeets) {
         run_ingestor_instance_with_retry(
             GatheringIngestor::new(receiver, events.clone(), signals.clone())
                 .with_hold_maintenance(maintenance_started),
-            IngestorHost::new(
+            IngestorLoopHost::new(
                 RecordingHost::new(events.clone(), control.clone()).with_allowance(allowance),
             ),
             gathering_policy(1),
@@ -688,7 +688,7 @@ fn lost_connection_during_settlement(losses: usize) {
         let (shutdown, shutdown_rx) = watch::channel(false);
         let loop_task = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
             RedeliveringIngestor::new(broker.clone()),
-            IngestorHost::new(RedeliveryHost::new(broker.clone(), false)),
+            IngestorLoopHost::new(RedeliveryHost::new(broker.clone(), false)),
             sequential_policy(PositionClass::BrokerRedelivered),
             shutdown_rx,
             nervix_connector::RetryBackoffSettings::default(),
@@ -825,7 +825,7 @@ struct GraphHost {
 impl nervix_connector::ConnectorEventProvider for GraphHost {}
 
 #[async_trait]
-impl IngestorHostServices for GraphHost {
+impl IngestorLoopServices for GraphHost {
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
     fn record_read_payloads(&self, _payloads: usize, _bytes: u64) {}
 
@@ -954,7 +954,7 @@ fn drain_observing_a_confirmation() {
                 queue: vec![1, 2],
                 progress: progress.clone(),
             },
-            IngestorHost::new(GraphHost {
+            IngestorLoopHost::new(GraphHost {
                 trackers: trackers.clone(),
                 roots,
                 shutdown: shutdown_rx.clone(),
@@ -1058,7 +1058,7 @@ struct RefusingGraphHost {
 impl nervix_connector::ConnectorEventProvider for RefusingGraphHost {}
 
 #[async_trait]
-impl IngestorHostServices for RefusingGraphHost {
+impl IngestorLoopServices for RefusingGraphHost {
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
     fn record_read_payloads(&self, _payloads: usize, _bytes: u64) {}
 
@@ -1199,7 +1199,7 @@ fn drain_observing_a_batch_with_a_refused_payload(queue: &'static [u64]) {
                 queue: queue.to_vec(),
                 progress: progress.clone(),
             },
-            IngestorHost::new(RefusingGraphHost {
+            IngestorLoopHost::new(RefusingGraphHost {
                 trackers: trackers.clone(),
                 roots,
                 unresolved: unresolved.clone(),
@@ -1337,7 +1337,7 @@ fn instance_unit_handoff() {
             };
             let task = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
                 ChannelIngestor::new(receiver),
-                IngestorHost::new(host),
+                IngestorLoopHost::new(host),
                 BrokerIngestorPolicy {
                     error_retry: nervix_models::DataPlaneSettings::default().ingestor_error_retry(),
                     unacknowledged_poll_batch: NonZeroUsize::MIN,

@@ -96,12 +96,12 @@ pub use ingestor::{
     BrokerIngestorConnector, IngestorAckPolicy, IngestorAcknowledgementOutcome,
     IngestorAcknowledgementSupport, IngestorBatch, IngestorBatchAcknowledgement,
     IngestorBatchAcknowledgementServices, IngestorBatchRequest, IngestorCapabilities,
-    IngestorConnector, IngestorError, IngestorHost, IngestorHostServices, IngestorIntakeError,
-    IngestorIntakeMessage, IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll,
-    IngestorPollMessage, IngestorReadAheadOverflow, IngestorReadBudget, IngestorReadCancellation,
-    IngestorReadHold, IngestorReadOutcome, IngestorResult, IngestorResume, IngestorResumeOutcome,
-    IngestorSettlement, IngestorSettlementOperation, IngestorSettlementOutcome,
-    IngestorSuspendCause, PacedIngestorConnector,
+    IngestorConnector, IngestorError, IngestorIntakeError, IngestorIntakeMessage,
+    IngestorIntakeResult, IngestorLoopHost, IngestorLoopServices, IngestorMessage, IngestorPlan,
+    IngestorPoll, IngestorPollMessage, IngestorReadAheadOverflow, IngestorReadBudget,
+    IngestorReadCancellation, IngestorReadHold, IngestorReadOutcome, IngestorResult,
+    IngestorResume, IngestorResumeOutcome, IngestorSettlement, IngestorSettlementOperation,
+    IngestorSettlementOutcome, IngestorSuspendCause, PacedIngestorConnector,
 };
 pub use nervix_tls::OutwardTlsPolicy;
 pub use row_requests::{

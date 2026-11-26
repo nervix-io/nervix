@@ -2008,7 +2008,7 @@ session-control hook, which the host also drives while a payload it took waits f
 node's extension workers.
 
 Before every broker read the host asks its services for the read's budget,
-`IngestorHostServices::read_budget`, given the window its delivery mode leaves: one message under
+`IngestorLoopServices::read_budget`, given the window its delivery mode leaves: one message under
 `NO ACK` and `ACK SEQUENTIAL`, `MAX` under `ACK PARALLEL`. A host whose ingestor writes no
 `RATE LIMIT` returns the window. Otherwise the budget lowers `IngestorBatchRequest::max_messages`
 to how many one-unit payloads the clauses without `OF` admit now, or is `WaitUntil` an instant
@@ -2018,7 +2018,7 @@ MQTT stop once they hold that many, and a ZeroMQ or Syslog read takes one messag
 else stays with the transport. On `WaitUntil` the loop
 holds before reading, on a deadline of the boundary's timer, servicing its ingest group's flush
 cadence; a quiesce change or a stop ends the hold, and every turn asks for the budget again.
-`IngestorHostServices::record_rate_limit_hold_started` counts each hold as it starts and
+`IngestorLoopServices::record_rate_limit_hold_started` counts each hold as it starts and
 `record_rate_limit_hold_ended` adds its length once it ended.
 
 The host drives that hook during both waits for the allowance, before a read and when the
@@ -2507,7 +2507,7 @@ transport's own redelivery contract applies.
 A batch acknowledgement's wait returns a typed `IngestorAcknowledgementOutcome`: `Acknowledged`,
 `Failed { reason }` for a tree the graph failed, `TimedOut { silence }` for a tree that reported no
 progress for the ingestor's `ACK TIMEOUT`, or `Shutdown`. The loop hands each outcome to
-`IngestorHost::record_acknowledgement` exactly once, for a batch or for each individually settled
+`IngestorLoopHost::record_acknowledgement` exactly once, for a batch or for each individually settled
 delivery, before it confirms or rejects the positions; the host counts it and reports a failed or
 timed-out tree as an error event that names which it was. The loop times every `acknowledge` and
 `reject` it asks of the connector, the retried rejection of a replayable ingestor included, and
@@ -3898,7 +3898,7 @@ those retained handles.
 A connector reports a transport-specific fact using a host-handle method or a declared event, or,
 from a task that polls its transport apart from the host's loop, a typed report in its plan.
 
-- `IngestorHost` exposes `record_read`, `record_read_payloads`, `record_acknowledgement`,
+- `IngestorLoopHost` exposes `record_read`, `record_read_payloads`, `record_acknowledgement`,
   `record_transport_settlement`, `record_resume` and `record_suspend` for host observations.
   `record_transport_redeliveries`, `record_oversized_payloads` and `record_unconfirmed_stop`
   report transport facts. `record_rate_limit_hold_started` and `record_rate_limit_hold_ended`
@@ -3915,7 +3915,7 @@ host. [Connector Interaction Metrics](metrics-and-observability.md#connector-int
 owns the family inventory and inspection format. The generated capability reference owns each
 entity's declared events.
 
-A connector task that polls its transport apart from the host's loop cannot reach `IngestorHost`,
+A connector task that polls its transport apart from the host's loop cannot reach `IngestorLoopHost`,
 so a fact only that task sees arrives through a report the host resolves into the plan instead. An
 ingestor connection's read-ahead overflow is the one such fact: the host builds an
 `IngestorReadAheadOverflow` around its counter child for the unit, and the task records each drop

@@ -207,7 +207,7 @@ struct ConfirmingHost {
 impl nervix_connector::ConnectorEventProvider for ConfirmingHost {}
 
 #[async_trait]
-impl IngestorHostServices for ConfirmingHost {
+impl IngestorLoopServices for ConfirmingHost {
     fn record_read(&self, _outcome: nervix_connector::IngestorReadOutcome) {}
     fn record_read_payloads(&self, _payloads: usize, _bytes: u64) {}
 
@@ -353,7 +353,7 @@ impl ConfirmationCheck {
     async fn run(self) -> (IngestorAckRootTrackers, Arc<Mutex<ConfirmationRecord>>) {
         run_ingestor_instance_with_retry(
             self.connector,
-            IngestorHost::new(self.host),
+            IngestorLoopHost::new(self.host),
             sequential_policy(PositionClass::Replayable),
             self.loop_shutdown,
             nervix_connector::RetryBackoffSettings::default(),
@@ -480,7 +480,7 @@ async fn a_stop_before_a_batch_resolved_reports_its_positions_unconfirmed() {
 async fn individual_settlement_keeps_each_drain_guard_until_its_transport_confirmation() {
     let check = ConfirmationCheck::reading([]);
     let mut connector = check.connector;
-    let mut host = IngestorHost::new(check.host);
+    let mut host = IngestorLoopHost::new(check.host);
     let messages = (1..=3u64)
         .map(|position| ConfirmingDelivery {
             position,

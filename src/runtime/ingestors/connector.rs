@@ -26,12 +26,12 @@ use nervix_connector::{
     BrokerIngestorConnector, ClientResourceMounts, IngestMetadataRow, IngestorAckPolicy,
     IngestorAcknowledgementOutcome, IngestorAcknowledgementSupport, IngestorBatch,
     IngestorBatchAcknowledgement, IngestorBatchRequest, IngestorCapabilities, IngestorConnector,
-    IngestorError, IngestorHost, IngestorHostServices, IngestorIntakeError, IngestorIntakeMessage,
-    IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll, IngestorReadBudget,
-    IngestorReadHold, IngestorReadOutcome, IngestorResume, IngestorResumeOutcome,
-    IngestorSettlement, IngestorSettlementOperation, IngestorSettlementOutcome,
-    IngestorSuspendCause, PacedIngestorConnector, ParsedRetryPolicy, next_retry_delay,
-    physical_time::actual_utc_now,
+    IngestorError, IngestorIntakeError, IngestorIntakeMessage, IngestorIntakeResult,
+    IngestorLoopHost, IngestorLoopServices, IngestorMessage, IngestorPlan, IngestorPoll,
+    IngestorReadBudget, IngestorReadHold, IngestorReadOutcome, IngestorResume,
+    IngestorResumeOutcome, IngestorSettlement, IngestorSettlementOperation,
+    IngestorSettlementOutcome, IngestorSuspendCause, PacedIngestorConnector, ParsedRetryPolicy,
+    next_retry_delay, physical_time::actual_utc_now,
 };
 use nervix_models::{DomainClockPeriod, IngestAcknowledgement, PositionClass};
 use nervix_primitives::sync::CancellationToken;
@@ -288,7 +288,7 @@ where
         let retry_settings = host.runtime.inner.connector_host.retry;
         Box::pin(run_ingestor_instance_with_retry(
             connector,
-            IngestorHost::new(host),
+            IngestorLoopHost::new(host),
             policy,
             shutdown,
             retry_settings,
@@ -1517,7 +1517,7 @@ impl nervix_connector::ConnectorEventProvider for RuntimeIngestorHost {
 }
 
 #[async_trait]
-impl IngestorHostServices for RuntimeIngestorHost {
+impl IngestorLoopServices for RuntimeIngestorHost {
     fn record_read(&self, outcome: IngestorReadOutcome) {
         self.interactions.reads.read(outcome);
     }
@@ -2042,7 +2042,7 @@ impl RuntimeIngestorHost {
         reason = "the retained paced ingestor host handles every poll and acknowledgement"
     )
 )]
-trait PacedIngestorHostServices: IngestorHostServices {
+trait PacedIngestorLoopServices: IngestorLoopServices {
     fn record_poll(&self, outcome: IngestorReadOutcome, elapsed: Duration);
     /// Takes in the messages `poll` returned, in intake batches of at most `intake_batch`
     /// messages, each an ingest group of its own.
@@ -2056,7 +2056,7 @@ trait PacedIngestorHostServices: IngestorHostServices {
 }
 
 #[async_trait]
-impl PacedIngestorHostServices for RuntimeIngestorHost {
+impl PacedIngestorLoopServices for RuntimeIngestorHost {
     fn record_poll(&self, outcome: IngestorReadOutcome, elapsed: Duration) {
         self.interactions.reads.poll(outcome, elapsed);
     }
@@ -2115,7 +2115,7 @@ async fn prepare_paced_ingestor<C, H>(
 ) -> PacedIngestorAction
 where
     C: IngestorConnector,
-    H: PacedIngestorHostServices,
+    H: PacedIngestorLoopServices,
 {
     if !host.wait_until_active().await {
         return PacedIngestorAction::Stop;
@@ -2197,7 +2197,7 @@ async fn run_paced_ingestor<C, H, D>(
     error_retry: Duration,
 ) where
     C: PacedIngestorConnector,
-    H: PacedIngestorHostServices,
+    H: PacedIngestorLoopServices,
     D: PacedIngestorCadence,
 {
     let cadence_cancellation = CancellationToken::new();
@@ -2314,7 +2314,7 @@ async fn run_paced_ingestor<C, H, D>(
 
 async fn flush_paced_ingestor<H>(host: &mut H)
 where
-    H: IngestorHostServices,
+    H: IngestorLoopServices,
 {
     if let Err(error) = host.flush().await {
         host.report_error(format!("{error:#}"));
@@ -2327,7 +2327,7 @@ async fn wait_for_paced_retry<H>(
     delay: Duration,
 ) -> bool
 where
-    H: IngestorHostServices,
+    H: IngestorLoopServices,
 {
     nervix_primitives::select! {
         changed = shutdown.changed() => !(changed.is_err() || *shutdown.borrow()),
@@ -2351,7 +2351,7 @@ where
 )]
 pub(super) async fn run_request_ingestor<C>(
     mut connector: C,
-    mut host: IngestorHost,
+    mut host: IngestorLoopHost,
     mut shutdown: watch::Receiver<bool>,
 ) where
     C: IngestorConnector,
@@ -2414,7 +2414,7 @@ struct BatchSettlement {
 )]
 pub(super) async fn run_ingestor_instance_with_retry<C>(
     mut connector: C,
-    mut host: IngestorHost,
+    mut host: IngestorLoopHost,
     policy: BrokerIngestorPolicy,
     mut shutdown: watch::Receiver<bool>,
     retry_settings: nervix_connector::RetryBackoffSettings,
@@ -2700,7 +2700,7 @@ fn batch_request(
 )]
 async fn handle_batch<C>(
     connector: &mut C,
-    host: &mut IngestorHost,
+    host: &mut IngestorLoopHost,
     policy: BrokerIngestorPolicy,
     retry_after: Duration,
     messages: Vec<C::Message>,
@@ -2785,7 +2785,7 @@ where
 /// every tree resolved leaves the positions unconfirmed, which the host reports.
 async fn settle_acknowledged_batch<C>(
     connector: &mut C,
-    host: &mut IngestorHost,
+    host: &mut IngestorLoopHost,
     settlement: BatchSettlement,
     mut acknowledgement: IngestorBatchAcknowledgement,
     timeout: Duration,
@@ -2819,7 +2819,7 @@ where
 /// the positions are rejected for their position class to handle.
 async fn confirm_batch<C>(
     connector: &mut C,
-    host: &mut IngestorHost,
+    host: &mut IngestorLoopHost,
     settlement: BatchSettlement,
     positions: Vec<C::Position>,
 ) -> BatchDisposition<C::Position>
@@ -2849,7 +2849,7 @@ where
 /// until a later confirmation succeeds.
 async fn reject_batch<C>(
     connector: &mut C,
-    host: &mut IngestorHost,
+    host: &mut IngestorLoopHost,
     settlement: BatchSettlement,
     positions: Vec<C::Position>,
 ) -> BatchDisposition<C::Position>
@@ -2877,7 +2877,7 @@ where
     }
 }
 
-async fn flush_for_lifecycle(host: &mut IngestorHost) {
+async fn flush_for_lifecycle(host: &mut IngestorLoopHost) {
     if let Err(error) = host.flush().await {
         host.report_error(format!("{error:#}"));
     }
@@ -2888,7 +2888,7 @@ fn ingestor_retry_delay(delay: Duration, minimum: Duration) -> Duration {
 }
 
 async fn wait_for_retry(
-    host: &mut IngestorHost,
+    host: &mut IngestorLoopHost,
     shutdown: &mut watch::Receiver<bool>,
     delay: Duration,
 ) -> bool {
