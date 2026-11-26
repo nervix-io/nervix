@@ -1163,37 +1163,57 @@ fn a_proof_of_life_verifies_only_under_the_root_and_epoch_it_names() {
         TrustError::Protocol
     ));
 
-    // A signature changed by one bit, or a root's signature of another document type, is no proof.
+    // A signature changed by one bit, or a root's signature of another document type, is no
+    // proof. Either refusal names the proof of life once, with the document's own refusal beneath
+    // it.
     let tampered = proof_refusal(&trust, &flip_signature_bit(&signed));
-    assert!(matches!(tampered.current_context(), TrustError::Document));
+    assert!(matches!(
+        tampered.current_context(),
+        TrustError::ProofOfLife
+    ));
     assert!(matches!(
         tampered.downcast_ref::<DocumentError>(),
         Some(DocumentError::Verification)
     ));
+    assert_eq!(
+        format!("{tampered:#}"),
+        "the proof of life has an invalid signature profile or payload: the document signature is \
+         invalid: JWS signature verification failed: InvalidSignature"
+    );
     let authorization = fixture.roots[1]
         .sign(&fixture.authorization(), limits())
         .assured("current authorization");
     let another_type = proof_refusal(&trust, &authorization);
     assert!(matches!(
         another_type.current_context(),
-        TrustError::Document
+        TrustError::ProofOfLife
     ));
     assert!(matches!(
         another_type.downcast_ref::<DocumentError>(),
         Some(DocumentError::Header)
     ));
+    assert_eq!(
+        format!("{another_type:#}"),
+        "the proof of life has an invalid signature profile or payload: the protected header must \
+         contain exactly ES256, the expected type and a key id"
+    );
 
-    // A proof of life is no trust document: a trust state refuses to build from one.
+    // A proof of life is no trust document: a trust state refuses to build from one, and names it
+    // as the trust document it was supplied as.
     let documents = TrustDocuments {
         documents: vec![SignedTrustDocument::Compact(signed)],
     };
+    let trust_refusal = TrustState::build(&fixture.embedded(), &documents, limits())
+        .err()
+        .assured("a trust state builds only from trust documents");
     assert!(matches!(
-        TrustState::build(&fixture.embedded(), &documents, limits())
-            .err()
-            .assured("a trust state builds only from trust documents")
-            .current_context(),
+        trust_refusal.current_context(),
         TrustError::Document
     ));
+    assert_eq!(
+        format!("{trust_refusal:#}"),
+        "the trust document has an invalid signature profile or payload"
+    );
 }
 
 #[test]
