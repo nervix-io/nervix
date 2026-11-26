@@ -71,7 +71,7 @@ use nervix_connector::{
 use nervix_dns::{DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver};
 use nervix_models::{
     ClientConfigEntry, ClientConfigSchema, ClientDeadline, ClientPoolBounds, ConnectorKind,
-    RedisChannelName,
+    ExternalErrorCode, RedisChannelName,
 };
 use nervix_primitives::{sync::Arc, time::Instant};
 use pool_minimum::{
@@ -619,6 +619,13 @@ impl RedisPubSubEmitter {
         connection
     }
 
+    /// The prefix of the error reply the server answered `error` with, as `error.external_code`
+    /// holds it, such as `ERR` or `NOPERM`, where the server answered with one.
+    fn server_code(error: &redis::RedisError) -> Option<ExternalErrorCode> {
+        let code = error.code()?;
+        ExternalErrorCode::new(code)
+    }
+
     fn is_record_failure(error: &redis::RedisError) -> bool {
         if !matches!(
             error.kind(),
@@ -705,11 +712,20 @@ impl RecordEmitter for RedisPubSubEmitter {
                     outcome.deliver(record.id);
                 }
                 Err(error) if Self::is_record_failure(&error) => {
-                    outcome
-                        .reject(record.rejected(format!("Redis rejected emitted record: {error}")));
+                    outcome.reject(record.rejected(
+                        format!("Redis rejected emitted record: {error}"),
+                        Self::server_code(&error),
+                    ));
                 }
                 Err(error) => {
-                    outcome.fail(Self::publish_error(error));
+                    // The server's error prefix stays with the failure, so a record the emitter
+                    // gives up on names it as `error.external_code`.
+                    let code = Self::server_code(&error);
+                    let mut failure = Self::publish_error(error);
+                    if let Some(code) = code {
+                        failure = failure.attach(code);
+                    }
+                    outcome.fail(failure);
                     break;
                 }
             }
@@ -761,6 +777,22 @@ mod tests {
         assert!(RedisPubSubEmitter::is_record_failure(&rejected));
         assert!(!RedisPubSubEmitter::is_record_failure(&ambiguous));
         assert!(!RedisPubSubEmitter::is_record_failure(&disconnected));
+
+        // The server's error prefix is the code; a failure no server answered has none.
+        let denied = redis::RedisError::from((
+            RedisErrorKind::Server(ServerErrorKind::NoPerm),
+            "publish denied",
+            "this user has no permissions to access one of the channels".to_string(),
+        ));
+        assert_eq!(
+            RedisPubSubEmitter::server_code(&rejected),
+            ExternalErrorCode::new("ERR")
+        );
+        assert_eq!(
+            RedisPubSubEmitter::server_code(&denied),
+            ExternalErrorCode::new("NOPERM")
+        );
+        assert_eq!(RedisPubSubEmitter::server_code(&disconnected), None);
     }
 
     #[nervix_primitives::test]

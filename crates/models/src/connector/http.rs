@@ -729,6 +729,11 @@ impl EmitterDeclaration for HttpRequestEmitter {
         ],
         envelope: &[],
         properties: &[],
+        external_code: Some(crate::ExternalCodeDeclaration {
+            space: "HTTP status code",
+            form: "three decimal digits",
+            example: "422",
+        }),
         bounds: HTTP_REQUEST_EMITTER_BOUNDS,
     };
 }

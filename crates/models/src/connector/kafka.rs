@@ -722,6 +722,12 @@ impl EmitterDeclaration for KafkaTopicEmitter {
             EnvelopeClauseKind::Timestamp,
         ],
         properties: &[],
+        external_code: Some(crate::ExternalCodeDeclaration {
+            space: "Kafka broker error, by librdkafka's name",
+            form: "upper-case words joined by underscores, as rd_kafka_err2name names the code \
+                   the broker answered with",
+            example: "MSG_SIZE_TOO_LARGE",
+        }),
         bounds: KAFKA_EMITTER_BOUNDS,
     };
 }

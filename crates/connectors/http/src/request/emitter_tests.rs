@@ -254,12 +254,25 @@ fn a_retryable_status_carries_only_the_delay_its_retry_after_asks_for() {
         }
     );
 
+    assert_eq!(
+        error.downcast_ref::<ExternalErrorCode>(),
+        ExternalErrorCode::new("429").as_ref(),
+        "a retried status is the code a request the emitter gives up on reports"
+    );
+
     let unstated = final_response(401, &[]);
     let error = HttpRequestEmitter::retryable_status_error(
         HttpAttemptError::Authentication { status: 401 },
         &unstated,
     );
     assert!(error.downcast_ref::<EmitterRetryDelay>().is_none());
+    assert_eq!(
+        error.downcast_ref::<ExternalErrorCode>(),
+        ExternalErrorCode::new("401").as_ref()
+    );
+
+    let unanswered = HttpRequestEmitter::publish_error(Report::new(HttpAttemptError::Timeout));
+    assert_eq!(unanswered.downcast_ref::<ExternalErrorCode>(), None);
 }
 
 #[test]

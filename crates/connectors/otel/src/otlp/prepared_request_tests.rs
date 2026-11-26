@@ -537,12 +537,22 @@ async fn publish_sends_each_prepared_request_unchanged_over_http_and_answers_for
     };
     assert_eq!(refused.id, EmitterRecordId::new(1));
     assert_eq!(refused.error.occurred_at, Timestamp::from_unix_nanos(7));
+    assert_eq!(
+        refused.error.external_code,
+        ExternalErrorCode::new("400"),
+        "the refused request carries the HTTP status the receiver answered"
+    );
     let failure = outcome
         .infrastructure_error
         .expect("a 503 leaves the request and the ones after it unanswered");
     assert_eq!(
         failure.current_context(),
         &EmitterWriteError::Publish { connector: OTEL }
+    );
+    assert_eq!(
+        failure.downcast_ref::<ExternalErrorCode>(),
+        ExternalErrorCode::new("503").as_ref(),
+        "the retried request keeps the HTTP status the receiver answered"
     );
     let received = received.lock();
     assert_eq!(received.len(), 3, "the request after the 503 is never sent");
@@ -839,7 +849,7 @@ fn a_grpc_answer_is_classified_by_the_otlp_retryable_codes() {
     }
     assert!(matches!(
         OtelTransport::grpc_failure(GrpcStatus::new(GrpcCode::InvalidArgument, "answered")),
-        OtelTransportOutcome::Rejected(_)
+        OtelTransportOutcome::Rejected { .. }
     ));
 }
 

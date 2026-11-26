@@ -83,7 +83,7 @@ use nervix_connector::{
     PerRecordOutcome, RecordEmitter, RejectedEmitterMember, next_retry_delay,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, MqttTopicName, PropertyType};
+use nervix_models::{ClientConfigEntry, ExternalErrorCode, MqttTopicName, PropertyType};
 use nervix_primitives::{
     sync::{
         Arc,
@@ -337,6 +337,38 @@ impl MqttBrokerPacketLimit {
 /// The broker's answer for one QoS 1 or 2 record, which resolves when its `PUBACK` or the last
 /// packet of its QoS 2 handshake arrives, or when the client gives the record up.
 type MqttAnswer = Pin<Box<dyn Future<Output = BrokerAnswer> + Send>>;
+
+/// The reason code a broker answered a publish with, as `error.external_code` holds it, where the
+/// broker answered with one rather than the client ending the publish itself.
+fn notice_code(error: &PublishNoticeError) -> Option<ExternalErrorCode> {
+    match error {
+        PublishNoticeError::V5PubAck(reason) => reason_code(*reason),
+        PublishNoticeError::V5PubRec(reason) => reason_code(*reason),
+        PublishNoticeError::V5PubComp(reason) => reason_code(*reason),
+        // Every other ending is the client's own: no broker answered it with a reason code.
+        _ => None,
+    }
+}
+
+/// A reason code as `error.external_code` holds it: the decimal value of the one byte MQTT carries
+/// it in, such as `135` for "Not authorized".
+///
+/// rumqttc decodes that byte into its typed reason and keeps no public way back to it, so the byte
+/// is found among the 256 values one byte holds, through rumqttc's own decoding of each.
+fn reason_code<R>(reason: R) -> Option<ExternalErrorCode>
+where
+    R: TryFrom<u8> + PartialEq,
+{
+    for value in u8::MIN..=u8::MAX {
+        let Ok(decoded) = R::try_from(value) else {
+            continue;
+        };
+        if decoded == reason {
+            return ExternalErrorCode::new(value.to_string());
+        }
+    }
+    None
+}
 
 /// The flush of one QoS 0 publish the client took, which ends once the client's event loop has
 /// written the publish and flushed the connection, or failed to: the write or the flush failed, or
@@ -657,12 +689,17 @@ impl MqttTopicEmitter {
             Ok(()) => Ok(BrokerVerdict::Confirmed),
             Err(error) if Self::is_record_notice_rejection(&error) => Ok(BrokerVerdict::Rejected {
                 message: format!("mqtt rejected record: {error}"),
+                external_code: notice_code(&error),
             }),
             Err(error) => {
                 let description = format!("mqtt publish failed: {error}");
-                Err(Report::new(error)
-                    .change_context(EmitterWriteError::Publish { connector: MQTT })
-                    .attach_printable(description))
+                let code = notice_code(&error);
+                let mut failure = Report::new(error)
+                    .change_context(EmitterWriteError::Publish { connector: MQTT });
+                if let Some(code) = code {
+                    failure = failure.attach(code);
+                }
+                Err(failure.attach_printable(description))
             }
         }
     }
@@ -703,6 +740,7 @@ impl MqttTopicEmitter {
                         record_id,
                         occurred_at,
                         format!("mqtt rejected record: {error}"),
+                        None,
                     ));
                     continue;
                 }
@@ -720,6 +758,7 @@ impl MqttTopicEmitter {
                         record_id,
                         occurred_at,
                         format!("mqtt rejected record: {error}"),
+                        None,
                     ));
                 }
                 Err(error) => {
@@ -756,6 +795,7 @@ impl MqttTopicEmitter {
                         record_id,
                         occurred_at,
                         format!("mqtt rejected record: {error}"),
+                        None,
                     ));
                     continue;
                 }
@@ -770,6 +810,7 @@ impl MqttTopicEmitter {
                         record_id,
                         occurred_at,
                         format!("mqtt rejected record: {error}"),
+                        None,
                     ));
                     continue;
                 }
@@ -886,40 +927,48 @@ mod tests {
 
     #[test]
     fn a_reason_code_about_the_record_refuses_it_for_good() {
+        // The reason codes the MQTT 5 specification gives these reasons, as error routes read them.
         let refusals = [
             (
                 PublishNoticeError::V5PubAck(MqttPubAckReason::NotAuthorized),
                 "mqtt rejected record: v5 puback returned non-success reason: NotAuthorized",
+                "135",
             ),
             (
                 PublishNoticeError::V5PubAck(MqttPubAckReason::TopicNameInvalid),
                 "mqtt rejected record: v5 puback returned non-success reason: TopicNameInvalid",
+                "144",
             ),
             (
                 PublishNoticeError::V5PubAck(MqttPubAckReason::PayloadFormatInvalid),
                 "mqtt rejected record: v5 puback returned non-success reason: PayloadFormatInvalid",
+                "153",
             ),
             (
                 PublishNoticeError::V5PubRec(MqttPubRecReason::NotAuthorized),
                 "mqtt rejected record: v5 pubrec returned non-success reason: NotAuthorized",
+                "135",
             ),
             (
                 PublishNoticeError::V5PubRec(MqttPubRecReason::TopicNameInvalid),
                 "mqtt rejected record: v5 pubrec returned non-success reason: TopicNameInvalid",
+                "144",
             ),
             (
                 PublishNoticeError::V5PubRec(MqttPubRecReason::PayloadFormatInvalid),
                 "mqtt rejected record: v5 pubrec returned non-success reason: PayloadFormatInvalid",
+                "153",
             ),
         ];
-        for (refusal, message) in refusals {
+        for (refusal, message, code) in refusals {
             let verdict = MqttTopicEmitter::broker_answer(Err(refusal))
                 .expect("a refusal of the record itself is the broker's verdict on it");
 
             assert_eq!(
                 verdict,
                 BrokerVerdict::Rejected {
-                    message: message.to_string()
+                    message: message.to_string(),
+                    external_code: ExternalErrorCode::new(code),
                 }
             );
         }
@@ -2112,34 +2161,42 @@ mod tests {
 
     #[test]
     fn any_other_ending_leaves_the_record_unknown_and_keeps_its_cause() {
+        // A reason code the broker answered stays with the failure as the code a record the
+        // emitter gives up on reports; an ending of the client's own has none.
         let endings = [
             (
                 PublishNoticeError::V5PubAck(MqttPubAckReason::QuotaExceeded),
                 "mqtt publish failed: v5 puback returned non-success reason: QuotaExceeded",
+                Some("151"),
             ),
             (
                 PublishNoticeError::V5PubAck(MqttPubAckReason::UnspecifiedError),
                 "mqtt publish failed: v5 puback returned non-success reason: UnspecifiedError",
+                Some("128"),
             ),
             (
                 PublishNoticeError::V5PubRec(MqttPubRecReason::QuotaExceeded),
                 "mqtt publish failed: v5 pubrec returned non-success reason: QuotaExceeded",
+                Some("151"),
             ),
             (
                 PublishNoticeError::V5PubComp(rumqttc::PubCompReason::PacketIdentifierNotFound),
                 "mqtt publish failed: v5 pubcomp returned non-success reason: \
                  PacketIdentifierNotFound",
+                Some("146"),
             ),
             (
                 PublishNoticeError::SessionReset,
                 "mqtt publish failed: message dropped due to session reset",
+                None,
             ),
             (
                 PublishNoticeError::Recv,
                 "mqtt publish failed: event loop dropped notice sender",
+                None,
             ),
         ];
-        for (ending, description) in endings {
+        for (ending, description, code) in endings {
             let failure = MqttTopicEmitter::broker_answer(Err(ending.clone()))
                 .expect_err("an ending that is not about the record leaves its outcome unknown");
 
@@ -2151,6 +2208,11 @@ mod tests {
             assert_eq!(
                 printable_description(&failure).as_deref(),
                 Some(description)
+            );
+            let expected = code.and_then(ExternalErrorCode::new);
+            assert_eq!(
+                failure.downcast_ref::<ExternalErrorCode>(),
+                expected.as_ref()
             );
         }
     }

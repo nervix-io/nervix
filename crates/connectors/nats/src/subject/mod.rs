@@ -271,10 +271,13 @@ impl CoreWrites {
                     Ok(reply) => Some(Subject::from(reply.to_string())),
                     Err(cause) => {
                         let report = Report::new(cause);
+                        // The client refused the reply subject itself; a Core NATS server answers
+                        // no publish, so no record carries a code.
                         outcome.reject(RejectedEmitterMember::external(
                             record_id,
                             occurred_at,
                             format!("{} reply subject rejected: {report:#}", ConnectorKind::Nats),
+                            None,
                         ));
                         continue;
                     }
@@ -304,6 +307,7 @@ impl CoreWrites {
                         record_id,
                         occurred_at,
                         format!("nats rejected record: {error}"),
+                        None,
                     ));
                 }
                 Err(error) => return Err(NatsSubjectEmitter::publish_error(error)),

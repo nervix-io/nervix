@@ -216,6 +216,11 @@ impl EmitterDeclaration for MySqlTableEmitter {
         }],
         envelope: &[],
         properties: &[],
+        external_code: Some(crate::ExternalCodeDeclaration {
+            space: "MySQL server error number and SQLSTATE",
+            form: "the error number, then the SQLSTATE in parentheses, as MySQL writes an error",
+            example: "1062 (23000)",
+        }),
         bounds: MYSQL_BOUNDS,
     };
 }

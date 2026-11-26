@@ -34,7 +34,7 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{
-    ClientConfigEntry, ConnectorKind, MessageErrorOperation, RaisedMessageError,
+    ClientConfigEntry, ConnectorKind, ExternalErrorCode, MessageErrorOperation, RaisedMessageError,
     RejectedErrorClass, Timestamp,
 };
 use nervix_primitives::time::Instant;
@@ -163,6 +163,12 @@ impl SentryEventEmitter {
     fn publish_error(error: impl std::fmt::Display) -> Report<EmitterWriteError> {
         Report::new(EmitterWriteError::Publish { connector: SENTRY })
             .attach_printable(error.to_string())
+    }
+
+    /// The status Sentry answered an envelope with, as `error.external_code` holds it: its three
+    /// decimal digits, such as `400`.
+    fn status_code(status: StatusCode) -> Option<ExternalErrorCode> {
+        ExternalErrorCode::new(status.as_str())
     }
 
     fn is_record_status(status: StatusCode) -> bool {
@@ -355,9 +361,10 @@ impl RecordEmitter for SentryEventEmitter {
                 continue;
             }
             if Self::is_record_status(status) {
-                outcome.reject(record.rejected(format!(
-                    "Sentry rejected the event with HTTP status {status}"
-                )));
+                outcome.reject(record.rejected(
+                    format!("Sentry rejected the event with HTTP status {status}"),
+                    Self::status_code(status),
+                ));
                 continue;
             }
             let retry_delay = Self::server_retry_delay(
@@ -371,9 +378,14 @@ impl RecordEmitter for SentryEventEmitter {
                     .and_then(|value| value.to_str().ok()),
                 actual_utc_now().into_datetime(),
             );
-            let error = Self::publish_error(format!(
+            // The status stays with the failure, so an event the emitter gives up on names it as
+            // `error.external_code`.
+            let mut error = Self::publish_error(format!(
                 "Sentry envelope request returned HTTP status {status}"
             ));
+            if let Some(code) = Self::status_code(status) {
+                error = error.attach(code);
+            }
             outcome.fail(match retry_delay {
                 Some(delay) => error.attach(EmitterRetryDelay(delay)),
                 None => error,
@@ -548,6 +560,18 @@ mod tests {
             StatusCode::UNPROCESSABLE_ENTITY,
         ] {
             assert!(SentryEventEmitter::is_record_status(status));
+        }
+        for (status, code) in [
+            (StatusCode::BAD_REQUEST, "400"),
+            (StatusCode::PAYLOAD_TOO_LARGE, "413"),
+            (StatusCode::UNPROCESSABLE_ENTITY, "422"),
+            (StatusCode::TOO_MANY_REQUESTS, "429"),
+        ] {
+            assert_eq!(
+                SentryEventEmitter::status_code(status),
+                ExternalErrorCode::new(code),
+                "a status is its bare three digits, without its reason phrase"
+            );
         }
         for status in [
             StatusCode::UNAUTHORIZED,

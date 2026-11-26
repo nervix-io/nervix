@@ -57,6 +57,7 @@ use nervix_connector::{
 use nervix_dns::{DnsLookupError, DnsResolver};
 use nervix_models::{
     ClickHouseTableName, ClientConfigEntry, ClientDeadline, ConnectorKind, EmitterBatchPolicy,
+    ExternalErrorCode, Timestamp,
 };
 use nervix_primitives::time::Instant;
 use tracing::{debug, trace};
@@ -88,9 +89,38 @@ pub struct ClickHouseTableEmitter {
 #[derive(Debug, thiserror::Error)]
 enum ClickHouseWriteError {
     #[error("ClickHouse rejected an insert")]
-    Response { name: Option<&'static str> },
+    Response { refusal: Option<RecordRefusal> },
     #[error("ClickHouse insert failed")]
     Driver(#[source] ClickHouseError),
+}
+
+/// Why ClickHouse refused the rows of an insert for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordRefusal {
+    /// ClickHouse refused a row with this exception, by the name ClickHouse documents it under,
+    /// which an error route reads as `error.external_code`.
+    Exception(&'static str),
+    /// The HTTP interface refused the request as larger than it accepts. Its answer names no
+    /// ClickHouse exception, so it carries no code.
+    PayloadTooLarge,
+}
+
+impl RecordRefusal {
+    /// The name a rejection reports the refusal by.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Exception(name) => name,
+            Self::PayloadTooLarge => "PAYLOAD_TOO_LARGE",
+        }
+    }
+
+    /// The exception ClickHouse refused the rows with, as `error.external_code` holds it.
+    fn external_code(self) -> Option<ExternalErrorCode> {
+        match self {
+            Self::Exception(name) => ExternalErrorCode::new(name),
+            Self::PayloadTooLarge => None,
+        }
+    }
 }
 
 impl ClickHouseWriteError {
@@ -98,7 +128,7 @@ impl ClickHouseWriteError {
         // ClickHouse may quote a rejected row in BadResponse. Keep only its safe classification.
         let failure = match error {
             ClickHouseError::BadResponse(response) => Self::Response {
-                name: Self::response_error_name(&response),
+                refusal: Self::response_refusal(&response),
             },
             error => Self::Driver(error),
         };
@@ -109,13 +139,13 @@ impl ClickHouseWriteError {
         }
     }
 
-    fn response_error_name(response: &str) -> Option<&'static str> {
+    fn response_refusal(response: &str) -> Option<RecordRefusal> {
         if response.contains("413 Payload Too Large")
             || response.contains("413 Request Entity Too Large")
         {
-            return Some("PAYLOAD_TOO_LARGE");
+            return Some(RecordRefusal::PayloadTooLarge);
         }
-        [
+        let exception = [
             "CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN",
             "CANNOT_PARSE_DATETIME",
             "CANNOT_PARSE_DATE",
@@ -125,25 +155,40 @@ impl ClickHouseWriteError {
             "VIOLATED_CONSTRAINT",
         ]
         .into_iter()
-        .find(|name| response.contains(&format!("({name})")))
+        .find(|name| response.contains(&format!("({name})")))?;
+        Some(RecordRefusal::Exception(exception))
     }
 
-    fn record_error_name(&self) -> Option<&'static str> {
+    fn record_refusal(&self) -> Option<RecordRefusal> {
         match self {
-            Self::Response { name } => *name,
+            Self::Response { refusal } => *refusal,
             Self::Driver(_) => None,
         }
     }
 
     fn is_record_error(&self) -> bool {
-        self.record_error_name().is_some()
+        self.record_refusal().is_some()
     }
 
     fn record_reason(&self) -> String {
-        match self.record_error_name() {
-            Some(name) => format!("ClickHouse rejected record with {name}"),
+        match self.record_refusal() {
+            Some(refusal) => format!("ClickHouse rejected record with {}", refusal.name()),
             None => "ClickHouse rejected record".to_string(),
         }
+    }
+
+    /// The rejection of the row this record error refused, carrying the exception ClickHouse
+    /// refused it with as `error.external_code`.
+    fn record_rejection(
+        &self,
+        position: EmitterRecordPosition,
+        occurred_at: Timestamp,
+    ) -> RejectedEmitterMember<EmitterRecordPosition> {
+        let external_code = match self.record_refusal() {
+            Some(refusal) => refusal.external_code(),
+            None => None,
+        };
+        RejectedEmitterMember::external(position, occurred_at, self.record_reason(), external_code)
     }
 
     /// The failed lookup of the ClickHouse host, when resolving it is what failed the request.
@@ -185,8 +230,8 @@ impl ClickHouseWriteError {
             let reason = format!("ClickHouse insert request failed: {lookup}");
             return report.change_context(publish).attach_printable(reason);
         }
-        let reason = if let Some(name) = error.record_error_name() {
-            format!("ClickHouse insert request failed with {name}")
+        let reason = if let Some(refusal) = error.record_refusal() {
+            format!("ClickHouse insert request failed with {}", refusal.name())
         } else if let Some(transport) = error.transport_failure() {
             format!("ClickHouse insert request failed: {transport}")
         } else {
@@ -539,10 +584,9 @@ impl RowEmitter for ClickHouseTableEmitter {
                         match inserted {
                             Ok(()) => outcome.deliver(rows.position(member)),
                             Err(error) if error.current_context().is_record_error() => {
-                                outcome.reject(RejectedEmitterMember::external(
+                                outcome.reject(error.current_context().record_rejection(
                                     rows.position(member),
                                     rows.occurred_at(member),
-                                    error.current_context().record_reason(),
                                 ));
                             }
                             Err(error) => {
@@ -554,11 +598,11 @@ impl RowEmitter for ClickHouseTableEmitter {
                 }
                 Err(error) if error.current_context().is_record_error() => {
                     let member = members[written.start];
-                    outcome.reject(RejectedEmitterMember::external(
-                        rows.position(member),
-                        rows.occurred_at(member),
-                        error.current_context().record_reason(),
-                    ));
+                    outcome.reject(
+                        error
+                            .current_context()
+                            .record_rejection(rows.position(member), rows.occurred_at(member)),
+                    );
                 }
                 Err(error) => {
                     outcome.fail(ClickHouseWriteError::into_report(error));
@@ -635,11 +679,38 @@ mod tests {
                 report.current_context().is_record_error(),
                 "{name} should be a definitive record error"
             );
+            let rejection = report.current_context().record_rejection(
+                EmitterRecordPosition {
+                    batch_index: 0,
+                    row_index: 0,
+                },
+                Timestamp::from_unix_nanos(1),
+            );
+            assert_eq!(
+                rejection.error.external_code,
+                ExternalErrorCode::new(name),
+                "the rejected row carries the exception {name} as its code"
+            );
         }
         let oversized = ClickHouseWriteError::report(ClickHouseError::BadResponse(
             "413 Payload Too Large".to_string(),
         ));
         assert!(oversized.current_context().is_record_error());
+        let rejection = oversized.current_context().record_rejection(
+            EmitterRecordPosition {
+                batch_index: 0,
+                row_index: 0,
+            },
+            Timestamp::from_unix_nanos(1),
+        );
+        assert_eq!(
+            rejection.error.message,
+            "ClickHouse rejected record with PAYLOAD_TOO_LARGE"
+        );
+        assert_eq!(
+            rejection.error.external_code, None,
+            "an answer of the HTTP interface names no ClickHouse exception"
+        );
         for name in [
             "NETWORK_ERROR",
             "TABLE_IS_DROPPED",

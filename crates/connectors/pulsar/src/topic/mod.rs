@@ -71,7 +71,8 @@ use nervix_connector::{
     optional_client_config_value,
 };
 use nervix_models::{
-    ClientConfigEntry, ConnectorKind, PULSAR_OUTBOUND_CAPACITY, PulsarTopicName, Timestamp,
+    ClientConfigEntry, ConnectorKind, ExternalErrorCode, PULSAR_OUTBOUND_CAPACITY, PulsarTopicName,
+    Timestamp,
 };
 use nervix_primitives::{
     sync::{
@@ -151,6 +152,36 @@ impl PulsarRecordError {
     fn message(&self) -> String {
         format!("{PULSAR} rejected record: {self}")
     }
+
+    /// The name of the protocol's server error the broker refused the message with, as
+    /// `error.external_code` holds it. A message the client or the record's envelope refused never
+    /// reached the broker, so it has none.
+    fn external_code(&self) -> Option<ExternalErrorCode> {
+        match self {
+            Self::NotAllowed { .. } => server_error_code(PulsarServerError::NotAllowedError),
+            Self::MessageTooLarge { .. } | Self::MessageTime(_) => None,
+        }
+    }
+}
+
+/// A server error of the Pulsar protocol as `error.external_code` holds it: the name the protocol
+/// gives its value, such as `NotAllowedError`.
+fn server_error_code(error: PulsarServerError) -> Option<ExternalErrorCode> {
+    ExternalErrorCode::new(error.as_str_name())
+}
+
+/// The server error the broker answered `error` with, as `error.external_code` holds it, where the
+/// broker answered with one.
+fn answered_server_error(error: &PulsarError) -> Option<ExternalErrorCode> {
+    let connection = match error {
+        PulsarError::Connection(connection)
+        | PulsarError::Producer(PulsarProducerError::Connection(connection)) => connection,
+        _ => return None,
+    };
+    let PulsarConnectionError::PulsarError(Some(server_error), _) = connection else {
+        return None;
+    };
+    server_error_code(*server_error)
 }
 
 /// What a failed send, or a failed receipt for a sent message, means for the record it carried.
@@ -567,6 +598,7 @@ impl PulsarTopicEmitter {
             Ok(_receipt) => Ok(BrokerVerdict::Confirmed),
             Err(PulsarSendFailure::Rejected(rejection)) => Ok(BrokerVerdict::Rejected {
                 message: rejection.message(),
+                external_code: rejection.external_code(),
             }),
             Err(PulsarSendFailure::Infrastructure(error)) => Err(Self::publish_error(error)),
         }
@@ -596,7 +628,12 @@ impl PulsarTopicEmitter {
         occurred_at: Timestamp,
         rejection: &PulsarRecordError,
     ) -> RejectedEmitterMember<EmitterRecordId> {
-        RejectedEmitterMember::external(record, occurred_at, rejection.message())
+        RejectedEmitterMember::external(
+            record,
+            occurred_at,
+            rejection.message(),
+            rejection.external_code(),
+        )
     }
 
     /// A client that did not connect: one its configuration cannot describe is invalid, and any
@@ -632,11 +669,16 @@ impl PulsarTopicEmitter {
     )]
     fn publish_error(error: PulsarError) -> Report<EmitterWriteError> {
         let message = error.to_string();
-        Report::new(error)
-            .change_context(EmitterWriteError::Publish {
-                connector: PULSAR.keyword(),
-            })
-            .attach_printable(message)
+        // The broker's server error stays with the failure, so a record the emitter gives up on
+        // names it as `error.external_code`.
+        let code = answered_server_error(&error);
+        let mut failure = Report::new(error).change_context(EmitterWriteError::Publish {
+            connector: PULSAR.keyword(),
+        });
+        if let Some(code) = code {
+            failure = failure.attach(code);
+        }
+        failure.attach_printable(message)
     }
 }
 
@@ -834,6 +876,11 @@ mod tests {
             "Pulsar message of 1200163 bytes, counting its metadata and properties, exceeds the \
              broker's maximum message size of 1048576 bytes"
         );
+        assert_eq!(
+            refused.external_code(),
+            None,
+            "the client refused the message before any broker answered it"
+        );
     }
 
     #[test]
@@ -847,6 +894,11 @@ mod tests {
             refused.to_string(),
             "the Pulsar broker does not allow the message: Exceed maximum message size"
         );
+        assert_eq!(
+            refused.external_code(),
+            ExternalErrorCode::new("NotAllowedError"),
+            "the broker's refusal carries the name of its server error"
+        );
     }
 
     #[test]
@@ -855,6 +907,25 @@ mod tests {
             PulsarServerError::ChecksumError,
             Some("Checksum failed on the broker"),
         )));
+    }
+
+    /// A failure the broker answered with a server error keeps its name, which a record the
+    /// emitter gives up on reports as `error.external_code`; a failure no broker answered has none.
+    #[test]
+    fn a_failure_the_broker_answered_keeps_its_server_error() {
+        let answered = PulsarTopicEmitter::publish_error(server_error(
+            PulsarServerError::PersistenceError,
+            Some("the bookies could not store the message"),
+        ));
+        assert_eq!(
+            answered.downcast_ref::<ExternalErrorCode>(),
+            ExternalErrorCode::new("PersistenceError").as_ref()
+        );
+
+        let unanswered = PulsarTopicEmitter::publish_error(PulsarError::Producer(
+            PulsarProducerError::Connection(PulsarConnectionError::Disconnected),
+        ));
+        assert_eq!(unanswered.downcast_ref::<ExternalErrorCode>(), None);
     }
 
     #[test]

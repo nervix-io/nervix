@@ -371,6 +371,11 @@ impl EmitterDeclaration for RedisPubSubEmitter {
         options: &[],
         envelope: &[],
         properties: &[],
+        external_code: Some(crate::ExternalCodeDeclaration {
+            space: "Redis error prefix",
+            form: "the upper-case word the server's error reply begins with",
+            example: "ERR",
+        }),
         bounds: REDIS_EMITTER_BOUNDS,
     };
 }

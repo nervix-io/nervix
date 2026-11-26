@@ -47,6 +47,9 @@ def declarations():
             "batch": "optional", "batch_maximum": None, "frame_limits": None,
             "body": "ENCODE USING <codec>", "batch_transformation": False,
             "envelope": [], "properties": [], "value_contract": None,
+            "external_code": {"space": "librdkafka error name",
+                              "form": "upper-case words joined by underscores",
+                              "example": "MSG_SIZE_TOO_LARGE"},
             "bounds": {
                 "buffers": [],
                 "waits": [{"wait": "produce request", "bound": "`timeout_ms`; unbounded when omitted"}],
@@ -223,8 +226,23 @@ class ConnectorMatrixTests(unittest.TestCase):
                       "`STALLED PEER timeout_ms`", "holds no buffer between its transport",
                       "no client deadline key bounds a wait",
                       "`write_header`; `ordered_repeats`, exact names: every header in the order "
-                      "it was written; a name matches only itself"]:
+                      "it was written; a name matches only itself",
+                      "| External code (`error.external_code`) | librdkafka error name: upper-case "
+                      "words joined by underscores; for example `MSG_SIZE_TOO_LARGE` |"]:
             self.assertIn(value, text)
+
+    def test_an_emitter_without_an_external_code_needs_a_reason(self):
+        surface = declarations()
+        surface["emit"][0]["external_code"] = None
+        with self.assertRaisesRegex(ValueError, "external_code"):
+            matrix.render_matrix(surface, reasons())
+        notes = reasons()
+        notes["KAFKA TOPIC"]["external_code"] = "The broker answers with no code of its own."
+        text = matrix.render_matrix(surface, notes)
+        self.assertIn("| External code (`error.external_code`) | Not offered: The broker answers "
+                      "with no code of its own. |", text)
+        with self.assertRaisesRegex(ValueError, "external_code"):
+            matrix.render_matrix(declarations(), notes)
 
     def test_header_models_group_each_side_and_absent_headers_need_a_reason(self):
         surface = declarations()

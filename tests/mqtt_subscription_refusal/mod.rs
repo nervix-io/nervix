@@ -1,9 +1,10 @@
-//! Public checks of MQTT subscription refusal and session admission.
+//! Public checks of MQTT subscription and publish refusal and session admission.
 //!
 //! Outside the layer order: a scenario harness.
 //!
-//! - **Owns.** Scenario-scoped broker authorization rules and wire observations of authenticated
-//!   subscription refusal and the broker's retained empty session.
+//! - **Owns.** Scenario-scoped broker authorization rules for a client's subscriptions and
+//!   publishes, and wire observations of authenticated subscription refusal and the broker's
+//!   retained empty session.
 //! - **Depends on.** The public session API, MQTT driver, broker management API and test environment.
 //! - **Must not know.** Product connector state, runtime tasks or acknowledgement ownership.
 
@@ -23,20 +24,31 @@ const BROKER_OBSERVATION_BUDGET: Duration = Duration::from_secs(30);
 #[given(expr = "MQTT client {string} is denied subscriptions")]
 async fn deny_subscriptions(world: &mut ScenarioWorld, client_id: String) {
     let client_id = expand_placeholders(world, &client_id);
-    set_subscription_permission(world, &client_id, "deny", false).await;
+    set_client_permission(world, &client_id, "subscribe", "deny", false).await;
 }
 
 #[when(expr = "MQTT client {string} is allowed to subscribe")]
 async fn allow_subscriptions(world: &mut ScenarioWorld, client_id: String) {
     let client_id = expand_placeholders(world, &client_id);
-    set_subscription_permission(world, &client_id, "allow", true).await;
+    set_client_permission(world, &client_id, "subscribe", "allow", true).await;
+}
+
+/// The broker refuses every publish of the client, answering an MQTT 5 client's QOS 1 publish with
+/// a PUBACK and its QOS 2 publish with a PUBREC whose reason code is Not authorized, since the
+/// broker's deny action ignores a refused publish rather than closing the connection.
+#[given(expr = "MQTT client {string} is denied publishing")]
+async fn deny_publishing(world: &mut ScenarioWorld, client_id: String) {
+    let client_id = expand_placeholders(world, &client_id);
+    set_client_permission(world, &client_id, "publish", "deny", false).await;
 }
 
 /// Each rule belongs to the scenario's unique client identity. The broker's no-match policy
-/// admits all other clients, so this neither serializes nor changes a neighboring scenario.
-async fn set_subscription_permission(
+/// admits all other clients, so this neither serializes nor changes a neighboring scenario. The
+/// rule grants or denies `action`, the broker's name for subscribing or publishing, on every topic.
+async fn set_client_permission(
     world: &ScenarioWorld,
     client_id: &str,
+    action: &str,
     permission: &str,
     replace: bool,
 ) {
@@ -61,7 +73,7 @@ async fn set_subscription_permission(
     drop(path);
     let rule = serde_json::json!({
         "clientid": client_id,
-        "rules": [{"action": "subscribe", "permission": permission, "topic": "#"}]
+        "rules": [{"action": action, "permission": permission, "topic": "#"}]
     });
     let http = reqwest::Client::builder()
         .timeout(BROKER_OBSERVATION_BUDGET)
@@ -88,7 +100,7 @@ async fn set_subscription_permission(
 )]
 async fn retains_refused_session(world: &mut ScenarioWorld, client_id: String) {
     let client_id = expand_placeholders(world, &client_id);
-    set_subscription_permission(world, &client_id, "deny", false).await;
+    set_client_permission(world, &client_id, "subscribe", "deny", false).await;
     nervix_primitives::time::timeout(BROKER_OBSERVATION_BUDGET, async {
         let (client, mut connection) = authenticated_connection(world, &client_id);
         assert!(

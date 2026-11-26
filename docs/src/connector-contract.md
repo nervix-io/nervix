@@ -1077,7 +1077,7 @@ or scenario registration, but neither substitutes for observing the transport.
 | Side | What the entity declares |
 | --- | --- |
 | Ingestor | Header reads, the typed metadata fields in their order, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits, and any alternative locators a body may write instead of it, each with its own keywords and name; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
-| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which `KAFKA TOPIC` declares `TIMESTAMP`, `PULSAR TOPIC` declares `TIMESTAMP` and `DELIVER AFTER`, `SQS QUEUE` declares `DELAY` and `DEDUPLICATION ID`, the two RabbitMQ emitter entities declare `PERSISTENT`, `MANDATORY`, `TIMESTAMP` and their AMQP basic properties, and every entity refuses clauses and keys it does not declare. |
+| Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; what its `error.external_code` holds, which is the name of its outside system's code space, the form a code takes there and an example, or nothing where its destination answers with no code of its own; and its envelope clauses and `PROPERTIES` keys, of which `KAFKA TOPIC` declares `TIMESTAMP`, `PULSAR TOPIC` declares `TIMESTAMP` and `DELIVER AFTER`, `SQS QUEUE` declares `DELAY` and `DEDUPLICATION ID`, the two RabbitMQ emitter entities declare `PERSISTENT`, `MANDATORY`, `TIMESTAMP` and their AMQP basic properties, and every entity refuses clauses and keys it does not declare. |
 | Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership, and which of its entities read each key: every ingestor and emitter that references the client, or only its ingestors or only its emitters. Only a client both sides reference declares a key for one side; a SYSLOG client does. The registry enforces that declaration where a statement binds a client, at `CREATE` and at every alteration that changes the client: an entity refuses a client that sets a key only the other side reads, naming the key and the side that reads it. A key may also be conditioned on another key's declared choice, as a SYSLOG TLS file is on `protocol`, which `CREATE CLIENT` holds it to. What an entity demands of a client beyond those declarations is the entity's own rule, which it applies at the same binding: a SYSLOG LISTENER binds only a literal socket address, requires a TLS identity, and refuses `connect_timeout_ms` where it performs no handshake. The declaration explicitly names delegated property namespaces and reserved keys, the statement clause that sets a reserved key a statement owns, which its refusal names, and the other names its driver reads for one property: each pair of names with the one the client accepts, and a prefix the driver strips from a key before reading it, with the driver's own properties that begin with it. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
@@ -2883,8 +2883,8 @@ out its reconnect backoff sends it on its next connection.
 A brokered record emitter in `MODE ACK` awaits its broker's answers through the contract crate's
 `ConfirmationWindow`. The emitter hands each record to its driver and gives the window the record's
 identity, its execution time and the future through which the broker answers for it: a
-confirmation, a refusal for good with the message its message error reports, or a failure that
-leaves the record's outcome unknown. The connector maps its driver's answer to one of those three;
+confirmation, a refusal for good with the message its message error reports and the code the broker
+refused it with, if it gave one, or a failure that leaves the record's outcome unknown. The connector maps its driver's answer to one of those three;
 the window decides nothing else about the driver. A record's deadline is `ACK TIMEOUT` after its own
 hand-over. While the window holds `MAX` records it waits for the oldest answer until the oldest's
 deadline and no longer before the emitter hands over another record, so at most `MAX` records await
@@ -3487,7 +3487,9 @@ sequenceDiagram
 
 - **Kafka client build.** Kafka clients, ingestors and emitters run librdkafka 2.12.1 through
   Nervix's fork of `rust-rdkafka`, `nervix-io/rust-rdkafka`, which carries the librdkafka backport
-  of the duplicate `FETCH_STOP` fix and builds librdkafka's TLS on AWS-LC instead of OpenSSL. Its
+  of the duplicate `FETCH_STOP` fix and builds librdkafka's TLS on AWS-LC instead of OpenSSL. The
+  fork also names an error code as librdkafka's `rd_kafka_err2name` does and tells a broker's codes
+  from librdkafka's own, which the Kafka emitter's `error.external_code` reads. Its
   `aws-lc` feature compiles librdkafka with CMake against the libcrypto and libssl that
   `aws-lc-sys` builds with its `ssl` feature: the same `aws-lc-sys` `aws-lc-rs` links, so Kafka
   TLS, SASL SCRAM and OAUTHBEARER share the product's one AWS-LC. The fork's build reads the
@@ -3978,7 +3980,14 @@ execution plan is published. An emitter initialization failure is reported as an
 the emitter remains unavailable and retries opening on its configured backoff. Invalid settings
 and missing external topics, queues, tables, namespaces, or other required entities surface as
 start errors: Nervix does not create them as a side effect. During execution, read and publish
-failures are classified separately from definitive record rejections. The host reports transient
+failures are classified separately from definitive record rejections. A definitive record rejection
+carries the code its outside system answered with, which `RejectedEmitterMember::external` takes
+beside the message, and a failure that leaves its records for `RETRY POLICY` carries one as an
+`ExternalErrorCode` attached to its report, which the host reads when `GIVE UP AFTER` fails the
+records that failure held. The connector takes the code from the typed answer it classified, a
+status, a reason code or an error code its driver hands it, never from message text, and gives none
+for a refusal its own client made before the outside system answered; the entity's declaration
+states what the code holds. The host reports transient
 status and events, retries infrastructure failures, and preserves the configured message and
 general error policies. The general error policy receives the host's typed report of a failure
 that ended a batch's work and renders its whole chain once: the event and every negative

@@ -576,6 +576,7 @@ impl EmitterDeclaration for IcebergTableEmitter {
         ],
         envelope: &[],
         properties: &[],
+        external_code: None,
         bounds: ICEBERG_BOUNDS,
     };
 }

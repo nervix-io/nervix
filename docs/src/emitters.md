@@ -316,8 +316,9 @@ clause. Once it passes, the emitter stops retrying the unit, and every row the u
 fails with an `unavailable` error of the `publish` operation, which the route's `ON MESSAGE ERROR`
 handles like any row error. The error's message names the limit and the latest failure, such as
 `gave up after 10m of retries: HTTP request returned status 503 Service Unavailable`, and its
-`error.external_code` carries the outside system's own code for that failure where the connector
-reported one. `GIVE UP AFTER 0s` never retries: the first failed attempt fails its unit's rows.
+`error.external_code` carries [the outside system's code](#the-outside-systems-code) of that
+failure, such as `503`, where the outside system answered with one. `GIVE UP AFTER 0s` never
+retries: the first failed attempt fails its unit's rows.
 
 ```text
 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s GIVE UP AFTER 10m
@@ -397,6 +398,23 @@ to discard a record.
 | HTTP | `ACK` | Complete successful response headers |
 | Client | `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | A current consumer attempt's explicit application ACK |
 
+### The outside system's code
+
+When an outside system refuses a row, or answers a failed attempt, with a code of its own, the
+row's error carries that code as `error.external_code`, spelled exactly as that system spells it:
+`23505` from Postgres, `1062 (23000)` from MySQL, `422` from an HTTP server, `MSG_SIZE_TOO_LARGE`
+from a Kafka broker. Each entity's reference below states under **External code** which code space
+it fills and the form a code takes there; an entity whose destination answers with no code of its
+own says so, and its field is null. A row the emitter or its client refuses before the outside
+system answers, such as a record over `MAX SIZE` or over a limit the client checks itself, carries
+no code either, nor does a failed attempt that got no answer, such as a connection that never
+opened. A code never quotes a row's values, so a route can copy it into a field of its error
+record:
+
+```text
+ON MESSAGE ERROR SEND TO rejected SET seq = input.seq, external_code = error.external_code
+```
+
 ### Client emitters
 
 <!-- connector-matrix:emit-client-consumer:start -->
@@ -429,6 +447,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | Not offered: A consumer refuses a delivery with a reason of its own text, which carries no code. |
 | Buffers | batches retained for consumers on a node: at most 134217728 bytes; when full, holds back what fills it |
 | Network waits | a delivery attempt: `ACK TIMEOUT` |
 | Driver limits | None declared. |
@@ -517,6 +536,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | HTTP status code: three decimal digits; for example `422` |
 | Buffers | The connector holds no buffer between its transport and the host. |
 | Network waits | a request and the redirects it follows: for each, name resolution within half of what is left, each address's connection within an equal share of what is left after it, the proxy's TLS and tunnel, TLS, writing it and its final response headers: `timeout_ms`; required |
 | Driver limits | HTTP/1.1 response heads above 100 fields or 417,792 bytes, and HTTP/2 header lists of 16,384 bytes or more as HTTP/2 counts them, are refused.<br>Redirects and proxies require the client's explicit opt-in. |
@@ -1641,6 +1661,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | KEY 'record-key'<br>PARTITION FROM BRANCH<br>TIMESTAMP occurred_at |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | Kafka broker error, by librdkafka's name: upper-case words joined by underscores, as rd_kafka_err2name names the code the broker answered with; for example `MSG_SIZE_TOO_LARGE` |
 | Buffers | PARTITION FROM BRANCH native topic metadata response: driver default, receive.message.max.bytes 100000000; when full, fails the publish for the host to retry<br>records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
 | Network waits | PARTITION FROM BRANCH topic metadata, including connector executor admission: driver default, socket.timeout.ms, 60 s; maximum 300 s<br>a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>a failed publish under ACK, for the reports of the records its purge gave up: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
 | Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. MODE ACK sets delivery.timeout.ms from ACK TIMEOUT.<br>librdkafka sends a failed produce request again by itself, up to message.send.max.retries times, until the record's delivery.timeout.ms passes. Under ACK the emitter's RETRY POLICY retries what is unresolved after that; under NO ACK a record librdkafka gives up is lost. Unless the client's CONFIG sets enable.idempotence=true or max.in.flight.requests.per.connection=1, a resend can put one key's records out of order under NO ACK and ACK PARALLEL.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR.<br>A producer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still resolving a name included. |
@@ -1784,6 +1805,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | KEY 'record-key'<br>PARTITION FROM BRANCH<br>TIMESTAMP occurred_at<br>DELIVER AFTER 5s |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | Pulsar protocol ServerError: the name of the ServerError value the broker answered with; for example `NotAllowedError` |
 | Buffers | receipts held under NO ACK: at most 100 receipts; when full, holds back what fills it<br>messages the driver queues for its connection: driver default, 100 messages; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
 | Network waits | name resolution: unbounded<br>connection: driver default, 10 s per address<br>topic lookup, producer creation and receipts: driver default, the operation timeout: ACK TIMEOUT under ACK, 30 s under NO ACK |
 | Driver limits | Messages above the broker's announced maximum are rejected. |
@@ -1931,6 +1953,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | PERSISTENT<br>MANDATORY<br>TIMESTAMP occurred_at |
 | PROPERTIES keys and exact types | content_type: STRING<br>content_encoding: STRING<br>message_id: STRING<br>correlation_id: STRING<br>reply_to: STRING<br>expiration: STRING<br>priority: U8<br>type: STRING<br>app_id: STRING<br>user_id: STRING |
+| External code (`error.external_code`) | AMQP reply code: a decimal number, the reply code of the broker's basic.return or channel close; for example `312` |
 | Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |
 | Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the queue check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |
 | Driver limits | A frame above the negotiated frame_max ends the connection. |
@@ -1975,6 +1998,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | PERSISTENT<br>MANDATORY<br>TIMESTAMP occurred_at |
 | PROPERTIES keys and exact types | content_type: STRING<br>content_encoding: STRING<br>message_id: STRING<br>correlation_id: STRING<br>reply_to: STRING<br>expiration: STRING<br>priority: U8<br>type: STRING<br>app_id: STRING<br>user_id: STRING |
+| External code (`error.external_code`) | AMQP reply code: a decimal number, the reply code of the broker's basic.return or channel close; for example `312` |
 | Buffers | publishes awaiting confirmation: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it<br>messages the broker returns unrouted under MANDATORY, until the write that published them reads them: set by the messages of one write; when full, holds back what fills it |
 | Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open, confirm select and the exchange check: `connect_timeout_ms`; 30s when omitted<br>a publish: unbounded<br>a confirmation under ACK: `ACK TIMEOUT`<br>the round trip that ends a publish under NO ACK: `timeout_ms`; unbounded when omitted |
 | Driver limits | A frame above the negotiated frame_max ends the connection.<br>A routing key longer than the 255 bytes an AMQP short string carries is not sent; its record is rejected. |
@@ -2174,6 +2198,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | Redis error prefix: the upper-case word the server's error reply begins with; for example `ERR` |
 | Buffers | connections the command pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
 | Network waits | checking out a connection, the PING that tests it and a new one's name resolution, connection, TLS and Redis setup included: `connect_timeout_ms`; 30s when omitted<br>the answer to the checkout's PING and to the PUBLISH: driver default, 500 ms |
 | Driver limits | A payload above the server's proto-max-bulk-len is rejected, and Redis then closes the connection that sent it.<br>The pool tries again to open a connection that failed, after 400 ms and then twice as long each time, at most half of connect_timeout_ms, and stops at the first failure after connect_timeout_ms has passed since its first try. A publish whose checkout ends without a connection fails, and RETRY POLICY decides the next attempt. |
@@ -2308,6 +2333,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | RETAIN |
 | PROPERTIES keys and exact types | content_type: STRING<br>message_expiry: U32<br>response_topic: STRING<br>correlation_data: BYTES |
+| External code (`error.external_code`) | MQTT 5 reason code: a decimal number, the reason code byte of the broker's PUBACK, PUBREC or PUBCOMP; for example `135` |
 | Buffers | publishes queued for the driver: set by 1 under NO ACK and ACK SEQUENTIAL, ACK PARALLEL MAX under ACK PARALLEL; when full, fails the publish for the host to retry |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>answers to QOS 1 and 2 publishes: `ACK TIMEOUT`<br>writes to the connection: unbounded<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
 | Driver limits | Packets above the broker's maximum packet size are rejected.<br>QOS 0 connects a clean session; QOS 1 and 2 connect a persistent one with the maximum Session Expiry Interval, and SESSION is not an emitter option: a publisher without acknowledgement needs no session, and an acknowledged one always keeps it.<br>At QOS 1 and 2 the client sends again by itself, after each reconnect whose CONNACK resumes its session, every publish the broker has not acknowledged, and at QOS 2 the PUBREL of every publish the broker answered with PUBREC. A CONNACK that resumes no session makes it fail them instead, for RETRY POLICY to retry their records. At QOS 0 it sends nothing again.<br>The client keeps a QOS 1 or 2 publish until the broker answers it, also after ACK TIMEOUT has ended the emitter's wait, so the broker can receive that record twice: the kept publish, answered late or sent again, and the new publish RETRY POLICY sends. At QOS 1 the broker also delivers again a publish it acknowledged when the connection lost that PUBACK; at QOS 2 the broker delivers a publish sent again under its packet identifier once.<br>A new client is refused while the broker keeps a session under its identity, since it holds no state to resume it with. |
@@ -2453,6 +2479,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | REPLY TO reply_queue |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | Not offered: Core NATS answers no publish; a record the client refuses itself carries no code. |
 | Buffers | commands queued for the connection: driver default, 2048 commands; when full, holds back what fills it |
 | Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>a core publish and its flush to the client's socket, not a server round trip: `timeout_ms`; unbounded when omitted |
 | Driver limits | Messages above the server's max_payload are rejected. |
@@ -2530,6 +2557,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | MESSAGE ID id |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; its MESSAGE ID envelope and written headers travel with the payload. |
+| External code (`error.external_code`) | JetStream API error code: a decimal number, the err_code of the server's JetStream error; for example `10060` |
 | Buffers | commands queued for the connection: driver default, 2048 commands; when full, holds back what fills it<br>PubAck answers awaiting settlement: set by ACK PARALLEL MAX, 1 under ACK SEQUENTIAL; when full, holds back what fills it |
 | Network waits | name resolution: unbounded<br>connection: driver default, 5 s per address<br>the stream lookup: `ACK TIMEOUT`<br>a JetStream acknowledgement: `ACK TIMEOUT` |
 | Driver limits | Messages above the server's max_payload are rejected. |
@@ -2603,6 +2631,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: The PUSH socket sends one payload frame. Multipart envelopes and additional per-record envelope clauses are not offered. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | Not offered: A PUSH socket hands frames to its peer without any answer, so nothing refuses a record with a code. |
 | Buffers | bytes queued for a peer: unbounded |
 | Network waits | connecting and the ZMTP handshake: `connect_timeout_ms`; 30s when omitted<br>a send: `timeout_ms`; unbounded when omitted |
 | Driver limits | The driver has no high-water mark, maximum message size or heartbeat. |
@@ -2686,6 +2715,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | Not offered: A syslog collector answers no record, so nothing refuses one with a code. |
 | Buffers | The connector holds no buffer between its transport and the host. |
 | Network waits | connection: name resolution, address attempts and TLS: `connect_timeout_ms`; 30s when omitted<br>writing and flushing a frame: `timeout_ms`; unbounded when omitted |
 | Driver limits | None declared. |
@@ -2745,6 +2775,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | DELAY 5s<br>DEDUPLICATION ID id |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | queue service error code: the error code the queue service names a refused entry or a failed request with; for example `InvalidMessageContents` |
 | Buffers | The connector holds no buffer between its transport and the host. |
 | Network waits | connection: name resolution, TCP and TLS: driver default, 3.1 s<br>the queue URL lookup at start and a send: `timeout_ms`; unbounded when omitted |
 | Driver limits | A batch request holds at most 10 entries and 1 MiB; a record above 1 MiB is rejected. |
@@ -2876,6 +2907,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | yes |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | HTTP status code: three decimal digits; for example `400` |
 | Buffers | The connector holds no buffer between its transport and the host. |
 | Network waits | a request: name resolution, connection, TLS and the response headers: `timeout_ms`; required |
 | Driver limits | An event above 1,000,000 bytes is rejected. |
@@ -3043,6 +3075,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | OTLP transport status code: the three-digit HTTP status under the http/protobuf protocol, or the decimal gRPC status code under grpc; for example `400` |
 | Buffers | the export request of a publish without BATCH: unbounded |
 | Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; required |
 | Driver limits | gRPC responses above 4 MiB are refused. |
@@ -3091,6 +3124,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | OTLP transport status code: the three-digit HTTP status under the http/protobuf protocol, or the decimal gRPC status code under grpc; for example `400` |
 | Buffers | the export request of a publish without BATCH: unbounded |
 | Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; required |
 | Driver limits | gRPC responses above 4 MiB are refused. |
@@ -3140,6 +3174,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | OTLP transport status code: the three-digit HTTP status under the http/protobuf protocol, or the decimal gRPC status code under grpc; for example `400` |
 | Buffers | the export request of a publish without BATCH: unbounded |
 | Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; required |
 | Driver limits | gRPC responses above 4 MiB are refused. |
@@ -3350,6 +3385,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | ClickHouse exception name: upper-case words joined by underscores, the exception ClickHouse refused a row with; for example `VIOLATED_CONSTRAINT` |
 | Buffers | The connector holds no buffer between its transport and the host. |
 | Network waits | an insert: connection, TLS, upload and the response: `timeout_ms`; required |
 | Driver limits | None declared. |
@@ -3494,8 +3530,10 @@ as [Database client pools](./database-client-pools.md#borrowing-and-waiting) des
 reapply rows from the failed insert; use the emitter's idempotent write facilities where available.
 Dividing a flush into inserts also means one flush is not an atomic database transaction.
 For a rejected row, the error names a safe ClickHouse error name, Postgres SQLSTATE, or MySQL
-SQLSTATE and code. Destination response text can quote a bound value, so it is not included in
-diagnostics. Connection and pool failures retain their causes for diagnosing a retry.
+SQLSTATE and code, and carries it as [`error.external_code`](#the-outside-systems-code): the
+ClickHouse exception name, such as `VIOLATED_CONSTRAINT`, the SQLSTATE, such as `23514`, or the
+MySQL error number with its SQLSTATE, such as `3819 (HY000)`. Destination response text can quote
+a bound value, so it is not included in diagnostics. Connection and pool failures retain their causes for diagnosing a retry.
 
 ### Postgres
 
@@ -3600,6 +3638,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | SQLSTATE: five characters, as PostgreSQL documents them; for example `23505` |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
 | Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>each catalog query and each insert: `timeout_ms`; unbounded when omitted<br>closing an interrupted query connection: driver default, SQLx close-on-drop timeout, 5 s<br>testing a connection returned to the pool, which keeps its place until the server answers: unbounded |
 | Driver limits | timeout_ms accepts at most 2147483647 milliseconds, PostgreSQL's statement_timeout maximum.<br>Without timeout_ms, catalog queries and inserts have no Nervix response deadline.<br>The pool tries again to open a connection the server refuses, by refusing the TCP connection or answering SQLSTATE 53300 (too_many_connections) or 57P03 (cannot_connect_now), after 10 ms and then twice as long each time, at most a fifth of what remained of pool_acquire_timeout_ms at its first try, and stops when pool_acquire_timeout_ms has passed since the checkout or the pool's opening began. Any other failure to connect ends that checkout or opening at once. A publish whose checkout ends without a connection fails, and RETRY POLICY decides the next attempt. |
@@ -3624,7 +3663,8 @@ its rows when the SQLSTATE's class is `21` (cardinality violation), `22` (data e
 value its column cannot read) or `23` (integrity constraint violation, such as a `NOT NULL`,
 `CHECK`, unique or foreign-key violation), and writes its rows again one at a time. A row Postgres
 still refuses on its own follows `ON MESSAGE ERROR`, named by its SQLSTATE only, such as
-`Postgres rejected record with SQLSTATE 23505`, because the server's message can quote a value.
+`Postgres rejected record with SQLSTATE 23505`, because the server's message can quote a value; its
+`error.external_code` is that SQLSTATE.
 Every other answer leaves the insert's rows unresolved for `RETRY POLICY` as a transient publish
 failure: a lost connection, an expired `timeout_ms`, any other SQLSTATE, such as
 `Postgres request failed with SQLSTATE 42P10`, and a missing table or mapped column, which the
@@ -3775,6 +3815,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | MySQL server error number and SQLSTATE: the error number, then the SQLSTATE in parentheses, as MySQL writes an error; for example `1062 (23000)` |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
 | Network waits | pool checkout, including connection and authentication; timeout_ms also applies when shorter: `pool_acquire_timeout_ms`; when omitted, the client's declared pool_acquire_timeout_ms default<br>initial validation and each insert; also bounds each pool checkout when shorter: `timeout_ms`; unbounded when omitted |
 | Driver limits | Without timeout_ms, initial validation after checkout and inserts have no operation deadline.<br>Maximum connection age is checked on reuse, return and the driver's idle scan; active inserts are not interrupted.<br>TLS identity keys use the driver's RSA PKCS#1 private-key format.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
@@ -3993,6 +4034,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | MongoDB error code: a decimal number; for example `11000` |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
 | Network waits | connection: name resolution, TCP and TLS: driver default, connectTimeoutMS, 10 s<br>server selection: driver default, 30 s<br>the handshake, a pool wait, the collection lookup and a write: unbounded |
 | Driver limits | A document above the declared BSON document limit is rejected.<br>The driver sends a write, or the collection lookup at open, again by itself: once after a network error or a retryable server error, a write only on a replica set or sharded cluster, and up to twice with its own backoff after an error the server labels as overload. A resent write carries the same transaction number, so the server applies each document once. The connection string's retryWrites, retryReads and maxAdaptiveRetries change this, and RETRY POLICY retries what the driver leaves unresolved. |
@@ -4106,6 +4148,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Batch transformation required | no |
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
+| External code (`error.external_code`) | Not offered: The emitter writes rows into data files it encodes itself, and the catalog answers a commit rather than a record; its failures reach the emitter as the Iceberg library's error kinds, not as the catalog's own codes. |
 | Buffers | records staged on disk until a commit: set by COMMIT EACH ... MAX SIZE; when full, holds back what fills it |
 | Network waits | catalog requests: unbounded<br>object-store metadata operations: stat, directory creation, rename and presign: `timeout_ms`; 1m when omitted<br>object-store reads, writes, lists, copies and deletes: `timeout_ms`; 10s when omitted |
 | Driver limits | None declared. |

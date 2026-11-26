@@ -30,7 +30,8 @@ Feature: OTEL Export requests through unknown outcomes
         seq I64,
         error_reference STRING,
         error_code STRING,
-        operation STRING
+        operation STRING,
+        external_code STRING OPTIONAL
       );
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
@@ -65,7 +66,8 @@ Feature: OTEL Export requests through unknown outcomes
           SET seq = input.seq,
               error_reference = error.reference,
               error_code = error.class,
-              operation = error.operation
+              operation = error.operation,
+              external_code = error.external_code
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
       START;
@@ -89,8 +91,8 @@ Feature: OTEL Export requests through unknown outcomes
       """
     And within "30s" the relay subscription receives payloads containing all fragments that share one "error_reference"
       """
-      "seq":3 | "error_code":"refused" | "operation":"publish"
-      "seq":4 | "error_code":"refused" | "operation":"publish"
+      "seq":3 | "error_code":"refused" | "operation":"publish" | "external_code":"<external_code>"
+      "seq":4 | "error_code":"refused" | "operation":"publish" | "external_code":"<external_code>"
       """
     And OTLP receiver "collector" has captured exactly 4 export requests
     And within "30s" DESCRIBE EMITTER "retried_logs" on the leader node contains
@@ -112,12 +114,95 @@ Feature: OTEL Export requests through unknown outcomes
       state="prepared"
       """
 
+    # The refusal carries the status code of the transport in use: gRPC INVALID_ARGUMENT is 3, and
+    # an HTTP refusal is 400 Bad Request.
     Examples:
-      | cluster_size | protocol      |
-      | 1            | grpc          |
-      | 3            | grpc          |
-      | 1            | http/protobuf |
-      | 3            | http/protobuf |
+      | cluster_size | protocol      | external_code |
+      | 1            | grpc          | 3             |
+      | 3            | grpc          | 3             |
+      | 1            | http/protobuf | 400           |
+      | 3            | http/protobuf | 400           |
+
+  @otel_export_retries
+  Scenario Outline: An OTEL <signal> Export request the receiver refuses routes its record with the status code it answered
+    Given OTLP receiver "collector" is running for "<protocol>"
+    And OTLP receiver "collector" answers with
+      """
+      reject
+      """
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( seq I64 );
+      CREATE SCHEMA rejected_event (
+        seq I64,
+        error_code STRING,
+        operation STRING,
+        external_code STRING OPTIONAL
+      );
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
+      CREATE VHOST edge otel-refusal-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
+        TO events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE OTEL CLIENT otel_main CONFIG {
+        'endpoint' = '{{otlp_receiver.collector}}',
+        'protocol' = '<protocol>',
+        'timeout_ms' = 5000
+      };
+      CREATE OTEL <signal> EMITTER refused FROM events
+        TO otel_main
+          <metric>
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s VALUES { <values> }
+          RESOURCE { 'service.name' = 'nervix-cucumber' }
+          SCOPE 'refusal-test' VERSION '1.0'
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO rejected_events
+          SET seq = input.seq,
+              error_code = error.class,
+              operation = error.operation,
+              external_code = error.external_code
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
+      START;
+      """
+    And http payload is posted to host "otel-refusal-{{test_id}}.example.com" path "/events"
+      """
+      [{"seq":1}]
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "seq":1 | "error_code":"refused" | "operation":"publish" | "external_code":"<external_code>"
+      """
+    And OTLP receiver "collector" has captured exactly 1 export requests
+
+    # The refusal carries the status code of the transport in use: gRPC INVALID_ARGUMENT is 3, and
+    # an HTTP refusal is 400 Bad Request.
+    Examples:
+      | cluster_size | protocol      | signal  | metric                                                                     | values                                                                                                                                                                                   | external_code |
+      | 1            | grpc          | TRACES  |                                                                            | 'trace_id' = '0123456789abcdef0123456789abcdef', 'span_id' = '0123456789abcdef', 'name' = 'refused', 'kind' = 'INTERNAL', 'start_time' = now(), 'end_time' = now(), 'status_code' = 'OK' | 3             |
+      | 3            | grpc          | TRACES  |                                                                            | 'trace_id' = '0123456789abcdef0123456789abcdef', 'span_id' = '0123456789abcdef', 'name' = 'refused', 'kind' = 'INTERNAL', 'start_time' = now(), 'end_time' = now(), 'status_code' = 'OK' | 3             |
+      | 1            | http/protobuf | TRACES  |                                                                            | 'trace_id' = '0123456789abcdef0123456789abcdef', 'span_id' = '0123456789abcdef', 'name' = 'refused', 'kind' = 'INTERNAL', 'start_time' = now(), 'end_time' = now(), 'status_code' = 'OK' | 400           |
+      | 3            | http/protobuf | TRACES  |                                                                            | 'trace_id' = '0123456789abcdef0123456789abcdef', 'span_id' = '0123456789abcdef', 'name' = 'refused', 'kind' = 'INTERNAL', 'start_time' = now(), 'end_time' = now(), 'status_code' = 'OK' | 400           |
+      | 1            | grpc          | METRICS | METRIC 'nervix.test.refused' UNIT '1' DESCRIPTION 'Cucumber refusal' GAUGE | 'time' = now(), 'value' = input.seq                                                                                                                                                      | 3             |
+      | 3            | grpc          | METRICS | METRIC 'nervix.test.refused' UNIT '1' DESCRIPTION 'Cucumber refusal' GAUGE | 'time' = now(), 'value' = input.seq                                                                                                                                                      | 3             |
+      | 1            | http/protobuf | METRICS | METRIC 'nervix.test.refused' UNIT '1' DESCRIPTION 'Cucumber refusal' GAUGE | 'time' = now(), 'value' = input.seq                                                                                                                                                      | 400           |
+      | 3            | http/protobuf | METRICS | METRIC 'nervix.test.refused' UNIT '1' DESCRIPTION 'Cucumber refusal' GAUGE | 'time' = now(), 'value' = input.seq                                                                                                                                                      | 400           |
 
   @otel_export_retries
   Scenario Outline: An OTEL Export request that timed out is sent again byte for byte

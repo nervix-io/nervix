@@ -343,7 +343,13 @@ impl EmitterConnector for ClientConsumerConnector {
             match result {
                 Ok(ClientEmitterResult::Acknowledged) => outcome.deliver(id),
                 Ok(ClientEmitterResult::Rejected(reason)) => {
-                    outcome.reject(RejectedEmitterMember::external(id, occurred_at, reason));
+                    // A consumer refuses a delivery with a reason of its own text and no code.
+                    outcome.reject(RejectedEmitterMember::external(
+                        id,
+                        occurred_at,
+                        reason,
+                        None,
+                    ));
                 }
                 // The delivery owner retries a delivery by itself and measured the emitter's
                 // GIVE UP AFTER from its first failed attempt, so the emitter gives the payload's

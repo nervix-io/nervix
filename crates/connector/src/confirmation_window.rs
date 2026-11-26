@@ -31,7 +31,7 @@ use std::{
 
 use error_stack::Report;
 use meticulous::OptionExt as _;
-use nervix_models::Timestamp;
+use nervix_models::{ExternalErrorCode, Timestamp};
 use nervix_primitives::{
     task::unconstrained,
     time::{Instant, timeout_at},
@@ -56,8 +56,12 @@ pub enum BrokerVerdict {
     /// The broker confirmed the record.
     Confirmed,
     /// The broker refused the record for good, so sending it again cannot succeed. `message` is
-    /// what the record's message error reports.
-    Rejected { message: String },
+    /// what the record's message error reports, and `external_code` the code the broker gave the
+    /// refusal in its own spelling, or `None` where its answer carries no code.
+    Rejected {
+        message: String,
+        external_code: Option<ExternalErrorCode>,
+    },
 }
 
 /// What the answer for one record resolves to: the broker's verdict on it, or the failure that
@@ -169,10 +173,14 @@ where
     fn settle(self, verdict: BrokerVerdict, outcome: &mut PerRecordOutcome<EmitterRecordId>) {
         match verdict {
             BrokerVerdict::Confirmed => outcome.deliver(self.record),
-            BrokerVerdict::Rejected { message } => outcome.reject(RejectedEmitterMember::external(
+            BrokerVerdict::Rejected {
+                message,
+                external_code,
+            } => outcome.reject(RejectedEmitterMember::external(
                 self.record,
                 self.occurred_at,
                 message,
+                external_code,
             )),
         }
     }

@@ -126,6 +126,11 @@ impl EmitterDeclaration for SentryEventEmitter {
         }],
         envelope: &[],
         properties: &[],
+        external_code: Some(crate::ExternalCodeDeclaration {
+            space: "HTTP status code",
+            form: "three decimal digits",
+            example: "400",
+        }),
         bounds: SENTRY_BOUNDS,
     };
 }

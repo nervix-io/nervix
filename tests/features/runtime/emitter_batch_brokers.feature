@@ -298,7 +298,9 @@ Feature: Batching across broker and message emitters
         error_reference STRING,
         error_code STRING,
         operation STRING,
-        error_message STRING
+        error_message STRING,
+        external_code STRING OPTIONAL,
+        no_external_code BOOL
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
@@ -330,7 +332,9 @@ Feature: Batching across broker and message emitters
               error_reference = error.reference,
               error_code = error.class,
               operation = error.operation,
-              error_message = error.message
+              error_message = error.message,
+              external_code = error.external_code,
+              no_external_code = is_null(error.external_code)
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
       START;
@@ -342,15 +346,17 @@ Feature: Batching across broker and message emitters
     # the channel, and the connector rejects the message on that answer and publishes the rest on a
     # new channel. Either way every member of the message is rejected with one reference and
     # publishing continues: the records after them still leave in their own message, exactly once.
+    # Only the RabbitMQ broker answered the message, so only its refusal carries a code: the 406
+    # PRECONDITION_FAILED it closed the channel with.
     And http payload is posted to host "limited-{{test_id}}.example.com" path "/events"
       """
       [{"seq":1,"note":"xy"},{"seq":2,"note":"xy"},{"seq":3,"note":"xy"},{"seq":4,"note":""},{"seq":5,"note":""}]
       """
     Then within "30s" the relay subscription receives payloads containing all fragments that share one "error_reference"
       """
-      "seq":1 | "error_code":"refused" | "operation":"publish" | <limit_message>
-      "seq":2 | "error_code":"refused" | "operation":"publish" | <limit_message>
-      "seq":3 | "error_code":"refused" | "operation":"publish" | <limit_message>
+      "seq":1 | "error_code":"refused" | "operation":"publish" | <limit_message> | <code>
+      "seq":2 | "error_code":"refused" | "operation":"publish" | <limit_message> | <code>
+      "seq":3 | "error_code":"refused" | "operation":"publish" | <limit_message> | <code>
       """
     And within "30s" the observed broker receives exactly these payloads
       """
@@ -358,19 +364,19 @@ Feature: Batching across broker and message emitters
       """
 
     Examples:
-      | cluster_size | target         | client                                                                         | connector_body                                                                                                                          | limit_message                         | emitter_kind   |
-      | 1            | Kafka          | CREATE KAFKA CLIENT emitter CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' }; | emitter TOPIC 'limited_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                                | Message size too large                | KAFKA TOPIC    |
-      | 3            | Kafka          | CREATE KAFKA CLIENT emitter CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' }; | emitter TOPIC 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                        | Message size too large                | KAFKA TOPIC    |
-      | 3            | MQTT           | CREATE MQTT CLIENT emitter CONFIG { 'addr' = '{{mqtt_addr}}' };                | emitter TOPIC 'limited_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                  | maximum packet size of 1048576 bytes  | MQTT TOPIC     |
-      | 1            | MQTT           | CREATE MQTT CLIENT emitter CONFIG { 'addr' = '{{mqtt_addr}}' };                | emitter TOPIC 'limited_{{test_id}}' QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                          | maximum packet size of 1048576 bytes  | MQTT TOPIC     |
-      | 1            | NATS           | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                | emitter SUBJECT 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                      | max payload size exceeded             | NATS SUBJECT   |
-      | 3            | NATS JetStream | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                | emitter STREAM 'limited_{{test_id}}' SUBJECT 'limited_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s | max payload size exceeded             | NATS STREAM    |
-      | 1            | Pulsar         | CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };            | emitter TOPIC 'limited_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                                | maximum message size of 1048576 bytes | PULSAR TOPIC   |
-      | 3            | Pulsar         | CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };            | emitter TOPIC 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                        | maximum message size of 1048576 bytes | PULSAR TOPIC   |
-      | 1            | RabbitMQ       | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | emitter QUEUE 'limited_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                                | max_message_size of 1048576 bytes     | RABBITMQ QUEUE |
-      | 3            | RabbitMQ       | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | emitter QUEUE 'limited_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                            | max_message_size of 1048576 bytes     | RABBITMQ QUEUE |
-      | 1            | RabbitMQ       | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | emitter QUEUE 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                        | max_message_size of 1048576 bytes     | RABBITMQ QUEUE |
-      | 3            | RabbitMQ       | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | emitter QUEUE 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                        | max_message_size of 1048576 bytes     | RABBITMQ QUEUE |
+      | cluster_size | target         | client                                                                         | connector_body                                                                                                                          | limit_message                         | emitter_kind   | code                    |
+      | 1            | Kafka          | CREATE KAFKA CLIENT emitter CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' }; | emitter TOPIC 'limited_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                                | Message size too large                | KAFKA TOPIC    | "no_external_code":true |
+      | 3            | Kafka          | CREATE KAFKA CLIENT emitter CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' }; | emitter TOPIC 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                        | Message size too large                | KAFKA TOPIC    | "no_external_code":true |
+      | 3            | MQTT           | CREATE MQTT CLIENT emitter CONFIG { 'addr' = '{{mqtt_addr}}' };                | emitter TOPIC 'limited_{{test_id}}' QOS 0 MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                  | maximum packet size of 1048576 bytes  | MQTT TOPIC     | "no_external_code":true |
+      | 1            | MQTT           | CREATE MQTT CLIENT emitter CONFIG { 'addr' = '{{mqtt_addr}}' };                | emitter TOPIC 'limited_{{test_id}}' QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                          | maximum packet size of 1048576 bytes  | MQTT TOPIC     | "no_external_code":true |
+      | 1            | NATS           | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                | emitter SUBJECT 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                      | max payload size exceeded             | NATS SUBJECT   | "no_external_code":true |
+      | 3            | NATS JetStream | CREATE NATS CLIENT emitter CONFIG { 'addr' = '{{nats_addr}}' };                | emitter STREAM 'limited_{{test_id}}' SUBJECT 'limited_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s | max payload size exceeded             | NATS STREAM    | "no_external_code":true |
+      | 1            | Pulsar         | CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };            | emitter TOPIC 'limited_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                                | maximum message size of 1048576 bytes | PULSAR TOPIC   | "no_external_code":true |
+      | 3            | Pulsar         | CREATE PULSAR CLIENT emitter CONFIG { 'addr' = '{{pulsar_addr}}' };            | emitter TOPIC 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                        | maximum message size of 1048576 bytes | PULSAR TOPIC   | "no_external_code":true |
+      | 1            | RabbitMQ       | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | emitter QUEUE 'limited_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                                | max_message_size of 1048576 bytes     | RABBITMQ QUEUE | "external_code":"406"   |
+      | 3            | RabbitMQ       | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | emitter QUEUE 'limited_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s                            | max_message_size of 1048576 bytes     | RABBITMQ QUEUE | "external_code":"406"   |
+      | 1            | RabbitMQ       | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | emitter QUEUE 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                        | max_message_size of 1048576 bytes     | RABBITMQ QUEUE | "external_code":"406"   |
+      | 3            | RabbitMQ       | CREATE RABBITMQ CLIENT emitter CONFIG { 'addr' = '{{rabbitmq_addr}}' };        | emitter QUEUE 'limited_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s                                                        | max_message_size of 1048576 bytes     | RABBITMQ QUEUE | "external_code":"406"   |
 
   @emitter_batch_brokers @emitter_batch_destination_limits
   Scenario Outline: A Pulsar batch message larger than its topic allows is rejected with every member

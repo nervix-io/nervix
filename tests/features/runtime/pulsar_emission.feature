@@ -512,7 +512,8 @@ Feature: Pulsar emission
         seq I64,
         error_code STRING,
         operation STRING,
-        error_message STRING
+        error_message STRING,
+        external_code STRING OPTIONAL
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
@@ -541,7 +542,8 @@ Feature: Pulsar emission
           SET seq = input.seq,
               error_code = error.class,
               operation = error.operation,
-              error_message = error.message
+              error_message = error.message,
+              external_code = error.external_code
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
       START;
@@ -552,7 +554,7 @@ Feature: Pulsar emission
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "seq":1 | "error_code":"refused" | "operation":"publish" | "error_message":"PULSAR rejected record: the Pulsar broker does not allow the message
+      "seq":1 | "error_code":"refused" | "operation":"publish" | "error_message":"PULSAR rejected record: the Pulsar broker does not allow the message | "external_code":"NotAllowedError"
       """
 
     Examples:

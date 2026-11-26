@@ -386,6 +386,11 @@ impl EmitterDeclaration for PostgresTableEmitter {
         }],
         envelope: &[],
         properties: &[],
+        external_code: Some(crate::ExternalCodeDeclaration {
+            space: "SQLSTATE",
+            form: "five characters, as PostgreSQL documents them",
+            example: "23505",
+        }),
         bounds: POSTGRES_BOUNDS,
     };
 }

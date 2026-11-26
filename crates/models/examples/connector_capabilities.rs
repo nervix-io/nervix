@@ -18,10 +18,11 @@ use nervix_models::{
     ClientConfigKey, ClientConfigNamespace, ClientConfigOwner, ClientConfigPresence,
     ClientConfigValue, ClientDeclaration, ClientPooling, ConnectorKind, DeclaredBounds,
     EmitterBatchLegality, EmitterBodyForm, EmitterEntityCapabilities, EmitterEntityKind,
-    EmitterInstancingCapability, EmitterReferenceKind, HeaderModel, IngestorEntityCapabilities,
-    IngestorEntityKind, IngestorReferenceKind, LocatorDeclaration, LocatorName, OmittedDeadline,
-    OptionDeclaration, OptionForm, OptionPresence, OptionValue, OtelEmitterEntity, OtelValueField,
-    RateLimitDeclaration, SYSLOG_FRAME_LIMITS, SyslogEmitterEntity, WaitBound,
+    EmitterInstancingCapability, EmitterReferenceKind, ExternalCodeDeclaration, HeaderModel,
+    IngestorEntityCapabilities, IngestorEntityKind, IngestorReferenceKind, LocatorDeclaration,
+    LocatorName, OmittedDeadline, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    OtelEmitterEntity, OtelValueField, RateLimitDeclaration, SYSLOG_FRAME_LIMITS,
+    SyslogEmitterEntity, WaitBound,
 };
 use serde_json::{Value, json};
 use strum::IntoEnumIterator as _;
@@ -369,6 +370,7 @@ fn emitter(kind: EmitterEntityKind) -> Value {
         options,
         envelope,
         properties,
+        external_code,
         bounds: declared_bounds,
     } = kind.capabilities();
     let reference = match reference {
@@ -415,8 +417,16 @@ fn emitter(kind: EmitterEntityKind) -> Value {
         "batch": batch, "batch_maximum": maximum, "body": body,
         "batch_transformation": requires_batch_transformation,
         "envelope": envelope, "properties": properties,
+        "external_code": external_code.map(external_code_declaration),
         "bounds": bounds(declared_bounds), "template": emitter_template(kind, body),
         "value_contract": otel_value_contract(kind), "frame_limits": frame_limits(kind),
+    })
+}
+
+/// What an emitter entity declares its `error.external_code` holds.
+fn external_code_declaration(declared: ExternalCodeDeclaration) -> Value {
+    json!({
+        "space": declared.space, "form": declared.form, "example": declared.example,
     })
 }
 

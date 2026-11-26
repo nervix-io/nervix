@@ -193,6 +193,20 @@ fn is_record_sqlstate(code: &str) -> bool {
     code.starts_with("21") || code.starts_with("22") || code.starts_with("23")
 }
 
+/// The SQLSTATE PostgreSQL answers a statement it canceled with, `query_canceled`.
+const QUERY_CANCELED: &str = "57014";
+
+/// The SQLSTATE of a driver error the server answered, in the server's own spelling.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "SQLx's external database-error trait provides the SQLSTATE")
+)]
+fn database_code(error: &sqlx::Error) -> Option<ExternalErrorCode> {
+    let database = error.as_database_error()?;
+    let code = database.code()?;
+    ExternalErrorCode::new(code.into_owned())
+}
+
 impl PostgresWriteError {
     #[cfg_attr(
         nervix_lint,
@@ -205,7 +219,7 @@ impl PostgresWriteError {
         let deadline = deadline?;
         let database = error.as_database_error()?;
         let code = database.code()?;
-        if code == "57014" {
+        if code == QUERY_CANCELED {
             return Some(Report::new(Self::StatementCanceled { deadline }));
         }
         None
@@ -255,15 +269,34 @@ impl PostgresWriteError {
         position: EmitterRecordPosition,
         occurred_at: Timestamp,
     ) -> RejectedEmitterMember<EmitterRecordPosition> {
-        let rejection =
-            RejectedEmitterMember::external(position, occurred_at, self.record_reason());
-        let Self::Server { code: Some(code) } = self else {
-            return rejection;
-        };
-        match ExternalErrorCode::new(code.clone()) {
-            Some(code) => rejection.with_external_code(code),
-            None => rejection,
+        RejectedEmitterMember::external(
+            position,
+            occurred_at,
+            self.record_reason(),
+            self.server_code(),
+        )
+    }
+
+    /// The SQLSTATE the server answered this failure with, which an error route reads as
+    /// `error.external_code`, where the server answered at all.
+    fn server_code(&self) -> Option<ExternalErrorCode> {
+        match self {
+            Self::Server { code: Some(code) } => ExternalErrorCode::new(code.clone()),
+            Self::StatementCanceled { .. } => ExternalErrorCode::new(QUERY_CANCELED),
+            Self::Metadata(error) => database_code(error),
+            _ => None,
         }
+    }
+
+    /// The SQLSTATE the server answered the failure `report` describes with: the one its own
+    /// context names, or the one of a connection checkout the server refused, whose driver error is
+    /// beneath the context.
+    fn failure_code(report: &Report<Self>) -> Option<ExternalErrorCode> {
+        if let Some(code) = report.current_context().server_code() {
+            return Some(code);
+        }
+        let driver = report.downcast_ref::<sqlx::Error>()?;
+        database_code(driver)
     }
 
     fn record_reason(&self) -> String {
@@ -277,7 +310,10 @@ impl PostgresWriteError {
         }
     }
 
+    /// The emitter's failure for `report`, which keeps the server's SQLSTATE where the server
+    /// answered, so a write the emitter gives up on names it as `error.external_code`.
     fn into_report(report: Report<Self>) -> Report<EmitterWriteError> {
+        let code = Self::failure_code(&report);
         let reason = match report.current_context() {
             Self::Server { code } => {
                 let code = code.as_deref().unwrap_or("unknown");
@@ -291,9 +327,12 @@ impl PostgresWriteError {
             Self::Pool | Self::Deadline => None,
             error => Some(error.to_string()),
         };
-        let report = report.change_context(EmitterWriteError::Publish {
+        let mut report = report.change_context(EmitterWriteError::Publish {
             connector: POSTGRES,
         });
+        if let Some(code) = code {
+            report = report.attach(code);
+        }
         match reason {
             Some(reason) => report.attach_printable(reason),
             None => report,
@@ -1532,6 +1571,51 @@ mod tests {
                 "{code} requires infrastructure retry"
             );
         }
+    }
+
+    /// A record the server refused carries its SQLSTATE as `error.external_code`, and a record error
+    /// the server gave no SQLSTATE leaves the code absent.
+    #[test]
+    fn a_rejected_record_carries_the_server_sqlstate() {
+        let at = Timestamp::from_unix_nanos(1);
+        let position = EmitterRecordPosition {
+            batch_index: 0,
+            row_index: 0,
+        };
+        let refused = PostgresWriteError::Server {
+            code: Some("23514".to_string()),
+        }
+        .record_rejection(position, at);
+        assert_eq!(refused.error.external_code, ExternalErrorCode::new("23514"));
+        assert_eq!(
+            refused.error.message,
+            "Postgres rejected record with SQLSTATE 23514"
+        );
+
+        let unnamed = PostgresWriteError::Server { code: None }.record_rejection(position, at);
+        assert_eq!(unnamed.error.external_code, None);
+    }
+
+    /// A failed write the server answered keeps the SQLSTATE it answered with, which a write the
+    /// emitter gives up on reports as `error.external_code`; a failure no server answered has none.
+    #[test]
+    fn a_failure_the_server_answered_keeps_its_sqlstate() {
+        let retried = PostgresWriteError::into_report(Report::new(PostgresWriteError::Server {
+            code: Some("40001".to_string()),
+        }));
+        assert_eq!(
+            retried.downcast_ref::<ExternalErrorCode>(),
+            ExternalErrorCode::new("40001").as_ref()
+        );
+        assert_eq!(
+            first_description(&retried).as_deref(),
+            Some("Postgres request failed with SQLSTATE 40001")
+        );
+
+        let unanswered = PostgresWriteError::into_report(Report::new(PostgresWriteError::Execute(
+            sqlx::Error::PoolClosed,
+        )));
+        assert_eq!(unanswered.downcast_ref::<ExternalErrorCode>(), None);
     }
 
     #[test]

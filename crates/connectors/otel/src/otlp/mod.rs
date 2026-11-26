@@ -46,7 +46,7 @@ use nervix_connector::{
     client_config_value, client_tls_paths, optional_client_config_value, read_tls_file,
 };
 use nervix_models::{
-    ClientConfigEntry, EmitterBatchPolicy, FieldPath, HeaderPair, OtelValueRule,
+    ClientConfigEntry, EmitterBatchPolicy, ExternalErrorCode, FieldPath, HeaderPair, OtelValueRule,
     PercentEncodedHeaders, Timestamp,
 };
 use nervix_primitives::{sync::StdArc, time::Instant};
@@ -391,8 +391,35 @@ struct OtelPartialSuccess {
 
 enum OtelTransportOutcome {
     Accepted(Option<OtelPartialSuccess>),
-    Rejected(String),
+    /// The receiver refused the request for good, for `reason`, answering with the status `code`.
+    Rejected {
+        reason: String,
+        code: Option<ExternalErrorCode>,
+    },
     Failed(Report<EmitterWriteError>),
+}
+
+/// A gRPC status as `error.external_code` holds it: its decimal code, such as `3` for
+/// `INVALID_ARGUMENT`, which is how the transport carries it.
+fn grpc_code(code: GrpcCode) -> Option<ExternalErrorCode> {
+    ExternalErrorCode::new(i32::from(code).to_string())
+}
+
+/// An HTTP status as `error.external_code` holds it: its three decimal digits, such as `400`.
+fn http_code(status: StatusCode) -> Option<ExternalErrorCode> {
+    ExternalErrorCode::new(status.as_str())
+}
+
+/// `failure` keeping the status `code` the receiver answered with, so an export the emitter gives
+/// up on names it as `error.external_code`.
+fn answered(
+    failure: Report<EmitterWriteError>,
+    code: Option<ExternalErrorCode>,
+) -> Report<EmitterWriteError> {
+    match code {
+        Some(code) => failure.attach(code),
+        None => failure,
+    }
 }
 
 #[derive(Debug, Error)]
@@ -934,8 +961,13 @@ impl OtlpEncoder {
                     }
                     outcome.deliver(id);
                 }
-                OtelTransportOutcome::Rejected(reason) => {
-                    outcome.reject(RejectedEmitterMember::external(id, occurred_at, reason));
+                OtelTransportOutcome::Rejected { reason, code } => {
+                    outcome.reject(RejectedEmitterMember::external(
+                        id,
+                        occurred_at,
+                        reason,
+                        code,
+                    ));
                 }
                 OtelTransportOutcome::Failed(error) => {
                     outcome.fail(error);
@@ -1178,10 +1210,12 @@ impl OtelTransport {
                 status.message()
             )));
         }
+        let code = grpc_code(status.code());
         match status.code() {
-            GrpcCode::InvalidArgument => OtelTransportOutcome::Rejected(
-                "OTEL receiver rejected the request with gRPC INVALID_ARGUMENT".to_string(),
-            ),
+            GrpcCode::InvalidArgument => OtelTransportOutcome::Rejected {
+                reason: "OTEL receiver rejected the request with gRPC INVALID_ARGUMENT".to_string(),
+                code,
+            },
             GrpcCode::Cancelled
             | GrpcCode::DeadlineExceeded
             | GrpcCode::ResourceExhausted
@@ -1193,15 +1227,19 @@ impl OtelTransport {
                 let retry_delay = status
                     .get_details_retry_info()
                     .and_then(|info| info.retry_delay);
-                OtelTransportOutcome::Failed(match retry_delay {
+                let failure = match retry_delay {
                     Some(delay) => publish_failure_after(message, delay),
                     None => publish_failure(message),
-                })
+                };
+                OtelTransportOutcome::Failed(answered(failure, code))
             }
-            _ => OtelTransportOutcome::Failed(misconfigured(format!(
-                "OTEL gRPC export failed with non-retryable {}",
-                status.code()
-            ))),
+            _ => {
+                let failure = misconfigured(format!(
+                    "OTEL gRPC export failed with non-retryable {}",
+                    status.code()
+                ));
+                OtelTransportOutcome::Failed(answered(failure, code))
+            }
         }
     }
 
@@ -1237,9 +1275,10 @@ impl OtelTransport {
         };
         let status = response.status();
         if status == StatusCode::BAD_REQUEST {
-            return OtelTransportOutcome::Rejected(
-                "OTEL receiver rejected the request with HTTP 400 Bad Request".to_string(),
-            );
+            return OtelTransportOutcome::Rejected {
+                reason: "OTEL receiver rejected the request with HTTP 400 Bad Request".to_string(),
+                code: http_code(status),
+            };
         }
         if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
             let delay = Self::http_retry_after(
@@ -1250,15 +1289,17 @@ impl OtelTransport {
                 nervix_connector::physical_time::actual_utc_now().into_datetime(),
             );
             let message = format!("OTEL HTTP export returned status {status}");
-            return OtelTransportOutcome::Failed(match delay {
+            let failure = match delay {
                 Some(delay) => publish_failure_after(message, delay),
                 None => publish_failure(message),
-            });
+            };
+            return OtelTransportOutcome::Failed(answered(failure, http_code(status)));
         }
         if !status.is_success() {
-            return OtelTransportOutcome::Failed(misconfigured(format!(
+            let failure = misconfigured(format!(
                 "OTEL HTTP export returned non-retryable status {status}"
-            )));
+            ));
+            return OtelTransportOutcome::Failed(answered(failure, http_code(status)));
         }
         let body = match response.bytes().await {
             Ok(body) => body,
@@ -2850,14 +2891,26 @@ mod tests {
 
     #[test]
     fn classifies_otlp_statuses_and_extracts_http_retry_after() {
-        assert!(matches!(
-            OtelTransport::grpc_failure(GrpcStatus::invalid_argument("bad record")),
-            OtelTransportOutcome::Rejected(_)
-        ));
-        assert!(matches!(
-            OtelTransport::grpc_failure(GrpcStatus::unavailable("retry")),
-            OtelTransportOutcome::Failed(_)
-        ));
+        let OtelTransportOutcome::Rejected { code, .. } =
+            OtelTransport::grpc_failure(GrpcStatus::invalid_argument("bad record"))
+        else {
+            panic!("INVALID_ARGUMENT refuses the request");
+        };
+        assert_eq!(
+            code,
+            ExternalErrorCode::new("3"),
+            "a refusal carries the gRPC status code the receiver answered"
+        );
+        let OtelTransportOutcome::Failed(retried) =
+            OtelTransport::grpc_failure(GrpcStatus::unavailable("retry"))
+        else {
+            panic!("UNAVAILABLE fails the attempt");
+        };
+        assert_eq!(
+            retried.downcast_ref::<ExternalErrorCode>(),
+            ExternalErrorCode::new("14").as_ref(),
+            "a retried export keeps the gRPC status code the receiver answered"
+        );
         let now = chrono::DateTime::parse_from_rfc3339("2026-08-24T12:00:00Z")
             .expect("fixed time")
             .with_timezone(&chrono::Utc);

@@ -103,7 +103,7 @@ use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType, date_time_ymd,
 };
-use redis::AsyncCommands;
+use redis::{AsyncCommands, acl::Rule as AclRule};
 use rumqttc::{
     AsyncClient, Event as MqttEvent, Incoming, MqttOptions, PublishOptions, QoS, SessionMode,
 };
@@ -3341,13 +3341,32 @@ impl Cluster {
     /// keeps every CreateTime as its producer wrote it, however far after the broker's clock, so a
     /// record whose timestamp no `DATETIME` holds reaches the topic whatever the broker's default.
     pub(crate) async fn create_kafka_metadata_topic(&self, topic: &str) -> io::Result<()> {
-        let admin = kafka_admin_client(&self.dependencies)?;
         let latest_create_time = i64::MAX.to_string();
         let definition = NewTopic::new(topic, 1, TopicReplication::Fixed(1))
             .set("message.timestamp.type", "CreateTime")
             .set("message.timestamp.after.max.ms", &latest_create_time)
             .set("retention.ms", "-1")
             .set("retention.bytes", "-1");
+        self.create_kafka_topic(topic, definition).await
+    }
+
+    /// Creates `topic` with one partition whose broker refuses every record batch larger than
+    /// `max_message_bytes`, the topic's own `max.message.bytes`, while a producer still takes it.
+    pub(crate) async fn create_kafka_topic_with_max_message_bytes(
+        &self,
+        topic: &str,
+        max_message_bytes: usize,
+    ) -> io::Result<()> {
+        let max_message_bytes = max_message_bytes.to_string();
+        let definition = NewTopic::new(topic, 1, TopicReplication::Fixed(1))
+            .set("max.message.bytes", &max_message_bytes);
+        self.create_kafka_topic(topic, definition).await
+    }
+
+    /// Creates the one-partition `topic` that `definition` describes and waits until the broker
+    /// serves it.
+    async fn create_kafka_topic(&self, topic: &str, definition: NewTopic<'_>) -> io::Result<()> {
+        let admin = kafka_admin_client(&self.dependencies)?;
         let options = AdminOptions::new().request_timeout(Some(Duration::from_secs(5)));
         let created = admin
             .create_topics(&[definition], &options)
@@ -6780,6 +6799,33 @@ async fn rabbitmq_queue_state(
     })
 }
 
+/// Creates the Redis user `user`, who signs in with `password` and may run every command on every
+/// key but publish or subscribe to no channel, and returns the address that connects as that user.
+pub(crate) async fn create_redis_user_without_channels(
+    dependencies: &DependencyEndpoints,
+    user: &str,
+    password: &str,
+) -> io::Result<String> {
+    let address = dependencies.get(REDIS_ADDR)?;
+    let client = TestRedisClient::open(address)?;
+    let mut connection = client.connect().await?;
+    let rules = [
+        AclRule::On,
+        AclRule::AddPass(password.to_string()),
+        AclRule::AllKeys,
+        AclRule::AllCommands,
+        AclRule::ResetChannels,
+    ];
+    let created: redis::RedisResult<()> = connection.acl_setuser_rules(user, &rules).await;
+    created.map_err(io::Error::other)?;
+    let mut url = url::Url::parse(address).map_err(io::Error::other)?;
+    url.set_username(user)
+        .map_err(|()| io::Error::other("the Redis address names no host to sign in to"))?;
+    url.set_password(Some(password))
+        .map_err(|()| io::Error::other("the Redis address names no host to sign in to"))?;
+    Ok(url.into())
+}
+
 async fn publish_redis(
     dependencies: &DependencyEndpoints,
     channel: &str,
@@ -7830,6 +7876,23 @@ impl SqsQueueHeld {
             ))
         })
     }
+}
+
+/// Deletes `queue` from the scenario's SQS service, as an operator would, so a client still sending
+/// to its URL is told the queue does not exist.
+pub(crate) async fn delete_sqs_queue(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<()> {
+    let client = sqs_client(dependencies).await?;
+    let queue_url = sqs_queue_url(&client, queue).await?;
+    client
+        .delete_queue()
+        .queue_url(queue_url)
+        .send()
+        .await
+        .map_err(io::Error::other)?;
+    Ok(())
 }
 
 /// Creates `queue` on the scenario's SQS service, which serves in-process and real-process

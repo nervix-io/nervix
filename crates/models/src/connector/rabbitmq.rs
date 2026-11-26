@@ -482,6 +482,11 @@ impl EmitterDeclaration for RabbitMqQueueEmitter {
         options: &[],
         envelope: RABBITMQ_EMITTER_ENVELOPE,
         properties: RABBITMQ_EMITTER_PROPERTIES,
+        external_code: Some(crate::ExternalCodeDeclaration {
+            space: "AMQP reply code",
+            form: "a decimal number, the reply code of the broker's basic.return or channel close",
+            example: "312",
+        }),
         bounds: RABBITMQ_QUEUE_EMITTER_BOUNDS,
     };
 }
@@ -538,6 +543,11 @@ impl EmitterDeclaration for RabbitMqExchangeEmitter {
         }],
         envelope: RABBITMQ_EMITTER_ENVELOPE,
         properties: RABBITMQ_EMITTER_PROPERTIES,
+        external_code: Some(crate::ExternalCodeDeclaration {
+            space: "AMQP reply code",
+            form: "a decimal number, the reply code of the broker's basic.return or channel close",
+            example: "312",
+        }),
         bounds: RABBITMQ_EXCHANGE_EMITTER_BOUNDS,
     };
 }

@@ -1216,3 +1216,80 @@ Feature: Kafka emission
       | cluster_size |
       | 1            |
       | 3            |
+
+  @kafka_broker_refusal
+  Scenario Outline: A record the Kafka broker refuses follows ON MESSAGE ERROR with the broker's error name and the rest are written
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "limited_{{test_id}}" exists and accepts record batches of at most 1000 bytes
+    And Kafka topic "limited_{{test_id}}" is observed
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( seq I64, note STRING );
+      CREATE SCHEMA rejected_event (
+        seq I64,
+        error_code STRING,
+        operation STRING,
+        external_code STRING OPTIONAL
+      );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
+      CREATE VHOST edge kafka-refusal-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
+        TO events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC EMITTER limited FROM events
+        TO kafka_main TOPIC 'limited_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
+          ENCODE USING event_codec
+        INHERIT ALL EXCEPT note
+        SET note = repeat(input.note, 1000)
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO rejected_events
+          SET seq = input.seq,
+              error_code = error.class,
+              operation = error.operation,
+              external_code = error.external_code
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
+      START;
+      """
+    # The second record grows to 2000 bytes, which the producer takes but the topic does not: the
+    # broker refuses its record batch as larger than the topic's max.message.bytes of 1000 bytes,
+    # with the error librdkafka names MSG_SIZE_TOO_LARGE. A sequential window sends each record in
+    # a batch of its own, so the records around it are written.
+    And http payload is posted to host "kafka-refusal-{{test_id}}.example.com" path "/events"
+      """
+      [{"seq":1,"note":""},{"seq":2,"note":"xy"},{"seq":3,"note":""}]
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "seq":2 | "error_code":"refused" | "operation":"publish" | "external_code":"MSG_SIZE_TOO_LARGE"
+      """
+    And within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":1,"note":""}
+      {"seq":3,"note":""}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

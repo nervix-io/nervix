@@ -325,6 +325,7 @@ async fn emitter_outcomes_classify_member_and_prepare_refusals_without_error_tex
         position(0),
         at,
         "refused".to_owned(),
+        None,
     ));
     answers.reject(RejectedEmitterMember::oversize(
         position(1),

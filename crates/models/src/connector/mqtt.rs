@@ -804,6 +804,12 @@ impl EmitterDeclaration for MqttTopicEmitter {
                 ty: PropertyType::Bytes,
             },
         ],
+        external_code: Some(crate::ExternalCodeDeclaration {
+            space: "MQTT 5 reason code",
+            form: "a decimal number, the reason code byte of the broker's PUBACK, PUBREC or \
+                   PUBCOMP",
+            example: "135",
+        }),
         bounds: MQTT_EMITTER_BOUNDS,
     };
 }

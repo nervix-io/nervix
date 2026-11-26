@@ -616,6 +616,11 @@ impl EmitterDeclaration for SqsQueueEmitter {
             EnvelopeClauseKind::DeduplicationId,
         ],
         properties: &[],
+        external_code: Some(crate::ExternalCodeDeclaration {
+            space: "queue service error code",
+            form: "the error code the queue service names a refused entry or a failed request with",
+            example: "InvalidMessageContents",
+        }),
         bounds: SQS_EMITTER_BOUNDS,
     };
 }

@@ -20,7 +20,10 @@ Feature: An emitter's retry policy gives up after GIVE UP AFTER
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (id STRING);
-      CREATE SCHEMA failed_event (id STRING, error_code STRING, operation STRING, message STRING);
+      CREATE SCHEMA failed_event (
+        id STRING, error_code STRING, operation STRING, message STRING,
+        external_code STRING OPTIONAL
+      );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (id string);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
@@ -47,7 +50,8 @@ Feature: An emitter's retry policy gives up after GIVE UP AFTER
           SET id = input.id,
               error_code = error.class,
               operation = error.operation,
-              message = error.message
+              message = error.message,
+              external_code = error.external_code
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION failed_events_subscription TO failed_events;
       START;
@@ -66,7 +70,7 @@ Feature: An emitter's retry policy gives up after GIVE UP AFTER
       """
     Then within "60s" the relay subscription receives payloads containing all fragments
       """
-      "id":"stranded-{{test_id}}" | "error_code":"unavailable" | "operation":"publish" | "message":"gave up after 3s of retries:
+      "id":"stranded-{{test_id}}" | "error_code":"unavailable" | "operation":"publish" | "message":"gave up after 3s of retries: | "external_code":"503"
       """
     And the relay subscription does not receive a payload within "5s"
     And HTTP receiver "api" eventually captures requests that are

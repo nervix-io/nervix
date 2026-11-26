@@ -62,7 +62,7 @@ use nervix_connector::{
     physical_time::actual_utc_now,
 };
 use nervix_dns::{AddressAttempt, DnsResolver, LookupShare, OperationBudget};
-use nervix_models::ClientConfigEntry;
+use nervix_models::{ClientConfigEntry, ExternalErrorCode};
 use nervix_primitives::{
     net::TcpStream,
     sync::{CancellationToken, StdArc},
@@ -206,6 +206,32 @@ enum HttpAttemptError {
     Tunnel,
     #[error("HTTP proxy refused the tunnel with status {status}")]
     TunnelRefused { status: u16 },
+}
+
+impl HttpAttemptError {
+    /// The status the endpoint or the proxy answered the attempt with, where one answered.
+    fn status(&self) -> Option<u16> {
+        match self {
+            Self::Authentication { status }
+            | Self::RetryableStatus { status }
+            | Self::TunnelRefused { status } => Some(*status),
+            Self::Timeout
+            | Self::Dns
+            | Self::Connection
+            | Self::Tls
+            | Self::Send
+            | Self::Response
+            | Self::Destination
+            | Self::Field
+            | Self::Proxy
+            | Self::Tunnel => None,
+        }
+    }
+}
+
+/// An HTTP status as `error.external_code` holds it: its three decimal digits, such as `422`.
+fn status_code(status: u16) -> Option<ExternalErrorCode> {
+    ExternalErrorCode::new(status.to_string())
 }
 
 type HttpAttemptResult<T> = Result<T, Report<HttpAttemptError>>;
@@ -687,13 +713,22 @@ impl HttpRequestEmitter {
     /// The emitter reports the description as its transient error while the request stays
     /// pending. Neither the attempt's errors nor their causes carry the evaluated target, a header
     /// value, a body or the proxy's credentials, so the description names none of them.
+    ///
+    /// A failure the endpoint or the proxy answered with a status keeps that status, so a request
+    /// the emitter gives up on names it as `error.external_code`.
     fn publish_error(error: Report<HttpAttemptError>) -> Report<EmitterWriteError> {
         let description = format!("{error:#}");
-        error
-            .change_context(EmitterWriteError::Publish {
-                connector: HTTP_EMITTER,
-            })
-            .attach_printable(description)
+        let code = match error.current_context().status() {
+            Some(status) => status_code(status),
+            None => None,
+        };
+        let mut failure = error.change_context(EmitterWriteError::Publish {
+            connector: HTTP_EMITTER,
+        });
+        if let Some(code) = code {
+            failure = failure.attach(code);
+        }
+        failure.attach_printable(description)
     }
 
     /// The failure of an attempt whose endpoint answered with a status to retry, carrying the
@@ -750,10 +785,10 @@ impl nervix_connector::HttpRequestEmitter for HttpRequestEmitter {
             // A delivered or rejected record is final, so its `Retry-After` is never read.
             match status.disposition() {
                 Disposition::Delivered => outcome.deliver(request.id),
-                Disposition::Rejected => outcome.reject(request.rejected(format!(
-                    "HTTP endpoint answered with status {}",
-                    status.code()
-                ))),
+                Disposition::Rejected => outcome.reject(request.rejected(
+                    format!("HTTP endpoint answered with status {}", status.code()),
+                    status_code(status.code()),
+                )),
                 Disposition::AuthenticationFailure => {
                     outcome.fail(Self::retryable_status_error(
                         HttpAttemptError::Authentication {

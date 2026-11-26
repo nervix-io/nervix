@@ -704,6 +704,11 @@ impl EmitterDeclaration for PulsarTopicEmitter {
             EnvelopeClauseKind::DeliverAfter,
         ],
         properties: &[],
+        external_code: Some(crate::ExternalCodeDeclaration {
+            space: "Pulsar protocol ServerError",
+            form: "the name of the ServerError value the broker answered with",
+            example: "NotAllowedError",
+        }),
         bounds: PULSAR_EMITTER_BOUNDS,
     };
 }

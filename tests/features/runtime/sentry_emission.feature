@@ -172,6 +172,71 @@ Feature: Sentry emission
       | 1            | 0             |
       | 3            | 1             |
 
+  @sentry_refusal
+  Scenario Outline: An event Sentry refuses routes its record with the HTTP status Sentry answered
+    Given HTTP receiver "sentry" is running
+    And HTTP receiver "sentry" answers with
+      """
+      respond 400
+      """
+    And HTTP receiver "sentry" answers unscripted requests with "respond 200"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA refused_event (message STRING, environment STRING);
+      CREATE SCHEMA rejected_event (
+        message STRING, error_code STRING, operation STRING, external_code STRING OPTIONAL
+      );
+      CREATE JAQ JSON CODEC refused_ingest TO SCHEMA refused_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE JAQ JSON CODEC refused_codec TO SCHEMA refused_event
+        WITH JAQ TRANSFORMATIONS ON EMITTING '.';
+      CREATE RELAY errors SCHEMA refused_event UNBRANCHED;
+      CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
+      CREATE VHOST edge sentry-refusal-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT error_ingress ON edge PATH '/errors';
+      CREATE HTTP ENDPOINT INGESTOR error_ingestor
+        FROM error_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING refused_ingest
+        TO errors INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SENTRY CLIENT sentry_main CONFIG {
+        'dsn' = 'http://public@127.0.0.1:{{http_receiver_port.sentry}}/1',
+        'timeout_ms' = 5000
+      };
+      CREATE SENTRY EVENT EMITTER sentry_errors FROM errors
+        TO sentry_main MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+        ENCODE USING refused_codec INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO rejected_events
+          SET message = input.message,
+              error_code = error.class,
+              operation = error.operation,
+              external_code = error.external_code
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
+      START;
+      """
+    And http payload is posted to host "sentry-refusal-{{test_id}}.example.com" path "/errors"
+      """
+      [{"message":"refused event","environment":"{{test_id}}"}]
+      """
+    Then within "20s" the relay subscription receives payloads containing all fragments
+      """
+      "message":"refused event" | "error_code":"refused" | "operation":"publish" | "external_code":"400"
+      """
+    And HTTP receiver "sentry" has captured exactly 1 requests
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @sentry_retry_envelope
   Scenario Outline: Sentry retries send the same prepared envelope and distinct payloads get distinct ids
     Given HTTP receiver "sentry" is running

@@ -99,6 +99,7 @@ impl PublishScript {
                             *id,
                             *at,
                             "refused".to_string(),
+                            None,
                         ));
                     } else {
                         outcome.deliver(*id);
@@ -115,7 +116,7 @@ impl PublishScript {
                     match answer {
                         MemberAnswer::Deliver => outcome.deliver(*id),
                         MemberAnswer::Reject(reason) => {
-                            outcome.reject(RejectedEmitterMember::external(*id, *at, reason))
+                            outcome.reject(RejectedEmitterMember::external(*id, *at, reason, None))
                         }
                         MemberAnswer::Unanswered => {}
                     }

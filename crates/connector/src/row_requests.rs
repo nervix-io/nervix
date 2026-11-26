@@ -102,6 +102,8 @@ impl RowOversize {
                 occurred_at,
                 format!("{request} of one row measures {size} bytes, above MAX SIZE {limit}"),
             ),
+            // The connector measured the row against the limit its destination documents and never
+            // sent it, so no outside system answered it with a code.
             ExceededLimit::Native(limit) => RejectedEmitterMember::external(
                 id,
                 occurred_at,
@@ -109,6 +111,7 @@ impl RowOversize {
                     "{request} of one row measures {size} bytes, above the {limit} bytes the \
                      destination accepts in one request"
                 ),
+                None,
             ),
         }
     }

@@ -4,8 +4,9 @@
 //!
 //! - **Owns.** The declaration of the name that locates an entity, of the options a statement
 //!   writes for it with their values and choices, of the option choices a mode needs written
-//!   beside it, of the envelope clauses and properties an emitter can set, and the capabilities a
-//!   statement can make an entity exercise at run time, which a scenario observes.
+//!   beside it, of the envelope clauses and properties an emitter can set, of the codes an
+//!   emitter's outside system answers with, and the capabilities a statement can make an entity
+//!   exercise at run time, which a scenario observes.
 //! - **Depends on.** The connector kinds and the schema types a declared value has.
 //! - **Must not know.** Any one connector or entity, the grammar that spells a declaration, or how
 //!   a host executes what an entity declares.
@@ -452,6 +453,21 @@ pub struct PropertyDeclaration {
     pub ty: PropertyType,
 }
 
+/// The codes an emitter's outside system answers a refused record or a failed write with, which
+/// the emitter's error route reads as `error.external_code`, in that system's own spelling.
+///
+/// The connector fills the code where it sorts the system's answer, from the typed value the
+/// answer carries; an answer without a code leaves `error.external_code` null.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalCodeDeclaration {
+    /// The name the outside system documents its codes under, such as `SQLSTATE`.
+    pub space: &'static str,
+    /// What one code is, as `error.external_code` holds it, such as `five characters`.
+    pub form: &'static str,
+    /// One code as `error.external_code` holds it, such as `23505`.
+    pub example: &'static str,
+}
+
 /// The exact type of a scalar a transport carries beside a payload: the value of a property, or
 /// of a header on a side whose [header model](crate::HeaderModel) declares typed values.
 ///
@@ -513,6 +529,9 @@ pub enum RuntimeCapability {
     /// An emitter giving up the work its destination did not take once its retry policy's
     /// `GIVE UP AFTER` has passed since the work's first failed attempt.
     GiveUp,
+    /// An emitter's error route reading the code its outside system gave a refused record or a
+    /// failed write as `error.external_code`.
+    ExternalCode,
     /// A statement writing an option that takes a value.
     Option { keywords: &'static str },
     /// A statement making one choice of an option, or leaving the option out where that choice
@@ -583,6 +602,7 @@ impl Display for RuntimeCapability {
             Self::EndpointPause(response) => write!(f, "ON QUIESCE BUFFER {}", response.phrase()),
             Self::Publishing(kind) => write!(f, "MODE {}", kind.label()),
             Self::GiveUp => f.write_str("GIVE UP AFTER"),
+            Self::ExternalCode => f.write_str("error.external_code"),
             Self::Option { keywords } => f.write_str(keywords),
             Self::OptionChoice { keywords, choice } => write!(f, "{keywords} {choice}"),
             Self::Metadata { field } => write!(f, "metadata.{field}"),

@@ -34,7 +34,7 @@ use std::fmt::Debug;
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use async_trait::async_trait;
 use aws_sdk_sqs::{
-    error::SdkError,
+    error::{ProvideErrorMetadata, SdkError},
     operation::get_queue_url::GetQueueUrlError,
     types::{MessageAttributeValue, SendMessageBatchRequestEntry},
 };
@@ -53,7 +53,7 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{
-    ClientConfigEntry, PropertyType, SQS_ATTRIBUTE_VALUES, SQS_DELAY_MAXIMUM,
+    ClientConfigEntry, ExternalErrorCode, PropertyType, SQS_ATTRIBUTE_VALUES, SQS_DELAY_MAXIMUM,
     SQS_MESSAGE_SIZE_MAXIMUM, SqsSend, Timestamp,
 };
 use nervix_primitives::time::Instant;
@@ -265,9 +265,32 @@ impl PreparedSqsRecord {
         })
     }
 
-    fn rejected(&self, reason: String) -> RejectedEmitterMember<EmitterRecordId> {
-        RejectedEmitterMember::external(self.record, self.occurred_at, reason)
+    /// The rejection of this record the queue refused, with the error code the queue named the
+    /// refusal with, or `None` where its answer named none.
+    fn rejected(
+        &self,
+        reason: String,
+        code: Option<ExternalErrorCode>,
+    ) -> RejectedEmitterMember<EmitterRecordId> {
+        RejectedEmitterMember::external(self.record, self.occurred_at, reason, code)
     }
+}
+
+/// The error code a queue service named a failed request with, as `error.external_code` holds it,
+/// such as `InvalidMessageContents`.
+fn service_code(error: &impl ProvideErrorMetadata) -> Option<ExternalErrorCode> {
+    let code = error.code()?;
+    ExternalErrorCode::new(code)
+}
+
+/// The entries of a batch request the queue's answer left unresolved, which fail the request for
+/// the host to retry.
+struct UnresolvedBatch {
+    /// Why each entry is unresolved.
+    reason: String,
+    /// The error code the queue failed the first such entry with, which a batch the emitter gives
+    /// up on names as `error.external_code`.
+    code: Option<ExternalErrorCode>,
 }
 
 impl SqsQueueEmitter {
@@ -383,14 +406,21 @@ impl SqsQueueEmitter {
                         .as_service_error()
                         .is_some_and(|error| error.is_invalid_message_contents()) =>
                 {
-                    outcome.reject(record.rejected(format!("SQS rejected the record: {error}")));
+                    outcome.reject(record.rejected(
+                        format!("SQS rejected the record: {error}"),
+                        service_code(&error),
+                    ));
                 }
                 Err(error) => {
-                    outcome.fail(
-                        self.client
-                            .failed(SqsRequest::Send, &error)
-                            .report(EmitterWriteError::Publish { connector: SQS }),
-                    );
+                    let code = service_code(&error);
+                    let mut failure = self
+                        .client
+                        .failed(SqsRequest::Send, &error)
+                        .report(EmitterWriteError::Publish { connector: SQS });
+                    if let Some(code) = code {
+                        failure = failure.attach(code);
+                    }
+                    outcome.fail(failure);
                     return;
                 }
             }
@@ -424,16 +454,24 @@ impl SqsQueueEmitter {
             let response = match request.send().await {
                 Ok(response) => response,
                 Err(error) => {
-                    outcome.fail(
-                        self.client
-                            .failed(SqsRequest::SendBatch, &error)
-                            .report(EmitterWriteError::Publish { connector: SQS }),
-                    );
+                    let code = service_code(&error);
+                    let mut failure = self
+                        .client
+                        .failed(SqsRequest::SendBatch, &error)
+                        .report(EmitterWriteError::Publish { connector: SQS });
+                    if let Some(code) = code {
+                        failure = failure.attach(code);
+                    }
+                    outcome.fail(failure);
                     return;
                 }
             };
-            if let Some(reason) = Self::apply_batch_response(&records, &response, outcome) {
-                outcome.fail(Self::publish_error(reason));
+            if let Some(unresolved) = Self::apply_batch_response(&records, &response, outcome) {
+                let mut failure = Self::publish_error(unresolved.reason);
+                if let Some(code) = unresolved.code {
+                    failure = failure.attach(code);
+                }
+                outcome.fail(failure);
                 return;
             }
         }
@@ -479,9 +517,10 @@ impl SqsQueueEmitter {
         records: &[PreparedSqsRecord],
         response: &aws_sdk_sqs::operation::send_message_batch::SendMessageBatchOutput,
         outcome: &mut PerRecordOutcome<EmitterRecordId>,
-    ) -> Option<String> {
+    ) -> Option<UnresolvedBatch> {
         let mut accounted = vec![false; records.len()];
         let mut infrastructure_reasons = Vec::new();
+        let mut infrastructure_code = None;
         for success in response.successful() {
             match Self::batch_entry_index(success.id(), records.len()) {
                 Some(index) if !accounted[index] => {
@@ -503,13 +542,17 @@ impl SqsQueueEmitter {
                 Some(index) if !accounted[index] => {
                     accounted[index] = true;
                     let reason = format!("SQS batch entry failed with {}", failure.code());
+                    let code = ExternalErrorCode::new(failure.code());
                     if Self::is_record_failure(
                         failure.sender_fault(),
                         failure.code(),
                         failure.message(),
                     ) {
-                        outcome.reject(records[index].rejected(reason));
+                        outcome.reject(records[index].rejected(reason, code));
                     } else {
+                        if infrastructure_code.is_none() {
+                            infrastructure_code = code;
+                        }
                         infrastructure_reasons.push(reason);
                     }
                 }
@@ -531,7 +574,13 @@ impl SqsQueueEmitter {
                 ));
             }
         }
-        (!infrastructure_reasons.is_empty()).then(|| infrastructure_reasons.join("; "))
+        if infrastructure_reasons.is_empty() {
+            return None;
+        }
+        Some(UnresolvedBatch {
+            reason: infrastructure_reasons.join("; "),
+            code: infrastructure_code,
+        })
     }
 
     fn batch_entry_id(index: usize) -> String {
@@ -809,10 +858,13 @@ impl RecordEmitter for SqsQueueEmitter {
             let occurred_at = record.occurred_at;
             match PreparedSqsRecord::new(record) {
                 Ok(record) => prepared.push(record),
+                // The connector refused the record itself and never sent it, so no queue answered
+                // it with a code.
                 Err(error) => outcome.reject(RejectedEmitterMember::external(
                     record_id,
                     occurred_at,
                     error.to_string(),
+                    None,
                 )),
             }
         }
@@ -1667,8 +1719,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![EmitterRecordId::new(1)]
         );
-        assert!(infrastructure.contains("SQS batch entry failed with ServiceUnavailable"));
-        assert!(infrastructure.contains("SQS omitted a result for batch entry m3"));
+        assert_eq!(
+            outcome.rejected[0].error.external_code,
+            ExternalErrorCode::new("InvalidMessageContents"),
+            "the refused entry carries the code the queue failed it with"
+        );
+        assert!(
+            infrastructure
+                .reason
+                .contains("SQS batch entry failed with ServiceUnavailable")
+        );
+        assert!(
+            infrastructure
+                .reason
+                .contains("SQS omitted a result for batch entry m3")
+        );
+        assert_eq!(
+            infrastructure.code,
+            ExternalErrorCode::new("ServiceUnavailable"),
+            "the retried batch keeps the code the queue failed its first entry with"
+        );
     }
 
     #[test]

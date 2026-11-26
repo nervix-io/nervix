@@ -2234,8 +2234,15 @@ error names itself on it: `RaisedMessageError` is what the operation raised, and
 one typed `NodeRef`; only the expression scope projects it into the two text fields `error.node`
 (the name) and `error.node_kind` (the kind's canonical snake_case name, the one `DESCRIBE` and the
 metrics use), because Plexus has no record values and node names are unique only per kind.
-`error.external_code` is the outside system's own spelling (PostgreSQL's SQLSTATE is the first
-one), filled only where the connector's failure already carries a typed code, and null otherwise.
+`error.external_code` is the code the outside system answered with, in that system's own spelling:
+a SQLSTATE, an HTTP status, a broker's error name or reason code. Each emitter entity's vocabulary
+declaration states which code space it fills and the form a code takes there, and the [capability
+matrix](./connector-capabilities.md) renders it per entity. The connector takes the code from the
+typed answer it classified, never from message text, so a row refused by its destination and a row
+given up after a failed attempt carry the code of that answer. A refusal Nervix or the connector's
+client made before the outside system answered, such as a record over a limit the client checks
+itself, a failure that got no answer, and every entity whose destination answers with no code of
+its own leave the field null. No code space quotes a row's values.
 `StructuredMessageError::scope_arrow_schema` is the one definition of the `error` scope that both
 the registry's validation and the runtime's compiled error programs read.
 

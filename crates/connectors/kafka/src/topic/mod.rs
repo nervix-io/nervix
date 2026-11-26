@@ -65,7 +65,9 @@ use nervix_connector::{
     EmitterWriteResult, PerRecordOutcome, RecordEmitter, RejectedEmitterMember,
 };
 use nervix_execution::{Executor, MemoryClass, StorageClass};
-use nervix_models::{ClientConfigEntry, ConnectorKind, KafkaTopicName, Timestamp};
+use nervix_models::{
+    ClientConfigEntry, ConnectorKind, ExternalErrorCode, KafkaTopicName, Timestamp,
+};
 use nervix_primitives::{
     sync::oneshot,
     time::{Instant, sleep, timeout_at},
@@ -565,11 +567,16 @@ impl KafkaTopicEmitter {
         if bytes <= self.queue_capacity_bytes.get() {
             return None;
         }
-        Some(record.rejected(format!(
-            "{KAFKA} record payload is {bytes} bytes, exceeding {QUEUE_CAPACITY_PROPERTY} \
-             capacity {} bytes",
-            self.queue_capacity_bytes,
-        )))
+        // The connector measured the payload itself and never handed it over, so no broker
+        // answered it with a code.
+        Some(record.rejected(
+            format!(
+                "{KAFKA} record payload is {bytes} bytes, exceeding {QUEUE_CAPACITY_PROPERTY} \
+                 capacity {} bytes",
+                self.queue_capacity_bytes,
+            ),
+            None,
+        ))
     }
 
     /// The configuration of a producer that publishes in `mode` through a client whose entries are
@@ -654,14 +661,17 @@ impl KafkaTopicEmitter {
             let create_time = match KafkaCreateTime::of(&record) {
                 Ok(create_time) => create_time,
                 Err(refusal) => {
-                    outcome.reject(record.rejected(refusal.to_string()));
+                    outcome.reject(record.rejected(refusal.to_string(), None));
                     continue;
                 }
             };
             match self.hand_over(producer, &record, create_time, None, partitions) {
                 Ok(()) => outcome.deliver(record.id),
+                // librdkafka refused the record itself as it was handed over, before any broker
+                // saw it, so no broker answered it with a code.
                 Err(error) if Self::is_record_rejection(&error) => {
-                    outcome.reject(record.rejected(format!("kafka rejected record: {error}")));
+                    outcome
+                        .reject(record.rejected(format!("kafka rejected record: {error}"), None));
                 }
                 Err(error) => {
                     outcome.fail(Self::refused_hand_over(error));
@@ -698,7 +708,7 @@ impl KafkaTopicEmitter {
             let create_time = match KafkaCreateTime::of(&record) {
                 Ok(create_time) => create_time,
                 Err(refusal) => {
-                    window.reject(record.rejected(refusal.to_string()));
+                    window.reject(record.rejected(refusal.to_string(), None));
                     continue;
                 }
             };
@@ -715,10 +725,14 @@ impl KafkaTopicEmitter {
             {
                 Ok(answer) => answer,
                 Err(failure) => {
+                    // librdkafka refused the record itself as it was handed over, before any
+                    // broker saw it, so no broker answered it with a code.
                     if let Some(error) = failure.downcast_ref::<KafkaError>()
                         && Self::is_record_rejection(error)
                     {
-                        window.reject(record.rejected(format!("{KAFKA} rejected record: {error}")));
+                        window.reject(
+                            record.rejected(format!("{KAFKA} rejected record: {error}"), None),
+                        );
                         continue;
                     }
                     return Self::give_up(producer, window, failure).await;
@@ -888,13 +902,18 @@ impl KafkaTopicEmitter {
             Ok(KafkaDeliveryReport::Failed(error)) if Self::is_record_rejection(&error) => {
                 Ok(BrokerVerdict::Rejected {
                     message: format!("kafka rejected record: {error}"),
+                    external_code: Self::broker_code(&error),
                 })
             }
             Ok(KafkaDeliveryReport::Failed(error)) => {
                 let description = format!("kafka delivery failed: {error}");
-                Err(Report::new(error)
-                    .change_context(EmitterWriteError::Publish { connector: KAFKA })
-                    .attach_printable(description))
+                let code = Self::broker_code(&error);
+                let mut failure = Report::new(error)
+                    .change_context(EmitterWriteError::Publish { connector: KAFKA });
+                if let Some(code) = code {
+                    failure = failure.attach(code);
+                }
+                Err(failure.attach_printable(description))
             }
             Err(dropped) => Err(Report::new(dropped)
                 .change_context(EmitterWriteError::Publish { connector: KAFKA })
@@ -951,6 +970,17 @@ impl KafkaTopicEmitter {
             KafkaProducerState::Ready { producer, .. } => producer.context().retained_records(),
             KafkaProducerState::Prepared(_) => 0,
         }
+    }
+
+    /// librdkafka's name for the code a broker answered `error` with, as `error.external_code`
+    /// holds it, such as `MSG_SIZE_TOO_LARGE`. An error librdkafka raised itself names no broker
+    /// answer, so it has none.
+    fn broker_code(error: &KafkaError) -> Option<ExternalErrorCode> {
+        let code = error.rdkafka_error_code()?;
+        if !code.is_broker_error() {
+            return None;
+        }
+        ExternalErrorCode::new(code.name()?)
     }
 
     fn is_record_rejection(error: &KafkaError) -> bool {
@@ -1119,7 +1149,7 @@ mod tests {
     use nervix_connector::{
         AckConfirmation, BrokerPublishingMode, BrokerVerdict, EmitterOpenError, EmitterWriteError,
     };
-    use nervix_models::ClientConfigEntry;
+    use nervix_models::{ClientConfigEntry, ExternalErrorCode};
     use nervix_primitives::sync::oneshot;
     use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 
@@ -1176,7 +1206,9 @@ mod tests {
             verdict,
             BrokerVerdict::Rejected {
                 message: format!("kafka rejected record: {error}"),
-            }
+                external_code: ExternalErrorCode::new("MSG_SIZE_TOO_LARGE"),
+            },
+            "a refused record carries librdkafka's name for the broker's code"
         );
     }
 
@@ -1198,6 +1230,28 @@ mod tests {
         assert_eq!(
             description(&failure),
             Some(format!("kafka delivery failed: {error}"))
+        );
+        assert_eq!(
+            failure.downcast_ref::<ExternalErrorCode>(),
+            None,
+            "an error librdkafka raised itself names no broker answer"
+        );
+    }
+
+    /// A delivery the broker failed with a code of its own keeps librdkafka's name for it, which a
+    /// record the emitter gives up on reports as `error.external_code`.
+    #[test]
+    fn a_delivery_the_broker_failed_keeps_its_code() {
+        let error = KafkaError::MessageProduction(RDKafkaErrorCode::NotEnoughReplicas);
+
+        let answer = KafkaTopicEmitter::broker_answer(Ok(KafkaDeliveryReport::Failed(error)));
+
+        let Err(failure) = answer else {
+            panic!("a record the broker could not replicate has no answer, got {answer:?}");
+        };
+        assert_eq!(
+            failure.downcast_ref::<ExternalErrorCode>(),
+            ExternalErrorCode::new("NOT_ENOUGH_REPLICAS").as_ref()
         );
     }
 

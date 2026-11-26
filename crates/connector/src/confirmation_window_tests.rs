@@ -25,7 +25,7 @@ use std::{
 
 use error_stack::{AttachmentKind, FrameKind, Report};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::{MessageErrorOperation, RejectedErrorClass, Timestamp};
+use nervix_models::{ExternalErrorCode, MessageErrorOperation, RejectedErrorClass, Timestamp};
 use nervix_primitives::{
     sync::oneshot,
     time::{Instant, Sleep, sleep, sleep_until},
@@ -67,6 +67,7 @@ impl ScriptedVerdict {
             Self::Confirmed => Ok(BrokerVerdict::Confirmed),
             Self::Rejected => Ok(BrokerVerdict::Rejected {
                 message: Self::rejection(record),
+                external_code: None,
             }),
             Self::Failed => Err(
                 Report::new(EmitterWriteError::Publish { connector: EMITTER })
@@ -522,6 +523,7 @@ impl WindowCase {
                     id,
                     occurred_at(id),
                     REFUSED_AT_HAND_OVER.to_owned(),
+                    None,
                 )),
                 Treatment::Taken {
                     verdict,
@@ -841,6 +843,53 @@ async fn a_failure_settles_more_given_answers_than_one_cooperative_budget() {
     let every_record: Vec<usize> = (0..ANSWERS_BEYOND_ONE_BUDGET).collect();
     assert_eq!(sorted_delivered(&outcome), record_ids(&every_record));
     assert!(outcome.rejected.is_empty());
+}
+
+/// A broker's refusal keeps the code the broker gave it, unchanged, as the rejection's
+/// `error.external_code`, and a refusal without a code leaves it absent.
+#[nervix_primitives::test]
+async fn a_broker_refusal_keeps_the_code_the_broker_gave_it() {
+    let mut window = ConfirmationWindow::new(EMITTER, settings(2, Duration::from_secs(30)), 2);
+    let verdicts = [
+        BrokerVerdict::Rejected {
+            message: "the broker refused the record".to_owned(),
+            external_code: ExternalErrorCode::new("MSG_SIZE_TOO_LARGE"),
+        },
+        BrokerVerdict::Rejected {
+            message: "the broker refused the record without a code".to_owned(),
+            external_code: None,
+        },
+    ];
+    for (index, verdict) in verdicts.into_iter().enumerate() {
+        let record = EmitterRecordId::new(index);
+        let (give, receiver) = oneshot::channel();
+        give.send(verdict)
+            .assured("the window holds the receiver as the record's answer");
+        window
+            .admit(record, occurred_at(record), channel_answer(receiver))
+            .await
+            .verified("a window of two never waits while it takes two records");
+    }
+
+    let outcome = window.finish().await.into_parts();
+
+    let mut codes: Vec<(EmitterRecordId, Option<ExternalErrorCode>)> = outcome
+        .rejected
+        .iter()
+        .map(|rejection| (rejection.id, rejection.error.external_code.clone()))
+        .collect();
+    codes.sort_by_key(|(record, _)| *record);
+    assert_eq!(
+        codes,
+        vec![
+            (
+                EmitterRecordId::new(0),
+                ExternalErrorCode::new("MSG_SIZE_TOO_LARGE")
+            ),
+            (EmitterRecordId::new(1), None),
+        ]
+    );
+    assert!(outcome.infrastructure_error.is_none());
 }
 
 /// A full window waits for its oldest answer until the oldest's own deadline, not a full timeout

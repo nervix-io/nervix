@@ -199,6 +199,11 @@ impl EmitterDeclaration for MongoDbCollectionEmitter {
         }],
         envelope: &[],
         properties: &[],
+        external_code: Some(crate::ExternalCodeDeclaration {
+            space: "MongoDB error code",
+            form: "a decimal number",
+            example: "11000",
+        }),
         bounds: MONGODB_BOUNDS,
     };
 }

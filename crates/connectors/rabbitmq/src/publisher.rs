@@ -82,7 +82,9 @@ use nervix_connector::{
     RejectedEmitterMember,
 };
 use nervix_dns::DnsResolver;
-use nervix_models::{ClientConfigEntry, RabbitMqExchangeName, RabbitMqQueueName};
+use nervix_models::{
+    ClientConfigEntry, ExternalErrorCode, RabbitMqExchangeName, RabbitMqQueueName,
+};
 use nervix_primitives::time::{Instant, timeout};
 use thiserror::Error;
 
@@ -96,6 +98,21 @@ mod properties;
 mod properties_tests;
 
 const RABBITMQ: &str = "rabbitmq";
+
+/// An AMQP reply code as `error.external_code` holds it: its decimal value, such as `312` for
+/// `NO_ROUTE`.
+fn reply_code(code: u16) -> Option<ExternalErrorCode> {
+    ExternalErrorCode::new(code.to_string())
+}
+
+/// The reply code the broker closed a channel with, as `error.external_code` holds it, where the
+/// broker closed it rather than the connection failing.
+fn closure_code(reason: &lapin::Error) -> Option<ExternalErrorCode> {
+    let ErrorKind::ProtocolError(error) = reason.kind() else {
+        return None;
+    };
+    reply_code(error.get_id())
+}
 
 /// Where a RabbitMQ emitter's messages go.
 #[derive(Clone)]
@@ -144,16 +161,24 @@ impl RabbitMqDestination {
                     routing_key,
                     properties,
                 }),
-                Err(error) => Err(Unaddressed::Rejected(record.rejected(format!(
-                    "{} rejected record: {error:#}",
-                    nervix_models::ConnectorKind::RabbitMq.to_string().to_ascii_lowercase()
-                )))),
+                // The connector refused the record itself and never wrote it, so no broker
+                // answered it with a code.
+                Err(error) => Err(Unaddressed::Rejected(record.rejected(
+                    format!(
+                        "{} rejected record: {error:#}",
+                        nervix_models::ConnectorKind::RabbitMq
+                            .to_string()
+                            .to_ascii_lowercase()
+                    ),
+                    None,
+                ))),
             },
             Err(source) => {
                 let error = RabbitMqRecordError::RoutingKeyTooLong { key_bytes, source };
-                Err(Unaddressed::Rejected(
-                    record.rejected(format!("rabbitmq rejected record: {error}")),
-                ))
+                Err(Unaddressed::Rejected(record.rejected(
+                    format!("rabbitmq rejected record: {error}"),
+                    None,
+                )))
             }
         }
     }
@@ -543,7 +568,7 @@ impl RabbitMqChannel {
                             returned,
                             outcome,
                         ),
-                        Err(error) => Err(Self::publish_error(error)),
+                        Err(error) => Err(Self::closed_channel_error(error)),
                     };
                     if let Err(error) = settled {
                         outcome.fail(error);
@@ -565,7 +590,7 @@ impl RabbitMqChannel {
             let returned = match self.returned_messages().await {
                 Ok(returned) => returned,
                 Err(error) => {
-                    outcome.fail(Self::publish_error(error));
+                    outcome.fail(Self::closed_channel_error(error));
                     return;
                 }
             };
@@ -653,14 +678,15 @@ impl RabbitMqChannel {
     ) -> EmitterWriteResult<()> {
         let (limit, reason) = match closure {
             ChannelClosure::MessageTooLarge { limit, reason } => (limit, reason),
-            ChannelClosure::Unattributed(reason) => return Err(Self::publish_error(reason)),
+            ChannelClosure::Unattributed(reason) => return Err(Self::closed_channel_error(reason)),
         };
+        let code = closure_code(&reason);
         // The scan walks this write's messages on the lost channel, in the order they were written.
         let Some(refused) = written
             .iter()
             .position(|message| message.record.payload.len() > limit)
         else {
-            return Err(Self::publish_error(reason));
+            return Err(Self::closed_channel_error(reason));
         };
         // The broker took every message before the refused one and discarded every message after it,
         // and the outcome settles them in the order they were written.
@@ -670,7 +696,7 @@ impl RabbitMqChannel {
             .next()
             .verified("`refused` is the position of a message of `written`");
         Self::settle_taken(exchange, taken, returned, outcome)?;
-        outcome.reject(Self::refused_for_size(&refused_message.record, limit));
+        outcome.reject(Self::refused_for_size(&refused_message.record, limit, code));
         for message in discarded.rev() {
             unsent.push_front(message);
         }
@@ -704,18 +730,21 @@ impl RabbitMqChannel {
             }
         }
         if let Some(stray) = returns.next() {
-            return Err(Self::publish_error(format!(
+            let failure = Self::publish_error(format!(
                 "rabbitmq returned a message this write did not publish, with reply code {}: {}",
                 stray.reply_code, stray.reply_text
-            )));
+            ));
+            return Err(match reply_code(stray.reply_code) {
+                Some(code) => failure.attach(code),
+                None => failure,
+            });
         }
         for (message, answer) in taken.into_iter().zip(answers) {
             match answer {
-                Some(returned) => outcome.reject(
-                    message
-                        .record
-                        .rejected(Self::returned_message_reason(&returned)),
-                ),
+                Some(returned) => outcome.reject(message.record.rejected(
+                    Self::returned_message_reason(&returned),
+                    reply_code(returned.reply_code),
+                )),
                 None => outcome.deliver(message.record.id),
             }
         }
@@ -813,16 +842,17 @@ impl RabbitMqChannel {
             ChannelClosure::MessageTooLarge { limit, reason } => (limit, reason),
             ChannelClosure::Unattributed(reason) => {
                 settlement?;
-                return Err(Self::publish_error(reason));
+                return Err(Self::closed_channel_error(reason));
             }
         };
+        let code = closure_code(&reason);
         // This is the current bounded window in publication order, not a shared lookup.
         let Some(refused) = answered
             .iter()
             .position(|entry| entry.answer.is_none() && entry.message.record.payload.len() > limit)
         else {
             settlement?;
-            return Err(Self::publish_error(reason));
+            return Err(Self::closed_channel_error(reason));
         };
         let mut failure = match settlement {
             Ok(attribution) => attribution.require_decided().err(),
@@ -842,7 +872,9 @@ impl RabbitMqChannel {
                         )
                     });
                 }
-                Ordering::Equal => outcome.reject(Self::refused_for_size(&message.record, limit)),
+                Ordering::Equal => {
+                    outcome.reject(Self::refused_for_size(&message.record, limit, code.clone()))
+                }
                 Ordering::Greater => discarded.push(message),
             }
         }
@@ -856,16 +888,29 @@ impl RabbitMqChannel {
     }
 
     /// `record` rejected because the broker refused its body as larger than `limit`, its
-    /// `max_message_size`.
+    /// `max_message_size`, with the reply code `code` the broker closed the channel with.
     fn refused_for_size(
         record: &EmitterRecord,
         limit: usize,
+        code: Option<ExternalErrorCode>,
     ) -> RejectedEmitterMember<EmitterRecordId> {
         let error = RabbitMqRecordError::AboveMaxMessageSize {
             body_bytes: record.payload.len(),
             limit,
         };
-        record.rejected(format!("rabbitmq rejected record: {error}"))
+        record.rejected(format!("rabbitmq rejected record: {error}"), code)
+    }
+
+    /// The failure of a write whose channel the broker closed, or whose connection failed, for a
+    /// reason no single message explains. It keeps the reply code the broker closed the channel
+    /// with, so a write the emitter gives up on names it as `error.external_code`.
+    fn closed_channel_error(reason: lapin::Error) -> Report<EmitterWriteError> {
+        let code = closure_code(&reason);
+        let failure = Self::publish_error(reason);
+        match code {
+            Some(code) => failure.attach(code),
+            None => failure,
+        }
     }
 
     fn returned_message_reason(returned: &BasicReturnMessage) -> String {
@@ -1477,6 +1522,51 @@ mod tests {
             assert!(settled_write.is_err());
             assert_eq!(settled(outcome), (Vec::new(), Vec::new()));
         }
+    }
+
+    /// A returned message carries the broker's reply code as `error.external_code`, and a message
+    /// the broker refused for its size carries the code the broker closed the channel with.
+    #[test]
+    fn a_refused_message_carries_the_reply_code_the_broker_answered_with() {
+        let written = vec![message(0, 20), message(1, 2000)];
+        let returns = vec![returned("", &written[0])];
+        let mut unsent = VecDeque::new();
+        let mut outcome = PerRecordOutcome::empty();
+        let refusal = ChannelClosure::from(lapin::Error::from(ErrorKind::ProtocolError(
+            lapin::protocol::AMQPError::new(
+                AMQPErrorKind::Soft(AMQPSoftError::PRECONDITIONFAILED),
+                format!(
+                    "PRECONDITION_FAILED - message size 2000 is larger than configured max size \
+                     {LIMIT}"
+                )
+                .as_str()
+                .into(),
+            ),
+        )));
+
+        RabbitMqChannel::settle_unconfirmed_loss(
+            "",
+            refusal,
+            written,
+            returns,
+            &mut unsent,
+            &mut outcome,
+        )
+        .assured("the broker returned the first message and refused the second");
+
+        let parts = outcome.into_parts();
+        let codes: Vec<(usize, Option<ExternalErrorCode>)> = parts
+            .rejected
+            .iter()
+            .map(|rejected| (rejected.id.index(), rejected.error.external_code.clone()))
+            .collect();
+        assert_eq!(
+            codes,
+            vec![
+                (0, ExternalErrorCode::new("312")),
+                (1, ExternalErrorCode::new("406")),
+            ]
+        );
     }
 
     #[test]

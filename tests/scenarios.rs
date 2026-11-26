@@ -139,9 +139,10 @@ use crate::common::{
         TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession, TypedBrokerHeader,
         WebsocketExchangeAction, assert_kafka_consumer_group_next_offset_through,
         bind_rabbitmq_queue, client_connect_options, client_domain, command_connect_options,
-        delete_rabbitmq_queue, dev_tls_ca_path, ensure_rabbitmq_exchange, ensure_rabbitmq_queue,
-        ensure_sqs_queue, observe_kafka_through, observe_sqs,
-        observe_sqs_fifo_without_content_deduplication, publish_kafka_record_through, publish_sqs,
+        create_redis_user_without_channels, delete_rabbitmq_queue, delete_sqs_queue,
+        dev_tls_ca_path, ensure_rabbitmq_exchange, ensure_rabbitmq_queue, ensure_sqs_queue,
+        observe_kafka_through, observe_sqs, observe_sqs_fifo_without_content_deduplication,
+        publish_kafka_record_through, publish_sqs,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     command_probe::{CommandPause, CommandProbe, CommandProbes, ProbeReply},
@@ -29786,6 +29787,22 @@ async fn given_kafka_topic_exists_with_partitions(
         .expect("failed to create kafka topic");
 }
 
+/// The topic's `max.message.bytes` bounds every record batch the broker accepts, so a batch above
+/// it is refused by the broker itself, after the producer took it.
+#[given(expr = "Kafka topic {string} exists and accepts record batches of at most {int} bytes")]
+async fn given_kafka_topic_exists_with_max_message_bytes(
+    world: &mut ScenarioWorld,
+    topic: String,
+    max_message_bytes: usize,
+) {
+    let topic = expand_placeholders(world, &topic);
+    world
+        .cluster()
+        .create_kafka_topic_with_max_message_bytes(&topic, max_message_bytes)
+        .await
+        .assured("a fresh topic takes the record batch bound the scenario gives it");
+}
+
 /// Starts the scenario's own mock Kafka broker with `topic` and names its address
 /// `{{mock_kafka_addr}}`.
 #[given(expr = "a mock Kafka broker serves topic {string}")]
@@ -30005,6 +30022,14 @@ async fn given_sqs_queue_exists(world: &mut ScenarioWorld, queue: String) {
         .expect("failed to declare sqs queue");
 }
 
+#[when(expr = "SQS queue {string} is deleted")]
+async fn when_sqs_queue_is_deleted(world: &mut ScenarioWorld, queue: String) {
+    let queue = expand_placeholders(world, &queue);
+    delete_sqs_queue(world.dependencies.endpoints(), &queue)
+        .await
+        .unwrap_or_else(|error| panic!("failed to delete SQS queue '{queue}': {error}"));
+}
+
 #[given(expr = "SQS queue {string} exists with a visibility timeout of {string}")]
 async fn given_sqs_queue_exists_with_visibility_timeout(
     world: &mut ScenarioWorld,
@@ -30179,6 +30204,20 @@ async fn given_rabbitmq_queue_is_observed(world: &mut ScenarioWorld, queue: Stri
             .await
             .expect("failed to observe rabbitmq queue"),
     );
+}
+
+/// The user is the scenario's own, so no other scenario's access changes. Every command it sends
+/// runs, but the server answers each publish with a `NOPERM` error.
+#[given(expr = "a Redis user that may publish to no channel connects at placeholder {string}")]
+async fn given_redis_user_without_channels(world: &mut ScenarioWorld, placeholder: String) {
+    initialize_scenario_identity(world);
+    let user = format!("no-channels-{}", world.test_id);
+    let password = format!("password-{}", world.test_id);
+    let address =
+        create_redis_user_without_channels(world.dependencies.endpoints(), &user, &password)
+            .await
+            .unwrap_or_else(|error| panic!("failed to create Redis user '{user}': {error}"));
+    world.placeholders.insert(placeholder, address);
 }
 
 #[given(expr = "Redis channel {string} is observed")]
