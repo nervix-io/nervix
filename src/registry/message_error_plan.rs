@@ -12,6 +12,7 @@
 )]
 
 use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_models::{
     CodecName, DomainName, FlushPolicy, IngestorInput, MessageErrorPolicy, Model, NodeRef,
     ProcessorOutputs, RelayName, ResolvedBranching, RouteConstruction, ScheduledNodes, SchemaName,
@@ -78,7 +79,7 @@ pub(crate) enum MessageErrorPlanError {
     RelayNotFound { node: NodeRef, relay: RelayName },
     #[error("{node:?} message-error route reads missing codec '{codec}'")]
     CodecNotFound { node: NodeRef, codec: CodecName },
-    #[error("{node:?} message-error route reads missing client schema '{schema}'")]
+    #[error("{node:?} message-error route reads missing client input schema '{schema}'")]
     ClientSchemaNotFound { node: NodeRef, schema: SchemaName },
     #[error("{node:?} message-error route has no {scope} input relay")]
     InputNotDeclared { node: NodeRef, scope: &'static str },
@@ -136,12 +137,10 @@ impl MessageErrorPlanContext<'_> {
         else {
             return Ok(None);
         };
-        let Some(schema) = self.activation.schemas.get(&consumer.schema) else {
-            return Err(Report::new(MessageErrorPlanError::ClientSchemaNotFound {
-                node: node.clone(),
-                schema: consumer.schema.clone(),
-            }));
-        };
+        let schema = self.activation.schemas.get(&consumer.schema).verified(
+            "the registry refused a client consumer emitter whose TO SCHEMA is not a schema of \
+             its domain, and the activation plan compiles every schema of the domain",
+        );
         Ok(Some(schema.clone()))
     }
 
@@ -578,33 +577,6 @@ mod tests {
         assert!(matches!(
             error.current_context(),
             MessageErrorPlanError::CodecNotFound { .. }
-        ));
-    }
-
-    #[test]
-    fn classifies_a_missing_client_output_schema_at_plan_creation() {
-        let (domain, mut nodes, activation) = fixture();
-        let node = nodes
-            .get_mut(&NodeRef::new(
-                ModelKind::Emitter,
-                named::<ModelName>("app_output"),
-            ))
-            .expect("the client consumer emitter is scheduled");
-        let Model::Emitter(emitter) = node.config.as_mut() else {
-            panic!("the scheduled node is an emitter");
-        };
-        let nervix_models::EmitterEntity::Client(nervix_models::ClientEmitter::Consumer(consumer)) =
-            emitter.connector.as_mut()
-        else {
-            panic!("the fixture emitter is a client consumer");
-        };
-        consumer.schema = named("unknown_schema");
-        let error = MessageErrorRouteSpecs::from_scheduled_nodes(&domain, &nodes, &activation)
-            .expect_err("a missing output schema must fail planning");
-        assert!(matches!(
-            error.current_context(),
-            MessageErrorPlanError::ClientSchemaNotFound { schema, .. }
-                if schema.as_str() == "unknown_schema"
         ));
     }
 }
