@@ -184,12 +184,6 @@ violates instead of softening the contract to match today's imports.
   replication mechanisms.
 - The registry validates domains, references, schemas, branches, capabilities and execution
   contracts before a graph becomes active.
-- Entity labels are bounded control-plane metadata owned and committed with their domain Model.
-  Metadata-only edits preserve execution and state identities, tasks, allowances, resource
-  bindings, connections, buffers and acknowledgement outcomes, with no pause, flush, rebuild or
-  relocation. Stored schedules and captured archives retain the complete metadata; execution
-  plans and recurring record paths consume none of it. [Entity Labels](docs/src/entity-labels.md)
-  owns validation, transactions, inspection and durability.
 - Gossip carries only membership-scoped state: identities and endpoints, prerequisites, admission
   verdicts, cluster parameters, termination and subscription interest. Application progress stays
   in one incarnation-bound local record and travels by typed interconnect reports and queries;
@@ -557,8 +551,11 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   drain and force flush, terminal teardown, startup recovery.
 - [Typed States And Validation Boundaries](docs/src/typed-states.md): how a missing value, state
   variant, required identity, conversion failure or boundary representation is modeled or validated.
-- [Entity Labels](docs/src/entity-labels.md): domain Model metadata, bounded key/value sets,
-  label statements and inspection, transaction effects, execution identity and archive fidelity.
+- [Entity Label Architecture](docs/src/entity-labels-architecture.md): the label vocabulary and
+  its owners, the captured limit policy and every place it is checked, each owner's commit path,
+  inspection and its revisions, what a label-only change leaves alone, labels in stored state and
+  archives, and adding a labelled entity. [Entity Labels](docs/src/entity-labels.md) owns the
+  statements, the limits and the guarantees an operator relies on.
 - [Node Settings](docs/src/node-settings.md): setting declarations, defaults, derivations,
   fixed-value contracts, validation, carriers, change procedures, capability sizing, settings
   enforcement. [Sizing A Node](docs/src/sizing.md) owns what an operator sizes a node and a
@@ -621,6 +618,44 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - Every order that follows the data may rely on it, such as the order in which a change stops the
   parts it replaces. No placement, scheduling, runtime or rendering path keeps a case for a loop in
   one domain graph; a view that overlays a graph before and after a change still meets cycles.
+
+### Entity labels
+
+- A label set is one `EntityLabels` map of exact keys to exact UTF-8 values. It is a field of the
+  record that describes its entity: every domain Model payload, the domain record, the logical
+  resource's catalog entry and the user record. It is committed and removed with that record. No
+  second copy, side map keyed by entity, managed label definition or inherited set exists, no
+  value is trimmed or normalized, and no key carries meaning: labels grant, select and place
+  nothing.
+- Every entity an operator creates by name and Nervix persists carries labels: each domain Model
+  kind, a domain, a logical resource and a cluster user. A resource version, a runtime branch, a
+  partition, a session and a cluster node carry none. A change that adds a Model kind, a connector
+  or entity variant, or another named owner delivers in the same change its trailing `LABELS`
+  creation clause through the shared grammar, `SET LABELS` and `SHOW LABELS` on its established
+  reference, its canonical text, the labels in every `DESCRIBE` it has, its archive records and
+  its console form.
+- The four `ENTITY_LABELS_MAX_*` cluster parameters bound a set. The complete resulting set is
+  validated against one captured committed policy before any effect, and again at every boundary
+  that decodes a stored or transmitted set. Nothing truncates or repairs a set, and a limit
+  reduction that a committed set exceeds is refused.
+- A change that edits only labels is control-plane metadata. It changes no execution or state
+  identity, plan, task, allowance, resource binding, connection, buffer or acknowledgement
+  outcome, needs no pause, flush, rebuild or relocation, and commits while a unit's owner is
+  unavailable. Whatever decides how an entity runs, such as a fingerprint, a change
+  classification, a plan or an endpoint contract, reads the Model's execution configuration,
+  which holds no labels. No data-plane path, metric label or automatic log field reads a label.
+- Inspection is one typed result: the typed owner, the complete map, a committed revision or an
+  explicit staged transaction view, and the captured policy. Text and JSON are projections of it.
+  Every client and host binding exposes the typed result, and none parses display text.
+- Stored schedules, snapshots and archives keep every included entity's labels exactly, under
+  their existing scope rules.
+- Label evidence runs through production owners and generated coverage. An interleaving of
+  commit, inspection, drop or recreation is a Shuttle check over the replicated state's label
+  owner, and a representation that carries labels has its registered Bolero property. Coverage of
+  entity kinds comes from the exhaustive Model generator, the vocabulary declarations and the
+  grammar, never from a list of kinds a test keeps by hand: the description scenario of
+  `tests/features/runtime/entity_labels.feature` is held to every Model kind the grammar can
+  describe.
 
 ### Types and sensitivity
 

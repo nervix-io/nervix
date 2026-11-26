@@ -236,6 +236,7 @@ mod emitter_lifecycle;
 mod emitter_metrics;
 mod endpoint_intake;
 mod engine_settings;
+mod entity_label_descriptions;
 mod entity_swap_failure;
 mod generated_http_payloads;
 mod http_transport;

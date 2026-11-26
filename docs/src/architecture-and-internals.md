@@ -37,6 +37,9 @@ Use it for:
 - [visual creation and shared completion: browser drafts and canonical submission, text completion
   and typed choices, the console's request ownership and fencing, recovery, and the evidence behind
   them](./visual-creation.md)
+- [entity labels: plain values owned by their entity, typed owners and inspection, the captured
+  limit policy, what a label-only change leaves alone, persistence and archives, and the facts a
+  future authorization design can use](./entity-labels-architecture.md)
 - [consensus durability, replication pacing, log retention, and snapshot recovery](./consensus-storage-and-replication.md)
 - [resource versions, pinned bindings, `LATEST` resolution, rebinding, and the HTTPS listener refresh](./resource-versions.md)
 - [WASM guest state: checkpoints, generations, resets, rejected-state recovery, and replay](./wasm-state.md)

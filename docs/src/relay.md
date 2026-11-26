@@ -155,7 +155,10 @@ partition epoch: 2
 previous partitions: 4
 keys pending: 3
 keys claimed: 12
+labels: {}
 ```
+
+The last line holds the parametrizer's [labels](entity-labels.md).
 
 `keys pending` counts the keys partitions still hold outside the partition the current count places
 them in, together with the claims in flight; `keys claimed` counts the keys the partitions' current
