@@ -207,6 +207,13 @@ Feature: A relay owner fails over while another node forwards to it
       """
       key={"tenant":"acme"} payload={"sequence":1,"tenant":"acme"}
       """
+    # Failover acts only once the alteration's hold below has ended. When the stopping owner's gate
+    # cannot report its own end, the gate deadline ends that hold, so the scenario keeps the
+    # deadline well inside the background post's own 30 s client timeout.
+    When these Plexus commands are executed on the leader node
+      """
+      ALTER CLUSTER SET ENTITY_GATE_DEADLINE = 5s;
+      """
     Given relay payloads for domain "{{domain}}" are held before their grant requests
     When one http payload begins posting in the background with a completed graph acknowledgement to node "{{forwarder}}" host "failover-forward-{{test_id}}.example.com" path "/records"
       """
@@ -222,9 +229,9 @@ Feature: A relay owner fails over while another node forwards to it
       """
     And node "{{owner}}" is stopped
     Then node "{{forwarder}}" stops counting node "{{owner}}" as a live peer
-    # The owner's stop ends the alteration, which cannot hold a node that is gone. The delivery
-    # finds that owner gone and waits for the route that failover publishes, which nothing on the
-    # forwarder holds back.
+    # The alteration's hold ends with the owner's stop or at its gate deadline, and the alteration
+    # fails. The delivery finds the owner gone and waits for the route that failover then
+    # publishes, which nothing on the forwarder holds back.
     When relay payload grant requests for domain "{{domain}}" are released
     Then within "60s" node "{{leader}}" reports no scheduled work on "{{owner}}"
     And the background http publish succeeds
