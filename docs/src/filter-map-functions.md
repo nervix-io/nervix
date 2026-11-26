@@ -148,9 +148,10 @@ transcendental functions, whose last places come from the platform's C math libr
 
 The compiler applies three optimizations that preserve results in the same way:
 
-- A deterministic call that cannot fail and whose arguments are all literals may be computed once
-  instead of for every batch. It produces exactly the value that evaluating it for each message
-  would, so `upper('grüßen')` and `upper(input.text)` agree when `input.text` holds `grüßen`.
+- A deterministic call whose arguments are all literals may be computed once instead of for every
+  batch, when it cannot fail or, as for `10s + 5s`, when computing it succeeds. It produces exactly
+  the value that evaluating it for each message would, so `upper('grüßen')` and `upper(input.text)`
+  agree when `input.text` holds `grüßen`.
 - Identical deterministic expressions that cannot fail may be computed once and shared within one
   assignment or clause. Calls that return a new value for every message, such as `uuid_v4()`, and
   calls that can report a per-message error are evaluated at each occurrence, so each occurrence
@@ -197,7 +198,7 @@ A function that cannot compute its result for a message reports an error of one 
 | Kind | Meaning | Examples |
 | --- | --- | --- |
 | `division_by_zero` | An integer division or remainder by zero | `integer division by zero`, `integer remainder by zero` |
-| `overflow` | A result its type or its column cannot hold | `integer addition overflowed`, `date_add result is outside the DATETIME range`, `repeat result exceeds the text one STRING column holds` |
+| `overflow` | A result its type or its column cannot hold | `integer addition overflowed`, `date_add result is outside the DATETIME range`, `duration addition result does not fit a DURATION`, `repeat result exceeds the text one STRING column holds` |
 | `cast_failed` | A value that does not read as the requested type | `cannot cast value to Int64`, `cannot cast list element to Int64`, `base64_decode input is not valid encoded bytes`, `JSON_VALUE document is not valid JSON` |
 | `invalid_argument` | An argument outside the function's domain, or a result that is not finite | `floating-point operation produced a non-finite result`, `invalid regular expression: ...`, `vector lengths differ: left has 3, right has 2` |
 
@@ -301,8 +302,10 @@ units ns, us, ms, s, m, h and d`. Each part holds its own unit, so `1h30m` is no
 `1h 30m`. A part may have a fraction, `1.5s`, when it names a whole number of nanoseconds, and a
 fraction finer than that, `1.5ns`, is refused rather than rounded. The parts add up to one value,
 which must fit a `DURATION`: `106752d` is refused with `it does not fit a DURATION, which holds at
-most 106751d 23h 47m 16s 854ms 775us 807ns`. A literal is never negative, and `-30s` applies unary
-minus, which a `DURATION` does not take.
+most 106751d 23h 47m 16s 854ms 775us 807ns`. A literal is never negative: `-30s` applies unary
+minus to `30s`, so it is the negative duration thirty seconds long, and `-1h 30m` negates the
+whole literal. [Duration And Datetime Arithmetic](#duration-and-datetime-arithmetic) describes the
+operators a duration takes.
 
 Text, the CLI and the web console show a duration in the same literal form, its non-zero parts
 from days down to nanoseconds: `1h 30m`, `1s 500ms`, `1d 12h`. Zero shows as `0s`, and a duration
@@ -546,14 +549,14 @@ The `AND` that closes a low bound belongs to the range, so `x BETWEEN 1 AND 5 AN
 
 ## Arithmetic
 
-`+`, `-`, `*`, `/`, and `%` require both operands to have the same exact numeric type, and the result
-has that type. Unary `-` applies to signed integer and floating-point operands; an unsigned operand
-is rejected with `operator Neg is not valid for UInt8`. A null operand makes the result null.
-Integer literals are `I64`, so `input.count + 1` over a `U32` field is rejected with `binary
-operator Add requires matching operand types, found UInt32 and Int64`; write `input.count + 1 AS
-U32`. `+` does not join text, which [`concat`](#string-functions) does, and `DATETIME` values have no
-arithmetic operators: move and measure them with [`date_add` and `date_diff`](#datetime-functions),
-or convert them to `I64` nanoseconds explicitly.
+`+`, `-`, `*`, `/`, and `%` over numbers require both operands to have the same exact numeric type,
+and the result has that type. Unary `-` applies to signed integer and floating-point operands; an
+unsigned operand is rejected with `operator Neg is not valid for UInt8`. A null operand makes the
+result null. Integer literals are `I64`, so `input.count + 1` over a `U32` field is rejected with
+`binary operator Add requires matching operand types, found UInt32 and Int64`; write
+`input.count + 1 AS U32`. `+` does not join text, which [`concat`](#string-functions) does. A
+`DURATION` and a `DATETIME` take only the operators [Duration And Datetime
+Arithmetic](#duration-and-datetime-arithmetic) lists.
 
 Arithmetic is checked. An operation whose result its type cannot hold reports a per-message error
 and yields null for that message, instead of wrapping, saturating, or producing NaN or an infinity.
@@ -585,6 +588,93 @@ negation overflowed` for an `overflow`; `integer division by zero` or `integer r
 for a `division_by_zero`; and `floating-point operation produced a non-finite result` for an
 `invalid_argument`.
 
+### Duration And Datetime Arithmetic
+
+A `DURATION` and a `DATETIME` take these operators, and no others:
+
+| Expression | Result | Meaning |
+| --- | --- | --- |
+| `DURATION + DURATION`, `DURATION - DURATION` | `DURATION` | The sum or the difference of two durations |
+| `-DURATION` | `DURATION` | A duration as long as the operand, pointing the other way |
+| `DATETIME + DURATION`, `DURATION + DATETIME` | `DATETIME` | The instant the duration lies after the datetime, or before it when the duration is negative |
+| `DATETIME - DURATION` | `DATETIME` | The instant the duration lies before the datetime |
+| `DATETIME - DATETIME` | `DURATION` | The duration from the right instant to the left one, negative when the left one is earlier |
+
+`input.finished_at - input.started_at` is how long something took, `input.sent_at + 30s` is thirty
+seconds later, and `input.sent_at - 1h 30m` is ninety minutes earlier. A duration is elapsed time,
+so `+ 1d` always moves an instant by exactly 24 hours; [`date_add`](#datetime-functions) moves it by
+calendar days, months, or years in a time zone instead.
+
+The operands keep their exact types: a duration takes no `*`, `/`, or `%`, two `DATETIME` values do
+not add, a `DATETIME` cannot be subtracted from a `DURATION`, and no number combines with either.
+Such a statement is rejected when it is applied, with a message that names the operator and the
+types it was given, such as `operator Mul is not valid for Duration(Nanosecond) and Int64` for
+`input.wait * 2` and `operator Add is not valid for Timestamp(Nanosecond, Some("+00:00"))` for the
+sum of two `DATETIME` values. To scale a duration, convert it to a count of units and back, as
+`to_duration('nanosecond', duration_floor('nanosecond', input.wait) * 2)` does. A null operand makes
+the result null.
+
+The arithmetic is exact to the nanosecond and checked like integer arithmetic. A result its type
+cannot hold reports an `overflow` error and yields null for that message, instead of wrapping or
+saturating:
+
+- A `DURATION` holds from `-106751d 23h 47m 16s 854ms 775us 808ns` to
+  `106751d 23h 47m 16s 854ms 775us 807ns`, so a sum or a difference of durations fails beyond
+  either end, with `duration addition result does not fit a DURATION` or `duration subtraction
+  result does not fit a DURATION`. Unary `-` fails only for the shortest duration, whose negation
+  is one nanosecond longer than the longest, with `duration negation result does not fit a
+  DURATION`.
+- An instant moved outside the `DATETIME` range fails with `datetime addition result is outside
+  the DATETIME range` or `datetime subtraction result is outside the DATETIME range`.
+- The difference of two instants more than about 292 years apart does not fit a `DURATION`, and
+  fails with `datetime subtraction result does not fit a DURATION`.
+
+An expression whose operands are all literals is computed once, when the statement is applied:
+`10s + 5s` is the constant `15s`. A constant whose result its type cannot hold is not computed
+ahead, so every message that evaluates it reports the error.
+
+### Durations As Whole Units
+
+Four functions convert between a `DURATION` and a whole number of one unit, each with the
+rounding its name states:
+
+| Function | Returns | Notes |
+| --- | --- | --- |
+| `duration_floor(unit, value)` | `I64` | The whole units in `value`, rounded toward negative infinity |
+| `duration_ceil(unit, value)` | `I64` | The whole units in `value`, rounded toward positive infinity |
+| `duration_round(unit, value)` | `I64` | The whole units nearest to `value`. A value exactly halfway between two counts rounds away from zero, as [`round`](#numeric-functions) does |
+| `to_duration(unit, count)` | `DURATION` | The duration `count` units long, negative when `count` is negative. `count` may be any integer type |
+
+`unit` is a `STRING` literal written in the call: `nanosecond`, `microsecond`, `millisecond`,
+`second`, `minute`, `hour`, or `day`, in any letter case, where a day is always 24 hours. A name
+must match exactly apart from letter case, so `ms`, `seconds`, and the calendar units `week`,
+`month`, `quarter`, and `year` are refused, with a message such as `function 'duration_floor' does
+not accept time unit 'week'; expected one of nanosecond, microsecond, millisecond, second, minute,
+hour, day`. A unit that is not a literal is refused with `function 'duration_ceil' requires its time
+unit to be a STRING literal`, and a `value` that is not a `DURATION` with `function
+'duration_round' requires Duration input, found Int64`.
+
+| `value` | `duration_floor('second', value)` | `duration_ceil('second', value)` | `duration_round('second', value)` |
+| --- | --- | --- | --- |
+| `1m 30s 400ms` | `90` | `91` | `90` |
+| `1s 500ms` | `1` | `2` | `2` |
+| `-1s 500ms` | `-2` | `-1` | `-2` |
+| `-1m 27s 900ms` | `-88` | `-87` | `-88` |
+
+A count of whole units is never longer than the nanoseconds it counts, so `duration_floor`,
+`duration_ceil`, and `duration_round` never fail a message. `to_duration` multiplies exactly and
+reports an `overflow` error, `to_duration result does not fit a DURATION`, for a count whose
+duration is longer than a `DURATION` holds, such as `to_duration('day', 106752)`. A null argument
+produces a null result.
+
+```plexus,ignore
+SET took = input.finished_at - input.started_at,
+    retry_at = input.finished_at + to_duration('millisecond', input.backoff_ms),
+    retry_after_seconds = duration_ceil('second', input.backoff),
+    took_ms = duration_round('millisecond', input.finished_at - input.started_at),
+    deadline = input.sent_at + 30s
+```
+
 ## Conversions
 
 A value never changes its type implicitly. Two explicit forms convert it to another type. They
@@ -608,7 +698,9 @@ for either is rejected with `BYTES conversions require bytes_from_utf8, bytes_to
 hex functions`, which name the functions that convert explicitly. A `DURATION` converts to no other
 type and no other type converts to a `DURATION`, in either form and as a list element alike; a
 statement that asks for either is rejected with `a DURATION converts to no other type, and no other
-type converts to a DURATION`. Converting a `DURATION` to `DURATION` returns it unchanged. A null operand is not a failure:
+type converts to a DURATION`; the functions of [Durations As Whole Units](#durations-as-whole-units)
+convert between a duration and a count of units, with the rounding written out. Converting a
+`DURATION` to `DURATION` returns it unchanged. A null operand is not a failure:
 it converts to a typed null in both forms, so `input.amount AS I64` over a message without an
 `amount` yields null and reports nothing. Test the operand to tell a missing value from one that did
 not convert:
@@ -1571,6 +1663,7 @@ expression as a value only through `now()`, which returns the execution-local do
 | `date_part(part, value[, zone])` | `I64` | One part of `value`'s local date and time in `zone`, named by `part` from the table of date parts below |
 | `date_trunc(unit, value[, zone])` | `DATETIME` | The first instant of the local `unit` that holds `value` in `zone`. See [Calendar Arithmetic](#calendar-arithmetic) |
 | `date_bin(unit, width, value, origin)` | `DATETIME` | The start of the bin that holds `value`, for bins `width` units wide that start at `origin` and at every whole number of widths before and after it |
+| `date_bin(width, value, origin)` | `DATETIME` | The same bins, `width` long, for a `DURATION` literal `width` such as `15m` |
 | `date_add(unit, amount, value[, zone])` | `DATETIME` | `value` moved by `amount` units in `zone`, backward when `amount` is negative. `amount` may be any integer type |
 | `date_diff(unit, start, end[, zone])` | `I64` | The whole units from `start` to `end` in `zone`, rounded toward zero. Negative when `end` is before `start` |
 | `to_unix(unit, value)` | `I64` | The whole units from `1970-01-01T00:00:00Z` to `value`, rounded down |
@@ -1583,7 +1676,11 @@ expressions, and they are checked when the statement is applied: a zone is resol
 compiled once then, never for each message. `unit`, `part`, `zone`, and `disambiguation` are
 `STRING` literals whose names are case-insensitive, and `format` is a `STRING` literal. `width` is a
 positive integer literal, and `width` units must not exceed 9,223,372,036,854,775,807 nanoseconds,
-about 292 years. A name must match exactly apart from letter case, so plurals and abbreviations such
+about 292 years. In the three-argument form of `date_bin`, `width` is a positive `DURATION`
+literal instead, such as `15m` or `1h 30m`, so `date_bin(15m, value, origin)` and
+`date_bin('minute', 15, value, origin)` place every value in the same bin; a width of `0s` or less
+is refused with `function 'date_bin' requires a positive width, found 0s`, and one that is not a
+literal with `function 'date_bin' requires its width to be a DURATION literal`. A name must match exactly apart from letter case, so plurals and abbreviations such
 as `days` or `ms` are unknown. A call with an unknown name, a non-literal argument, an invalid
 format, or a width that is not positive is rejected, and its message names what the call accepts,
 such as `function 'date_bin' does not accept time unit 'month'; expected one of nanosecond,
@@ -2334,6 +2431,9 @@ errors. `T` is the argument's type, and a list is an `ARRAY` or a `VEC`.
 | Name | Returns | Section |
 | --- | --- | --- |
 | `+`, `-`, `*`, `/`, `%`, unary `-` | numeric `T` | [Arithmetic](#arithmetic) |
+| `+`, `-`, unary `-` over `DURATION` and `DATETIME` | `DURATION` or `DATETIME` | [Duration And Datetime Arithmetic](#duration-and-datetime-arithmetic) |
+| `duration_floor`, `duration_ceil`, `duration_round` | `I64` | [Durations As Whole Units](#durations-as-whole-units) |
+| `to_duration` | `DURATION` | [Durations As Whole Units](#durations-as-whole-units) |
 | `AND`, `OR`, `NOT` | `BOOL` | [Logical Operators](#logical-operators) |
 | `=`, `!=`, `<`, `<=`, `>`, `>=` | `BOOL` | [Comparison And Equality](#comparison-and-equality) |
 | `IS [NOT] DISTINCT FROM` | `BOOL`, never null | [Comparison And Equality](#comparison-and-equality) |

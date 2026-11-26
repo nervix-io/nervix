@@ -5,10 +5,10 @@
 //! - **Owns.** The batch kernels behind every datetime builtin: date-part extraction, truncation,
 //!   binning, addition and difference in fixed and calendar units, conversion to and from Unix
 //!   time, and, in its submodules, the time zones local dates and times are read in, the local
-//!   calendar arithmetic over them, and the formats datetimes are written and read as text in. Each
-//!   kernel is one pass over its operands' value buffers that yields the result column and the
-//!   lanes whose result its type cannot hold, and a kernel that reads text also yields why each such
-//!   lane failed.
+//!   calendar arithmetic over them, the formats datetimes are written and read as text in, and the
+//!   operators and conversions a DURATION takes, with an instant or alone. Each kernel is one pass
+//!   over its operands' value buffers that yields the result column and the lanes whose result its
+//!   type cannot hold, and a kernel that reads text also yields why each such lane failed.
 //! - **Depends on.** Arrow arrays and Arrow's date-part kernel, the checked lanes of the numeric
 //!   kernels, Jiff's civil calendar and time zone rules with the IANA Time Zone Database it bundles,
 //!   and the resolved datetime vocabulary of a VM program.
@@ -54,9 +54,14 @@ use crate::{
 };
 
 mod calendar;
+mod duration;
 mod format;
 mod zone;
 
+pub(crate) use duration::{
+    Direction, UnitLength, differences, durations, elapsed, moved_instants, negations, sums,
+    whole_units,
+};
 pub use format::{
     DatetimeField, DatetimeFormat, DatetimeParser, DayPadding, FormatDefect, FormatDirective,
     FractionDigits, NameLength, Padding, ParseFormat, ParserZoneMismatch, TextExpectation,

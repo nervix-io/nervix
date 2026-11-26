@@ -3462,6 +3462,111 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/datetime/__fuzz__/datetime__duration__tests__bolero_duration_addition_matches_an_exact_reference/corpus"
+domain_version = 1
+features = []
+id = "vm-duration-addition"
+invariant = "Every lane of generated DURATION + DURATION and DATETIME + DURATION operands, which DURATION + DATETIME also runs, as two columns or with a shared scalar on either side and with sliced offsets, equals a 128-bit reference sum: the exact sum where it fits 64 bits, a failed null lane exactly where it does not, and a null lane without a failure wherever an operand is null."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-vm"
+random_iterations = 256
+source = "crates/nervix-vm/src/datetime/duration_tests.rs"
+test = "datetime::duration::tests::bolero_duration_addition_matches_an_exact_reference"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/datetime/__fuzz__/datetime__duration__tests__bolero_duration_subtraction_matches_an_exact_reference/corpus"
+domain_version = 1
+features = []
+id = "vm-duration-subtraction"
+invariant = "Every lane of generated DURATION - DURATION, DATETIME - DURATION and DATETIME - DATETIME operands, as two columns or with a shared scalar on either side and with sliced offsets, equals a 128-bit reference difference: the exact difference where it fits 64 bits, a failed null lane exactly where it does not, and a null lane without a failure wherever an operand is null."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-vm"
+random_iterations = 256
+source = "crates/nervix-vm/src/datetime/duration_tests.rs"
+test = "datetime::duration::tests::bolero_duration_subtraction_matches_an_exact_reference"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/datetime/__fuzz__/datetime__duration__tests__bolero_duration_negation_matches_an_exact_reference/corpus"
+domain_version = 1
+features = []
+id = "vm-duration-negation"
+invariant = "Every lane of a generated sliced DURATION column negates to the exact 128-bit negation where it fits 64 bits, fails only for the shortest DURATION, and stays null without failing where it is null."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-vm"
+random_iterations = 256
+source = "crates/nervix-vm/src/datetime/duration_tests.rs"
+test = "datetime::duration::tests::bolero_duration_negation_matches_an_exact_reference"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/datetime/__fuzz__/datetime__duration__tests__bolero_duration_floor_matches_an_exact_reference/corpus"
+domain_version = 1
+features = []
+id = "vm-duration-floor"
+invariant = "Every lane of a generated sliced DURATION column converts to the whole units of each unit from a nanosecond to a day exactly as a 128-bit reference rounds toward negative infinity, never failing, with null lanes kept, and the folding contract computes the same count for every value."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-vm"
+random_iterations = 256
+source = "crates/nervix-vm/src/datetime/duration_tests.rs"
+test = "datetime::duration::tests::bolero_duration_floor_matches_an_exact_reference"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/datetime/__fuzz__/datetime__duration__tests__bolero_duration_ceil_matches_an_exact_reference/corpus"
+domain_version = 1
+features = []
+id = "vm-duration-ceil"
+invariant = "Every lane of a generated sliced DURATION column converts to the whole units of each unit from a nanosecond to a day exactly as a 128-bit reference rounds toward positive infinity, never failing, with null lanes kept, and the folding contract computes the same count for every value."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-vm"
+random_iterations = 256
+source = "crates/nervix-vm/src/datetime/duration_tests.rs"
+test = "datetime::duration::tests::bolero_duration_ceil_matches_an_exact_reference"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/datetime/__fuzz__/datetime__duration__tests__bolero_duration_round_matches_an_exact_reference/corpus"
+domain_version = 1
+features = []
+id = "vm-duration-round"
+invariant = "Every lane of a generated sliced DURATION column converts to the whole units of each unit from a nanosecond to a day exactly as a 128-bit reference rounds to the nearest with halves away from zero, never failing, with null lanes kept, and the folding contract computes the same count for every value."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-vm"
+random_iterations = 256
+source = "crates/nervix-vm/src/datetime/duration_tests.rs"
+test = "datetime::duration::tests::bolero_duration_round_matches_an_exact_reference"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/datetime/__fuzz__/datetime__duration__tests__bolero_to_duration_matches_an_exact_reference/corpus"
+domain_version = 1
+features = []
+id = "vm-to-duration"
+invariant = "Every lane of a generated sliced count column of each integer width converts under each unit from a nanosecond to a day to the exact 128-bit duration where it fits 64 bits, fails exactly where it does not, and stays null without failing where it is null."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-vm"
+random_iterations = 256
+source = "crates/nervix-vm/src/datetime/duration_tests.rs"
+test = "datetime::duration::tests::bolero_to_duration_matches_an_exact_reference"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/nervix-vm/src/numeric/__fuzz__/numeric__decimal_rounding__tests__bolero_rounded_float_columns_match_the_exact_decimal_expansion/corpus"
 domain_version = 1
 features = []

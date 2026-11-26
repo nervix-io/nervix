@@ -1287,7 +1287,8 @@ handshake and its wire forms.
 
 ## Entity Label Limits
 
-Domain Models share four committed metadata limits: `ENTITY_LABELS_MAX_COUNT` (64),
+Every label owner, a domain Model, a domain, a logical resource or a cluster user, shares four
+committed metadata limits: `ENTITY_LABELS_MAX_COUNT` (64),
 `ENTITY_LABELS_MAX_KEY_BYTES` (128 B), `ENTITY_LABELS_MAX_VALUE_BYTES` (1024 B), and
 `ENTITY_LABELS_MAX_BYTES` (16384 B). Their declarations also supply the first-bootstrap options
 `--entity-labels-max-count`, `--entity-labels-max-key-bytes`, `--entity-labels-max-value-bytes`, and

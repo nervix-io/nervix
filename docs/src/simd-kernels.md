@@ -140,8 +140,8 @@ route errors, ACK attribution, and branch ownership.
 | List statistics | Non-finite masks, moments, `RunMoments::variance` with `Estimator`, `QuantileRank` | The VM's `list_var_pop` through `list_quantile` mask a batch's child buffer once and fold each list's slice as one run; quantile selection and the `list_argmin` and `list_argmax` scans remain typed scalar work |
 | VM failure packing | `FlagPacker::pack`, `WORD_LANES`, `lane_mask` | `numeric::Lanes` computes blocks of up to 1,024 lanes and packs one failure byte per lane; explicit arithmetic kernels already return failure words |
 | Selection bitmaps | Arrow `BooleanBuffer` operations, `collect_bool`, `set_indices`, filter/take | VM predicates exclude null and failed rows; runtime selection and ingest branch masks retain packed form; required-output validation ORs inverted validity buffers |
-| Checked integer arithmetic | `CheckedArithmetic`, `LaneOperands`, `CheckedLanes` | VM integer operators pass two runs or a shared operand; every signed/unsigned width has checked sums and differences, with widened products below 64 bits |
-| Constant integer division | `UnsignedDivisor`, `SignedDivisor`, `ConstantDivision` | VM column-by-scalar `/` and `%` and fixed-unit datetime operations prepare the divisor once; measured 64-bit operations retain scalar reciprocal paths |
+| Checked integer arithmetic | `CheckedArithmetic`, `LaneOperands`, `CheckedLanes` | VM integer operators pass two runs or a shared operand; every signed/unsigned width has checked sums and differences, with widened products below 64 bits. `DURATION` and `DATETIME` `+` and `-` pass the same `I64` runs, read in place from their own value and validity buffers |
+| Constant integer division | `UnsignedDivisor`, `SignedDivisor`, `ConstantDivision` | VM column-by-scalar `/` and `%`, fixed-unit datetime operations and the duration conversions prepare the divisor once; measured 64-bit operations retain scalar reciprocal paths |
 | SYSLOG header and structured-data scanning | `ByteClass::first_in`, `ByteScanner` | Compiled SYSLOG fields retain names and Arrow types; byte classes find header refusals and structured-data syntax before scalar parsing at those positions |
 | Syslog TCP framing | memchr, retained read cursor, typed `FrameProgress` | The connector retains parsed octet counts and searches newly read bytes of split lines, with one compaction per read |
 | SQS XML character admission | `XmlChars::into_string` and `XmlChars::admits`, with simdutf8 | The SQS emitter validates bodies and string attributes; its integration owns size limits and reporting |
@@ -226,6 +226,8 @@ contract keeps `MIN % -1` equal to zero.
 | Fixed-unit truncation/binning and `to_unix` | Prepared signed reciprocal in the datetime caller; scalar/compiler-vectorized loops |
 | Fixed-unit `date_diff` | Checked `i64` subtraction and prepared truncating division; exact `i128` subtraction/division when the difference exceeds `i64`, followed by a checked `i64` result |
 | `date_add`, `from_unix` | Checked `i128` multiplication/addition; `from_unix` has no division |
+| `duration_floor`, `duration_ceil`, `duration_round` | Prepared signed reciprocal; floor is the Euclidean quotient, ceil and round adjust the truncated quotient by its remainder |
+| `to_duration` | Checked `i128` multiplication with a checked `i64` result; no division |
 | Column divisor, including scalar-left/column-right | Existing checked scalar lane loop |
 
 Binning normalizes the value and origin, corrects their phase difference by at most one stride,

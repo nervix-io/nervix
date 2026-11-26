@@ -155,7 +155,10 @@ partition epoch: 2
 previous partitions: 4
 keys pending: 3
 keys claimed: 12
+labels: {}
 ```
+
+The last line holds the parametrizer's [labels](entity-labels.md).
 
 `keys pending` counts the keys partitions still hold outside the partition the current count places
 them in, together with the claims in flight; `keys claimed` counts the keys the partitions' current
@@ -263,9 +266,10 @@ Operationally that means:
 - a delivery that reaches a node after its attached consumer moved away fails its attached
   acknowledgements, so the ingestor redelivers the record along the owner's current routes; see
   [Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver)
-- an owner batch that starts fan-out while a schedule swap fences its consumer routes fails its
-  record acknowledgements and is retried by its ingestor after the swap; fan-out already holding a
-  dispatch permit finishes before those routes change
+- an owner batch that starts fan-out while a schedule swap fences its consumer routes waits for the
+  swap and fans out along the routes it published; fan-out already holding a dispatch permit
+  finishes before those routes change, and only an owner told to stop meanwhile fails the batch's
+  record acknowledgements, which its ingestor redelivers
 - an acknowledgement a receiver returns after the sending node restarted names that node's earlier
   run, so the restarted node rejects it and its own records stay pending until their own
   acknowledgements resolve; see
@@ -284,7 +288,9 @@ owner, and the buffer of each partition owner of a partitioned relay. It is one 
 backpressure boundary for each partition, not a per-producer, per-consumer, or per-branch capacity.
 If downstream runtime consumers cannot drain a partition quickly enough, upstream dispatch to that
 partition waits once its owner buffer and the fixed dispatch slots leading to it are occupied, while
-the relay's other partitions keep flowing. A producer on another node also
+the relay's other partitions keep flowing. A producer waits for room in a full owner buffer before
+its batch enters the relay, so a change that fences the relay never waits for a producer that waits
+for the owner. A producer on another node also
 waits while the owner has no relay memory left for the acknowledgement watches of the rows it
 sends, until the owner has reported enough earlier rows, or for the grant of its next delivery, and
 while its own node has no relay memory left to store the acknowledgements of the rows it sends; see

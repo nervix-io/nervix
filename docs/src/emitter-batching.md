@@ -87,6 +87,18 @@ under each carrier's accepted execution snapshot. It retains the Arc-backed Arro
 addresses selected rows by carrier and row position. Temporary jaq member values belong only to
 encoding; they are not a second retained record representation.
 
+An emitter whose `ON MESSAGE ERROR SEND TO` route reads the rows it fails also keeps, with each
+carrier whose records its route built, the source carrier those records were built from and the
+carrier's materialized-state snapshot, so that a row rejected, failed or given up after its route
+ran hands the error route its original input ([Error routes](./emitters.md#error-routes)). The
+source carrier is shared, not copied, and its Arrow data is counted apart from the constructed
+output: `FLUSH EACH ... MAX BATCH SIZE` releases the buffer once either the constructed output or
+what it keeps for its error route reaches the bound, so such an emitter holds at most about twice
+the bound, plus the carrier that crosses it. Batching is unchanged while the kept data is no larger
+than the constructed output, and what the emitter reports as sent counts only the constructed
+output. An emitter with `LOG` or `IGNORE` keeps nothing for its error route, and `FLUSH IMMEDIATE`
+releases every carrier as before.
+
 For codec-backed batching, the packer walks released carriers in arrival order and selected rows
 in source order. A candidate can span successive carriers only while the source relay, exact
 named and concrete branch, destination/key, ordered headers, ordering group and envelope agree.
