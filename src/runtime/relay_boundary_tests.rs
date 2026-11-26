@@ -222,6 +222,53 @@ fn replacing_relay_owner_retires_the_retained_ingress_channel() {
     assert!(!StdArc::ptr_eq(&retained, &replacement));
 }
 
+/// A delivery that reaches a relay's owner after a drop removed the relay and stopped its owner
+/// counts as done: the caller resolves its share as delivered, and no share is answered "not
+/// processed". Without the drop, a missing owner buffer still refuses the batch.
+#[nervix_primitives::test]
+async fn an_owner_delivery_after_a_drop_stopped_the_owner_counts_as_done() {
+    let services = test_relay_boundary_services();
+    let refused_batch = |acks| {
+        RelayRecordBatch::single(
+            test_schema(&[("value", ParseAsType::I64)]),
+            None,
+            test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]),
+            acks,
+        )
+        .expect("relay owner drop test batch should build")
+    };
+
+    let (acks, completion) = AckSet::root();
+    let refused = services
+        .enqueue_owner_batch(&refused_batch(acks), Unit::SINGLE)
+        .await;
+    assert!(
+        refused.is_err(),
+        "a relay with no owner here refuses the batch"
+    );
+    assert!(matches!(
+        timeout(Duration::from_secs(1), completion.wait())
+            .await
+            .expect("the refusal resolves the share"),
+        AckOutcome::NoAck(_)
+    ));
+
+    services.mark_dropped();
+    let (acks, completion) = AckSet::root();
+    let batch = refused_batch(acks.clone());
+    services
+        .enqueue_owner_batch(&batch, Unit::SINGLE)
+        .await
+        .expect("a batch for a dropped relay counts as done");
+    acks.ack_success();
+    assert_eq!(
+        timeout(Duration::from_secs(1), completion.wait())
+            .await
+            .expect("the caller's share resolves the root"),
+        AckOutcome::Ack
+    );
+}
+
 #[nervix_primitives::test]
 async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
     let runtime = Runtime::default();
@@ -1532,6 +1579,90 @@ async fn a_routed_attached_batch_completes_when_its_attached_consumer_does() {
             .await
             .expect("the consumer's completion resolves the acknowledgement"),
         AckOutcome::Ack
+    );
+    services.remove_local_runtime_consumer(AckMode::Attached);
+}
+
+#[nervix_primitives::test]
+async fn a_routed_batch_for_a_dropped_consumer_counts_its_share_as_done() {
+    let services = test_relay_boundary_services();
+    let mut consumer = services.add_local_runtime_consumer(AckMode::Attached);
+    services.remove_dropped_unit_runtime_consumer(AckMode::Attached, Unit::SINGLE);
+    assert!(consumer.depart_releasing().is_empty());
+    drop(consumer);
+    let (acks, completion) = AckSet::root();
+    let batch = routed_test_batch(test_schema(&[("value", ParseAsType::I64)]), acks.clone());
+
+    services
+        .inject_remote_message(Unit::SINGLE, &batch)
+        .await
+        .expect("a batch routed for a consumer a drop destroyed here is taken");
+    // The routed share is the one the delivery's handler resolves once the batch is taken.
+    acks.ack_success();
+    assert_eq!(
+        timeout(Duration::from_secs(1), completion.wait())
+            .await
+            .expect("nothing else holds a share of the routed batch"),
+        AckOutcome::Ack
+    );
+
+    // A consumer that registers again ends the drop's exception, and once it leaves without a
+    // drop, a routed batch finds no consumer as before.
+    let consumer = services.add_local_runtime_consumer(AckMode::Attached);
+    services.remove_local_runtime_consumer(AckMode::Attached);
+    drop(consumer);
+    let (acks, completion) = AckSet::root();
+    let batch = routed_test_batch(test_schema(&[("value", ParseAsType::I64)]), acks);
+    services
+        .inject_remote_message(Unit::SINGLE, &batch)
+        .await
+        .expect_err("no attached consumer of the relay runs on this node any more");
+    assert!(matches!(
+        timeout(Duration::from_secs(1), completion.wait())
+            .await
+            .expect("the failed delivery resolves the acknowledgement"),
+        AckOutcome::NoAck(_)
+    ));
+}
+
+#[nervix_primitives::test]
+async fn a_dropped_consumer_releases_the_share_of_a_batch_it_had_not_taken() {
+    let services = test_relay_boundary_services();
+    let mut dropped = services.add_local_runtime_consumer(AckMode::Attached);
+    let mut staying = services.add_local_runtime_consumer(AckMode::Attached);
+    let (acks, completion) = AckSet::root();
+    let batch = routed_test_batch(test_schema(&[("value", ParseAsType::I64)]), acks.clone());
+    services
+        .inject_remote_message(Unit::SINGLE, &batch)
+        .await
+        .expect("both attached consumers take the routed batch");
+    acks.ack_success();
+
+    services.remove_dropped_unit_runtime_consumer(AckMode::Attached, Unit::SINGLE);
+    for taken in dropped.depart_releasing() {
+        for acks in &taken.acks {
+            acks.ack_success();
+        }
+    }
+    let completion = completion.wait();
+    tokio::pin!(completion);
+    assert!(
+        timeout(Duration::from_millis(50), &mut completion)
+            .await
+            .is_err(),
+        "the consumer that stays still holds its share"
+    );
+    staying
+        .recv()
+        .await
+        .expect("the consumer that stays receives the batch")
+        .ack_success();
+    assert_eq!(
+        timeout(Duration::from_secs(1), &mut completion)
+            .await
+            .expect("the staying consumer's completion resolves the acknowledgement"),
+        AckOutcome::Ack,
+        "the dropped consumer's share counts as done, so the source hears acknowledged"
     );
     services.remove_local_runtime_consumer(AckMode::Attached);
 }

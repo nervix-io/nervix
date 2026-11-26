@@ -149,6 +149,35 @@ impl ScheduledNodeTask {
         (&mut self.task).join_after_shutdown("scheduled node").await;
     }
 
+    /// Asks the task to destroy the unit, as the drop that removes the processor does, and waits
+    /// until it has: the task takes no further input, every branch releases what it holds as
+    /// done, and the task answers what was released and ends. Only a task that can no longer
+    /// answer fails it, and it is aborted then.
+    pub(super) async fn discard(
+        mut self,
+    ) -> error_stack::Result<entity_drop::DiscardedWorkCounts, ScheduledNodeHandoffError> {
+        let (response, receiver) = oneshot::channel();
+        if self
+            .commands
+            .send(ProcessorNodeCommand::Discard { response })
+            .await
+            .is_err()
+        {
+            self.abort_and_join().await;
+            return Err(Report::new(ScheduledNodeHandoffError::CommandUnavailable));
+        }
+        let Ok(released) = receiver.await else {
+            self.abort_and_join().await;
+            return Err(Report::new(ScheduledNodeHandoffError::ResponseDropped));
+        };
+        match (&mut self.task).await {
+            Ok(()) => Ok(released),
+            Err(error) => {
+                Err(Report::new(ScheduledNodeHandoffError::TaskJoin).attach_printable(error))
+            }
+        }
+    }
+
     /// Asks the task to hand its branches over and waits until it has: the task stops every branch
     /// it holds, each under that branch's own stop grace, answers with what they hand over, and
     /// ends. A handover is waited for however many branches it takes, because a limit belongs to

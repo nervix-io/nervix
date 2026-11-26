@@ -2830,6 +2830,18 @@ the emitter's transient error that `DESCRIBE EMITTER` shows and as an error even
 | RabbitMQ, Redis Pub/Sub, SQS, Sentry, OTEL, HTTP, Syslog, ClickHouse, Postgres, MySQL, MongoDB, client emitters | Nothing: a publish returns once its transport answered for or wrote each record | Nothing to send |
 | Iceberg | Rows it staged and has not committed, which only a commit publishes | Nothing to send: a stop commits the staged rows before it finishes, and teardown leaves them uncommitted, as [Shutdown And Recovery](./shutdown.md#emitters) describes |
 
+A drop destroys an emitter without a stop and without a finish. The host first removes the
+emitter's registration from every relay it reads, then ends its task's loop wherever it is, a
+publish on the wire or a retry wait included, and releases as done every record the emitter holds:
+the input its relays delivered that it had not buffered, every row of its buffer that no answer
+resolved, a row a cut-off attempt prepared included, and the rows an emitter that commits on its
+own staged. The host reaches staged rows through the lifecycle's `release_staged_as_done`, which
+an emitter that retains acknowledgements implements: it acknowledges what it retained, forgets
+the staged rows without publishing them and answers how many they were, so nothing it does
+afterwards, its own end included, resolves those acknowledgements again. Iceberg forgets its staged
+batches, and its staging directory goes with the emitter. The host then closes the transport
+without finishing it and reports the released records as the drop's undelivered records.
+
 librdkafka sends lingering records at once only while a call to its flush is waiting: each broker
 thread checks that state when it next serves its partitions. rust-rdkafka's `flush` calls
 librdkafka's flush without waiting and polls in between, so on a loaded node the broker threads miss

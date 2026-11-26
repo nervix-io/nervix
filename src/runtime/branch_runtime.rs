@@ -574,6 +574,22 @@ impl BranchRuntime {
         collected || routed
     }
 
+    /// Releases as done everything the branch of `processor_id` holds, as the drop that destroys
+    /// the processor does, and ends the branch's lanes into the relays it published to. Its
+    /// materialized state belongs to the relays it reads, which stay.
+    pub(super) fn release_processor_held_work_as_done(
+        &mut self,
+        processor_id: &ModelName,
+        released: &mut entity_drop::DiscardedWorkCounts,
+    ) {
+        if let Some(processor) = self.processors.get_mut(processor_id) {
+            processor.release_held_work_as_done(released);
+        }
+        for relay in self.relays.values_mut() {
+            relay.retire();
+        }
+    }
+
     pub(super) fn processor_has_pending_materialized(&self, processor_id: &ModelName) -> bool {
         self.processors
             .get(processor_id)

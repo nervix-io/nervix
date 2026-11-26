@@ -925,6 +925,17 @@ pub trait EmitterLifecycle: Send {
         0
     }
 
+    /// Releases as done the acknowledgements this emitter retained for the messages it staged and
+    /// has not committed, forgets those messages without publishing them, and answers how many
+    /// they were.
+    ///
+    /// The host calls this only as a drop destroys the emitter: the drop counts the emitter's
+    /// share of every message it held as done, so nothing the emitter does afterwards, its own
+    /// end included, may resolve those acknowledgements again.
+    fn release_staged_as_done(&mut self) -> u64 {
+        0
+    }
+
     /// Publishes everything this emitter staged and resolves the acknowledgements it retained.
     ///
     /// The host calls this when the commit [`EmitterLifecycle::staged_commit`] describes is due, and

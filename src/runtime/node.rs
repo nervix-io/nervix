@@ -107,6 +107,21 @@ pub(in crate::runtime) struct RuntimeInner {
     /// it or the domain starts again.
     pub(in crate::runtime) stop_ledgers:
         DashMap<DomainName, domain_stop::StopLedgerEntry, RandomState>,
+    /// What this node discarded for each domain when it destroyed the entities a revision
+    /// dropped, kept until the change's coordinator collects it or the domain's execution ends.
+    pub(in crate::runtime) drop_ledgers:
+        DashMap<DomainName, entity_drop::DomainDropLedger, RandomState>,
+    /// The runtime revisions this run of the node applied, which tell a drop report that is not
+    /// applied yet, or that an earlier run applied, from one this run can answer.
+    pub(in crate::runtime) applied_runtime_revisions:
+        watch::Sender<entity_drop::AppliedRuntimeRevisions>,
+    /// The signal by which a drop asks every task of one reingestor to destroy itself, created
+    /// when its first task starts and taken by the drop.
+    pub(in crate::runtime) reingestor_discards: DashMap<
+        DomainNodeRef,
+        watch::Sender<Option<reingestor::ReingestorDiscardAnswer>>,
+        RandomState,
+    >,
     pub(in crate::runtime) emitter_buffers:
         DashMap<DomainNodeUnitRef, Arc<AtomicUsize>, RandomState>,
     pub(in crate::runtime) force_flush_by_domain:

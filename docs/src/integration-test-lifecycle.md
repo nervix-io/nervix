@@ -1345,7 +1345,9 @@ remote cache appear empty.
 `kunobi-ninja/kache-action` installs kache, sets `RUSTC_WRAPPER`, the store and a job-scoped runtime
 directory, and stops the job's daemon in its post step. The action receives no S3 inputs, so its
 post step neither saves a manifest nor pushes. The configuration file `scripts/kache_remote.py`
-writes, for a job and for the Docker builder alike, lets the local store hold a quarter of the
+writes, for a job and for the Docker builder alike, names the remote when the build is given all of
+its `KACHE_S3_*` settings, names none when it is given none of them, as a local image build may be,
+and is refused for some without the rest. It lets the local store hold a quarter of the
 volume that holds the store, rounded to the nearest GiB and at least kache's own floor of 5 GiB, so
 the budget still follows the cache volume when the runner changes. Kache's own default, 5% of the
 volume and at most 100 GiB, gave a Boat runner 15 GiB, while the `checks` job's store reached 33
@@ -1430,6 +1432,7 @@ document, and an answer outside its schema is reported rather than read. The out
 | `published` | The manifest is saved and the daemon reports every upload of the job finished | Nothing |
 | `incomplete` | The budget ended with uploads queued or in flight, the manifest failed or did not finish, an upload failed for good, or the daemon stopped answering during the wait | Queued uploads go to the daemon's shutdown drain, which kache bounds at 30 seconds |
 | `read-only` | Kache made the job's remote read-only, as for a scheduled or manually dispatched run | Nothing: such a job publishes nothing |
+| `local-only` | The job's daemon has no remote, as for a local image build given no `KACHE_S3_*` setting | The build's cache, in its local store only |
 | `not-run` | The job's work failed or was cancelled, so publication returns at once | After a failure, queued uploads go to the shutdown drain of the kache action's post step. That step does not run for a cancelled job, and a job that reaches its time limit is cancelled, so its queued uploads end with the machine |
 | `unavailable` | The job has no kache command or no manifest key, or its daemon does not answer | Whatever a stopped daemon left queued: publication asks `kache --json daemon status` first because `kache stats` would start a new daemon |
 | `cancelled` | The step received `SIGINT` or `SIGTERM` | The record names the first signal and the phase in which the step received it |

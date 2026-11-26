@@ -166,6 +166,7 @@ mod domain_clock;
 mod domain_lifecycle;
 mod domain_start;
 mod domain_stop;
+mod entity_drop;
 mod entity_gate;
 mod entity_labels;
 mod error;
@@ -1953,6 +1954,9 @@ impl Application {
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
         service
             .register_domain_stop_handlers(&interconnect)
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        service
+            .register_entity_drop_handlers(&interconnect)
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
         interconnect
             .register_handler::<PublishResourceReplica, _, _>(move |context, request| {

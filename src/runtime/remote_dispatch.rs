@@ -1657,7 +1657,8 @@ impl Runtime {
         };
         // An owner admits ingress only for a unit it owns; a payload addressed to a unit whose
         // owner moved meanwhile is refused as one for a relay this node does not instantiate.
-        if owner_ingress && !self.owns_relay_unit(&services, remote.unit) {
+        if owner_ingress && !services.is_dropped() && !self.owns_relay_unit(&services, remote.unit)
+        {
             return Err(Report::new(RuntimeError::relay_not_instantiated(
                 &remote.domain,
                 &remote.relay,
@@ -2084,14 +2085,25 @@ impl Runtime {
         });
     }
 
+    pub(in crate::runtime) fn remote_runtime_consumers_for_revision(
+        revision: &ExecutionRevision,
+        local_node_id: &ClusterNodeName,
+    ) -> HashMap<RelayName, Vec<RemoteRuntimeConsumer>> {
+        Self::remote_runtime_consumers_leaving_out(revision, local_node_id, &HashSet::default())
+    }
+
+    /// The remote consumers the relays this node owns route to under `revision`, leaving out the
+    /// consumers `left_out` names: what those relays route to once a drop destroyed them, before
+    /// anything else of the revision that drops them is installed.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the typed revision supplies bounded iteration over its \
                                    installed emitter and entrypoint plans")
     )]
-    pub(in crate::runtime) fn remote_runtime_consumers_for_revision(
+    pub(in crate::runtime) fn remote_runtime_consumers_leaving_out(
         revision: &ExecutionRevision,
         local_node_id: &ClusterNodeName,
+        left_out: &HashSet<NodeRef>,
     ) -> HashMap<RelayName, Vec<RemoteRuntimeConsumer>> {
         let mut consumers = HashMap::<RelayName, Vec<RemoteRuntimeConsumer>>::new();
         // Common consumers read every unit; a partitioned processor reads its matching unit.
@@ -2103,10 +2115,11 @@ impl Runtime {
             .map(|node| RelayName::from(&node.identifier))
             .collect::<HashSet<_>>();
         for spec in &revision.processors.processors {
-            let Some(node) = revision
-                .nodes
-                .get(&NodeRef::new(spec.spec.kind, spec.spec.processor.clone()))
-            else {
+            let identity = NodeRef::new(spec.spec.kind, spec.spec.processor.clone());
+            if left_out.contains(&identity) {
+                continue;
+            }
+            let Some(node) = revision.nodes.get(&identity) else {
                 continue;
             };
             for unit in node.units.keys().copied() {
@@ -2127,9 +2140,18 @@ impl Runtime {
                 }
             }
         }
-        Self::push_emitter_remote_consumers(revision, local_node_id, &owned_relays, &mut consumers);
+        Self::push_emitter_remote_consumers(
+            revision,
+            local_node_id,
+            &owned_relays,
+            left_out,
+            &mut consumers,
+        );
         for plan in revision.entrypoints.reingestors() {
             let identity = NodeRef::new(ModelKind::Reingestor, ModelName::from(&plan.name));
+            if left_out.contains(&identity) {
+                continue;
+            }
             let node = revision
                 .nodes
                 .get(&identity)

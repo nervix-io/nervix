@@ -23,9 +23,11 @@
 
 use error_stack::ResultExt as _;
 use nervix_execution::CapacityWaits;
+use nervix_models::DiscardedWorkKind;
 
 use super::{
     capacity_attempt::{CapacityAttempt, DetachedAttempt},
+    entity_drop,
     materialized_read::MaterializedStateWait,
     processor_partition_moves::{
         ClaimProgress, ClaimProgressOutcome, HolderKeyRequest, HolderStep, ProcessorBranchSlot,
@@ -85,6 +87,9 @@ pub(super) enum ProcessorBranchStopMode {
     Evict,
     Detach,
     Handoff(oneshot::Sender<ProcessorBranchHandoff>),
+    /// The drop that destroys the processor: the branch publishes nothing more, releases every
+    /// message it holds as done and answers what it released.
+    Discard(oneshot::Sender<entity_drop::DiscardedWorkCounts>),
 }
 
 /// Whether a branch resumes a known lifetime or appears after the lifecycle had no such key.
@@ -174,6 +179,12 @@ pub(super) enum ProcessorNodeCommand {
     },
     Handoff {
         response: oneshot::Sender<Vec<ProcessorBranchHandoff>>,
+    },
+    /// The drop that destroys the processor: the unit takes no further input, every branch
+    /// releases what it holds as done, and the unit answers what its branches and its own queues
+    /// released.
+    Discard {
+        response: oneshot::Sender<entity_drop::DiscardedWorkCounts>,
     },
     PrepareWasmStateReset {
         preparation: WasmStateResetPreparation,
@@ -435,6 +446,7 @@ pub(super) async fn run_processor_node_runtime(
     }
 
     let mut handoff_response = None;
+    let mut discard_response = None;
     loop {
         nervix_primitives::task::consume_budget().await;
         let ownership_frozen = ownership_freeze.observe().is_frozen();
@@ -870,6 +882,10 @@ pub(super) async fn run_processor_node_runtime(
                     handoff_response = Some(response);
                     break;
                 }
+                ProcessorNodeCommand::Discard { response } => {
+                    discard_response = Some(response);
+                    break;
+                }
                 ProcessorNodeCommand::PartitionKey(request) => {
                     let outcome = nervix_primitives::expect_lint!(
                         nervix::lifecycle_call,
@@ -1090,6 +1106,47 @@ pub(super) async fn run_processor_node_runtime(
         }
     }
 
+    // A drop destroys the unit at once: nothing it took in is processed or published, and every
+    // message it holds is released as done. The branches it never restored hold nothing in memory.
+    if let Some(response) = discard_response {
+        drop(restore_attempt);
+        let mut released = entity_drop::DiscardedWorkCounts::default();
+        // A key's first batch whose branch still waits to be built ends with the unit, and its
+        // build with it.
+        if let Some(pending) = pending_build.take() {
+            let batch = nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "the drop that destroys the processor ends its first batch's build once",
+                pending.discard()
+            );
+            released.release_batch(DiscardedWorkKind::UnprocessedMessages, batch);
+        }
+        if let Some(moves) = moves.as_mut() {
+            for input in moves.drain_parked() {
+                released.release_batch(DiscardedWorkKind::UnprocessedMessages, input.batch);
+                drop(input.work);
+            }
+        }
+        interaction
+            .release_held_input_as_done(DiscardedWorkKind::UnprocessedMessages, &mut released);
+        nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "the drop that destroys the processor ends its exact retained branch generations",
+            discard_all_processor_branch_instances(
+                &runtime_handle,
+                &domain,
+                &processor,
+                template.parametrizer.as_ref(),
+                &mut instances,
+                &mut released,
+            )
+        )
+        .await;
+        response
+            .send(released)
+            .means_peer_left("processor drop requester");
+        return;
+    }
     // A key's first batch whose branch still waits to be built is work in motion, so the task's
     // end waits for the build and delivers the batch.
     if let Some(pending) = pending_build.take() {
@@ -1374,6 +1431,23 @@ impl PendingBranchBuild {
             // The unit is ending with its runtime: the batch's source sends it again.
             None => first.refuse("the processor unit stopped before its key's branch was built"),
         }
+    }
+
+    /// Ends the build with the unit a drop destroys, and hands back the batch that waited for it,
+    /// which the drop releases as done.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "the drop that destroys the processor ends its first batch's build once"
+        )
+    )]
+    pub(super) fn discard(self) -> RelayRecordBatch {
+        let Self { first, build } = self;
+        drop(build);
+        let FirstBatch { batch, work, .. } = first;
+        drop(work);
+        batch
     }
 
     /// Wait for the build to end, then install it and deliver the batch that waited for it.
@@ -2102,7 +2176,13 @@ async fn run_processor_branch_task(
             _ = sleep(runtime_handle.ownership_freeze_recheck()), if ownership_frozen => {}
         }
     }
+    let mut released = entity_drop::DiscardedWorkCounts::default();
     while let Ok(ProcessorBranchInput { relay, batch, work }) = input.try_recv() {
+        if let Some(ProcessorBranchStopMode::Discard(_)) = &stop_mode {
+            released.release_batch(DiscardedWorkKind::UnprocessedMessages, batch);
+            drop(work);
+            continue;
+        }
         branch
             .execute_processor_input(&processor, &relay, batch)
             .await;
@@ -2136,13 +2216,16 @@ async fn run_processor_branch_task(
                 None
             }
         },
-        Some(ProcessorBranchStopMode::Evict) => None,
+        Some(ProcessorBranchStopMode::Evict | ProcessorBranchStopMode::Discard(_)) => None,
     };
     if let Some(snapshot) = &finalization_snapshot {
         branch.force_flush(snapshot).await;
     }
     if let Some(ProcessorBranchStopMode::Evict) = &stop_mode {
         branch.evict().await;
+    }
+    if let Some(ProcessorBranchStopMode::Discard(_)) = &stop_mode {
+        branch.release_processor_held_work_as_done(&processor, &mut released);
     }
     stop_processor_snapshot_task(&mut branch, &processor, &mut snapshot).await;
     match stop_mode {
@@ -2174,6 +2257,11 @@ async fn run_processor_branch_task(
                 .send(handoff)
                 .means_peer_left("processor branch handoff requester");
         }
+        Some(ProcessorBranchStopMode::Discard(response)) => {
+            response
+                .send(released)
+                .means_peer_left("processor branch drop requester");
+        }
         Some(ProcessorBranchStopMode::Detach) | None => {}
     }
 }
@@ -2194,7 +2282,10 @@ pub(super) async fn stop_processor_branch_task(
     wait: TaskStopWait,
 ) {
     let processor = processor.into();
-    if matches!(&mode, ProcessorBranchStopMode::Evict) {
+    if matches!(
+        &mode,
+        ProcessorBranchStopMode::Evict | ProcessorBranchStopMode::Discard(_)
+    ) {
         entry.delivery_lifetime.cancel();
     }
     let mut task = None;
@@ -2458,6 +2549,52 @@ pub(super) async fn evict_processor_branch_instances_to_capacity(
             max_instances,
             "evicted processor branch task by lru"
         );
+    }
+}
+
+/// Destroys every branch of a processor the drop removes: each releases what it holds as done and
+/// answers what it released, which `released` adds up.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "the drop that destroys the processor ends its exact branch lifetimes"
+    )
+)]
+pub(super) async fn discard_all_processor_branch_instances(
+    runtime: &Runtime,
+    domain: &DomainName,
+    processor: impl Into<ModelName>,
+    parametrizer: Option<&ParametrizerName>,
+    instances: &mut ProcessorBranches,
+    released: &mut entity_drop::DiscardedWorkCounts,
+) {
+    let processor = processor.into();
+    for (key, entry) in instances.drain() {
+        runtime.observe_branch_instance_removed(domain, parametrizer, &key, None);
+        // A released key's branch already stopped and holds nothing in memory.
+        let Some(task) = entry.live() else {
+            continue;
+        };
+        let (response, receiver) = oneshot::channel();
+        stop_processor_branch_task(
+            domain,
+            processor.clone(),
+            &key,
+            task,
+            ProcessorBranchStopMode::Discard(response),
+            runtime.teardown_task_stop(),
+        )
+        .await;
+        match receiver.await {
+            Ok(branch_released) => released.merge(branch_released),
+            Err(_) => warn!(
+                domain = domain.as_str(),
+                processor = processor.as_str(),
+                scope = %BranchScope::from(&key),
+                "a dropped processor branch ended without reporting what it released"
+            ),
+        }
     }
 }
 

@@ -6147,11 +6147,8 @@ docker-build-linux image_target llvm_version tag platform push cache_from cache_
     if [[ -n {{ quote(cache_to) }} ]]; then
         cache_flags+=(--cache-to={{ quote(cache_to) }})
     fi
-    : "${KACHE_S3_BUCKET:?KACHE_S3_BUCKET is required}"
-    : "${KACHE_S3_REGION:?KACHE_S3_REGION is required}"
-    : "${KACHE_S3_ENDPOINT:?KACHE_S3_ENDPOINT is required}"
-    : "${KACHE_S3_ACCESS_KEY:?KACHE_S3_ACCESS_KEY is required}"
-    : "${KACHE_S3_SECRET_KEY:?KACHE_S3_SECRET_KEY is required}"
+    # The remote compiler cache is optional: without its settings the builder keeps its cache in its
+    # local store alone.
     docker buildx build \
         -f Dockerfile.debian \
         --target {{ quote(image_target) }} \
@@ -6160,11 +6157,11 @@ docker-build-linux image_target llvm_version tag platform push cache_from cache_
         --build-arg "KACHE_VERSION=${KACHE_VERSION:-2.0.0}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
         --build-arg LLVM_VERSION={{ quote(llvm_version) }} \
-        --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET}" \
-        --build-arg "KACHE_S3_REGION=${KACHE_S3_REGION}" \
-        --build-arg "KACHE_S3_ENDPOINT=${KACHE_S3_ENDPOINT}" \
-        --build-arg "KACHE_S3_ACCESS_KEY=${KACHE_S3_ACCESS_KEY}" \
-        --build-arg "KACHE_S3_SECRET_KEY=${KACHE_S3_SECRET_KEY}" \
+        --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET:-}" \
+        --build-arg "KACHE_S3_REGION=${KACHE_S3_REGION:-}" \
+        --build-arg "KACHE_S3_ENDPOINT=${KACHE_S3_ENDPOINT:-}" \
+        --build-arg "KACHE_S3_ACCESS_KEY=${KACHE_S3_ACCESS_KEY:-}" \
+        --build-arg "KACHE_S3_SECRET_KEY=${KACHE_S3_SECRET_KEY:-}" \
         --build-arg NERVIX_DIAGNOSTIC_SELECTION={{ quote(diagnostic_selection) }} \
         --build-arg "NERVIX_SOURCE_REVISION=${revision}" \
         --label "org.opencontainers.image.revision=${revision}" \

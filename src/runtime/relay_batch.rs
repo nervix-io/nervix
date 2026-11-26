@@ -143,6 +143,16 @@ pub(super) struct UnkeyedRelayBatchParts {
 }
 
 impl RelayRecordBatch {
+    /// Resolves `shares` shares of every row's acknowledgement as done: the shares consumers held
+    /// that a drop destroyed before they took this batch.
+    pub(super) fn release_shares_as_done(&self, shares: usize) {
+        for _ in 0..shares {
+            for acks in &self.acks {
+                acks.ack_success();
+            }
+        }
+    }
+
     /// A contiguous suffix/prefix preserves row sidecars and the same acknowledgement obligations.
     pub(super) fn slice(
         &self,

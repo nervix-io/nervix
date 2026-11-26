@@ -1423,6 +1423,10 @@ impl Runtime {
     pub(in crate::runtime) fn clear_runtime_state_for_domain(&self, domain: &DomainName) {
         self.inner.state_replication_routing.retire_domain(domain);
         self.clear_mqtt_session_retirements(domain);
+        self.forget_drop_ledger(domain);
+        self.inner
+            .reingestor_discards
+            .retain(|key, _| &key.domain != domain);
         #[cfg_attr(
             nervix_lint,
             expect(

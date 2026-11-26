@@ -38,6 +38,7 @@ mod authentication;
 pub mod backup;
 mod capability_publication;
 pub mod domain_stop;
+pub mod entity_drop;
 mod relay_slicing;
 #[doc(hidden)]
 pub use relay_slicing::RelaySliceCursor;

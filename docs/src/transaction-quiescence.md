@@ -181,6 +181,18 @@ changes only the running task's cadence. A contract-changing replacement or fail
 the same retained-work and rollback boundaries as other emitters: the previous execution remains
 the owner until the change commits, and a canceled attempt cannot resolve a new owner's ACK.
 
+Dropping an entity is `DYNAMIC`, the drop of a relay, a hash map, a source, a processor or an
+emitter included: neither the drop nor the schedule it publishes pauses, drains, flushes or
+rebuilds anything. Every node applying the revision first destroys each entity the revision no
+longer declares, before any other change of that revision runs there: it disconnects the entity
+from the relays it reads, destroys it at once with what it holds, releases the entity's share of
+every held message as done, and records what it discarded for the change's answer (see the drop
+statements in the [Plexus Overview](plexus-overview.md)). A node that
+catches up to a later revision destroys the entity the same way, against what its own execution
+runs. In a run that also pauses an entity or the domain, a dropped entity inside that pause area
+is drained with the pause, as before this change commits, and then destroyed with whatever it
+still holds; a run that only drops entities waits for nothing they hold.
+
 The report keeps separate effect sets for configuration creation/change/drop, resource catalog and
 version bindings, ownership moves, activations and deactivations, rebuilds, state resets, force
 flushes, and affected topology. An HTTPS `VHOST` version refresh can therefore

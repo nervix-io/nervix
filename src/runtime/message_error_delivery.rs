@@ -635,6 +635,28 @@ impl Runtime {
             })
     }
 
+    /// Ends the error routes of `node` in `domain`, which a drop destroyed, as a domain's
+    /// teardown ends every route of its own.
+    pub(super) async fn stop_message_error_routes_of_node(
+        &self,
+        domain: &DomainName,
+        node: &NodeRef,
+    ) {
+        let mut keys = Vec::new();
+        for entry in self.inner.message_error_routes.iter() {
+            let key = entry.key();
+            if &key.domain == domain && &key.node == node {
+                keys.push(key.clone());
+            }
+        }
+        for key in keys {
+            nervix_primitives::task::consume_budget().await;
+            if let Some((_, route)) = self.inner.message_error_routes.remove(&key) {
+                route.shutdown().await;
+            }
+        }
+    }
+
     pub(super) async fn stop_message_error_routes_for_domain(&self, domain: &DomainName) {
         let keys = self
             .inner

@@ -35,8 +35,9 @@ use super::{
         model_mutation::command_error,
         session_service::SessionServiceImpl,
     },
-    PreparedTransactionAdmission, TransactionCommitError, is_queueable_transaction_statement,
-    transaction_commit_error_message, transaction_commit_result, transaction_statement_label,
+    PreparedTransactionAdmission, TransactionCommitError, dropped_running_entities,
+    is_queueable_transaction_statement, transaction_commit_error_message,
+    transaction_commit_result, transaction_statement_label,
 };
 
 fn standalone_transaction_result(transaction: &ReplicatedTransaction) -> CommandResult {
@@ -222,6 +223,10 @@ impl SessionServiceImpl {
             Ok(transaction) => transaction,
             Err(result) => return *result,
         };
+        // Every node records what it discarded for an entity the command drops under the runtime
+        // revision that dropped it, which comes after this one.
+        let revision_before_commit = self.inner.consensus.current_runtime_revision().await;
+        let dropped = dropped_running_entities([&request.statement]);
         let committing = match self.admit_standalone_commit(&command, admitted).await {
             Ok(transaction) => transaction,
             Err(result) => return *result,
@@ -232,7 +237,17 @@ impl SessionServiceImpl {
             Box::pin(self.execute_replicated_commit(transaction_id)).await
         };
         let error = match finished {
-            Ok(transaction) => return standalone_transaction_result(&transaction),
+            Ok(transaction) => {
+                let mut result = standalone_transaction_result(&transaction);
+                Box::pin(self.report_transaction_drops(
+                    &transaction,
+                    &dropped,
+                    revision_before_commit,
+                    &mut result,
+                ))
+                .await;
+                return result;
+            }
             Err(error) => error,
         };
         #[cfg(feature = "testing")]
