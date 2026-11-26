@@ -18,7 +18,6 @@ struct StoppingTask {
     task: JoinHandle<()>,
 }
 
-
 /// How a stop of every domain execution on this node ends their branched routes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runtime) enum ExecutionsStop {

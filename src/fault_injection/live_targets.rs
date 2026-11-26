@@ -24,13 +24,15 @@ impl FaultInjection {
         node: &ClusterNodeName,
         live: &BTreeSet<ClusterNodeName>,
     ) {
-        self.inner.published_live_targets.send_if_modified(|published| {
-            if published.get(node) == Some(live) {
-                return false;
-            }
-            published.insert(node.clone(), live.clone());
-            true
-        });
+        self.inner
+            .published_live_targets
+            .send_if_modified(|published| {
+                if published.get(node) == Some(live) {
+                    return false;
+                }
+                published.insert(node.clone(), live.clone());
+                true
+            });
     }
 
     /// Waits until `observer` has published a live set to its transport that leaves `peer` out,
