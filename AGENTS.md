@@ -184,6 +184,15 @@ violates instead of softening the contract to match today's imports.
   replication mechanisms.
 - The registry validates domains, references, schemas, branches, capabilities and execution
   contracts before a graph becomes active.
+- A change that passed validation commits, and nothing after the commit fails it on a node:
+  everything after the commit is scheduling and connector behavior. Whatever is structurally wrong
+  is found before the commit, a WASM module and every plan and program included. An external
+  system that does not answer never fails a committed change; it is the entity's transient error,
+  which the entity retries. Placement after the commit belongs to the scheduler, which starts the
+  new instance and then removes the old one. A check that can run before the commit moves there,
+  and a check that runs after it and can fail the change is removed, never added. An existing one
+  is debt recorded on ClickUp, never extended or copied, and a test never injects a failure into a
+  step that cannot fail after the commit.
 - Gossip carries only membership-scoped state: identities and endpoints, prerequisites, admission
   verdicts, cluster parameters, termination and subscription interest. Application progress stays
   in one incarnation-bound local record and travels by typed interconnect reports and queries;
