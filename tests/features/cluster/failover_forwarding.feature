@@ -284,8 +284,8 @@ Feature: A relay owner fails over while another node forwards to it
       """
       - domain={{domain}} kind=relay name=wire_records owner={{owner}}
       """
-    # Neither the owner's stop nor failover places the relay on a cordoned node, so once the owner
-    # stops, nothing replaces it.
+    # Neither a stopping node's moves nor failover places the relay on a cordoned node, so once
+    # the owner stops, nothing replaces it.
     When these Plexus commands are executed on the leader node
       """
       CORDON NODE {{leader}};
@@ -297,11 +297,15 @@ Feature: A relay owner fails over while another node forwards to it
       {"tenant":"beta","sequence":2}
       """
     Then a relay payload for domain "{{domain}}" is waiting before its grant request
+    # The forwarder stops first, and its save waits for the forward. The save holds the
+    # forwarder's installation turn, so no route reaches the forwarder until the save ends.
+    When node "{{forwarder}}" begins stopping
+    Then node "{{forwarder}}" is still saving or moving its units after "2s"
     When node "{{owner}}" is gracefully stopped
     Then node "{{forwarder}}" stops counting node "{{owner}}" as a live peer
-    # The forward finds its owner gone while its node still serves, so it waits for a route that
-    # replaces that owner. The node's stop gives that wait up, so the stop ends within its own
-    # course rather than when the forward's admission bound passes, five minutes on.
+    # The forward now finds its owner gone on a node that is stopping. It awaits no route that
+    # replaces the owner, so the save ends at once rather than when the forward's admission bound
+    # passes, five minutes on.
     When relay payload grant requests for domain "{{domain}}" are released
     And node "{{forwarder}}" is gracefully stopped
     Then the last cluster operation completes within "30s"
