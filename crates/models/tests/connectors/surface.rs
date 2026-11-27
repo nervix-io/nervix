@@ -700,7 +700,7 @@ fn only_a_client_both_sides_reference_declares_a_key_for_one_side() {
 }
 
 #[test]
-fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_external_codes_and_stalled_peers() {
+fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_and_stalled_peers() {
     let named = |capabilities: Vec<RuntimeCapability>| {
         capabilities
             .into_iter()
