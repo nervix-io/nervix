@@ -1882,6 +1882,7 @@ mod tests {
             EmitterRecordId::new(1),
             Timestamp::from_unix_nanos(1),
             "refused".to_string(),
+            None,
         ));
         outcome.deliver(EmitterRecordId::new(0));
 

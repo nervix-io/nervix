@@ -22,7 +22,10 @@ Feature: HTTP REQUEST emitter response classification
       CREATE SCHEMA outbound_event (event_id STRING);
       CREATE JAQ JSON CODEC outbound_events_codec TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
-      CREATE SCHEMA rejected_request (event_id STRING, code STRING, operation STRING, message STRING);
+      CREATE SCHEMA rejected_request (
+        event_id STRING, code STRING, operation STRING, message STRING,
+        external_code STRING OPTIONAL
+      );
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
@@ -46,7 +49,8 @@ Feature: HTTP REQUEST emitter response classification
           SET event_id = input.event_id,
               code = error.class,
               operation = error.operation,
-              message = error.message
+              message = error.message,
+              external_code = error.external_code
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_requests_subscription TO rejected_requests;
       START;
@@ -57,7 +61,7 @@ Feature: HTTP REQUEST emitter response classification
       """
     Then within "20s" the relay subscription receives payloads containing all fragments
       """
-      "event_id":"1" | "code":"refused" | "operation":"publish" | "message":"HTTP endpoint answered with status <status>"
+      "event_id":"1" | "code":"refused" | "operation":"publish" | "message":"HTTP endpoint answered with status <status>" | "external_code":"<status>"
       """
     And HTTP receiver "api" eventually receives at least 2 requests
     And HTTP receiver "api" request 1 is

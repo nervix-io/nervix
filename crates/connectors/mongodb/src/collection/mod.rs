@@ -56,7 +56,7 @@ use mongodb::{
     bson::{Binary, Bson, Document, RawDocumentBuf, doc, spec::BinarySubtype},
     error::{
         BulkWriteError, Error as DriverError, ErrorKind, InsertManyError, PartialBulkWriteResult,
-        WriteConcernError,
+        WriteConcernError, WriteFailure,
     },
     options::{UpdateOneModel as MongoDbUpdateOneModel, WriteModel as MongoDbWriteModel},
 };
@@ -69,8 +69,8 @@ use nervix_connector::{
 };
 use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_models::{
-    ClientConfigEntry, ClientPoolBounds, ConnectorKind, EmitterBatchPolicy, FieldPath,
-    MONGODB_MAX_DOCUMENT_BYTES, MongoDbCollectionName, Timestamp,
+    ClientConfigEntry, ClientPoolBounds, ConnectorKind, EmitterBatchPolicy, ExternalErrorCode,
+    FieldPath, MONGODB_MAX_DOCUMENT_BYTES, MongoDbCollectionName, Timestamp,
 };
 use nervix_primitives::{sync::Arc, time::Instant};
 use tempfile::NamedTempFile;
@@ -248,6 +248,12 @@ fn is_record_write_error(code: i32) -> bool {
     matches!(code, 121 | 10334 | 11000)
 }
 
+/// A code the server answered with, as `error.external_code` holds it: the decimal number MongoDB
+/// documents its error codes by, such as `11000`.
+fn server_code(code: i32) -> Option<ExternalErrorCode> {
+    ExternalErrorCode::new(code.to_string())
+}
+
 fn safe_infrastructure_error(operation: &str) -> Report<EmitterWriteError> {
     Report::new(EmitterWriteError::Publish { connector: MONGODB })
         .attach_printable(format!("MongoDB {operation} failed"))
@@ -281,10 +287,26 @@ impl fmt::Debug for MongoRequestFailure {
 
 impl std::error::Error for MongoRequestFailure {}
 
+/// The code the server answered a failed request with, where the driver's error carries one.
+fn driver_code(driver: &DriverError) -> Option<ExternalErrorCode> {
+    match driver.kind.as_ref() {
+        ErrorKind::Command(cause) => server_code(cause.code),
+        ErrorKind::Write(WriteFailure::WriteConcernError(cause)) => server_code(cause.code),
+        ErrorKind::Write(WriteFailure::WriteError(cause)) => server_code(cause.code),
+        _ => None,
+    }
+}
+
+/// The failure of a request the driver failed, which keeps the server's code where the server
+/// answered, so a write the emitter gives up on names it as `error.external_code`.
 fn driver_failure(operation: &'static str, driver: DriverError) -> Report<EmitterWriteError> {
-    Report::new(MongoRequestFailure { operation, driver })
-        .change_context(EmitterWriteError::Publish { connector: MONGODB })
-        .attach_printable(format!("MongoDB {operation} failed"))
+    let code = driver_code(&driver);
+    let mut report = Report::new(MongoRequestFailure { operation, driver })
+        .change_context(EmitterWriteError::Publish { connector: MONGODB });
+    if let Some(code) = code {
+        report = report.attach(code);
+    }
+    report.attach_printable(format!("MongoDB {operation} failed"))
 }
 
 #[cfg_attr(
@@ -566,11 +588,14 @@ impl MongoDbCollectionEmitter {
             };
             match StorableDocument::new(row, document) {
                 Ok(document) => documents.push(document),
+                // The connector measured the document against the limit MongoDB documents and never
+                // sent it, so no server answered it with a code.
                 Err(error @ UnstorableDocument::AboveDocumentLimit { .. }) => {
                     outcome.reject(RejectedEmitterMember::external(
                         row.position,
                         row.occurred_at,
                         error.to_string(),
+                        None,
                     ));
                 }
                 Err(error @ UnstorableDocument::InvalidFieldNames) => {
@@ -790,6 +815,7 @@ impl WriteAnswers {
                         row.position,
                         row.occurred_at,
                         format!("MongoDB rejected document with code {code}"),
+                        server_code(code),
                     ));
                 }
                 DocumentAnswer::Unresolved => leaves_unresolved = true,
@@ -800,8 +826,26 @@ impl WriteAnswers {
             return;
         }
         if leaves_unresolved || self.names_foreign_document(rows.len()) {
-            outcome.fail(self.request.failure());
+            let mut failure = self.request.failure();
+            if let Some(code) = self.retried_code() {
+                failure = failure.attach(code);
+            }
+            outcome.fail(failure);
         }
+    }
+
+    /// The code of the first document the server refused without refusing it for good, which the
+    /// write's failure keeps, so a write the emitter gives up on names it as
+    /// `error.external_code`.
+    fn retried_code(&self) -> Option<ExternalErrorCode> {
+        for refusal in self.refusals.values() {
+            if let Refusal::Code(code) = refusal
+                && !is_record_write_error(*code)
+            {
+                return server_code(*code);
+            }
+        }
+        None
     }
 }
 
@@ -824,7 +868,11 @@ impl UnsatisfiedWriteConcern {
             }
             None => format!("MongoDB {request} write concern failed with code {code}"),
         };
-        Report::new(EmitterWriteError::Publish { connector: MONGODB }).attach_printable(message)
+        let mut report = Report::new(EmitterWriteError::Publish { connector: MONGODB });
+        if let Some(code) = server_code(code) {
+            report = report.attach(code);
+        }
+        report.attach_printable(message)
     }
 }
 
@@ -1501,7 +1549,49 @@ mod tests {
                 row_index: 11,
             }
         );
-        assert!(outcome.infrastructure_error.is_some());
+        assert_eq!(
+            outcome.rejected[0].error.external_code,
+            ExternalErrorCode::new("11000"),
+            "the refused document carries the server's write code"
+        );
+        let failure = outcome
+            .infrastructure_error
+            .expect("the document the server did not refuse for good fails the write");
+        assert_eq!(
+            failure.downcast_ref::<ExternalErrorCode>(),
+            ExternalErrorCode::new("91").as_ref(),
+            "the retried write keeps the code the server refused its other document with"
+        );
+    }
+
+    /// A request the server failed with a command error keeps the server's code, which a write
+    /// the emitter gives up on reports as `error.external_code`; a failure no server answered has
+    /// none.
+    #[test]
+    fn a_failed_request_keeps_the_code_its_server_answered_with() {
+        let command: mongodb::error::CommandError = mongodb::bson::from_document(doc! {
+            "code": 50,
+            "codeName": "MaxTimeMSExpired",
+            "errmsg": "operation exceeded time limit",
+        })
+        .expect("a server's command error deserializes");
+        let answered = driver_failure(
+            "insert_many",
+            DriverError::from(ErrorKind::Command(command)),
+        );
+        assert_eq!(
+            answered.downcast_ref::<ExternalErrorCode>(),
+            ExternalErrorCode::new("50").as_ref()
+        );
+
+        let unanswered = driver_failure(
+            "insert_many",
+            DriverError::from(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "refused",
+            )),
+        );
+        assert_eq!(unanswered.downcast_ref::<ExternalErrorCode>(), None);
     }
 
     #[test]
@@ -1760,6 +1850,10 @@ mod tests {
                 "MongoDB insert_many write concern failed with code 100 \
                  (UnsatisfiableWriteConcern)"
             )
+        );
+        assert_eq!(
+            failure.downcast_ref::<ExternalErrorCode>(),
+            ExternalErrorCode::new("100").as_ref()
         );
     }
 

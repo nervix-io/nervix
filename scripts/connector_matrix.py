@@ -78,7 +78,7 @@ def required_notes(surface):
             if side == "ingest" and not row["metadata"]:
                 fields.add("metadata")
             if side == "emit":
-                for field in ("envelope", "properties"):
+                for field in ("envelope", "properties", "external_code"):
                     if not row[field]:
                         fields.add(field)
             fields.add("mirror")
@@ -200,6 +200,7 @@ def entity_rows(row, side, notes):
             ("Batch transformation required", "yes" if row["batch_transformation"] else "no"),
             ("Envelope", "\n".join(row["envelope"]) or absent(notes, row, "envelope")),
             ("PROPERTIES keys and exact types", "\n".join(row["properties"]) or absent(notes, row, "properties")),
+            ("External code (`error.external_code`)", external_code_text(row, notes)),
         ])
         rows.extend(bounds_rows(row["bounds"]))
         contract = row["value_contract"]
@@ -211,6 +212,14 @@ def entity_rows(row, side, notes):
                 ("Unsupported OTLP features and reasons", "\n".join(contract["unsupported"])),
             ])
     return rows
+
+
+def external_code_text(row, notes):
+    """The code an emitter's outside system answers with, or why it gives none."""
+    code = row["external_code"]
+    if code is None:
+        return absent(notes, row, "external_code")
+    return f"{code['space']}: {code['form']}; for example `{code['example']}`"
 
 
 def series(items):

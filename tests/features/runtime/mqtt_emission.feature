@@ -480,3 +480,75 @@ Feature: MQTT emission
       | cluster_size |
       | 1            |
       | 3            |
+
+  @mqtt_publish_refusal
+  Scenario Outline: A publish the MQTT broker refuses follows ON MESSAGE ERROR with the broker's reason code
+    Given MQTT is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And MQTT client "refused_publisher_{{test_id}}" is denied publishing
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( seq I64 );
+      CREATE SCHEMA rejected_event (
+        seq I64,
+        error_code STRING,
+        operation STRING,
+        external_code STRING OPTIONAL
+      );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
+      CREATE VHOST edge mqtt-refusal-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
+        TO events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE MQTT CLIENT mqtt_main CONFIG {
+        'addr' = '{{mqtt_addr}}', 'client_id' = 'refused_publisher_{{test_id}}'
+      };
+      CREATE MQTT TOPIC EMITTER refused FROM events
+        TO mqtt_main TOPIC 'refused_{{test_id}}' <qos>
+          MODE <mode> RETRY POLICY BACKOFF 50ms MAX 1s
+          ENCODE USING event_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO rejected_events
+          SET seq = input.seq,
+              error_code = error.class,
+              operation = error.operation,
+              external_code = error.external_code
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
+      START;
+      """
+    # The broker answers every publish of the client as Not authorized, MQTT 5 reason code 135: in
+    # the PUBACK of a QOS 1 publish and in the PUBREC of a QOS 2 one.
+    And http payload is posted to host "mqtt-refusal-{{test_id}}.example.com" path "/events"
+      """
+      [{"seq":1}]
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "seq":1 | "error_code":"refused" | "operation":"publish" | "external_code":"135"
+      """
+
+    Examples:
+      | cluster_size | qos   | mode                               |
+      | 1            | QOS 1 | ACK SEQUENTIAL ACK TIMEOUT 30s     |
+      | 3            | QOS 1 | ACK SEQUENTIAL ACK TIMEOUT 30s     |
+      | 1            | QOS 2 | ACK PARALLEL MAX 2 ACK TIMEOUT 30s |
+      | 3            | QOS 2 | ACK PARALLEL MAX 2 ACK TIMEOUT 30s |

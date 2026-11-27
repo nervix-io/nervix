@@ -2501,3 +2501,128 @@ entity = "CLIENT CONSUMER EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/emitter_give_up_entities.feature", scenario = "A client consumer emitter whose application asks for a batch again gives the batch up once GIVE UP AFTER passes" },
 ]
+
+# error.external_code is the code an outside system answered a refusal or a failed attempt with,
+# which an entity declares it fills. Each scenario has that system refuse a record, or keep failing
+# it until GIVE UP AFTER passes, through its real transport.
+
+[[capability]]
+capability = "error.external_code"
+entity = "CLICKHOUSE TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_databases.feature", scenario = "Rows <connector_body> or MAX SIZE rejects follow ON MESSAGE ERROR and the rest of their batch is written" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "HTTP REQUEST EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/http_emitter_responses.feature", scenario = "HTTP terminal response <status> rejects only its record" },
+  { feature = "tests/features/runtime/emitter_give_up.feature", scenario = "An HTTP emitter that cannot reach its destination for longer than GIVE UP AFTER fails exactly the rows it did not deliver" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "KAFKA TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/kafka_emission.feature", scenario = "A record the Kafka broker refuses follows ON MESSAGE ERROR with the broker's error name and the rest are written" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "MONGODB COLLECTION EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_databases.feature", scenario = "Rows <connector_body> or MAX SIZE rejects follow ON MESSAGE ERROR and the rest of their batch is written" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "MQTT TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/mqtt_emission.feature", scenario = "A publish the MQTT broker refuses follows ON MESSAGE ERROR with the broker's reason code" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "MYSQL TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_databases.feature", scenario = "Rows <connector_body> or MAX SIZE rejects follow ON MESSAGE ERROR and the rest of their batch is written" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "NATS STREAM EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/nats_emission.feature", scenario = "A NATS STREAM emitter rejects a subject another stream captures with the server's JetStream error code" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "OTEL LOGS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_export_retries.feature", scenario = "An OTEL Export request whose answer was lost is sent again byte for byte" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "OTEL METRICS EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_export_retries.feature", scenario = "An OTEL <signal> Export request the receiver refuses routes its record with the status code it answered" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "OTEL TRACES EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/otel_export_retries.feature", scenario = "An OTEL <signal> Export request the receiver refuses routes its record with the status code it answered" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "POSTGRES TABLE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/emitter_batch_databases.feature", scenario = "Rows <connector_body> or MAX SIZE rejects follow ON MESSAGE ERROR and the rest of their batch is written" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "PULSAR TOPIC EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/pulsar_emission.feature", scenario = "A delay past the topic's maximum delivery delay rejects its record" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "RABBITMQ EXCHANGE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_exchange_emission.feature", scenario = "MANDATORY rejects a record its exchange cannot route in every mode" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "RABBITMQ QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_exchange_emission.feature", scenario = "MANDATORY rejects a record its deleted queue can no longer receive" },
+  { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "A batch within MAX SIZE that the destination cannot carry is rejected with every member" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "REDIS PUBSUB EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/redis_emission.feature", scenario = "A Redis emitter whose user may publish to no channel gives up its row with the server's error prefix" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "SENTRY EVENT EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/sentry_emission.feature", scenario = "An event Sentry refuses routes its record with the HTTP status Sentry answered" },
+]
+
+[[capability]]
+capability = "error.external_code"
+entity = "SQS QUEUE EMITTER"
+scenarios = [
+  { feature = "tests/features/runtime/sqs_emission.feature", scenario = "An SQS emitter whose queue is deleted gives up its row with the queue service's error code" },
+]

@@ -1091,6 +1091,7 @@ mod tests {
             EmitterRecordId::new(0),
             Timestamp::from_unix_nanos(1),
             "refused".to_string(),
+            None,
         ));
 
         let answers = prepared
@@ -1219,6 +1220,7 @@ mod tests {
             EmitterRecordId::new(0),
             Timestamp::from_unix_nanos(1),
             "refused".to_string(),
+            None,
         ));
         let error = prepared
             .answers(&mut batches, prepared.next_write().payloads, twice)
@@ -2025,6 +2027,7 @@ mod tests {
                             EmitterRecordId::new(index),
                             Timestamp::from_unix_nanos(1),
                             format!("refused {index}"),
+                            None,
                         ));
                         rejected.push(*first_member);
                     }

@@ -210,7 +210,8 @@ Feature: RabbitMQ exchange emission and unroutable messages
         seq I64,
         error_code STRING,
         operation STRING,
-        error_message STRING
+        error_message STRING,
+        external_code STRING OPTIONAL
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, category string );
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
@@ -242,7 +243,8 @@ Feature: RabbitMQ exchange emission and unroutable messages
           SET seq = input.seq,
               error_code = error.class,
               operation = error.operation,
-              error_message = error.message
+              error_message = error.message,
+              external_code = error.external_code
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
       START;
@@ -253,7 +255,7 @@ Feature: RabbitMQ exchange emission and unroutable messages
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":2 | "error_code":"refused" | "operation":"publish" | reply code 312 | NO_ROUTE
+      "seq":2 | "error_code":"refused" | "operation":"publish" | reply code 312 | NO_ROUTE | "external_code":"312"
       """
     And within "30s" the observed broker receives exactly these payloads
       """
@@ -364,7 +366,8 @@ Feature: RabbitMQ exchange emission and unroutable messages
         seq I64,
         error_code STRING,
         operation STRING,
-        error_message STRING
+        error_message STRING,
+        external_code STRING OPTIONAL
       );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, category string );
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
@@ -395,7 +398,8 @@ Feature: RabbitMQ exchange emission and unroutable messages
           SET seq = input.seq,
               error_code = error.class,
               operation = error.operation,
-              error_message = error.message
+              error_message = error.message,
+              external_code = error.external_code
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
       START;
@@ -415,7 +419,7 @@ Feature: RabbitMQ exchange emission and unroutable messages
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":2 | "error_code":"refused" | "operation":"publish" | reply code 312 | NO_ROUTE
+      "seq":2 | "error_code":"refused" | "operation":"publish" | reply code 312 | NO_ROUTE | "external_code":"312"
       """
 
     Examples:

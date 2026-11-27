@@ -659,6 +659,7 @@ impl EmitterDeclaration for NatsSubjectEmitter {
         options: &[],
         envelope: &[EnvelopeClauseKind::ReplyTo],
         properties: &[],
+        external_code: None,
         bounds: NATS_SUBJECT_EMITTER_BOUNDS,
     };
 }
@@ -699,6 +700,11 @@ impl EmitterDeclaration for NatsStreamEmitter {
         }],
         envelope: &[EnvelopeClauseKind::MessageId],
         properties: &[],
+        external_code: Some(crate::ExternalCodeDeclaration {
+            space: "JetStream API error code",
+            form: "a decimal number, the err_code of the server's JetStream error",
+            example: "10060",
+        }),
         bounds: NATS_STREAM_EMITTER_BOUNDS,
     };
 }

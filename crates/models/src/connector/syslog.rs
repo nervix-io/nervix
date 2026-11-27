@@ -447,6 +447,7 @@ impl EmitterDeclaration for SyslogCollectorEmitter {
         options: &[],
         envelope: &[],
         properties: &[],
+        external_code: None,
         bounds: SYSLOG_COLLECTOR_BOUNDS,
     };
 }

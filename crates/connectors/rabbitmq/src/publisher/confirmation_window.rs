@@ -256,11 +256,10 @@ impl ReturnedRecord<'_> {
         outcome: &mut PerRecordOutcome<EmitterRecordId>,
     ) -> EmitterWriteResult<PositiveAnswerAttribution> {
         if let Some(returned) = self.returned {
-            outcome.reject(
-                self.message
-                    .record
-                    .rejected(RabbitMqChannel::returned_message_reason(returned)),
-            );
+            outcome.reject(self.message.record.rejected(
+                RabbitMqChannel::returned_message_reason(returned),
+                super::reply_code(returned.reply_code),
+            ));
             return Ok(PositiveAnswerAttribution::Decided);
         }
         match self.answer {
@@ -284,13 +283,21 @@ impl ReturnedRecord<'_> {
 }
 
 impl RabbitMqConfirmationError {
+    /// The failure this is. A return no message of the window carries keeps the broker's reply
+    /// code, so a write the emitter gives up on names it as `error.external_code`.
     fn report(self) -> Report<EmitterWriteError> {
         let message = self.to_string();
-        Report::new(self)
-            .change_context(EmitterWriteError::Publish {
-                connector: RABBITMQ,
-            })
-            .attach_printable(message)
+        let code = match &self {
+            Self::UnattributedReturn { reply_code, .. } => super::reply_code(*reply_code),
+            Self::Nack | Self::NotRequested | Self::IncompleteAttribution => None,
+        };
+        let mut failure = Report::new(self).change_context(EmitterWriteError::Publish {
+            connector: RABBITMQ,
+        });
+        if let Some(code) = code {
+            failure = failure.attach(code);
+        }
+        failure.attach_printable(message)
     }
 
     fn unattributed(returned: &BasicReturnMessage) -> Report<EmitterWriteError> {

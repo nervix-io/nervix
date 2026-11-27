@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use super::{
     ChoiceRequirement, ClickHouseEmitter, ClickHouseEmitterChange, ClickHouseEmitterEntity,
     ClientEmitter, ClientEmitterChange, ClientEmitterEntity, DeclaredBounds, EnvelopeClauseKind,
-    HeaderModel, HttpEmitter, HttpEmitterChange, HttpEmitterEntity, IcebergEmitter,
-    IcebergEmitterChange, IcebergEmitterEntity, KafkaEmitter, KafkaEmitterChange,
+    ExternalCodeDeclaration, HeaderModel, HttpEmitter, HttpEmitterChange, HttpEmitterEntity,
+    IcebergEmitter, IcebergEmitterChange, IcebergEmitterEntity, KafkaEmitter, KafkaEmitterChange,
     KafkaEmitterEntity, LocatorDeclaration, MongoDbEmitter, MongoDbEmitterChange,
     MongoDbEmitterEntity, MqttEmitter, MqttEmitterChange, MqttEmitterEntity, MySqlEmitter,
     MySqlEmitterChange, MySqlEmitterEntity, NatsEmitter, NatsEmitterChange, NatsEmitterEntity,
@@ -303,6 +303,10 @@ pub struct EmitterEntityCapabilities {
     pub envelope: &'static [EnvelopeClauseKind],
     /// The closed set of keys its emitters' `PROPERTIES { … }` may set.
     pub properties: &'static [PropertyDeclaration],
+    /// The codes its outside system answers a refused record or a failed write with, which an
+    /// emitter's error route reads as `error.external_code`, or `None` where that system answers
+    /// with no code of its own.
+    pub external_code: Option<ExternalCodeDeclaration>,
     /// What its connector holds and how long it waits.
     pub bounds: DeclaredBounds,
 }
@@ -384,8 +388,9 @@ impl EmitterEntityCapabilities {
     }
 
     /// What a statement can make every emitter of the entity do at run time: publish in each
-    /// declared mode, write each option or choice, batch where batching is available, and set
-    /// each envelope clause and property.
+    /// declared mode, write each option or choice, batch where batching is available, set each
+    /// envelope clause and property, and give its error route the outside system's code where that
+    /// system answers with one.
     pub fn runtime_capabilities(&self) -> Vec<RuntimeCapability> {
         let mut capabilities = Vec::new();
         for mode in self.publishing_modes {
@@ -404,6 +409,9 @@ impl EmitterEntityCapabilities {
             capabilities.push(RuntimeCapability::Property {
                 name: property.name,
             });
+        }
+        if self.external_code.is_some() {
+            capabilities.push(RuntimeCapability::ExternalCode);
         }
         capabilities.extend(RuntimeCapability::of_bounds(self.bounds));
         capabilities.extend(

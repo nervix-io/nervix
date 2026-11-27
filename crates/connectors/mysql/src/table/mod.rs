@@ -57,8 +57,8 @@ use nervix_connector::{
     RowEmitter, RowRequest, RowRequestLimits, client_config_value, client_tls_paths,
 };
 use nervix_models::{
-    ClientConfigEntry, ClientPoolBounds, ConnectorKind, EmitterBatchPolicy, MYSQL_MAX_PLACEHOLDERS,
-    MySqlTableName,
+    ClientConfigEntry, ClientPoolBounds, ConnectorKind, EmitterBatchPolicy, ExternalErrorCode,
+    MYSQL_MAX_PLACEHOLDERS, MySqlTableName, Timestamp,
 };
 use nervix_primitives::{
     sync::atomic::Ordering,
@@ -277,6 +277,34 @@ impl MySqlWriteError {
         is_record_server_error(state, *code)
     }
 
+    /// The rejection of the row this record error refused, carrying the server's error number and
+    /// SQLSTATE as the code its error route reads as `error.external_code`.
+    fn record_rejection(
+        &self,
+        position: EmitterRecordPosition,
+        occurred_at: Timestamp,
+    ) -> RejectedEmitterMember<EmitterRecordPosition> {
+        let external_code = match self {
+            Self::Server { state, code } => server_code(*code, state),
+            _ => None,
+        };
+        RejectedEmitterMember::external(position, occurred_at, self.record_reason(), external_code)
+    }
+
+    /// The code the server answered the failure `report` describes with: the one its own context
+    /// names, or the one of a connection checkout the server refused, whose driver error is
+    /// beneath the context.
+    fn failure_code(report: &Report<Self>) -> Option<ExternalErrorCode> {
+        if let Self::Server { state, code } = report.current_context() {
+            return server_code(*code, state);
+        }
+        let Some(mysql_async::Error::Server(refused)) = report.downcast_ref::<mysql_async::Error>()
+        else {
+            return None;
+        };
+        server_code(refused.code, &refused.state)
+    }
+
     fn record_reason(&self) -> String {
         let server_error = match self {
             Self::Server { state, code } => Some((state, code)),
@@ -291,7 +319,10 @@ impl MySqlWriteError {
         }
     }
 
+    /// The emitter's failure for `report`, which keeps the server's code where the server
+    /// answered, so a write the emitter gives up on names it as `error.external_code`.
     fn into_report(report: Report<Self>) -> Report<EmitterWriteError> {
+        let code = Self::failure_code(&report);
         let reason = match report.current_context() {
             Self::MissingInsertColumn | Self::MissingUpdateColumn => {
                 Some(report.current_context().to_string())
@@ -302,12 +333,21 @@ impl MySqlWriteError {
             )),
             Self::Execute | Self::Pool | Self::CheckOut | Self::Validate | Self::Deadline => None,
         };
-        let report = report.change_context(EmitterWriteError::Publish { connector: MYSQL });
+        let mut report = report.change_context(EmitterWriteError::Publish { connector: MYSQL });
+        if let Some(code) = code {
+            report = report.attach(code);
+        }
         match reason {
             Some(reason) => report.attach_printable(reason),
             None => report,
         }
     }
+}
+
+/// A server error as `error.external_code` holds it: the error number, then the SQLSTATE in
+/// parentheses, as MySQL itself writes an error, such as `3819 (HY000)`.
+fn server_code(code: u16, state: &str) -> Option<ExternalErrorCode> {
+    ExternalErrorCode::new(format!("{code} ({state})"))
 }
 
 /// A SQLSTATE and error code the server reports for a row it will never accept.
@@ -681,10 +721,9 @@ impl RowEmitter for MySqlTableEmitter {
                         match connection.insert(&statement, 1, params).await {
                             Ok(_) => outcome.deliver(rows.position(member)),
                             Err(error) if error.current_context().is_record_error() => {
-                                outcome.reject(RejectedEmitterMember::external(
+                                outcome.reject(error.current_context().record_rejection(
                                     rows.position(member),
                                     rows.occurred_at(member),
-                                    error.current_context().record_reason(),
                                 ));
                             }
                             Err(error) => {
@@ -696,11 +735,11 @@ impl RowEmitter for MySqlTableEmitter {
                 }
                 Err(error) if error.current_context().is_record_error() => {
                     let member = members[written.start];
-                    outcome.reject(RejectedEmitterMember::external(
-                        rows.position(member),
-                        rows.occurred_at(member),
-                        error.current_context().record_reason(),
-                    ));
+                    outcome.reject(
+                        error
+                            .current_context()
+                            .record_rejection(rows.position(member), rows.occurred_at(member)),
+                    );
                 }
                 Err(error) => {
                     outcome.fail(MySqlWriteError::into_report(error));
@@ -1163,11 +1202,43 @@ mod tests {
                 message: "secret-row-value".to_string(),
             }));
         assert!(report.current_context().is_record_error());
+        let rejection = report.current_context().record_rejection(
+            EmitterRecordPosition {
+                batch_index: 0,
+                row_index: 0,
+            },
+            Timestamp::from_unix_nanos(1),
+        );
+        assert_eq!(
+            rejection.error.external_code,
+            ExternalErrorCode::new("1406 (22001)"),
+            "the rejected row carries the error number and SQLSTATE as MySQL writes them"
+        );
         let report = MySqlWriteError::into_report(report);
         let diagnostic = format!("{report:?}");
         assert!(report.contains::<MySqlWriteError>());
         assert!(diagnostic.contains("22001"));
         assert!(!diagnostic.contains("secret-row-value"));
+    }
+
+    /// A failed write the server answered keeps the code it answered with, which a write the
+    /// emitter gives up on reports as `error.external_code`; a failure no server answered has none.
+    #[test]
+    fn a_failure_the_server_answered_keeps_its_code() {
+        let retried = MySqlWriteError::into_report(MySqlWriteError::report_execute(
+            mysql_async::Error::Server(mysql_async::ServerError {
+                state: "40001".to_string(),
+                code: 1213,
+                message: "Deadlock found".to_string(),
+            }),
+        ));
+        assert_eq!(
+            retried.downcast_ref::<ExternalErrorCode>(),
+            ExternalErrorCode::new("1213 (40001)").as_ref()
+        );
+
+        let unanswered = MySqlWriteError::into_report(Report::new(MySqlWriteError::Deadline));
+        assert_eq!(unanswered.downcast_ref::<ExternalErrorCode>(), None);
     }
 
     #[test]

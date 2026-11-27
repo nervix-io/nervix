@@ -10745,7 +10745,7 @@ dependencies = [
 [[package]]
 name = "rdkafka"
 version = "0.39.0"
-source = "git+https://github.com/nervix-io/rust-rdkafka.git?branch=nervix-aws-lc-fetch-stop#4698fcb05eb5c334b1d6d36dab288ed2af17a5e3"
+source = "git+https://github.com/nervix-io/rust-rdkafka.git?branch=nervix-aws-lc-fetch-stop-error-names#1409f140c6409b9868c70d903ddfe58d6461e2f9"
 dependencies = [
  "futures-channel",
  "futures-util",
@@ -10762,7 +10762,7 @@ dependencies = [
 [[package]]
 name = "rdkafka-sys"
 version = "4.10.0+2.12.1"
-source = "git+https://github.com/nervix-io/rust-rdkafka.git?branch=nervix-aws-lc-fetch-stop#4698fcb05eb5c334b1d6d36dab288ed2af17a5e3"
+source = "git+https://github.com/nervix-io/rust-rdkafka.git?branch=nervix-aws-lc-fetch-stop-error-names#1409f140c6409b9868c70d903ddfe58d6461e2f9"
 dependencies = [
  "aws-lc-sys",
  "cmake",

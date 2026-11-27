@@ -169,6 +169,12 @@ impl EmitterDeclaration for ClickHouseTableEmitter {
         options: &[],
         envelope: &[],
         properties: &[],
+        external_code: Some(crate::ExternalCodeDeclaration {
+            space: "ClickHouse exception name",
+            form: "upper-case words joined by underscores, the exception ClickHouse refused a row \
+                   with",
+            example: "VIOLATED_CONSTRAINT",
+        }),
         bounds: CLICKHOUSE_BOUNDS,
     };
 }

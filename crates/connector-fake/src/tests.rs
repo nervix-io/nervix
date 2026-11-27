@@ -314,7 +314,9 @@ async fn a_cancelled_channel_read_returns_and_allows_close() {
 #[nervix_primitives::test]
 async fn scripted_payload_and_finish_failures_preserve_their_complete_outcomes() {
     let mut connector = FakeEmitter::<Records>::new([]);
-    let refused = record().rejected("scripted refusal".to_string()).error;
+    let refused = record()
+        .rejected("scripted refusal".to_string(), None)
+        .error;
     connector.preparation = PayloadPreparation::Refuse(refused.clone());
     let result = connector.prepare_payload(vec![0, 255], Timestamp::from_unix_nanos(42));
     let Err(actual) = result else {

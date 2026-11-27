@@ -45,7 +45,7 @@ use nervix_connector::{
     EmitterRecordId, EmitterStartResult, EmitterWriteError, ParsedRetryPolicy, PerRecordOutcome,
     RecordEmitter, RejectedEmitterMember,
 };
-use nervix_models::{ClientConfigEntry, NatsPublishSubjectName, NatsStreamName};
+use nervix_models::{ClientConfigEntry, ExternalErrorCode, NatsPublishSubjectName, NatsStreamName};
 use nervix_primitives::time::Instant;
 
 use crate::subject::NatsSubjectEmitter;
@@ -116,12 +116,17 @@ impl NatsStreamEmitter {
             Ok(_ack) => Ok(BrokerVerdict::Confirmed),
             Err(error) if Self::is_record_rejection(&error) => Ok(BrokerVerdict::Rejected {
                 message: format!("nats JetStream rejected record: {error}"),
+                external_code: Self::jetstream_code(&error),
             }),
             Err(error) => {
                 let description = format!("nats JetStream publish failed: {error}");
-                Err(Report::new(error)
-                    .change_context(EmitterWriteError::Publish { connector: NATS })
-                    .attach_printable(description))
+                let code = Self::jetstream_code(&error);
+                let mut failure = Report::new(error)
+                    .change_context(EmitterWriteError::Publish { connector: NATS });
+                if let Some(code) = code {
+                    failure = failure.attach(code);
+                }
+                Err(failure.attach_printable(description))
             }
         }
     }
@@ -131,6 +136,16 @@ impl NatsStreamEmitter {
         Report::new(error)
             .change_context(EmitterWriteError::Publish { connector: NATS })
             .attach_printable(description)
+    }
+
+    /// The JetStream error code the server answered `error` with, as `error.external_code` holds
+    /// it, such as `10060`, where the server's answer carried one. A publish no stream answered,
+    /// or one the client refused itself, has none.
+    fn jetstream_code(error: &JetStreamPublishError) -> Option<ExternalErrorCode> {
+        let source = error.source()?;
+        let cause = source.downcast_ref::<NatsJetStreamError>()?;
+        let ErrorCode(code) = cause.error_code();
+        ExternalErrorCode::new(code.to_string())
     }
 
     fn is_record_rejection(error: &JetStreamPublishError) -> bool {
@@ -248,6 +263,7 @@ impl RecordEmitter for NatsStreamEmitter {
                         record_id,
                         occurred_at,
                         format!("nats JetStream rejected record: {error}"),
+                        Self::jetstream_code(&error),
                     ));
                     continue;
                 }
@@ -474,11 +490,18 @@ mod tests {
     fn a_stream_without_a_responder_is_a_definitive_record_rejection() {
         let error = JetStreamPublishError::new(PublishErrorKind::StreamNotFound);
         assert!(NatsStreamEmitter::is_record_rejection(&error));
-        let Ok(BrokerVerdict::Rejected { message }) = NatsStreamEmitter::broker_answer(Err(error))
+        let Ok(BrokerVerdict::Rejected {
+            message,
+            external_code,
+        }) = NatsStreamEmitter::broker_answer(Err(error))
         else {
             panic!("the named stream did not capture this subject");
         };
         assert!(message.contains("no stream found for given subject"));
+        assert_eq!(
+            external_code, None,
+            "no stream answered the publish, so no JetStream error code names its refusal"
+        );
     }
 
     #[test]
@@ -489,6 +512,16 @@ mod tests {
         .expect("the server's typed mismatch error");
         let error = JetStreamPublishError::with_source(PublishErrorKind::Other, cause);
         assert!(NatsStreamEmitter::is_record_rejection(&error));
+        let Ok(BrokerVerdict::Rejected { external_code, .. }) =
+            NatsStreamEmitter::broker_answer(Err(error))
+        else {
+            panic!("the server refused the record for the stream it named");
+        };
+        assert_eq!(
+            external_code,
+            ExternalErrorCode::new("10060"),
+            "the refused record carries the JetStream error code the server answered"
+        );
         let other = JetStreamPublishError::new(PublishErrorKind::TimedOut);
         assert!(!NatsStreamEmitter::is_record_rejection(&other));
     }

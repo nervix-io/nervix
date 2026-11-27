@@ -303,6 +303,7 @@ impl EmitterDeclaration for ClientConsumerEmitter {
         options: &[],
         envelope: &[],
         properties: &[],
+        external_code: None,
         bounds: CONSUMER_BOUNDS,
     };
 }

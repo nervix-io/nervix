@@ -748,6 +748,7 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
             "BATCH",
             "DELAY",
             "DEDUPLICATION ID",
+            "error.external_code",
             "STALLED PEER timeout_ms",
         ]
     );
@@ -762,6 +763,7 @@ fn the_runtime_capabilities_of_a_pair_are_its_modes_options_metadata_batching_an
             "GIVE UP AFTER",
             "METHOD",
             "PATH",
+            "error.external_code",
             "STALLED PEER timeout_ms"
         ]
     );

@@ -251,6 +251,7 @@ impl EmitterDeclaration for ZeroMqPushEmitter {
         options: &[],
         envelope: &[],
         properties: &[],
+        external_code: None,
         bounds: ZEROMQ_EMITTER_BOUNDS,
     };
 }

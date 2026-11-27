@@ -508,8 +508,10 @@ impl RecordEmitter for SyslogCollectorEmitter {
         let mut staged_deliveries = Vec::with_capacity(records.len());
         for record in records {
             nervix_primitives::task::consume_budget().await;
+            // The emitter refused the payload itself; a syslog collector answers no record, so no
+            // record carries a code.
             if let Err(reason) = self.validate_payload(&record.payload) {
-                outcome.reject(record.rejected(reason.to_string()));
+                outcome.reject(record.rejected(reason.to_string(), None));
                 continue;
             }
             match self.publish_payload(&record.payload).await {

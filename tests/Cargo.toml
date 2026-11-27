@@ -144,7 +144,8 @@ playwright-rs = { workspace = true }
 prost = { workspace = true }
 pulsar = { workspace = true }
 rcgen = { workspace = true }
-redis = { workspace = true }
+# The harness creates scenario-scoped users through the driver's typed ACL rules.
+redis = { workspace = true, features = ["acl"] }
 reqwest = { workspace = true, features = [
   "json",
   "rustls",

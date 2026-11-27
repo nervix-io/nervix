@@ -759,3 +759,86 @@ Feature: SQS emission
       | cluster_size | send   |
       | 1            | SINGLE |
       | 3            | BATCH  |
+
+  @sqs_publish_give_up
+  Scenario Outline: An SQS emitter whose queue is deleted gives up its row with the queue service's error code
+    Given SQS is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And SQS queue "deleted_{{test_id}}" is observed
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( seq I64 );
+      CREATE SCHEMA failed_event (
+        seq I64,
+        error_code STRING,
+        operation STRING,
+        external_code STRING OPTIONAL
+      );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE RELAY failed_events SCHEMA failed_event UNBRANCHED;
+      CREATE VHOST edge sqs-give-up-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
+        TO events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SQS CLIENT sqs_main CONFIG {
+        'endpoint' = '{{sqs_endpoint}}', 'region' = 'us-east-1',
+        'access_key_id' = 'scenario-key', 'secret_access_key' = 'scenario-secret'
+      };
+      CREATE SQS QUEUE EMITTER deleted FROM events
+        TO sqs_main QUEUE 'deleted_{{test_id}}' SEND <send>
+          MODE ACK RETRY POLICY BACKOFF 100ms MAX 500ms GIVE UP AFTER 2s
+          ENCODE USING event_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO failed_events
+          SET seq = input.seq,
+              error_code = error.class,
+              operation = error.operation,
+              external_code = error.external_code
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION failed_events_subscription TO failed_events;
+      START;
+      """
+    And http payload is posted to host "sqs-give-up-{{test_id}}.example.com" path "/events"
+      """
+      [{"seq":1}]
+      """
+    Then the observed broker receives a payload
+      """
+      {"seq":1}
+      """
+    # The emitter keeps the queue URL it resolved, and the queue service answers every later send
+    # to it with QueueDoesNotExist, which the emitter retries as a failure of its destination until
+    # GIVE UP AFTER passes. The row then fails as unavailable and names that code.
+    When SQS queue "deleted_{{test_id}}" is deleted
+    And http payload is posted to host "sqs-give-up-{{test_id}}.example.com" path "/events"
+      """
+      [{"seq":2}]
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "seq":2 | "error_code":"unavailable" | "operation":"publish" | "external_code":"QueueDoesNotExist"
+      """
+
+    Examples:
+      | cluster_size | send   |
+      | 1            | SINGLE |
+      | 3            | SINGLE |
+      | 1            | BATCH  |
+      | 3            | BATCH  |

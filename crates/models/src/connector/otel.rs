@@ -276,6 +276,12 @@ const fn otel_capabilities(
         options,
         envelope: &[],
         properties: &[],
+        external_code: Some(crate::ExternalCodeDeclaration {
+            space: "OTLP transport status code",
+            form: "the three-digit HTTP status under the http/protobuf protocol, or the decimal \
+                   gRPC status code under grpc",
+            example: "400",
+        }),
         bounds: OTEL_BOUNDS,
     }
 }

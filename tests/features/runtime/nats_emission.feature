@@ -89,7 +89,9 @@ Feature: NATS emission
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification ( id STRING );
-      CREATE SCHEMA rejection ( error_code STRING, operation STRING, error_message STRING );
+      CREATE SCHEMA rejection (
+        error_code STRING, operation STRING, error_message STRING, no_external_code BOOL
+      );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( id string );
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
@@ -111,7 +113,8 @@ Feature: NATS emission
           ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejections
-          SET error_code = error.class, operation = error.operation, error_message = error.message
+          SET error_code = error.class, operation = error.operation, error_message = error.message,
+              no_external_code = is_null(error.external_code)
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejections_output TO rejections;
       START;
@@ -121,12 +124,74 @@ Feature: NATS emission
       """
       {"id":"outside"}
       """
+    # No stream answers a subject none captures, so no JetStream error code names the refusal.
     Then within "10s" the relay subscription receives payloads containing all fragments
       """
-      "error_code":"refused" | "operation":"publish" | nats JetStream rejected record
+      "error_code":"refused" | "operation":"publish" | nats JetStream rejected record | "no_external_code":true
       """
     And within "10s" Kafka consumer group "outside_group_{{test_id}}" next offset for topic "outside_in_{{test_id}}" partition 0 is "at least 1"
     And NATS JetStream stream "captured_{{test_id}}" holds exactly 0 messages
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @nats_stream_expected_stream
+  Scenario Outline: A NATS STREAM emitter rejects a subject another stream captures with the server's JetStream error code
+    Given NATS is running
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And NATS JetStream stream "named_{{test_id}}" exists for subject "named_in_{{test_id}}"
+    And NATS JetStream stream "other_{{test_id}}" exists for subject "other_in_{{test_id}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA notification ( id STRING );
+      CREATE SCHEMA rejection (
+        id STRING, error_code STRING, operation STRING, external_code STRING OPTIONAL
+      );
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( id string );
+      CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
+      CREATE JAQ JSON CODEC ingest_codec TO SCHEMA notification
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+      CREATE RELAY rejections SCHEMA rejection UNBRANCHED;
+      CREATE VHOST edge nats-mismatch-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM notifications_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
+        TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE NATS CLIENT nats_main CONFIG { 'addr' = '{{nats_addr}}' };
+      CREATE NATS STREAM EMITTER stream_output FROM notifications
+        TO nats_main STREAM 'named_{{test_id}}' SUBJECT 'other_in_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 1s
+          ENCODE USING notification_codec
+        INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO rejections
+          SET id = input.id, error_code = error.class, operation = error.operation,
+              external_code = error.external_code
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION rejections_output TO rejections;
+      START;
+      """
+    # The stream that captures the subject is not the one the message names, so the server refuses
+    # the message with JetStream error code 10060, "expected stream does not match".
+    And http payload is posted to host "nats-mismatch-{{test_id}}.example.com" path "/notifications"
+      """
+      [{"id":"mismatched"}]
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      "id":"mismatched" | "error_code":"refused" | "operation":"publish" | "external_code":"10060"
+      """
+    And NATS JetStream stream "other_{{test_id}}" holds exactly 0 messages
+    And NATS JetStream stream "named_{{test_id}}" holds exactly 0 messages
 
     Examples:
       | cluster_size |

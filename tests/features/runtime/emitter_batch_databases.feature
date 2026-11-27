@@ -201,7 +201,8 @@ Feature: Database emitter batches
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA rejected_event (
-        seq I64, error_code STRING, error_operation STRING, error_message STRING
+        seq I64, error_code STRING, error_operation STRING, error_message STRING,
+        external_code STRING OPTIONAL, no_external_code BOOL
       );
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
@@ -229,21 +230,25 @@ Feature: Database emitter batches
           SET seq = input.seq,
               error_code = error.class,
               error_operation = error.operation,
-              error_message = error.message
+              error_message = error.message,
+              external_code = error.external_code,
+              no_external_code = is_null(error.external_code)
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
       START;
       """
     # The four rows do not fit 600 bytes together, so the write is halved. The first half fails on
     # the poison row and is written again row by row; the huge row alone is still over 600 bytes.
+    # The database's own code names its refusal of the poison row; the emitter refused the huge row
+    # itself, so no database gave it a code.
     And http payload is posted to host "database-rejections-{{test_id}}.example.com" path "/events"
       """
       [{"seq":1,"note":"healthy_a"},{"seq":2,"note":"poison"},{"seq":3,"note":"huge"},{"seq":4,"note":"healthy_b"}]
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":2 | "error_code":"refused" | "error_operation":"publish"
-      "seq":3 | "error_code":"limit" | "error_operation":"encode" | MAX SIZE 600B
+      "seq":2 | "error_code":"refused" | "error_operation":"publish" | "external_code":"<external_code>"
+      "seq":3 | "error_code":"limit" | "error_operation":"encode" | MAX SIZE 600B | "no_external_code":true
       """
     And the "<connector_body>" batch table "rejecting_{{test_id}}" eventually holds exactly these rows
       """
@@ -273,15 +278,15 @@ Feature: Database emitter batches
       """
 
     Examples:
-      | cluster_size | connector_body | client                                                                                                                                   | target        | emitter_kind       |
-      | 1            | ClickHouse     | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix', 'timeout_ms' = '5000' }; | db TABLE      | CLICKHOUSE TABLE   |
-      | 3            | ClickHouse     | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix', 'timeout_ms' = '5000' }; | db TABLE      | CLICKHOUSE TABLE   |
-      | 1            | Postgres       | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                                                 | db TABLE      | POSTGRES TABLE     |
-      | 3            | Postgres       | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                                                 | db TABLE      | POSTGRES TABLE     |
-      | 1            | MySQL          | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                                       | db TABLE      | MYSQL TABLE        |
-      | 3            | MySQL          | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                                       | db TABLE      | MYSQL TABLE        |
-      | 1            | MongoDB        | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };                            | db COLLECTION | MONGODB COLLECTION |
-      | 3            | MongoDB        | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };                            | db COLLECTION | MONGODB COLLECTION |
+      | cluster_size | connector_body | client                                                                                                                                   | target        | emitter_kind       | external_code       |
+      | 1            | ClickHouse     | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix', 'timeout_ms' = '5000' }; | db TABLE      | CLICKHOUSE TABLE   | VIOLATED_CONSTRAINT |
+      | 3            | ClickHouse     | CREATE CLICKHOUSE CLIENT db CONFIG { 'addr' = '{{clickhouse_addr}}', 'user' = 'default', 'password' = 'nervix', 'timeout_ms' = '5000' }; | db TABLE      | CLICKHOUSE TABLE   | VIOLATED_CONSTRAINT |
+      | 1            | Postgres       | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                                                 | db TABLE      | POSTGRES TABLE     | 23514               |
+      | 3            | Postgres       | CREATE POSTGRES CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{postgres_addr}}' };                                                 | db TABLE      | POSTGRES TABLE     | 23514               |
+      | 1            | MySQL          | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                                       | db TABLE      | MYSQL TABLE        | 3819 (HY000)        |
+      | 3            | MySQL          | CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };                                                       | db TABLE      | MYSQL TABLE        | 3819 (HY000)        |
+      | 1            | MongoDB        | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };                            | db COLLECTION | MONGODB COLLECTION | 121                 |
+      | 3            | MongoDB        | CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mongodb_addr}}', 'database' = 'nervix' };                            | db COLLECTION | MONGODB COLLECTION | 121                 |
 
   @emitter_batch_databases @database_batch_conflicts
   Scenario Outline: A <connector_body> conflict policy resolves a key repeated inside one batch

@@ -368,8 +368,14 @@ impl EmitterRecord {
         self
     }
 
-    pub fn rejected(&self, message: String) -> RejectedEmitterMember<EmitterRecordId> {
-        RejectedEmitterMember::external(self.id, self.occurred_at, message)
+    /// The rejection of this record its outside system refused, with the code that system gave
+    /// the refusal, or `None` where its answer carries no code.
+    pub fn rejected(
+        &self,
+        message: String,
+        external_code: Option<ExternalErrorCode>,
+    ) -> RejectedEmitterMember<EmitterRecordId> {
+        RejectedEmitterMember::external(self.id, self.occurred_at, message, external_code)
     }
 }
 
@@ -392,8 +398,14 @@ pub struct EmitterHttpRequest {
 }
 
 impl EmitterHttpRequest {
-    pub fn rejected(&self, message: String) -> RejectedEmitterMember<EmitterRecordId> {
-        RejectedEmitterMember::external(self.id, self.occurred_at, message)
+    /// The rejection of this request its outside system refused, with the code that system gave
+    /// the refusal, or `None` where its answer carries no code.
+    pub fn rejected(
+        &self,
+        message: String,
+        external_code: Option<ExternalErrorCode>,
+    ) -> RejectedEmitterMember<EmitterRecordId> {
+        RejectedEmitterMember::external(self.id, self.occurred_at, message, external_code)
     }
 }
 
@@ -415,8 +427,14 @@ pub struct EmitterRowRequest {
 }
 
 impl EmitterRowRequest {
-    pub fn rejected(&self, message: String) -> RejectedEmitterMember<EmitterRecordId> {
-        RejectedEmitterMember::external(self.id, self.occurred_at, message)
+    /// The rejection of this request its outside system refused, with the code that system gave
+    /// the refusal, or `None` where its answer carries no code.
+    pub fn rejected(
+        &self,
+        message: String,
+        external_code: Option<ExternalErrorCode>,
+    ) -> RejectedEmitterMember<EmitterRecordId> {
+        RejectedEmitterMember::external(self.id, self.occurred_at, message, external_code)
     }
 }
 
@@ -455,8 +473,16 @@ pub struct RejectedEmitterMember<Id> {
 }
 
 impl<Id> RejectedEmitterMember<Id> {
-    /// A record the external system itself refused.
-    pub fn external(id: Id, occurred_at: Timestamp, message: String) -> Self {
+    /// A record the external system itself refused, with the code that system gave the refusal in
+    /// its own spelling, which the error route reads as `error.external_code`, or `None` where the
+    /// system's answer carries no code. The connector takes the code from the typed value its
+    /// driver gave the answer, never from the answer's text.
+    pub fn external(
+        id: Id,
+        occurred_at: Timestamp,
+        message: String,
+        external_code: Option<ExternalErrorCode>,
+    ) -> Self {
         Self::rejected(
             id,
             RejectedErrorClass::Refused,
@@ -464,11 +490,13 @@ impl<Id> RejectedEmitterMember<Id> {
             message,
             MessageErrorOperation::Publish,
             std::iter::empty(),
+            external_code,
         )
     }
 
     /// A record whose own request measures more than the emitter's `MAX SIZE`, which the connector
-    /// found by measuring the record alone. It never reaches the destination.
+    /// found by measuring the record alone. It never reaches the destination, so no outside
+    /// system gives it a code.
     pub fn oversize(id: Id, occurred_at: Timestamp, message: String) -> Self {
         Self::rejected(
             id,
@@ -477,11 +505,12 @@ impl<Id> RejectedEmitterMember<Id> {
             message,
             MessageErrorOperation::Encode,
             std::iter::empty(),
+            None,
         )
     }
 
     /// A record whose mapped values the connector's own validation refused, naming the fields that
-    /// carry them.
+    /// carry them. The connector refused it itself, so no outside system gives it a code.
     pub fn invalid(
         id: Id,
         occurred_at: Timestamp,
@@ -495,14 +524,8 @@ impl<Id> RejectedEmitterMember<Id> {
             message,
             MessageErrorOperation::Values,
             fields,
+            None,
         )
-    }
-
-    /// This rejection with the code its external system gave the refusal, in that system's own
-    /// spelling, which the error route reads as `error.external_code`.
-    pub fn with_external_code(mut self, code: ExternalErrorCode) -> Self {
-        self.error.external_code = Some(code);
-        self
     }
 
     fn rejected(
@@ -512,6 +535,7 @@ impl<Id> RejectedEmitterMember<Id> {
         message: String,
         operation: MessageErrorOperation,
         fields: impl IntoIterator<Item = FieldPath>,
+        external_code: Option<ExternalErrorCode>,
     ) -> Self {
         Self {
             id,
@@ -523,7 +547,7 @@ impl<Id> RejectedEmitterMember<Id> {
                 operation_index: None,
                 fields: fields.into_iter().collect(),
                 occurred_at,
-                external_code: None,
+                external_code,
             },
         }
     }
