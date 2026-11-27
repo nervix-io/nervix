@@ -1,9 +1,11 @@
-//! Every service of both host handles, reached by the fake connectors a host opened with them.
+//! Every service of the host handles, reached by the fake connectors a host opened with them.
 //!
 //! Layer: test harness.
 //! - **Owns.** The checks that each service behind an ingestor's and an emitter's host handle
 //!   reaches the connector that was opened with the handle, that a service the host did not
-//!   provide is refused with its typed reason, and that a leased pooled client publishes its waits.
+//!   provide is refused with its typed reason, that a leased pooled client publishes its waits,
+//!   and that the handles of a pooled client and of a partition inspector hand over their node's
+//!   own services.
 //! - **Depends on.** The fake connectors and hosts and the contract they implement.
 //! - **Must not know.** Runtime internals or real transports.
 
@@ -543,4 +545,20 @@ async fn a_pool_opens_through_the_services_its_node_provides_and_names_one_it_la
     .assured("the node provides its resolver");
     assert!(resolved.opening.resolved_through_node);
     assert_eq!(resolved.opening.bounds, bounds());
+}
+
+/// A partition inspector runs outside every ingestor instance, so it asks its own handle, which
+/// hands over the node's own executor and the node's own outward TLS policy publication.
+#[nervix_primitives::test]
+async fn a_partition_inspector_reaches_its_nodes_executor_and_tls_policy_through_its_handle() {
+    let executor = Executor::default();
+    let tls_policy = OutwardTlsPolicy::default();
+
+    let host = PartitionInspectorHost::new(executor.clone(), tls_policy.clone());
+
+    assert!(is_the_nodes_executor(host.executor(), &executor));
+    assert!(
+        StdArc::ptr_eq(&host.tls_policy().provider(), &tls_policy.provider()),
+        "the handle hands over the node's own policy publication"
+    );
 }

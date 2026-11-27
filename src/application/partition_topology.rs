@@ -2,7 +2,8 @@
 //!
 //! Layer: control plane.
 //! - **Owns.** Branch observation lifetimes, captured-input publication and leader-tenure fencing.
-//! - **Depends on.** Pure source/grouping plans, connector metadata inspectors and consensus.
+//! - **Depends on.** Pure source/grouping plans, connector partition inspectors with the host handle
+//!   it builds for them from the node's executor and outward TLS policy, and consensus.
 //! - **Must not know.** Record routing, broker offset ownership, branch actors or key state.
 
 #![cfg_attr(
@@ -17,7 +18,7 @@ use std::{collections::BTreeMap, num::NonZeroU32};
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
-use nervix_connector::ClientResourceMounts;
+use nervix_connector::{ClientResourceMounts, PartitionInspectorHost};
 use nervix_connector_kafka::TopicPartitionInspector;
 use nervix_connector_pulsar::PulsarTopicPartitionInspector;
 use nervix_consensus::{DomainPlanningInputs, LeaderTenure};
@@ -153,6 +154,10 @@ impl ConnectedSource {
             .runtime
             .resolve_client_config(domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(context)?;
+        let host = PartitionInspectorHost::new(
+            service.inner.runtime.executor().clone(),
+            service.inner.runtime.outward_tls().clone(),
+        );
         let observer = match &spec.source {
             PartitionSourcePlan::Kafka(KafkaPartitionSourcePlan::Topic { topic, .. }) => {
                 Observer::Kafka {
@@ -163,7 +168,7 @@ impl ConnectedSource {
                             domain.as_str(),
                             spec.ingestor.as_str()
                         ),
-                        service.inner.runtime.executor().clone(),
+                        &host,
                     )
                     .await
                     .change_context_lazy(context)?,
@@ -172,13 +177,9 @@ impl ConnectedSource {
             }
             PartitionSourcePlan::Pulsar(PulsarPartitionSourcePlan::Topic { topic, .. }) => {
                 Observer::Pulsar(
-                    PulsarTopicPartitionInspector::connect(
-                        &resolved.entries,
-                        topic,
-                        service.inner.runtime.outward_tls(),
-                    )
-                    .await
-                    .change_context_lazy(context)?,
+                    PulsarTopicPartitionInspector::connect(&resolved.entries, topic, &host)
+                        .await
+                        .change_context_lazy(context)?,
                 )
             }
         };

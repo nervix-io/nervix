@@ -17,6 +17,7 @@ use meticulous::ResultExt as _;
 use nervix_connector::{
     BrokerIngestorConnector as _, DomainOffsetInitialization, DomainOffsetPosition,
     DomainOffsetResult, DomainOffsetServices, DomainOffsets, IngestorConnector, IngestorHost,
+    OutwardTlsPolicy, PartitionInspectorHost,
 };
 use nervix_connector_fake::FakeIngestorHost;
 use nervix_execution::{AdmissionError, Executor, MemoryClass, StorageClass};
@@ -49,7 +50,7 @@ async fn an_admitted_partition_inspection_preserves_a_named_missing_topic() {
     let inspector = TopicPartitionInspector::new(
         &plan.config,
         "metadata-missing-topic".to_string(),
-        Executor::default(),
+        &PartitionInspectorHost::new(Executor::default(), OutwardTlsPolicy::default()),
     )
     .await
     .assured("the inspector accepts the test broker configuration");
@@ -72,6 +73,36 @@ async fn an_admitted_partition_inspection_preserves_a_named_missing_topic() {
             .await
             .assured("the same inspector observes the provisioned topic"),
         vec![0]
+    );
+}
+
+/// A partition inspector takes its executor from its host handle: its metadata lookup is one job
+/// admitted on the executor the handle hands over.
+#[nervix_primitives::test]
+async fn a_partition_inspection_runs_its_lookup_on_the_executor_its_handle_hands_over() {
+    let broker = cluster();
+    let executor = Executor::default();
+    let plan = group_plan(&broker, KafkaGroupCommit::EachAcknowledgedBatch);
+    let inspector = TopicPartitionInspector::new(
+        &plan.config,
+        "metadata-through-the-handle".to_string(),
+        &PartitionInspectorHost::new(executor.clone(), OutwardTlsPolicy::default()),
+    )
+    .await
+    .assured("the inspector accepts the test broker configuration");
+    let before = executor.snapshot().connector_storage;
+
+    let partitions = inspector
+        .partitions("orders")
+        .await
+        .assured("the mock broker serves the test topic's metadata");
+
+    assert_eq!(partitions, vec![0]);
+    let after = executor.snapshot().connector_storage;
+    assert_eq!(
+        after.admitted,
+        before.admitted + 1,
+        "the lookup is one job of the handle's executor: {after:?}"
     );
 }
 

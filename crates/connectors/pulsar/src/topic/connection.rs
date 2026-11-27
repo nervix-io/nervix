@@ -298,4 +298,4 @@ impl<'a> PulsarClientConnection<'a> {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 #[path = "connection_tests.rs"]
-mod tests;
+pub(super) mod tests;
