@@ -1493,7 +1493,15 @@ streams the management connection reserves for one round trip. A held sender kee
 and its channel, and holds no grant and no memory on the receiver. The hold ends when the receiver
 grants the delivery, refuses it permanently, leaves the cluster, or the delivery's route changes or
 its admission bound passes. A subscriber node that holds a subscription fan-out back therefore holds
-the relay owner's fan-out back with it, as a `BLOCKING` session's full queue does.
+the relay owner's fan-out back with it, as a `BLOCKING` session's full queue does. A held
+subscription fan-out also ends once the subscription interest the owner sees published no longer
+lists that node for the relay, as when the node's last subscription to the relay is deleted: nothing
+there takes the batch any more. The owner gives that delivery up where it stands, without waiting
+for room on the node, the transport asks the node to cancel whatever the delivery started there,
+and the fan-out goes on to the next interested node. The publication puts each index in place
+before it announces it, and the owner marks the announcements it saw before it reads the index, so
+no withdrawal is missed; the production-owner Shuttle check
+`shuttle_a_withdrawal_racing_a_relay_owners_wait_is_never_missed` races a withdrawal with that wait.
 
 Storing a delivery's record acknowledgements waits for room in the sender's own relay budget the
 way a receiver's watch charge does: it reads the budget every 10 milliseconds, registers for no
@@ -1635,7 +1643,12 @@ and its dispatch permits, which the installer and any other change take without 
 waits until the installation retires its channel, until membership lists the former owner live
 again, as a voter that returns within the failover grace keeps its work, or until its admission
 bound passes. Its producer then delivers the rows to the unit's owner on the current route, which is
-the returned owner when the route never changed, and only the admission bound fails them. A delivery that
+the returned owner when the route never changed, and only the admission bound or this node's own stop
+fails them. A node that stops awaits no such route: when every node stops, failover publishes none,
+and the node's save holds its installation turn, so none would reach it while it saves. Once the
+node's intake closes, a delivery that finds its owner gone, or already waits because of that, fails
+its rows at once, as work that reaches a peer after that peer saved is negatively acknowledged; see
+[Saving What The Node Holds](shutdown.md#saving-what-the-node-holds). A delivery that
 may have reached the former owner uses the same cancellation operation, asked again until the
 former owner answers, membership removes it, or the delivery's admission bound passes. The forced
 change follows membership's verdict on that owner, so the delivery need not wait for the fenced

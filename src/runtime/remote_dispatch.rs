@@ -134,6 +134,10 @@ pub(super) enum RemoteDispatchError {
         target: ClusterNodeName,
         timeout: Duration,
     },
+    /// The receiver left the cluster before the delivery reached it, and this node is stopping,
+    /// so the delivery awaits no route that replaces the receiver.
+    #[error("this node is stopping, so it awaits no route that replaces node '{target}'")]
+    ReceiverLeftWhileStopping { target: ClusterNodeName },
     #[error("failed to cancel relay delivery {sequence} on node '{target}'")]
     AdmissionCancellation {
         target: ClusterNodeName,
@@ -330,6 +334,10 @@ pub(super) struct RemoteDispatcher {
     pub(super) registry: Arc<RemoteDispatchRegistry>,
     /// The same fault seams the attaching runtime holds.
     pub(super) fault_injection: ConfiguredFaultInjection,
+    /// The attaching runtime's intake, which closes once the node stops and never reopens.
+    pub(super) local_intake: watch::Receiver<LocalIntake>,
+    /// The cluster's subscription interest publication, kept from the moment the node attached.
+    pub(super) subscription_interest: cluster::SubscriptionInterestWatch,
 }
 
 /// An outbound delivery retains every registration until admission, or resolves its held shares
@@ -1046,39 +1054,58 @@ impl RemoteDispatcher {
             let deadline = self.delivery_deadline(timing);
             let delivery = outbound_slot.next_delivery_with_policy(timing);
             // A subscriber node that applies backpressure holds the relay owner's fan-out back,
-            // as a BLOCKING session's full queue does: the delivery ends only when the node leaves
-            // the cluster or the delivery's admission bound passes.
-            if let Err(error) = self
-                .dispatch_sliced_relay_payload(
-                    node_id,
-                    RelayPayload {
-                        ack_timing: timing,
-                        decoded_bytes,
-                        delivery,
-                        kind: RelayPayloadKind::SubscriptionFanout,
-                        domain: domain.clone(),
-                        relay: relay.clone(),
-                        unit,
-                        key: BranchKey::to_remote_key(&batch.key),
-                        batch_ipc: batch_ipc.clone(),
-                        metadata: batch.metadata.to_remote(),
-                        acks: vec![None; batch.acks.len()],
-                        admission: None,
-                    },
-                    &batch.batch,
-                    RelayDeliveryChannel::new(&outbound_slot, None),
-                    deadline,
-                    None,
-                )
-                .await
-            {
-                warn!(
+            // as a BLOCKING session's full queue does. The delivery ends sooner only when the node
+            // withdraws its interest in the relay, as its last subscription to the relay ends,
+            // when it leaves the cluster, or when the delivery's admission bound passes. A node
+            // that withdrew takes nothing more, so its delivery is given up where it stands: the
+            // transport asks the node on its own to cancel whatever the delivery started there,
+            // and the fan-out goes on to the next node.
+            let withdrawn = self.subscription_interest.until_withdrawn(
+                node_id,
+                domain.as_str(),
+                relay.as_str(),
+            );
+            let sending = self.dispatch_sliced_relay_payload(
+                node_id,
+                RelayPayload {
+                    ack_timing: timing,
+                    decoded_bytes,
+                    delivery,
+                    kind: RelayPayloadKind::SubscriptionFanout,
+                    domain: domain.clone(),
+                    relay: relay.clone(),
+                    unit,
+                    key: BranchKey::to_remote_key(&batch.key),
+                    batch_ipc: batch_ipc.clone(),
+                    metadata: batch.metadata.to_remote(),
+                    acks: vec![None; batch.acks.len()],
+                    admission: None,
+                },
+                &batch.batch,
+                RelayDeliveryChannel::new(&outbound_slot, None),
+                deadline,
+                None,
+            );
+            let sent = nervix_primitives::select! {
+                biased;
+                () = withdrawn => None,
+                result = sending => Some(result),
+            };
+            match sent {
+                None => debug!(
+                    target_node = %node_id,
+                    domain = domain.as_str(),
+                    relay = relay.as_str(),
+                    "a subscriber node withdrew its interest in the relay, so the fan-out to it ended"
+                ),
+                Some(Ok(())) => {}
+                Some(Err(error)) => warn!(
                     target_node = %node_id,
                     domain = domain.as_str(),
                     relay = relay.as_str(),
                     error = %format_args!("{error:#}"),
                     "failed to dispatch remote subscription payload"
-                );
+                ),
             }
         }
     }
@@ -1369,12 +1396,15 @@ impl Runtime {
         // The transport is how this node learns that a receiver left or its run ended, which
         // gives up the acknowledgements that receiver admitted.
         let membership = interconnect.clone();
+        let subscription_interest = cluster.subscription_interest_watch();
         let dispatcher = RemoteDispatcher {
             cluster,
             interconnect,
             executor: self.inner.executor.clone(),
             registry: self.inner.remote_dispatch.clone(),
             fault_injection: self.inner.fault_injection.clone(),
+            local_intake: self.inner.local_intake.subscribe(),
+            subscription_interest,
         };
         self.inner
             .remote_dispatcher

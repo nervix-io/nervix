@@ -660,6 +660,15 @@ other. When every node terminates at once, each finds no other node to take its 
 what it holds and stops, and work that reaches a peer after that peer saved is negatively
 acknowledged.
 
+A delivery from this node to a relay owner that left the cluster before the delivery reached it is
+not work in motion for a stopping node. A node that serves holds such a delivery until failover
+installs the route that replaces that owner, as [Cancellation And Branch
+Changes](interconnect.md#cancellation-and-branch-changes) describes. A stopping node awaits no such
+route: when every node stops, failover publishes none, and the save holds the node's installation
+turn, so none would reach the node while it saves. Once this node's intake closes, such a delivery
+therefore fails its rows at once, including one that was already waiting, so neither the node's
+moves nor its save wait for it.
+
 ## Moving The Node's Units
 
 The moves begin once the save ends, and the shutdown timeout bounds them. When another live, schedulable Raft voter exists, the node's units move there through the planned

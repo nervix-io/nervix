@@ -4,7 +4,8 @@ Feature: A relay owner fails over while another node forwards to it
   failover moves the relay to a surviving node, and every node installs the new route on its own.
   A batch a node was still forwarding to the stopped owner never reached that owner, so it goes to
   the relay's new owner instead, exactly once, whether the node installs the new route before it
-  learns that the owner left the cluster or after.
+  learns that the owner left the cluster or after. A node that stops awaits no such route: no route
+  reaches a node that saves what it holds, so it gives the batch up and its stop ends.
 
   Scenario: A post forwarded to a stopped relay owner reaches the owner failover installs
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -240,3 +241,68 @@ Feature: A relay owner fails over while another node forwards to it
       key={"tenant":"beta"} payload={"sequence":2,"tenant":"beta"}
       """
     And within "60s" the background Plexus execution reaches a terminal outcome
+
+  Scenario: A node that stops gives up a post whose stopped relay owner nothing replaces
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And graceful shutdown drain is enabled
+    And a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    Then the current leader node is saved as placeholder "leader"
+    And a node other than placeholder "leader" is saved as placeholder "owner"
+    And a node other than placeholders "leader" and "owner" is saved as placeholder "forwarder"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA wire_record (
+        tenant STRING,
+        sequence I64
+      );
+      CREATE WIRE JSON SCHEMA wire_record_json MODE STRICT (
+        tenant string,
+        sequence integer
+      );
+      CREATE WIRE JSON CODEC wire_record_codec
+        FROM WIRE SCHEMA wire_record_json
+        TO SCHEMA wire_record;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
+      CREATE VHOST edge failover-forward-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';
+      CREATE HTTP ENDPOINT INGESTOR wire_ingestor
+        FROM wire_ingress MODE ACK MAX 8 ACK TIMEOUT 30s
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wire_record_codec
+        TO wire_records INHERIT ALL
+        BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      RELOCATE RELAY wire_records ONTO NODE {{owner}} IGNORE PREFERENCES;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=relay name=wire_records owner={{owner}}
+      """
+    # Neither the owner's stop nor failover places the relay on a cordoned node, so once the owner
+    # stops, nothing replaces it.
+    When these Plexus commands are executed on the leader node
+      """
+      CORDON NODE {{leader}};
+      CORDON NODE {{forwarder}};
+      """
+    Given relay payloads for domain "{{domain}}" are held before their grant requests
+    When one http payload begins posting in the background with a completed graph acknowledgement to node "{{forwarder}}" host "failover-forward-{{test_id}}.example.com" path "/records"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then a relay payload for domain "{{domain}}" is waiting before its grant request
+    When node "{{owner}}" is gracefully stopped
+    Then node "{{forwarder}}" stops counting node "{{owner}}" as a live peer
+    # The forward finds its owner gone while its node still serves, so it waits for a route that
+    # replaces that owner. The node's stop gives that wait up, so the stop ends within its own
+    # course rather than when the forward's admission bound passes, five minutes on.
+    When relay payload grant requests for domain "{{domain}}" are released
+    And node "{{forwarder}}" is gracefully stopped
+    Then the last cluster operation completes within "30s"
+    And node "{{forwarder}}" reports that its last shutdown finished cleanly

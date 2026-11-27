@@ -225,8 +225,18 @@ impl SubscriptionInterestPublication {
 
     fn publish(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
         let index = subscription_interests_from_live_nodes(nodes);
-        self.index.store(StdArc::new(index));
         let runs = membership::live_incarnations(nodes);
+        self.install(index, runs);
+    }
+
+    /// Puts `index` and `runs` in place, then announces them, so a waiter that marks the
+    /// announcements it saw before it reads the index misses none.
+    fn install(
+        &self,
+        index: SubscriptionInterestIndex,
+        runs: BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+    ) {
+        self.index.store(StdArc::new(index));
         self.live_runs.store(StdArc::new(runs));
         self.changed.send_replace(());
     }
@@ -254,6 +264,48 @@ impl SubscriptionInterestPublication {
             changes.changed().await.assured(
                 "the subscription-interest publication retains its change sender for the server \
                  lifetime",
+            );
+        }
+    }
+}
+
+/// What a relay owner keeps of the subscription interest publication, from the moment it attaches
+/// to its cluster: the published index and a receiver of its announcements.
+#[derive(Clone)]
+pub(crate) struct SubscriptionInterestWatch {
+    publication: StdArc<SubscriptionInterestPublication>,
+    changes: watch::Receiver<()>,
+}
+
+impl SubscriptionInterestWatch {
+    /// Resolves once the published index no longer lists `subscriber` for `relay` of `domain`, as
+    /// when that node's last subscription to the relay ended. A node that advertises a newer
+    /// interest in the relay is still listed.
+    pub(crate) async fn until_withdrawn(
+        &self,
+        subscriber: &ClusterNodeName,
+        domain: &str,
+        relay: &str,
+    ) {
+        let mut changes = self.changes.clone();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            // The publication announces an index once it is in place, so the announcements seen
+            // are marked before the index is read: a publication after the read wakes the wait.
+            changes.mark_unchanged();
+            let listed = {
+                let index = self.publication.load();
+                match index.nodes(domain, relay) {
+                    Some(nodes) => nodes.contains_key(subscriber),
+                    None => false,
+                }
+            };
+            if !listed {
+                return;
+            }
+            changes.changed().await.assured(
+                "this watch holds the subscription-interest publication, and with it the change \
+                 sender, for as long as it lives",
             );
         }
     }
@@ -1910,6 +1962,16 @@ impl ClusterHandle {
         self.subscription_interest.load()
     }
 
+    /// The subscription interest publication as a relay owner keeps it, taken once as the owner's
+    /// node attaches to its cluster, so a fan-out that a subscriber node holds back can end once
+    /// that node withdraws its interest.
+    pub(crate) fn subscription_interest_watch(&self) -> SubscriptionInterestWatch {
+        SubscriptionInterestWatch {
+            publication: self.subscription_interest.clone(),
+            changes: self.subscription_interest.changed.subscribe(),
+        }
+    }
+
     /// Wait until this node's live Chitchat view contains the interest advertised by the exact
     /// subscriber incarnation at or beyond the requested interest key version. The interconnect
     /// request that calls this method owns the deadline.
@@ -2208,3 +2270,6 @@ pub fn derive_peer_addr(grpc_addr: SocketAddr) -> Option<SocketAddr> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "shuttle"))]
+mod subscription_interest_shuttle_tests;

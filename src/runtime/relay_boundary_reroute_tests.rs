@@ -7,7 +7,7 @@
 //!   a producer whose own branch ended fails such a delivery instead, and that a delivery whose
 //!   owner left before the delivery reached it waits, holding no dispatch gate, for the route that
 //!   replaces that owner or for the owner's return, and fails only when its admission bound
-//!   passes.
+//!   passes or its node is stopping.
 //! - **Depends on.** The runtime relay boundary, a loopback cluster and the runtime test fixtures.
 //! - **Must not know.** Production control-plane orchestration or external connector behavior.
 
@@ -481,6 +481,67 @@ async fn a_delivery_whose_owner_left_fails_only_when_its_admission_bound_passes(
         reason.contains("waiting for relay admission from node 'node-2'")
             && reason.contains("never reached node 'node-2'"),
         "the failure names the bound and the owner the delivery never reached: {reason}"
+    );
+}
+
+/// A stopping node awaits no route that replaces an owner that left. Its save holds its
+/// installation turn, so no such route reaches it before it stops, and when every node stops, none
+/// is published at all. A delivery that finds its owner gone on a stopping node therefore fails at
+/// once, as work that reaches a peer after that peer saved does, and the failure says why.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_stopping_node_fails_a_delivery_whose_owner_left_at_once() {
+    let (runtime, services) = runtime_forwarding_to_a_departed_owner().await;
+    runtime.close_local_intake();
+    publish_membership(&runtime, &["node-1"]);
+    let (batch, _acks, completion) = acknowledged_batch();
+
+    let unadmitted = timeout(
+        Duration::from_secs(5),
+        spawn_forward(&runtime, &services, batch),
+    )
+    .await
+    .expect("a stopping node awaits no route that replaces the owner that left")
+    .expect("the delivery task joins")
+    .expect_err("nothing replaces the owner that left on a stopping node");
+
+    assert_eq!(unadmitted.batch.batch().num_rows(), 1);
+    let AckOutcome::NoAck(reason) = completion.wait().await else {
+        panic!("a delivery a stopping node gives up fails its record");
+    };
+    assert!(
+        reason.contains("this node is stopping") && reason.contains("never reached node 'node-2'"),
+        "the failure names the stop and the owner the delivery never reached: {reason}"
+    );
+}
+
+/// A delivery that already waits for the route that replaces an owner that left ends as its node
+/// begins stopping, instead of holding the node's stop until its admission bound passes.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_delivery_waiting_for_its_departed_owner_fails_once_its_node_begins_stopping() {
+    let (runtime, services) = runtime_forwarding_to_a_departed_owner().await;
+    publish_membership(&runtime, &["node-1"]);
+    let (batch, _acks, completion) = acknowledged_batch();
+    let forward = spawn_forward(&runtime, &services, batch);
+    sleep(Duration::from_millis(100)).await;
+    assert!(
+        !forward.is_finished(),
+        "a serving node's delivery waits for the route that replaces the owner that left"
+    );
+
+    runtime.close_local_intake();
+    let unadmitted = timeout(Duration::from_secs(5), forward)
+        .await
+        .expect("the wait ends as its node begins stopping")
+        .expect("the delivery task joins")
+        .expect_err("nothing replaces the owner that left on a stopping node");
+
+    assert_eq!(unadmitted.batch.batch().num_rows(), 1);
+    let AckOutcome::NoAck(reason) = completion.wait().await else {
+        panic!("a delivery a stopping node gives up fails its record");
+    };
+    assert!(
+        reason.contains("this node is stopping") && reason.contains("never reached node 'node-2'"),
+        "the failure names the stop and the owner the delivery never reached: {reason}"
     );
 }
 

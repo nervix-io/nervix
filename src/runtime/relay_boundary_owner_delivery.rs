@@ -7,8 +7,8 @@
 //!   or carried on to the unit's owner on its current route, after a route change replaced the
 //!   one it was sent on or the owner that route names returned to the cluster it had left.
 //! - **Depends on.** The relay boundary's channels, routes and dispatch gates, the remote
-//!   dispatcher, and the interconnect's report of whether a send reached its receiver and of
-//!   whether membership lists that receiver.
+//!   dispatcher, the interconnect's report of whether a send reached its receiver and of whether
+//!   membership lists that receiver, and whether this node's intake closed because it stops.
 //! - **Must not know.** Plexus text, placement policy, transactions or connector internals.
 
 #![cfg_attr(
@@ -52,6 +52,10 @@ enum DepartedOwnerWait {
     ChannelEnded,
     /// Membership lists the owner live again.
     OwnerReturned,
+    /// This node is stopping. No route that replaces the owner is awaited: when every node stops,
+    /// failover publishes none, and a stopping node's save holds its installation turn, so none
+    /// would reach the node while it saves.
+    NodeStopping,
     /// The delivery's admission bound passed first.
     BoundPassed,
 }
@@ -265,9 +269,9 @@ impl RelayBoundaryServices {
             // it, and this node has not installed the route that replaces that owner yet, which
             // failover publishes and every node installs on its own. Nothing of the delivery
             // reached the owner, so it waits for that route, or for the owner's return, within its
-            // admission bound. It gives its channel and its dispatch gates back first: the
-            // installation of that route, or of any other change, takes them without waiting for
-            // this delivery.
+            // admission bound, unless this node is stopping. It gives its channel and its dispatch
+            // gates back first: the installation of that route, or of any other change, takes
+            // them without waiting for this delivery.
             drop(slot);
             drop(permits);
             match dispatcher
@@ -276,6 +280,11 @@ impl RelayBoundaryServices {
             {
                 DepartedOwnerWait::ChannelEnded => {}
                 DepartedOwnerWait::OwnerReturned => owner_returned = true,
+                DepartedOwnerWait::NodeStopping => {
+                    error = error.change_context(RemoteDispatchError::ReceiverLeftWhileStopping {
+                        target: owner_node.clone(),
+                    });
+                }
                 DepartedOwnerWait::BoundPassed => {
                     error = error.change_context(RemoteDispatchError::AdmissionTotalTimeout {
                         target: owner_node.clone(),
@@ -345,7 +354,8 @@ impl RemoteDispatcher {
     /// Waits, for a delivery that found `owner` gone from membership before any send of the
     /// delivery reached that owner, until the delivery can carry on or must end: `channel` ends,
     /// as the route change that replaces the owner or the end of the delivery's producer ends it,
-    /// membership lists `owner` live again, or `deadline`, the delivery's admission bound, passes.
+    /// membership lists `owner` live again, this node is stopping, or `deadline`, the delivery's
+    /// admission bound, passes. A node already stopping ends the wait at once.
     async fn wait_for_departed_owner(
         &self,
         owner: &ClusterNodeName,
@@ -356,8 +366,22 @@ impl RemoteDispatcher {
             biased;
             () = channel.cancelled() => DepartedOwnerWait::ChannelEnded,
             () = self.interconnect.target_returned(owner) => DepartedOwnerWait::OwnerReturned,
+            () = self.node_stops() => DepartedOwnerWait::NodeStopping,
             () = nervix_primitives::time::sleep_until(deadline) => DepartedOwnerWait::BoundPassed,
         }
+    }
+
+    /// Resolves once this node is stopping: its intake closed, which never reopens, or the runtime
+    /// that owns the intake ended.
+    async fn node_stops(&self) {
+        let mut intake = self.local_intake.clone();
+        let closed = intake
+            .wait_for(|intake| *intake == LocalIntake::Closed)
+            .await;
+        closed.discarded(
+            "a closed intake and an ended runtime both mean the node is stopping, and the value \
+             seen is not needed",
+        );
     }
 }
 

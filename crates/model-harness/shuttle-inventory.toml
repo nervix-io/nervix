@@ -176,6 +176,7 @@ checks = [
   "application::domain_clock::attachments::tests::modeled::shuttle_an_attachment_survives_a_preceding_availability_snapshot",
   "application::domain_clock::attachments::tests::modeled::shuttle_a_duplicate_attachment_survives_a_preceding_availability_snapshot",
   "cluster::peer_health_watcher::shuttle_tests::shuttle_a_policy_change_racing_a_retained_health_wait_is_never_missed",
+  "cluster::subscription_interest_shuttle_tests::shuttle_a_withdrawal_racing_a_relay_owners_wait_is_never_missed",
   "runtime::backup_capture_fence::shuttle_tests::shuttle_backup_cut_includes_pre_cut_branch_publication",
   "runtime::backup_state::branch_state_shuttle_tests::shuttle_a_forced_deduplicator_publication_holds_every_key_acknowledged_before_the_cut",
   "runtime::backup_state::branch_state_shuttle_tests::shuttle_a_forced_window_publication_holds_every_step_acknowledged_before_the_cut",
