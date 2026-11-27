@@ -5,9 +5,9 @@
 //! - **Owns.** Kafka consumer configuration, polling, headers and metadata, partition assignment,
 //!   offset acknowledgement in a consumer group or through the domain-owned offsets its host
 //!   keeps, partition inspection and consumer retirement.
-//! - **Depends on.** The connector contract and the host handle through which an instance takes
-//!   the bounded executor and its domain-owned offsets, Kafka vocabulary values, the primitive
-//!   boundary, `error-stack` and `rust-rdkafka`.
+//! - **Depends on.** The connector contract and the host handles through which an instance takes
+//!   the bounded executor and its domain-owned offsets and a partition inspector takes the bounded
+//!   executor, Kafka vocabulary values, the primitive boundary, `error-stack` and `rust-rdkafka`.
 //! - **Must not know.** Runtime offset-state types, domain execution maps, relays, branches,
 //!   schedules outside the typed Kafka partition schedule, or registry state.
 
@@ -64,8 +64,8 @@ use nervix_connector::{
     IngestMetadataValues, IngestRowHeaders, IngestTransportPosition, IngestorAckPolicy,
     IngestorBatch, IngestorBatchRequest, IngestorConnector, IngestorError, IngestorHost,
     IngestorMessage, IngestorReadCancellation, IngestorReadHold, IngestorResult, IngestorResume,
+    PartitionInspectorHost,
 };
-use nervix_execution::Executor;
 use nervix_models::{
     ClientConfigEntry, ConnectorKind, ExternalPartitionAssignment, IngestStartPosition,
     IngestorMetadataType, KAFKA_COMMIT_ANSWER_DEADLINE, KafkaTopicName, Timestamp,
@@ -1922,15 +1922,26 @@ pub struct TopicPartitionInspector {
     consumer: KafkaConsumerHandle,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::host_services(
+        executor,
+        reason = "a Kafka partition inspector admits its consumer's metadata lookups and \
+                  destruction through its node's bounded executor"
+    )
+)]
 impl TopicPartitionInspector {
+    /// Opens the inspector's consumer under `group_id`, taking from `host` the executor its
+    /// metadata lookups and the consumer's destruction run on.
     pub async fn new(
         config: &[ClientConfigEntry],
         group_id: String,
-        executor: Executor,
+        host: &PartitionInspectorHost,
     ) -> Result<Self, Report<KafkaTopicIngestorError>> {
         let client_config = consumer_config(config, &group_id, false);
+        let executor = host.executor();
         let control = KafkaControl::new(&client_config, executor.clone())?;
-        let consumer = KafkaConsumerHandle::create(&client_config, executor).await?;
+        let consumer = KafkaConsumerHandle::create(&client_config, executor.clone()).await?;
         Ok(Self { control, consumer })
     }
 

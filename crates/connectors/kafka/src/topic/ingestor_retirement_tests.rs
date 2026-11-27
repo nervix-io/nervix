@@ -15,7 +15,7 @@ use std::{
 };
 
 use meticulous::ResultExt as _;
-use nervix_connector::IngestorConnector as _;
+use nervix_connector::{IngestorConnector as _, OutwardTlsPolicy, PartitionInspectorHost};
 use nervix_execution::{Executor, MemoryClass};
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::sync::oneshot;
@@ -81,7 +81,8 @@ async fn a_dropped_ingestor_destroys_its_joined_consumer_on_a_connector_worker()
     .await;
 }
 
-/// A partition inspector lets the last handle go when its watch ends.
+/// A partition inspector lets the last handle go when its watch ends, and its consumer is
+/// destroyed on the executor its host handle handed over.
 #[nervix_primitives::test]
 async fn a_dropped_partition_inspector_destroys_its_consumer_on_a_connector_worker() {
     let broker = cluster();
@@ -92,7 +93,7 @@ async fn a_dropped_partition_inspector_destroys_its_consumer_on_a_connector_work
             value: broker.bootstrap_servers(),
         }],
         "orders-inspector".to_string(),
-        executor.clone(),
+        &PartitionInspectorHost::new(executor.clone(), OutwardTlsPolicy::default()),
     )
     .await
     .assured("the inspector accepts the test broker's configuration");

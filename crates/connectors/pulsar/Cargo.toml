@@ -13,6 +13,7 @@ default = []
 shuttle = [
   "nervix-connector/shuttle",
   "nervix-connector-fake/shuttle",
+  "nervix-execution/shuttle",
   "nervix-primitives/shuttle",
 ]
 
@@ -36,5 +37,6 @@ url = { workspace = true }
 [dev-dependencies]
 bolero = { workspace = true }
 nervix-connector-fake = { workspace = true }
+nervix-execution = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 tokio-util = { workspace = true, features = ["codec"] }
