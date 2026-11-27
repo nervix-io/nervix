@@ -136,7 +136,9 @@ fn qualified_topic(config: &[ClientConfigEntry], topic: &PulsarTopicName) -> Str
     nervix_lint,
     nervix::error_boundary(
         outcome,
-        reason = "a refused message is a semantic per-record rejection the emitter answers with"
+        reason = "a refused message is a semantic per-record rejection the emitter answers with, \
+                  naming the broker's server error as its external code where the broker refused \
+                  it and none where the client did"
     )
 )]
 enum PulsarRecordError {
