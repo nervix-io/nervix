@@ -171,11 +171,13 @@ Resolution](./name-resolution.md#residual-resolution) lists.
 
 ### Host handles and declared services
 
-An ingestor or an emitter reaches its node only through its host handle: `IngestorHost` on the
-ingestor side and `EmitterHost` on the emitter side. A plan carries configuration and nothing else. No resolver,
-executor, TLS policy, pooled client, recorder, offset store or compiled protocol travels in a plan
-or a connector configuration, and no connector crate defines an interface for the host to
-implement.
+Every connector component reaches its node only through its host handle: `IngestorHost` on the
+ingestor side, `EmitterHost` on the emitter side, `PooledClientHost` for the pooled client the host
+opens before any emitter of its client exists, and `PartitionInspectorHost` for a partition
+inspector. A plan carries configuration and nothing else. No resolver, executor, TLS policy, pooled
+client, recorder, offset store or compiled protocol travels in a plan or a connector
+configuration, or as an argument of a function the host calls, and no connector crate defines an
+interface for the host to implement.
 
 The host builds an ingestor's handle for the exact unit before anything of its connector runs. It
 hands that one handle to `open`, to every `resume`, and to every read: a broker ingestor's
@@ -185,6 +187,18 @@ the handle in place of the service it needs. A connector takes a service where i
 keep what it took for as long as its instance lives. The handle is not the host's own loop
 interface: intake, quiesce, readiness and acknowledgement records stay with `IngestorLoopHost`,
 which no connector sees. An emitter is opened with its handle and keeps it.
+
+A partition inspector runs outside every ingestor instance. The leader opens one for each Kafka or
+Pulsar source whose partitions it observes, as [Inherited Partitions](./partitioning.md) describes,
+keeps it while it watches the source, and opens a new one after an observation fails. The host
+builds the inspector's `PartitionInspectorHost` from the node's bounded executor and committed
+outward TLS policy and hands it to the inspector's constructor: Kafka's
+`TopicPartitionInspector::new` takes from it the executor that runs its metadata lookups and its
+consumer's destruction, and Pulsar's `PulsarTopicPartitionInspector::connect` the TLS policy its
+client connects under. Neither inspector dials through the node's resolver, because each driver
+resolves broker names itself, as [Residual Resolution](./name-resolution.md#residual-resolution)
+lists, and neither publishes a status, an event or a measurement: the leader reports a failed
+observation under the ingestor's general error policy.
 
 Every public method of a handle hands over one service:
 
@@ -202,6 +216,9 @@ Every public method of a handle hands over one service:
 | `pool` | `pool::<K>` | Emitter | The pooled client the host leased for the emitter, as the [pooled-client service](#the-pooled-client-service) describes. |
 | `domain_offsets` | `domain_offsets` | Ingestor | The offsets an ingestor's domain keeps for it: a Kafka ingestor in `DOMAIN` offset mode reads, replaces and commits them through `DomainOffsets`, which the contract defines. |
 | `signaling` | `signaling_protocol::<P>` | Ingestor | The signaling protocol the host compiled for an ingestor that names one, as the shared value its connector reads. |
+
+`PooledClientHost` hands over `dns` and `executor`, and `PartitionInspectorHost` `executor` and
+`tls_policy`, through methods of the same names and with the same meaning.
 
 The instance's end is not its stop. A stop still ends an ingestor through `close` and an emitter
 through `finish` and `close`, and the token of `cancellation` is cancelled only afterwards: when the
@@ -245,8 +262,10 @@ list, and a call no contract covers. A narrower contract replaces a wider one in
 it, so the list beside an entity is the whole of what that entity's code reaches. The declaration
 is a static contract only: at run time the host hands over what it prepared, and
 [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts) owns how the rule resolves
-callers and what it does not see. The handle a pooled client opens through, `PooledClientHost`, is
-a host handle under the same rule. Harness code is outside it: a test asserts what a handle hands
+callers and what it does not see. The handles a pooled client and a partition inspector open
+through, `PooledClientHost` and `PartitionInspectorHost`, are host handles under the same rule:
+each pooled client declares what its `open` reaches, the Kafka inspector declares the executor and
+the Pulsar inspector the TLS policy. Harness code is outside it: a test asserts what a handle hands
 over, and the fake connectors stand in for any real one, so neither declares services.
 
 #### The pooled-client service
@@ -299,7 +318,8 @@ connector. `FakePooledClient` and `OtherFakePooledClient` are scripted pools of 
 that open through the pooled-client contract, and `FakePooledClientWaits` records the waits a
 lease publishes. The fake connectors keep the handle they were opened with, and the fake ingestor
 publishes its failed resumes and reads through the handle it is driven with when a test scripts it
-to report its own connection.
+to report its own connection. A test builds a `PooledClientHost` or a `PartitionInspectorHost`
+itself from the services it gives the handle, because neither handle hides a host type behind it.
 
 Finite publish scripts fail on an unexpected extra call. Repeating answers are explicit.
 Scripts distinguish accepted, rejected and unanswered members, infrastructure failures and
@@ -932,10 +952,11 @@ sequenceDiagram
 
 A connector runs on the host's asynchronous tasks and never blocks one. Synchronous work it does
 itself, such as writing or reading a local file, goes through the node's bounded executor. The
-emitter host supplies it as `EmitterHost::executor` and the ingestor host as
-`IngestorHost::executor`, the same node-owned handle. The connector chooses the storage or CPU class
-of its work and the memory it charges; the executor admits that work beside the rest of the node's,
-and a refusal is the connector's own typed failure. The Iceberg emitter appends to and reads its
+emitter host supplies it as `EmitterHost::executor`, the ingestor host as `IngestorHost::executor`,
+and the host of a pooled client or a partition inspector as `PooledClientHost::executor` or
+`PartitionInspectorHost::executor`, the same node-owned handle. The connector chooses the storage
+or CPU class of its work and the memory it charges; the executor admits that work beside the rest
+of the node's, and a refusal is the connector's own typed failure. The Iceberg emitter appends to and reads its
 Arrow IPC staging files on the filesystem storage workers. A staging write the node cannot take now
 fails the publish, which the host retries as it retries any other. A commit charges the bulk memory
 class for every staged byte it reads back before it reads them, or the whole class for a single

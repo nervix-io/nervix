@@ -7502,6 +7502,7 @@ dependencies = [
  "meticulous",
  "nervix-connector",
  "nervix-connector-fake",
+ "nervix-execution",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",

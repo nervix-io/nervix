@@ -3,7 +3,7 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Client entries, a loopback broker that answers the commands a test scripts, and the
-//!   count of attempts it saw.
+//!   count of attempts it saw. The partition inspector's tests script the same broker.
 //! - **Depends on.** The production client connection and the driver's wire codec.
 //! - **Must not know.** Ingestors, emitters, topics or a real broker.
 
@@ -37,7 +37,7 @@ use super::*;
 
 const TOPIC: &str = "persistent://public/default/events";
 
-fn entry(key: &str, value: &str) -> ClientConfigEntry {
+pub(crate) fn entry(key: &str, value: &str) -> ClientConfigEntry {
     ClientConfigEntry {
         key: key.to_string(),
         value: value.to_string(),
@@ -58,13 +58,13 @@ fn trust(config: &[ClientConfigEntry]) -> ServerCertificateTrust {
 }
 
 /// A loopback broker that hands every connection it accepts to `serve`, counting them.
-struct ScriptedBroker {
-    service_url: String,
+pub(crate) struct ScriptedBroker {
+    pub(crate) service_url: String,
     connections: Arc<AtomicUsize>,
 }
 
 impl ScriptedBroker {
-    async fn start<Serve, Serving>(serve: Serve) -> Self
+    pub(crate) async fn start<Serve, Serving>(serve: Serve) -> Self
     where
         Serve: Fn(Framed<TcpStream, PulsarCodec>) -> Serving + Send + 'static,
         Serving: Future<Output = ()> + Send + 'static,
@@ -98,14 +98,14 @@ impl ScriptedBroker {
     }
 }
 
-fn answer(command: BaseCommand) -> PulsarFrame {
+pub(crate) fn answer(command: BaseCommand) -> PulsarFrame {
     PulsarFrame {
         command,
         payload: None,
     }
 }
 
-fn connected() -> PulsarFrame {
+pub(crate) fn connected() -> PulsarFrame {
     answer(BaseCommand {
         r#type: i32::from(CommandType::Connected),
         connected: Some(CommandConnected {
@@ -130,7 +130,9 @@ fn refused(error: PulsarServerError, reason: &str) -> PulsarFrame {
 }
 
 /// The `CONNECT` a client opened its connection with.
-async fn read_connect(frames: &mut Framed<TcpStream, PulsarCodec>) -> Option<CommandConnect> {
+pub(crate) async fn read_connect(
+    frames: &mut Framed<TcpStream, PulsarCodec>,
+) -> Option<CommandConnect> {
     frames.next().await?.ok()?.command.connect
 }
 

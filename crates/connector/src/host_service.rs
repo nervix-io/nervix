@@ -7,13 +7,14 @@
 //! - **Depends on.** The vocabulary's connector kinds and typed reports.
 //! - **Must not know.** How a host provides a service, which connector asks for it, or any driver.
 //!
-//! An ingestor or an emitter reaches the node only through its host handle: `IngestorHost` on the
-//! ingestor side and `EmitterHost` on the emitter side. Every public method of a handle hands over one named
-//! service and says so in a `nervix::host_service` source contract. The code that calls one
-//! declares the services it reaches in a `nervix::host_services` contract on its own module, type
-//! or function, and the compiler analysis refuses a call to a service the narrowest such contract
-//! does not list. A plan therefore carries configuration only: no resolver, executor, pool,
-//! policy or recorder travels in one.
+//! Every connector component reaches the node only through its host handle: an ingestor through
+//! `IngestorHost`, an emitter through `EmitterHost`, a pooled client through `PooledClientHost` and
+//! a partition inspector through `PartitionInspectorHost`. Every public method of a handle hands
+//! over one named service and says so in a `nervix::host_service` source contract. The code that
+//! calls one declares the services it reaches in a `nervix::host_services` contract on its own
+//! module, type or function, and the compiler analysis refuses a call to a service the narrowest
+//! such contract does not list. A plan therefore carries configuration only: no resolver,
+//! executor, pool, policy or recorder travels in one.
 
 #![cfg_attr(
     nervix_lint,

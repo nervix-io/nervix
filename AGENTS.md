@@ -268,16 +268,18 @@ checklists.
   per-record outcomes and decides nothing about the graph. It reads no Model, only the typed plan
   the decision layer converts once, and only the server, the composition root, names every
   connector.
-- An ingestor or emitter reaches its node only through its host handle, `IngestorHost` or
-  `EmitterHost`, which the host hands to `open` and to every ingestor `resume` and read. The resolver, the bounded
-  executor, the outward TLS policy, the pooled client, status, readiness, recorders, the end of
-  the instance and an entity's own services (domain offsets, a compiled signaling protocol) are
-  typed services of the handle. A plan or connector configuration carries configuration only,
-  never a service, and no connector crate defines an interface for the host to implement: a
-  pooled client implements the contract's `PooledClient`, the host opens and leases it, and its
-  emitter takes the lease through `EmitterHost::pool`. A connector declares the services its code
-  reaches in a `nervix::host_services` source contract, and a refused service is a typed
-  `HostServiceError` beneath the step that needed it. [Host handles and declared
+- Every connector component reaches its node only through its host handle: an ingestor or emitter
+  through `IngestorHost` or `EmitterHost`, which the host hands to `open` and to every ingestor
+  `resume` and read, a pooled client through `PooledClientHost` and a partition inspector through
+  `PartitionInspectorHost`. The resolver, the bounded executor, the outward TLS policy, the
+  pooled client, status, readiness, recorders, the end of the instance and an entity's own
+  services (domain offsets, a compiled signaling protocol) are typed services of the handle. A
+  plan or connector configuration carries configuration only, never a service, and no connector
+  crate defines an interface for the host to implement: a pooled client implements the contract's
+  `PooledClient`, the host opens and leases it, and its emitter takes the lease through
+  `EmitterHost::pool`. A connector declares the services its code reaches in a
+  `nervix::host_services` source contract, and a refused service is a typed `HostServiceError`
+  beneath the step that needed it. [Host handles and declared
   services](docs/src/connector-contract.md#host-handles-and-declared-services) owns the services
   and the pooled-client service.
 - Models, plans and runtime composition nest connector, then entity. Every entity, a second one
