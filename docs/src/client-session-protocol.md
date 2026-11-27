@@ -2779,7 +2779,9 @@ Large replies use the ordinary reply-transfer and `ReplyTooLarge` contracts.
 
 ## State Inspection Envelope
 
-`CommandOutcome.state` carries `StateInspection`, independently of the display message. Its result
+`CommandOutcome.state` carries `StateInspection`, independently of the display message. [State
+Inspection](./state-inspection.md) owns what a read means: how it is answered, its counts, origins,
+continuations, refusals and bounds; this section owns its wire form. Its result
 is exactly one `Page` or `Rejected` value. A page contains complete counts, unit count, ordered unit
 entries and an optional continuation. Unit entries preserve execution identity, owner, replicas,
 process-bound read origin, complete counts and named sections. A section carries the shared
@@ -2790,14 +2792,16 @@ schema, keep branch keys and redaction, and share the verified outer reply's bac
 The entity is a typed choice between a domain node and the cluster license. A domain-node entity
 carries its domain and node reference. A cluster-license entity has neither a domain nor a model
 name. `DESCRIBE LICENSE` uses the same page, unit, origin and Row-section contract, capturing one
-published policy revision and its committed usage. Its single unit belongs to the answering node.
-The `summary` includes typed decision issue/receipt timestamps and the active transition count.
-The `quotas` section reports current usage against each target; `capabilities` reports each
-catalog capability's `state` (`enabled`, `disabled` or `permitted`) with a `permitted_until`
-deadline only for `permitted`; `transitions` reports the original and target quota, affected usage,
-identity, start, deadline, effective deadline, acknowledgement and current quota state. Its
-datetime cells retain full timestamp precision. Counts include capability and transition rows, and
-a client preserves every section through the generic inspection contract.
+published policy revision and its committed usage. Its single unit belongs to the answering node,
+its origin's generation and revision are that policy revision and its stage is `stored`, and it
+carries no continuation. Its three sections are `summary`, `capabilities` and `transitions`. The
+`summary` includes the licensing mode, typed decision issue/receipt timestamps and the active
+transition count; `capabilities` reports each catalog capability's `state` (`enabled`, `disabled`
+or `permitted`) with a `permitted_until` deadline only for `permitted`; `transitions` reports one
+row per affected condition of each transition: its identity, the condition, start, deadline,
+effective deadline, previous and target quota, usage at the start and acknowledgement. Its datetime
+cells retain full timestamp precision. Counts include the rows of all three sections, and a client
+preserves every section through the generic inspection contract.
 
 Stateful processor reads use the same envelope. Deduplicators publish `keys`; windows publish
 retained `rows` plus per-branch `header` and `accumulators` sections. Window metadata consumes

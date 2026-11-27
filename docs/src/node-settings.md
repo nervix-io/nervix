@@ -1882,7 +1882,8 @@ admitted, preserving equal work for known and unknown names across changes, rest
 
 ## State Inspection Capabilities
 
-The runtime declares three local `NodeCapabilities` through `SettingDefinition`:
+The runtime declares three local `NodeCapabilities` through `SettingDefinition`, which bound every
+[state inspection](state-inspection.md#bounds-and-memory):
 
 | Setting / CLI flag | Environment | Default | Validation |
 | --- | --- | --- | --- |

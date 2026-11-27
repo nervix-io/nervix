@@ -204,6 +204,9 @@ violates instead of softening the contract to match today's imports.
   key-version change still refreshes interests, prerequisites and routes without offering a
   membership event. Every server notice carries its semantic kind, and clients and bindings route
   notices by that kind; notice text is display-only.
+- A typed command outcome travels as tables of the session protocol, never as JSON or another
+  document inside a string field or a string cell. The command's text and JSON messages are
+  projections of that one value, and clients and bindings read the typed value, never its rendering.
 - Branch runtime ownership and its relation to scheduling are defined in
   [A branch owns its runtime](#a-branch-owns-its-runtime).
 - Server endpoint definitions and bound intakes form one immutable host-and-path publication. A
@@ -536,6 +539,14 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - [Transaction Quiescence And Impact Inspection](docs/src/transaction-quiescence.md): transaction
   operation or step impact, affected topology, preview identity or freshness, actual engagement,
   report persistence, inspection presentation.
+- [State Inspection](docs/src/state-inspection.md): the `SHOW ... STATE` family and every other read
+  of runtime state through the `StateInspection` envelope, `DESCRIBE LICENSE` included: what each
+  kind reads and from which source, owner routing and read origins, counts, sections and metadata
+  sections, continuations and their fences, the typed refusals, the inspection bounds and their
+  memory admission, sensitivity and withheld guest state, the guest's description of its state, and
+  adding a readable state, section, count or bound. [Client Session
+  Protocol](docs/src/client-session-protocol.md#state-inspection-envelope) keeps the envelope's wire
+  form and [Cluster Interconnect](docs/src/interconnect.md) the page operations.
 - [Domain Clock](docs/src/domain-clock.md): the domain-clock architecture, domain architecture that
   changes how time is established, propagated or consumed, and how a client session attaches to and
   follows a domain clock, including a receiver node's attachment to its clock authority.
@@ -933,6 +944,21 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   carrier; WASM guest state keeps the per-callback checkpoint [WASM State And
   Recovery](docs/src/wasm-state.md) owns.
 
+### State inspection
+
+- A relay's materialized rows and the state each stateful processor keeps for its branches are
+  readable through the one typed `StateInspection` envelope by the entity's
+  `SHOW <kind> <name> [MATERIALIZED] STATE` statement. Each unit's owner answers from its published
+  generation or a copy its branch task makes between two batches, selects and bounds the page
+  before it crosses the interconnect, redacts it exactly as a subscription would, never carries a
+  guest-state value, and fences its continuation to the cut it read. A read never changes the state
+  it reads, refreshes an expiry, emits, or holds up the work that changes the state.
+- A new kind of runtime state, and a new section, count or bound of an inspected kind, joins the
+  envelope, its entity's `DESCRIBE` counts and every client in the change that adds it, by
+  [Adding A Readable State](docs/src/state-inspection.md#adding-a-readable-state). [State
+  Inspection](docs/src/state-inspection.md#guarantees-and-limits) names the state no statement reads
+  yet and the state that stays outside inspection by decision.
+
 ### Inference
 
 - Every inferencer runs through one implementation: the model runs once for each admitted batch,
@@ -943,6 +969,15 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
 - An inferencer form the grammar accepts is honoured by the runtime in the same change; no accepted
   clause, declaration or mode is stored and ignored. [Inferencer State And
   Recovery](docs/src/inferencer-state.md) owns the carried state's contract.
+
+### WASM guest ABI
+
+- Every export the host resolves on a guest is required, and a module without one fails
+  instantiation rather than falling back to a host default. A change that adds an export adds in the same change
+  its default in the Rust SDK's `Processor` trait and export macro, the export in the [Go
+  sketch](docs/src/wasm-processor-guests.md#go-sketch) and the Rust and Go example guests, and the
+  WAT fixtures that instantiate a guest. [WASM Processor Guests](docs/src/wasm-processor-guests.md)
+  owns the ABI.
 
 ### Domains and external systems
 

@@ -773,8 +773,9 @@ Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery).
 
 ## Observability
 
-`SHOW WASM PROCESSOR <name> STATE` reads a processor's guest-state facts through the typed state
-inspection envelope every `SHOW ... STATE` statement shares, with the same optional clauses:
+`SHOW WASM PROCESSOR <name> STATE` reads a processor's guest-state facts through the typed [state
+inspection envelope](./state-inspection.md) every `SHOW ... STATE` statement shares, with the same
+optional clauses:
 `FOR ALL BRANCHES`, `FOR UNBRANCHED` or `FOR BRANCH KEY { ... }` selects branches, `LIMIT n`
 bounds the branch entries of one reply and `AFTER '<continuation>'` resumes after the last entry of
 an earlier reply, and `FORMAT TEXT` (the default) or `FORMAT JSON` picks the rendering. An omitted

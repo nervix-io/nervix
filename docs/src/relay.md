@@ -433,8 +433,10 @@ The clauses are ordered: optional `FOR ALL BRANCHES`, `FOR UNBRANCHED` or
 `AFTER 'continuation'`; optional `FORMAT TEXT` or `FORMAT JSON`. The default selector reads all
 branches and the default format is text. `LIMIT` is positive and cannot exceed the serving node's
 inspection row capability. Branch key fields follow the same typed, complete-key rules as state reset: string, boolean, signed
-64-bit integer and 64-bit float literals match their declared field types exactly. `FOR ALL
-BRANCHES` reads every branch regardless of its key field types.
+64-bit integer, finite 64-bit float and `DURATION` literals match their declared field types exactly. `FOR ALL
+BRANCHES` reads every branch regardless of its key field types. Every `SHOW ... STATE` statement
+shares these clauses, the envelope, the continuation rules and the refusals described here;
+[State Inspection](state-inspection.md) describes how a read is answered across them.
 
 Every successful read carries `CommandOutcome.state`, a typed `StateInspection` envelope. It names
 the domain and relay, complete selected branch/row/Arrow-byte counts, and each execution unit's
@@ -445,9 +447,11 @@ fingerprint includes every captured branch-local state lifetime and its generati
 high-watermarks alone do not identify a multi-branch cut. Stopped-state inspection reads stored
 state without starting the domain.
 
-Sections carry their name, the existing `RowSchema`, verified Row batches, omitted-row count and
-positional low/high watermark column identities. A user payload field with a watermark-like name
-retains its name and type; metadata receives a distinct name. Typed branch keys accompany each
+Each unit's rows form one `records` section, which carries its name, the existing `RowSchema`,
+verified Row batches, omitted-row count and positional low/high watermark column identities. The
+watermark columns follow the relay's fields as `ingested_at_low_watermark` and
+`ingested_at_high_watermark`. A user payload field with a watermark-like name retains its name and
+type; metadata receives a distinct name. Typed branch keys accompany each
 branched batch. Sensitive payload and branch cells are `Redacted`, exactly as for subscriptions;
 text renders them as `"<masked>"`. Empty state has zero counts, no row sections and no continuation.
 

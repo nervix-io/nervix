@@ -818,6 +818,10 @@ Read `outcome.state`, match `StateInspectionResult::Page` or `Rejected`, then vi
 and `frame.batch()` using each section's schema. `counts` describe the complete selected cut;
 `continuation` resumes bounded pages. Typed cells preserve sensitivity, integer widths, float bits,
 datetime and duration nanoseconds and bytes. `state.to_json()` and `state.display_text()` render the same value.
+`SHOW DEDUPLICATOR ... STATE`, `SHOW REORDERER ... STATE`, `SHOW CORRELATOR ... STATE` and
+`SHOW WINDOW PROCESSOR ... STATE` fill the same page with their own sections, described in
+[Runtime Nodes](processors.md#inspect-remembered-keys); [State Inspection](state-inspection.md)
+describes how every read is answered.
 
 `SHOW WASM PROCESSOR guest STATE FOR ALL BRANCHES LIMIT 10;` fills the same envelope with typed WASM
 guest-state facts instead of row sections: the page's `wasm_binding` holds the pinned module, and

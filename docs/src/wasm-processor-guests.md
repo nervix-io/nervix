@@ -819,7 +819,8 @@ and discards the instance. The scratch instance runs under the processor's `MAX 
 node's extension workers.
 It requests no timeouts that are ever delivered, and `nervix_request_state_reset` is refused there.
 The description reflects the committed checkpoint, which lags the live instance by at most the
-callback in progress.
+callback in progress. [State Inspection](./state-inspection.md#the-guests-description) describes
+the read that carries it.
 
 Guest state is always sensitive: Nervix cannot tell which part of a guest's state derives from
 sensitive data, and a guest may hold anything, such as private keys it derived itself. An inspection

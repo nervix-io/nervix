@@ -61,6 +61,7 @@ Keep detailed grammar in those chapters when reviewing a configuration.
 | Session subscriptions and domain clock attachment | `Sessions` |
 | Configuration backups, their archives, bounded waits and exact-reference recovery, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore`; cut timeout phases and their elapsed measurements: `Backup And Restore Architecture` → `Observability` |
 | Metrics and runtime inspection | `Metrics And Observability` |
+| Reading the state a running graph holds with `SHOW ... STATE`: selectors, paging, typed rows, sensitivity and refusals | `Relay` → `Inspect Materialized State`, then the inspected kind's `Runtime Nodes` section |
 | Transport attempts, endpoint outcomes, acknowledgements and retries in `/metrics` and `DESCRIBE` | [Connector Interaction Metrics](../../../../docs/src/metrics-and-observability.md#connector-interaction-metrics) |
 | Labels on Models, domains, logical resources and users: bounded metadata, staged inspection and execution continuity | `Entity Labels` |
 | Emitter record outcomes, retries, acquisition, pool waits, finish outcomes and current failure | `Metrics And Observability` → `Emitter outcomes and lifecycle` |
@@ -73,6 +74,11 @@ Keep detailed grammar in those chapters when reviewing a configuration.
 For transaction preview scopes, operation and step impact, actual engagement, and retained
 inspection, read [Transaction Quiescence And Impact Inspection](https://docs.nervix.io/transaction-quiescence.html)
 directly. It is an architecture chapter and is outside the curated Plexus index.
+
+For how a `SHOW ... STATE` read is answered (owner routing, read origins, complete counts,
+continuation fences, refusals, bounds and sensitivity), read
+[State Inspection](https://docs.nervix.io/state-inspection.html) directly. It is an architecture
+chapter and is outside the curated Plexus index.
 
 For native application graphs, endpoint ownership, Arrow/credit limits, ACK boundaries, ALTER,
 restoration and replay, read [Client Ingestors And Emitters](https://docs.nervix.io/client-io-architecture.html)

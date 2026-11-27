@@ -2992,6 +2992,9 @@ partition over the real transport, without claiming whole-node Raft or Fjall cra
 
 ## Materialized Inspection Page Operation
 
+[State Inspection](./state-inspection.md) describes the read these three page operations serve:
+the coordinator, its routing to unit owners, the envelope it assembles and its refusals.
+
 `read_materialized_state_page` is a process-targeted Bulk stream request using the Snapshot
 subquota. It names domain, relay, execution unit, committed control revision, schema fingerprint,
 resolved branch selector, optional branch/offset position, row/byte limits and exact owner process.
@@ -3029,7 +3032,7 @@ and obey the ordinary Bulk chunk bound. No operator payload crosses the intercon
 or row maps; the coordinator uses the shared Arrow-to-Row writer at the session reporting boundary.
 
 The coordinator opens the page's stream under the read's own deadline, `--inspection-read-timeout`
-(ten seconds by default) from when the read began, which the exchange carries as its caller's
+(ten seconds by default) from when it asks for the page, which the exchange carries as its caller's
 deadline: it bounds stream admission, setup and the owner's answer, and an opening that does not
 complete within it, or that liveness ends, is refused as `owner_unavailable`. Other typed requests
 carry no deadline of their own, as [Liveness And Deadlines](#liveness-and-deadlines) states.

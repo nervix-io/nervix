@@ -303,7 +303,8 @@ with its reason in the branch's entry of the inspection, under the `state descri
 
 Guest state is always sensitive: an inspection reports each section's name, its fields and their
 types, and its row count, and never a value, whatever the processor reads. A separate permission to
-read guest-state values will come later.
+read guest-state values will come later. [State Inspection](./state-inspection.md#the-guests-description)
+describes the read that carries the description.
 
 ## Requesting A New State Lifetime
 
