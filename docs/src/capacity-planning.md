@@ -122,8 +122,9 @@ node byte credit. The pools cannot borrow from one another.
 A relay operation defaults to one sixth of the relay pool each for encoded body and decoded data,
 and one twelfth for scratch, capped at 32, 32 and 16 MiB respectively. The validated pools hold two
 complete operations so a blocked channel leaves room for another. Bulk streams retain their own
-1 MiB default receive window, drawn from the dedicated bulk-window pool; the stream waits within
-its request deadline when that pool is full.
+1 MiB default receive window, drawn from the dedicated bulk-window pool; when that pool is full the
+stream waits until a stream holding a window returns it, or until a deadline its caller named
+passes.
 An Iceberg commit charges the bulk budget for the staged batches it reads back, one group at a
 time, so a commit whose staged batches exceed the budget reads them in groups, a single staged batch
 larger than the budget waits until the whole budget is free and is charged all of it, and a commit

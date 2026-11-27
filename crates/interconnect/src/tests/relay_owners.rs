@@ -132,8 +132,12 @@ async fn remote_relay_frame_cost() {
             timings[timings.len() * 99 / 100],
         );
     }
-    pair.transport_a.shutdown().await;
-    pair.transport_b.shutdown().await;
+    pair.transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    pair.transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 #[nervix_primitives::test]
@@ -187,8 +191,12 @@ async fn peer_departure_reclaims_an_admitted_relays_capacity() {
         RelayAdmissionDecision::Admitted,
         "an intake already admitted may finish after its sender leaves"
     );
-    pair.transport_a.shutdown().await;
-    pair.transport_b.shutdown().await;
+    pair.transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    pair.transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 /// One-byte rows on `delivery`, carrying the admission `ack_id` of `registrar`, whose delivery
@@ -250,8 +258,12 @@ async fn installed_cluster_parameters_give_the_transport_their_relay_channel_ret
             .duration(),
         Duration::from_secs(40)
     );
-    pair.transport_a.shutdown().await;
-    pair.transport_b.shutdown().await;
+    pair.transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    pair.transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 /// A validated timing whose total admission budget is one second, so a receiver keeps what its
@@ -259,11 +271,8 @@ async fn installed_cluster_parameters_give_the_transport_their_relay_channel_ret
 fn one_second_timing() -> nervix_models::RemoteAckTiming {
     let timing = nervix_models::RemoteAckTiming {
         remote_ack_alive_interval: Duration::from_millis(100),
-        remote_ack_dispatch_timeout: Duration::from_millis(500),
-        remote_ack_silence_timeout: Duration::from_secs(2),
         remote_ack_sweep_interval: Duration::from_millis(100),
         remote_relay_total_timeout: Duration::from_secs(1),
-        remote_relay_instantiation_wait: Duration::from_millis(500),
     };
     timing
         .validate()
@@ -420,8 +429,12 @@ async fn a_receiver_charges_every_channel_watermark_until_its_retention_passes()
         pair.incoming_b.try_recv().is_err(),
         "a channel's batch never reaches the application twice"
     );
-    pair.transport_a.shutdown().await;
-    pair.transport_b.shutdown().await;
+    pair.transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    pair.transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 /// A cancellation that fences a position its receiver never granted takes that watermark's relay
@@ -469,6 +482,10 @@ async fn a_cancellation_that_fences_a_position_waits_for_its_watermark_charge() 
             .assured("the receiver answers the status of a fenced position"),
         RelayAdmissionStatus::Cancelled
     );
-    pair.transport_a.shutdown().await;
-    pair.transport_b.shutdown().await;
+    pair.transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    pair.transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }

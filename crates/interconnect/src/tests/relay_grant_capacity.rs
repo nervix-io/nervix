@@ -143,8 +143,12 @@ async fn receive_bound_refusal_creates_no_attempt_and_a_revised_claim_is_adopted
     assert!(
         matches!(received.envelope, Envelope::RelayPayload(payload) if payload.batch_ipc.len() == 8)
     );
-    pair.transport_a.shutdown().await;
-    pair.transport_b.shutdown().await;
+    pair.transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    pair.transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 /// A receiver whose relay budget has no room left at all holds a grant request back until room
@@ -208,8 +212,8 @@ async fn a_grant_asked_while_the_relay_budget_is_full_waits_and_is_granted_once_
         .expect("the granted relay should enter the application queue")
         .expect("the application queue should remain open");
     assert!(matches!(received.envelope, Envelope::RelayPayload(_)));
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// A grant request larger than the relay room its receiver has left waits for the room it needs
@@ -295,13 +299,13 @@ async fn a_grant_request_larger_than_the_free_relay_room_waits_and_is_granted_on
         records,
         "the whole request arrived"
     );
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// A grant whose receiver's relay budget stays full for as long as its sender lets the receiver hold
-/// it, half the delivery's dispatch timeout, is answered with the capacity refusal the delivery is
-/// held back on, which both ends count, and the same delivery is granted once room returns.
+/// it, the delivery's retry ceiling, is answered with the capacity refusal the delivery is held back
+/// on, which both ends count, and the same delivery is granted once room returns.
 #[nervix_primitives::test]
 async fn a_grant_still_without_room_when_its_wait_ends_is_refused_for_capacity_and_granted_later() {
     let ConnectedTransports {
@@ -314,9 +318,10 @@ async fn a_grant_still_without_room_when_its_wait_ends_is_refused_for_capacity_a
         ..
     } = connected_transports().await;
     let payload = RelayPayload {
-        // The receiver may hold this delivery's grant for 200 milliseconds.
+        // The receiver may hold this delivery's grant for its retry ceiling, twenty-five alive
+        // intervals: 200 milliseconds.
         ack_timing: nervix_models::RemoteAckTiming {
-            remote_ack_dispatch_timeout: Duration::from_millis(400),
+            remote_ack_alive_interval: Duration::from_millis(8),
             ..nervix_models::RemoteAckTiming::default()
         },
         decoded_bytes: 0,
@@ -379,6 +384,6 @@ async fn a_grant_still_without_room_when_its_wait_ends_is_refused_for_capacity_a
         .expect("the granted relay should enter the application queue")
         .expect("the application queue should remain open");
     assert!(matches!(received.envelope, Envelope::RelayPayload(_)));
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }

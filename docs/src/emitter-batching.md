@@ -283,10 +283,12 @@ behavior. A failed drain is not permission to discard retained work and apply a 
 
 Force flush and graceful drain publish retained prepared bytes unchanged and attempt pending
 commit work without waiting for a stopped domain clock. The host gives connector-held work its
-finish deadline and reports incomplete output. Branch expiry or eviction withdraws that source
-branch's unresolved host work without acknowledging it; it cannot revive when materialized state
-later becomes ready. Rows already owned by a staging connector keep that connector's commit
-lifecycle. Other branches retain their bytes and membership.
+finish deadline and reports incomplete output. A branch's TTL never withdraws unresolved host work:
+a branch whose rows the emitter still holds stays until they are delivered
+([Branch Semantics](./emitters.md#branch-semantics)). Eviction withdraws the evicted source
+branch's unresolved host work without acknowledging it, and that work cannot revive when
+materialized state later becomes ready. Rows already owned by a staging connector keep that
+connector's commit lifecycle. Other branches retain their bytes and membership.
 
 Prepared payloads, ACK maps and pending attempts are volatile. A process or owner loss can require
 upstream replay and can duplicate a publication whose answer was lost. Model/execution snapshots

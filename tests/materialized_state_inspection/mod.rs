@@ -521,7 +521,7 @@ async fn received_page_bytes(world: &ScenarioWorld, node: &str) -> f64 {
 }
 
 #[when(expr = "inspection client {string} connects away from the last relay owner when possible")]
-async fn nonowner(world: &mut ScenarioWorld, name: String) {
+pub(crate) async fn nonowner(world: &mut ScenarioWorld, name: String) {
     let StateInspectionResult::Page(page) = &last_state(world).result else {
         panic!("page");
     };
@@ -541,6 +541,233 @@ async fn nonowner(world: &mut ScenarioWorld, name: String) {
     world.transaction_clients.insert(name, client);
     world.inspection_observations.remote_baseline = Some(received_page_bytes(world, &node).await);
     world.inspection_observations.reader_node = Some(node);
+}
+
+/// The node the inspection client reads through, as the last step that connected it chose.
+fn reading_node(world: &ScenarioWorld) -> nervix_models::ClusterNodeName {
+    let node = world
+        .inspection_observations
+        .reader_node
+        .as_deref()
+        .assured("a preceding step connected the inspection client away from the owner");
+    crate::common::cluster::node_name(node)
+}
+
+/// Holds every byte of bulk memory but `room` on the node the inspection client reads through, so
+/// a page it receives from another node finds no room there until the scenario releases it.
+#[when(expr = "bulk memory on the reading node keeps only {string} bytes free")]
+async fn reader_keeps_only_bytes_free(world: &mut ScenarioWorld, room: String) {
+    let room = expand_placeholders(world, &room)
+        .parse::<u64>()
+        .assured("the scenario names the free bulk memory in bytes");
+    let node = reading_node(world);
+    world
+        .fault_injection
+        .hold_bulk_memory_leaving_room_on(&node, room);
+}
+
+/// Returns the bulk memory the scenario held on the node the inspection client reads through.
+#[when("bulk memory on the reading node is released")]
+async fn reader_memory_released(world: &mut ScenarioWorld) {
+    let node = reading_node(world);
+    world.fault_injection.release_bulk_memory_on(&node);
+}
+
+/// The background read answered a JSON page that another node's unit owner served, returning
+/// `returned` rows of the `complete` rows its counts name.
+#[then(expr = "the background read answered {int} row(s) of {int} from a remote owner")]
+fn background_page(world: &mut ScenarioWorld, returned: usize, complete: u64) {
+    let output = world
+        .last_command_output
+        .as_deref()
+        .assured("a preceding step finished the background read");
+    let page: Value = serde_json::from_str(output).assured("the read answered one JSON document");
+    assert_eq!(page["outcome"], "page", "{page}");
+    assert_eq!(page["counts"]["rows"], complete, "{page}");
+    let reader = world
+        .inspection_observations
+        .reader_node
+        .as_deref()
+        .assured("a preceding step connected the inspection client away from the owner");
+    let mut rows = 0;
+    for unit in page["units"].as_array().assured("a page lists its units") {
+        assert_ne!(
+            unit["owner"], reader,
+            "another node's owner served the page: {page}"
+        );
+        for section in unit["sections"]
+            .as_array()
+            .assured("a unit lists its sections")
+        {
+            for frame in section["frames"]
+                .as_array()
+                .assured("a section lists its frames")
+            {
+                rows += frame["rows"]
+                    .as_array()
+                    .assured("a frame lists its rows")
+                    .len();
+            }
+        }
+    }
+    assert_eq!(rows, returned, "{page}");
+}
+
+/// The node that owns the one unit of the relay the last read inspected.
+fn last_relay_owner(world: &ScenarioWorld) -> nervix_models::ClusterNodeName {
+    let StateInspectionResult::Page(page) = &last_state(world).result else {
+        panic!("the last read answered a page");
+    };
+    let [unit] = page.units.as_slice() else {
+        panic!("the inspected relay runs one unit");
+    };
+    unit.owner.clone()
+}
+
+/// Waits until a client of each cluster node sees `relay` hold `rows` materialized rows, keeping
+/// the last read for the steps that follow.
+#[then(
+    expr = "within {string} a client of every node sees relay {string} hold {int} materialized \
+            rows"
+)]
+async fn every_node_sees_relay_rows(
+    world: &mut ScenarioWorld,
+    duration: String,
+    relay: String,
+    rows: u64,
+) {
+    let bound = parse_duration_text(&duration).assured("the scenario names a valid bound");
+    let relay = expand_placeholders(world, &relay);
+    let statement = format!("SHOW RELAY {relay} MATERIALIZED STATE FORMAT JSON;");
+    for node in world.cluster().node_ids() {
+        let client = client(world, &node).await;
+        let deadline = Instant::now() + bound;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let outcome = client
+                .execute(statement.clone())
+                .await
+                .assured("the fixture client reaches its node");
+            let held = match outcome.state.as_deref().map(|state| &state.result) {
+                Some(StateInspectionResult::Page(page)) => Some(page.counts.rows),
+                _ => None,
+            };
+            if held == Some(rows) {
+                world.last_client_outcome = Some(outcome);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "node {node} saw relay {relay} hold {held:?} rows within {duration}, not {rows}"
+            );
+            sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+}
+
+/// Holds every byte of bulk memory but `room` on the node that owns the one unit of the relay the
+/// last read inspected, so the pages it sends other nodes end where that memory runs out.
+#[when(expr = "bulk memory on the owner of the last read relay keeps only {string} bytes free")]
+async fn relay_owner_keeps_only_bytes_free(world: &mut ScenarioWorld, room: String) {
+    let room = expand_placeholders(world, &room)
+        .parse::<u64>()
+        .assured("the scenario names the free bulk memory in bytes");
+    let owner = last_relay_owner(world);
+    world
+        .fault_injection
+        .hold_bulk_memory_leaving_room_on(&owner, room);
+}
+
+/// Reads every page of `relay`'s materialized state from a client of each node that does not own
+/// the relay's unit, at the node's default row bound. Each read must take more than one page, with
+/// the complete counts of its first on every page and at least one row a page, and return every
+/// row once.
+#[then(
+    expr = "a client of every other node reads relay {string} materialized state at the default \
+            limit in more than one page with unchanged complete counts"
+)]
+async fn other_nodes_read_relay_in_pages(world: &mut ScenarioWorld, relay: String) {
+    let relay = expand_placeholders(world, &relay);
+    let owner = last_relay_owner(world);
+    let limit = nervix_models::StateInspectionSettings::default()
+        .max_rows
+        .value()
+        .get();
+    let mut readers = 0_usize;
+    for node in world.cluster().node_ids() {
+        if node.as_str() == owner.as_str() {
+            continue;
+        }
+        let client = client(world, &node).await;
+        let mut counts = None;
+        let mut branches = Vec::new();
+        let mut pages = 0_usize;
+        let mut after = None::<String>;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            // A continuation resumes only behind an explicit LIMIT, here the node's default bound.
+            let statement = match &after {
+                Some(token) => format!(
+                    "SHOW RELAY {relay} MATERIALIZED STATE FOR ALL BRANCHES LIMIT {limit} AFTER \
+                     '{}' FORMAT JSON;",
+                    token.replace('\'', "''")
+                ),
+                None => {
+                    format!("SHOW RELAY {relay} MATERIALIZED STATE FOR ALL BRANCHES FORMAT JSON;")
+                }
+            };
+            let outcome = client
+                .execute(statement)
+                .await
+                .assured("the fixture client reaches its node");
+            assert!(
+                outcome.succeeded(),
+                "every page of the read answers node {node}: {}",
+                outcome.message
+            );
+            let state = outcome
+                .state
+                .as_deref()
+                .assured("the read returned typed state");
+            let StateInspectionResult::Page(page) = &state.result else {
+                panic!("expected a page: {state:?}");
+            };
+            match &counts {
+                Some(first) => assert_eq!(&page.counts, first, "complete counts stay unchanged"),
+                None => counts = Some(page.counts),
+            }
+            let returned = observed_rows(state);
+            assert!(!returned.is_empty(), "every page returns at least one row");
+            for row in returned {
+                branches.push(row["branch"].to_string());
+            }
+            pages += 1;
+            match &page.continuation {
+                Some(token) => after = Some(token.clone()),
+                None => break,
+            }
+        }
+        assert!(pages > 1, "node {node} read every row in one page");
+        let total = counts.verified("the loop read a first page").rows;
+        assert_eq!(
+            u64::try_from(branches.len()).assured("bounded rows"),
+            total,
+            "the pages returned every row to node {node}"
+        );
+        let returned = branches.len();
+        branches.sort();
+        branches.dedup();
+        assert_eq!(
+            branches.len(),
+            returned,
+            "no row was returned twice to node {node}"
+        );
+        readers += 1;
+    }
+    assert!(
+        readers > 0,
+        "some node reads the relay from another node's owner"
+    );
 }
 
 #[then("the typed inspection used its unit owner and a remote page when the cluster permits it")]

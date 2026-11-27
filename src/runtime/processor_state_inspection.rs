@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 use arrow_array::{TimestampNanosecondArray, UInt32Array};
 use arrow_schema::FieldRef;
 use error_stack::ResultExt as _;
-use nervix_execution::{CpuClass, MemoryClass};
+use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass, Reservation};
 use nervix_models::{ProcessorStateSection, StateInspectionBranchSelection, StateInspectionCounts};
 
 use super::*;
@@ -98,6 +98,76 @@ impl HeldRowsKind {
         match self {
             Self::Reorderer { rows, .. } => rows.len(),
             Self::Correlator { rows, .. } => rows.len(),
+        }
+    }
+
+    /// What admitting each copied row takes, in the order the rows were copied.
+    fn row_costs(&self) -> Vec<HeldRowCost> {
+        let mut costs = Vec::with_capacity(self.copied());
+        match self {
+            Self::Reorderer { rows, .. } => {
+                // The route the row waits on, and its received and release times.
+                let fixed = std::mem::size_of::<u32>()
+                    .checked_add(std::mem::size_of::<i64>())
+                    .assured("fixed column widths are tiny");
+                let fixed = fixed
+                    .checked_add(std::mem::size_of::<i64>())
+                    .assured("fixed column widths are tiny");
+                let fixed = u64::try_from(fixed).assured("fixed column widths fit u64");
+                let key_part = u64::try_from(std::mem::size_of::<u64>())
+                    .assured("a fixed column width fits u64");
+                for row in rows {
+                    let columns = held_row_bytes(&row.row);
+                    let mut appended = fixed;
+                    for part in &row.key {
+                        appended = appended
+                            .checked_add(key_part)
+                            .assured("a resident row's key is far below u64::MAX bytes");
+                        appended = appended
+                            .checked_add(part.value_bytes())
+                            .assured("a resident row's key is far below u64::MAX bytes");
+                    }
+                    costs.push(HeldRowCost::new(columns, appended));
+                }
+            }
+            Self::Correlator { rows, .. } => {
+                // The row's received and timeout times.
+                let appended = std::mem::size_of::<i64>()
+                    .checked_add(std::mem::size_of::<i64>())
+                    .assured("fixed column widths are tiny");
+                let appended = u64::try_from(appended).assured("fixed column widths fit u64");
+                for row in rows {
+                    costs.push(HeldRowCost::new(held_row_bytes(&row.row), appended));
+                }
+            }
+        }
+        costs
+    }
+
+    /// Keeps only the first `rows` copied rows.
+    fn truncate(&mut self, rows: usize) {
+        match self {
+            Self::Reorderer { rows: held, .. } => held.truncate(rows),
+            Self::Correlator { rows: held, .. } => held.truncate(rows),
+        }
+    }
+}
+
+/// What admitting one copied row to a page takes: the bytes of its gathered columns, and the bytes
+/// of the body that carries it to another node.
+struct HeldRowCost {
+    columns: u64,
+    body: u64,
+}
+
+impl HeldRowCost {
+    /// A row whose payload takes `columns` bytes and whose appended columns take `appended`.
+    fn new(columns: u64, appended: u64) -> Self {
+        Self {
+            columns,
+            body: columns
+                .checked_add(appended)
+                .assured("a resident row is far below u64::MAX bytes"),
         }
     }
 }
@@ -533,6 +603,106 @@ pub(crate) struct ProcessorStatePageRead<'a> {
 pub(crate) struct ProcessorStatePageBounds {
     pub(crate) rows: usize,
     pub(crate) bytes: u64,
+    /// What admitting the page's rows also sets aside for the reply that carries them.
+    pub(crate) reply: PageReply,
+}
+
+/// How an owner page reaches its reader, which decides what admitting its rows also sets aside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PageReply {
+    /// This node presents the page itself and writes its rows as Row frames: nothing is set aside.
+    Local,
+    /// Another node reads the page, which travels as a descriptor and native Arrow bodies. The
+    /// page sets aside `descriptor` for the descriptor's encoding and, when it can return rows,
+    /// `framing` for each section body's Arrow framing; every row it admits sets the bytes of the
+    /// body that carries it aside as well.
+    Remote { descriptor: u64, framing: u64 },
+}
+
+impl PageReply {
+    /// The eight-byte little-endian length that frames a page stream's descriptor.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a page stream frames its descriptor with an eight-byte little-endian length"
+        )
+    )]
+    pub(crate) const DESCRIPTOR_LENGTH_BYTES: u64 = 8;
+
+    /// The charge of the job that computes one body's digest: the least a bounded job carries.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a bounded executor job carries a charge of at least one byte"
+        )
+    )]
+    pub(crate) const DIGEST_JOB_BYTES: u64 = 1;
+
+    /// The reply to another node under `executor`'s bounds: what its descriptor takes and each
+    /// body's framing.
+    pub(crate) fn remote(executor: &nervix_execution::Executor) -> Self {
+        Self::Remote {
+            descriptor: Self::descriptor_share(executor),
+            framing: Self::body_framing(executor),
+        }
+    }
+
+    /// What a page another node reads sets aside ahead for its descriptor under `executor`'s
+    /// bounds: the largest descriptor a bulk page stream carries, the length that frames it, and
+    /// the job that computes each body's digest, one body at a time.
+    pub(crate) fn descriptor_share(executor: &nervix_execution::Executor) -> u64 {
+        let descriptor = nervix_interconnect::PoolClass::Bulk.payload_limit(executor);
+        let framed = descriptor
+            .checked_add(Self::DESCRIPTOR_LENGTH_BYTES)
+            .assured("the bulk payload bound leaves room for its length");
+        framed
+            .checked_add(Self::DIGEST_JOB_BYTES)
+            .assured("the bulk payload bound leaves room for its digest job")
+    }
+
+    /// The most one Arrow body's framing, its schema, record batch header and buffer padding, adds
+    /// to its rows' bytes under `executor`'s bounds: the bound on one sealed snapshot header.
+    pub(crate) fn body_framing(executor: &nervix_execution::Executor) -> u64 {
+        executor.limits().snapshot_header_bytes.as_u64()
+    }
+
+    /// The bulk share an owner page of at most `max_rows` rows and `max_bytes` bytes starts its
+    /// read from. A page that returns no row starts from the least share, since everything it
+    /// takes is required. Any other starts from the room the class has free now
+    /// ([`Executor::memory`]), up to the most such a page takes by the charges its rows take: each
+    /// row's columns twice over, the selected views and their gathered buffers, and for a reply to
+    /// another node the body that carries the row, beside what the reply sets aside ahead. A page
+    /// that requires more runs again within a larger share, and one whose optional rows find no
+    /// room in its share ends before them.
+    pub(crate) fn initial_share(self, executor: &Executor, max_rows: u64, max_bytes: u64) -> u64 {
+        if max_rows == 0 {
+            return 1;
+        }
+        let free = executor.memory(MemoryClass::Bulk).available_bytes();
+        // A page bound past what `u64` counts is past the class, whose free room alone then bounds
+        // the share.
+        let Some(most) = self.most_bytes(max_bytes) else {
+            return free.max(1);
+        };
+        most.min(free).max(1)
+    }
+
+    /// The most an owner page of at most `max_bytes` bytes takes by the charges its rows take, or
+    /// `None` past what `u64` counts: its rows' columns twice over and, for a reply to another
+    /// node, the bodies that carry them beside what the reply sets aside ahead.
+    fn most_bytes(self, max_bytes: u64) -> Option<u64> {
+        let columns = max_bytes.checked_mul(2)?;
+        let (bodies, ahead) = match self {
+            Self::Local => (0, 0),
+            Self::Remote {
+                descriptor,
+                framing,
+            } => (max_bytes, descriptor.checked_add(framing)?),
+        };
+        columns.checked_add(bodies)?.checked_add(ahead)
+    }
 }
 
 /// The ordinary branch selector and, only during repartitioning, copies selected elsewhere.
@@ -582,6 +752,27 @@ pub(crate) struct ProcessorStatePage {
 pub(crate) struct ProcessorStatePageMemory {
     pub(super) _reservation: nervix_execution::Reservation,
     pub(super) _windows: Vec<super::window_state::AdmittedWindowSnapshot>,
+    /// What a page read for another node set aside for its reply; absent for a page that set
+    /// nothing aside.
+    pub(super) reply: Option<ReplyMemory>,
+}
+
+impl ProcessorStatePageMemory {
+    /// Takes what the page set aside for its reply to another node.
+    pub(crate) fn take_reply(&mut self) -> Option<ReplyMemory> {
+        self.reply.take()
+    }
+}
+
+/// What a page read for another node set aside for its reply when it admitted its rows, so that
+/// encoding the reply never waits for room the page itself holds.
+pub(crate) struct ReplyMemory {
+    /// Encodes the reply's descriptor.
+    pub(crate) descriptor: nervix_execution::Reservation,
+    /// Encodes the bodies: every admitted row's bytes, and each section body's framing.
+    pub(crate) bodies: nervix_execution::Reservation,
+    /// The most one body's Arrow framing adds to its rows' bytes.
+    pub(crate) framing: u64,
 }
 
 /// One section of a unit page: how many rows of it the unit holds, and the returned rows as Arrow
@@ -625,8 +816,7 @@ impl Runtime {
     /// between two of its batches, after skipping the rows earlier pages returned, within the rows
     /// and bytes still left. Every selected branch is asked even once the page is full, because the
     /// counts are complete and the page names the exact state of every branch. The caller bounds the
-    /// whole read with the inspection deadline, and runs it within the allowances its charges
-    /// draw from through `executor`.
+    /// whole read with the inspection deadline.
     pub(crate) async fn local_processor_state_page(
         &self,
         executor: &Executor,
@@ -692,8 +882,6 @@ impl Runtime {
         let mut rows_left = bounds.rows;
         let mut bytes_left = bounds.bytes;
         let mut counts = StateInspectionCounts::default();
-        let mut returned = 0_u64;
-        let mut last_branch = None;
         let mut previous_branch = None;
         let mut digest = nervix_crypto::digest::Sha256::new();
         digest.update(b"nervix/state-inspection/processor-branches");
@@ -742,7 +930,6 @@ impl Runtime {
                 .verified("skipped is the smaller of skip and the branch's rows");
             let copied = held.kind.copied();
             if copied > 0 {
-                last_branch = fingerprint;
                 // A branch copies within the rows and bytes it was asked for, so an answer beyond
                 // them breaks the read contract rather than the page bounds.
                 rows_left = rows_left
@@ -751,9 +938,6 @@ impl Runtime {
                 bytes_left = bytes_left
                     .checked_sub(held.copied_bytes)
                     .ok_or_else(|| Report::new(ProcessorStatePageError::Branch))?;
-                returned = returned
-                    .checked_add(u64::try_from(copied).assured("a bounded row count fits u64"))
-                    .assured("a page returns fewer rows than its unit holds");
             }
             copies.push(CopiedBranch {
                 key: branch.key,
@@ -763,57 +947,302 @@ impl Runtime {
         if start > counts.rows || after.is_some_and(|(expected, _)| expected != previous_branch) {
             return Err(Report::new(ProcessorStatePageError::Position));
         }
-        let offset = start
-            .checked_add(returned)
-            .ok_or_else(|| Report::new(ProcessorStatePageError::Position))?;
-        let gathered = self
-            .processor_state_sections(executor, processor.kind, copies)
+        let copied = CopiedPage {
+            copies,
+            start,
+            counts,
+            generation,
+            digest,
+        };
+        self.held_rows_page(
+            executor,
+            processor.kind,
+            bounds.reply,
+            bounds.rows != 0,
+            copied,
+        )
+        .await
+    }
+
+    /// The page of the rows `copied` holds for a `kind` unit: admitted to the bulk memory the
+    /// page holds, those it keeps gathered into columns, and what it set aside for `reply`. A read
+    /// that `returns_rows` admits rows; a count-only read admits none.
+    async fn held_rows_page(
+        &self,
+        executor: &Executor,
+        kind: ModelKind,
+        reply: PageReply,
+        returns_rows: bool,
+        copied: CopiedPage,
+    ) -> error_stack::Result<ProcessorStatePage, ProcessorStatePageError> {
+        let CopiedPage {
+            copies,
+            start,
+            counts,
+            generation,
+            digest,
+        } = copied;
+        let sections = held_row_sections(kind)?;
+        let memory = HeldRowsMemory::new(executor, reply, sections, returns_rows)?;
+        let held = self
+            .processor_state_sections(executor, kind, copies, memory)
             .await?;
+        let offset = start
+            .checked_add(held.admitted.returned)
+            .ok_or_else(|| Report::new(ProcessorStatePageError::Position))?;
+        let (rows_memory, reply) = held.memory.finish()?;
+        let gathered = held.gathered;
         Ok(ProcessorStatePage {
             partition_catalog: nervix_models::StateInspectionKeyCatalog::Unrequested,
             fingerprint: digest.finish(),
             generation,
             counts,
             offset,
-            last_branch,
+            last_branch: held.admitted.last_branch,
             more: offset < counts.rows,
             runs: gathered.runs,
             sections: gathered.sections,
-            memory: None,
+            memory: Some(ProcessorStatePageMemory {
+                _reservation: rows_memory,
+                _windows: Vec::new(),
+                reply,
+            }),
         })
     }
 
-    /// Gathers the copied rows into Arrow columns per section on the bulk executor, admitted before
-    /// any column is built.
+    /// Admits the copied rows to `memory` and gathers those it keeps into Arrow columns per
+    /// section, on the bulk executor, before any column is built.
     async fn processor_state_sections(
         &self,
         executor: &Executor,
         kind: ModelKind,
-        copies: Vec<CopiedBranch>,
-    ) -> error_stack::Result<GatheredSections, ProcessorStatePageError> {
-        let mut copied_bytes = 0_u64;
-        for copy in &copies {
-            copied_bytes = copied_bytes
-                .checked_add(copy.held.copied_bytes)
-                .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
-        }
-        let admission = executor
-            .reserve(MemoryClass::Bulk, copied_bytes.max(1))
-            .await
-            .change_context(ProcessorStatePageError::Admission)?;
+        mut copies: Vec<CopiedBranch>,
+        memory: HeldRowsMemory,
+    ) -> error_stack::Result<HeldSections, ProcessorStatePageError> {
+        let HeldRowsMemory {
+            memory: charge,
+            reply,
+            bodies,
+        } = memory;
         executor
-            .run_cpu(CpuClass::Bulk, admission, move |_charge, cancellation| {
+            .run_cpu(CpuClass::Bulk, charge, move |charge, cancellation| {
                 cancellation
                     .check()
                     .change_context(ProcessorStatePageError::Admission)?;
-                match kind {
-                    ModelKind::Reorderer => reorderer_sections(copies),
-                    ModelKind::Correlator => correlator_sections(copies),
-                    _ => Err(Report::new(ProcessorStatePageError::Columns)),
-                }
+                let mut memory = HeldRowsMemory {
+                    memory: charge,
+                    reply,
+                    bodies,
+                };
+                let admitted = memory.admit_copies(&mut copies, cancellation)?;
+                let gathered = match kind {
+                    ModelKind::Reorderer => reorderer_sections(copies)?,
+                    ModelKind::Correlator => correlator_sections(copies)?,
+                    _ => return Err(Report::new(ProcessorStatePageError::Columns)),
+                };
+                Ok(HeldSections {
+                    gathered,
+                    memory,
+                    admitted,
+                })
             })
             .await
             .change_context(ProcessorStatePageError::Admission)?
+    }
+}
+
+/// What reading a unit's selected branches came to before their rows are admitted to a page:
+/// every branch's copied rows, the offset the page starts at, the complete counts, the newest
+/// incarnation and the fingerprint so far.
+struct CopiedPage {
+    copies: Vec<CopiedBranch>,
+    start: u64,
+    counts: StateInspectionCounts,
+    generation: u64,
+    digest: nervix_crypto::digest::Sha256,
+}
+
+/// The columns of a page of held rows, the memory that holds them, and what admitting its rows
+/// left it with.
+struct HeldSections {
+    gathered: GatheredSections,
+    memory: HeldRowsMemory,
+    admitted: AdmittedRows,
+}
+
+/// How many sections a page of `kind` carries its held rows in: a reorderer's pending rows, or a
+/// correlator's left and right rows.
+fn held_row_sections(kind: ModelKind) -> error_stack::Result<u64, ProcessorStatePageError> {
+    let sections = match kind {
+        ModelKind::Reorderer => [ProcessorStateSection::Pending].len(),
+        ModelKind::Correlator => [ProcessorStateSection::Left, ProcessorStateSection::Right].len(),
+        _ => return Err(Report::new(ProcessorStatePageError::Columns)),
+    };
+    Ok(u64::try_from(sections).assured("a section count fits u64"))
+}
+
+/// The bulk memory of a page of held rows: the bytes of the rows' gathered columns and, for a page
+/// another node reads, what encoding its reply takes, set aside as the rows are admitted.
+struct HeldRowsMemory {
+    memory: Reservation,
+    reply: PageReply,
+    /// The bytes set aside so far for the bodies of a reply to another node.
+    bodies: u64,
+}
+
+/// What admitting the copied rows left a page with.
+struct AdmittedRows {
+    returned: u64,
+    last_branch: Option<BranchKeyFingerprint>,
+}
+
+impl HeldRowsMemory {
+    /// The memory of a page whose rows fall into `sections` sections. A page another node reads
+    /// sets aside, before any row, the bound on its descriptor and, when it can return rows, the
+    /// framing of each section's body.
+    fn new(
+        executor: &Executor,
+        reply: PageReply,
+        sections: u64,
+        returns_rows: bool,
+    ) -> error_stack::Result<Self, ProcessorStatePageError> {
+        let mut page = Self {
+            memory: executor.charge_nothing(MemoryClass::Bulk),
+            reply,
+            bodies: 0,
+        };
+        if let PageReply::Remote {
+            descriptor,
+            framing,
+        } = reply
+        {
+            page.reserve(descriptor)?;
+            if returns_rows {
+                let framing = framing
+                    .checked_mul(sections)
+                    .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
+                page.reserve(framing)?;
+                page.bodies = framing;
+            }
+        }
+        Ok(page)
+    }
+
+    /// Takes `bytes` more, as a charge the page requires: drawn from the page's allowance, a share
+    /// without room for it runs the read again within a larger one.
+    fn reserve(&mut self, bytes: u64) -> error_stack::Result<(), ProcessorStatePageError> {
+        let total = self
+            .memory
+            .bytes()
+            .checked_add(bytes)
+            .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
+        self.memory
+            .grow_to(total)
+            .change_context(ProcessorStatePageError::Admission)
+    }
+
+    /// Admits the copied rows in page order while the page's share has room for each now, and
+    /// keeps only those. Every row after the page's first is optional, so the page ends before the
+    /// first row the share has no room for, with its complete counts. The first row is required: a
+    /// share without room for it runs the read again within a larger one.
+    fn admit_copies(
+        &mut self,
+        copies: &mut [CopiedBranch],
+        cancellation: &Cancellation,
+    ) -> error_stack::Result<AdmittedRows, ProcessorStatePageError> {
+        let mut admitted = AdmittedRows {
+            returned: 0,
+            last_branch: None,
+        };
+        let mut full = false;
+        for copy in copies.iter_mut() {
+            cancellation
+                .check()
+                .change_context(ProcessorStatePageError::Admission)?;
+            let mut kept = 0_usize;
+            if !full {
+                for cost in copy.held.kind.row_costs() {
+                    if !self.admit(cost, admitted.returned == 0)? {
+                        full = true;
+                        break;
+                    }
+                    kept = kept
+                        .checked_add(1)
+                        .assured("a page keeps no more rows than were copied");
+                    admitted.returned = admitted
+                        .returned
+                        .checked_add(1)
+                        .assured("a page returns fewer rows than its unit holds");
+                }
+            }
+            copy.held.kind.truncate(kept);
+            if kept > 0 {
+                admitted.last_branch = copy.key.as_ref().map(BranchKey::fingerprint);
+            }
+        }
+        Ok(admitted)
+    }
+
+    /// Admits one row whose columns, and for another node its body, take `cost`. A page's `first`
+    /// row is required; every later row joins only while the share has room for it now.
+    fn admit(
+        &mut self,
+        cost: HeldRowCost,
+        first: bool,
+    ) -> error_stack::Result<bool, ProcessorStatePageError> {
+        let body = match self.reply {
+            PageReply::Local => 0,
+            PageReply::Remote { .. } => cost.body,
+        };
+        let charge = cost
+            .columns
+            .checked_add(body)
+            .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
+        let target = self
+            .memory
+            .bytes()
+            .checked_add(charge)
+            .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
+        if first {
+            self.memory
+                .grow_to(target)
+                .change_context(ProcessorStatePageError::Admission)?;
+        } else if self.memory.try_grow_to(target).is_err() {
+            return Ok(false);
+        }
+        self.bodies = self
+            .bodies
+            .checked_add(body)
+            .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
+        Ok(true)
+    }
+
+    /// The page's memory split into what its rows hold and, for a reply to another node, what it
+    /// set aside for encoding the reply.
+    fn finish(
+        self,
+    ) -> error_stack::Result<(Reservation, Option<ReplyMemory>), ProcessorStatePageError> {
+        match self.reply {
+            PageReply::Local => Ok((self.memory, None)),
+            PageReply::Remote {
+                descriptor,
+                framing,
+            } => {
+                let (descriptor, rest) = self
+                    .memory
+                    .split(descriptor)
+                    .change_context(ProcessorStatePageError::Admission)?;
+                let (bodies, rest) = rest
+                    .split(self.bodies)
+                    .change_context(ProcessorStatePageError::Admission)?;
+                let reply = ReplyMemory {
+                    descriptor,
+                    bodies,
+                    framing,
+                };
+                Ok((rest, Some(reply)))
+            }
+        }
     }
 }
 

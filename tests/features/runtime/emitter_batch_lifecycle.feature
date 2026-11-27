@@ -427,7 +427,7 @@ Feature: Emitter batch lifecycle
       | 3            |
 
   @emitter_batch_lifecycle
-  Scenario Outline: An emitter expires a partial branch batch before a later flush
+  Scenario Outline: An emitter keeps a partial branch batch past its branch's TTL until a later flush
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -473,13 +473,17 @@ Feature: Emitter batch lifecycle
       [{"seq":1,"tenant":"acme"},{"seq":2,"tenant":"acme"}]
       """
     Then within "10s" DESCRIBE EMITTER "batched" on the leader node reports "messages_total" "received" relay "events" totalling "2"
-    # The partial batch stays unpublished throughout its TTL and the maintenance scan interval.
+    # The hourly flush holds the partial batch past its branch's TTL and the maintenance scan
+    # interval. The emitter still holds the batch's rows, so the scan keeps their branch.
     And the observed broker does not receive a payload within "55s"
     When these Plexus commands are executed on the leader node
       """
       ALTER ZEROMQ PUSH EMITTER batched SET FLUSH IMMEDIATE;
       """
-    Then the observed broker does not receive a payload within "2s"
+    Then within "10s" the observed broker receives exactly these payloads
+      """
+      [{"seq":1,"tenant":"acme"},{"seq":2,"tenant":"acme"}]
+      """
     When http payload is posted to host "batch-expiry-{{test_id}}.example.com" path "/events"
       """
       [{"seq":3,"tenant":"acme"},{"seq":4,"tenant":"acme"}]
@@ -495,7 +499,7 @@ Feature: Emitter batch lifecycle
       | 3            |
 
   @emitter_batch_lifecycle
-  Scenario Outline: An expired materialized-state wait cannot publish when state later arrives
+  Scenario Outline: A materialized-state wait outlives its branch's TTL and publishes once the state arrives
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -558,6 +562,8 @@ Feature: Emitter batch lifecycle
       [{"seq":1,"tenant":"acme"},{"seq":2,"tenant":"acme"}]
       """
     Then within "10s" DESCRIBE EMITTER "batched" on the leader node reports "messages_total" "received" relay "events" totalling "2"
+    # The rows wait for their branch's settings past the branch's TTL and the maintenance scan
+    # interval. The emitter still holds them, so the scan keeps their branch.
     And the observed broker does not receive a payload within "55s"
     When http payload is posted to host "batch-wait-expiry-{{test_id}}.example.com" path "/settings"
       """
@@ -566,6 +572,10 @@ Feature: Emitter batch lifecycle
     Then within "10s" node "node-1" eventually reports materialized state for relay "settings" containing
       """
       {"branch":{"tenant":"acme"},"fields":{"tenant":"acme","label":"ready"}}
+      """
+    And within "10s" the observed broker receives exactly these payloads
+      """
+      [{"seq":1,"tenant":"acme","label":"ready"},{"seq":2,"tenant":"acme","label":"ready"}]
       """
     When http payload is posted to host "batch-wait-expiry-{{test_id}}.example.com" path "/events"
       """

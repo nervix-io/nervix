@@ -572,6 +572,207 @@ async fn pages(world: &mut ScenarioWorld, client: String, kind: String, name: St
     assert_eq!(sorted(observed), expected);
 }
 
+/// What reading every page of a processor's state at the node's default row bound returned.
+struct DefaultLimitRead {
+    pages: usize,
+    /// Every returned retained row, metadata excluded, in page order.
+    rows: Vec<String>,
+    /// The complete row count every page reported.
+    total: u64,
+}
+
+impl DefaultLimitRead {
+    /// Requires the pages to have returned every row the read holds, each once.
+    fn assert_every_row_once(&self, client: &str) {
+        let mut distinct = sorted(self.rows.clone());
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            self.rows.len(),
+            "no row was returned twice to client {client:?}"
+        );
+        assert_eq!(
+            u64::try_from(self.rows.len()).assured("bounded rows"),
+            self.total,
+            "the pages returned every row to client {client:?}"
+        );
+    }
+}
+
+/// Reads every page of a processor's state at the node's default row bound. Every page must answer
+/// with at least one row and the complete counts of the first, so a page that ends early still
+/// returns what fits and a continuation.
+async fn read_at_default_limit(
+    world: &ScenarioWorld,
+    client: &str,
+    kind: &str,
+    name: &str,
+) -> DefaultLimitRead {
+    let limit = nervix_models::StateInspectionSettings::default()
+        .max_rows
+        .value()
+        .get();
+    let mut counts = None;
+    let mut rows = Vec::new();
+    let mut pages = 0_usize;
+    let mut after = None::<String>;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        // A continuation resumes only behind an explicit LIMIT, here the node's default bound.
+        let statement = match &after {
+            Some(token) => format!(
+                "SHOW {kind} {name} STATE FOR ALL BRANCHES LIMIT {limit} AFTER '{}' FORMAT JSON;",
+                token.replace('\'', "''")
+            ),
+            None => format!("SHOW {kind} {name} STATE FOR ALL BRANCHES FORMAT JSON;"),
+        };
+        let outcome = execute(world, client, statement).await;
+        assert!(
+            outcome.succeeded(),
+            "every page of the read answers client {client:?}: {}",
+            outcome.message
+        );
+        let state = outcome
+            .state
+            .as_deref()
+            .assured("the read returned typed state");
+        let StateInspectionResult::Page(page) = &state.result else {
+            panic!("expected a page: {state:?}");
+        };
+        match &counts {
+            Some(first) => assert_eq!(&page.counts, first, "complete counts stay unchanged"),
+            None => counts = Some(page.counts),
+        }
+        let returned = complete_rows(state);
+        assert!(!returned.is_empty(), "every page returns at least one row");
+        rows.extend(returned);
+        pages += 1;
+        let total = counts
+            .as_ref()
+            .verified("the first page set the counts")
+            .rows;
+        assert!(
+            u64::try_from(rows.len()).assured("bounded rows") <= total,
+            "paging never returns more rows than the read holds"
+        );
+        match &page.continuation {
+            Some(token) => after = Some(token.clone()),
+            None => break,
+        }
+    }
+    let total = counts.verified("the loop read a first page").rows;
+    DefaultLimitRead { pages, rows, total }
+}
+
+/// The client that reads from `node` for a step every node takes, connected on first use and named
+/// after the node.
+async fn node_reader(world: &mut ScenarioWorld, node: &str) -> String {
+    let client = format!("{node}-reader");
+    if !world.transaction_clients.contains_key(&client) {
+        crate::connect_named_client_to_node(
+            world,
+            client.clone(),
+            node.to_string(),
+            Vec::new(),
+            false,
+        )
+        .await;
+    }
+    client
+}
+
+/// Waits until a client of each cluster node in turn sees the processor hold `rows` rows. Every
+/// node asks the unit's owner, so on more than one node some reads cross the interconnect whatever
+/// the placement.
+#[then(expr = "within {string} a client of every node sees {word} {string} hold {int} rows")]
+async fn every_node_holds(
+    world: &mut ScenarioWorld,
+    duration: String,
+    kind: String,
+    name: String,
+    rows: u64,
+) {
+    for node in world.cluster().node_ids() {
+        let client = node_reader(world, &node).await;
+        holds(
+            world,
+            duration.clone(),
+            client,
+            kind.clone(),
+            name.clone(),
+            rows,
+        )
+        .await;
+    }
+}
+
+/// Reads every page of a processor's state from a client of each cluster node at the node's
+/// default row bound, and requires each node's read to take more than one page, so a page whose
+/// rows the owner's bulk memory cannot hold whole still returns what fits and a continuation,
+/// whether the owner presents it or sends it to another node.
+#[then(
+    expr = "a client of every node reads {word} {string} state at the default limit in more than \
+            one page with unchanged complete counts"
+)]
+async fn every_node_reads_in_pages(world: &mut ScenarioWorld, kind: String, name: String) {
+    let name = expand_placeholders(world, &name);
+    for node in world.cluster().node_ids() {
+        let client = node_reader(world, &node).await;
+        let read = read_at_default_limit(world, &client, statement_kind(&kind), &name).await;
+        assert!(
+            read.pages > 1,
+            "client {client:?} read every row in one page"
+        );
+        read.assert_every_row_once(&client);
+    }
+}
+
+/// Reads every page of a processor's state from a client of each cluster node at the node's
+/// default row bound, and requires each node's pages to return every row once.
+#[then(
+    expr = "a client of every node reads {word} {string} state at the default limit with every \
+            row once"
+)]
+async fn every_node_reads_every_row(world: &mut ScenarioWorld, kind: String, name: String) {
+    let name = expand_placeholders(world, &name);
+    for node in world.cluster().node_ids() {
+        let client = node_reader(world, &node).await;
+        let read = read_at_default_limit(world, &client, statement_kind(&kind), &name).await;
+        read.assert_every_row_once(&client);
+    }
+}
+
+/// Connects inspection client `name` to a node other than the owner of the unit the last read
+/// inspected, so its next read crosses the interconnect, or to the first node when only the owner
+/// runs.
+#[when(
+    expr = "inspection client {string} connects away from the last read processor's owner when \
+            possible"
+)]
+async fn away_from_processor_owner(world: &mut ScenarioWorld, name: String) {
+    crate::materialized_state_inspection::nonowner(world, name).await;
+}
+
+/// Holds every byte of bulk memory but `room` on the node that owns the one unit of the processor
+/// the last read inspected, so that node's pages end where its memory runs out while every node
+/// that reads them keeps the room it takes to receive them.
+#[when(expr = "bulk memory on the owner of the last read processor keeps only {string} bytes free")]
+async fn owner_keeps_only_bytes_free(world: &mut ScenarioWorld, room: String) {
+    let room = expand_placeholders(world, &room)
+        .parse::<u64>()
+        .assured("the scenario names the free bulk memory in bytes");
+    let StateInspectionResult::Page(page) = &last_state(world).result else {
+        panic!("the last read answered a page");
+    };
+    let [unit] = page.units.as_slice() else {
+        panic!("the inspected processor runs one unit");
+    };
+    let owner = unit.owner.clone();
+    world
+        .fault_injection
+        .hold_bulk_memory_leaving_room_on(&owner, room);
+}
+
 #[when(expr = "client {string} saves a one row page of {word} {string} state")]
 async fn save_page(world: &mut ScenarioWorld, client: String, kind: String, name: String) {
     let statement = format!(

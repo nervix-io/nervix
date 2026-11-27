@@ -437,3 +437,110 @@ Feature: Bounded typed reorderer and correlator state inspection
       | cluster_size |
       | 1            |
       | 3            |
+
+  @processor_state_inspection
+  Scenario: A reorderer page read from another node waits for the owner's bulk memory to hold its first row
+    Given a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( tenant STRING, value I64, message STRING );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer, message string );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY incoming SCHEMA event BRANCHED BY by_tenant;
+      CREATE RELAY ordered SCHEMA event BRANCHED BY by_tenant;
+      CREATE VHOST edge first-row-reorderer-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR events FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 4MiB RESPOND IMMEDIATE DECODE USING event_codec
+        TO incoming INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE REORDERER held
+        FROM incoming
+        BY input.value
+        MAX TIME 10m
+        BRANCHED BY by_tenant
+        TO ordered INHERIT ALL FLUSH EACH 1h MAX BATCH SIZE 64MiB ON MESSAGE ERROR LOG;
+      START;
+      """
+    And http payload for tenant "east" with value 1 and a 1048576 byte message is posted to host "first-row-reorderer-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "west" with value 2 and a 1048576 byte message is posted to host "first-row-reorderer-{{test_id}}.example.com" path "/events"
+    Then within "30s" a client of every node sees reorderer "held" hold 2 rows
+    Given client "reader" is connected to node "node-1"
+    When client "reader" executes these Plexus commands
+      """
+      SHOW REORDERER held STATE FOR ALL BRANCHES LIMIT 2 FORMAT JSON;
+      """
+    Then the last processor state counts 2 rows in 2 branches
+    # The owner keeps room for the reply's descriptor and its body's framing, but not for its first
+    # row's columns and body, which carry a 1 MiB message. The first row is what makes the read
+    # progress, so the owner waits for room for it, holding nothing, rather than refusing the read.
+    When inspection client "reader" connects away from the last read processor's owner when possible
+    And bulk memory on the owner of the last read processor keeps only "524288" bytes free
+    And client "reader" begins executing these Plexus commands in the background
+      """
+      SHOW REORDERER held STATE FOR ALL BRANCHES LIMIT 2 FORMAT JSON;
+      """
+    Then the background Plexus execution is still running after "2s"
+    # Once the memory is released, the owner's page runs again within the share its first row
+    # needed: it returns that row, and its continuation carries the other.
+    When bulk memory on every node is released
+    Then within "30s" the background Plexus execution reaches a successful outcome
+    And the background read answered 1 row of 2 from a remote owner
+
+  @processor_state_inspection
+  Scenario Outline: A reorderer read the bulk memory cannot hold in one page pages through every held row
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( tenant STRING, value I64, message STRING );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer, message string );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY incoming SCHEMA event BRANCHED BY by_tenant;
+      CREATE RELAY ordered SCHEMA event BRANCHED BY by_tenant;
+      CREATE VHOST edge paged-reorderer-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR events FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 4MiB RESPOND IMMEDIATE DECODE USING event_codec
+        TO incoming INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE REORDERER held
+        FROM incoming
+        BY input.value
+        MAX TIME 10m
+        BRANCHED BY by_tenant
+        TO ordered INHERIT ALL FLUSH EACH 1h MAX BATCH SIZE 64MiB ON MESSAGE ERROR LOG;
+      START;
+      """
+    And http payload for tenant "east" with value 1 and a 1048576 byte message is posted to host "paged-reorderer-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "west" with value 2 and a 1048576 byte message is posted to host "paged-reorderer-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "east" with value 3 and a 1048576 byte message is posted to host "paged-reorderer-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "west" with value 4 and a 1048576 byte message is posted to host "paged-reorderer-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "east" with value 5 and a 1048576 byte message is posted to host "paged-reorderer-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "west" with value 6 and a 1048576 byte message is posted to host "paged-reorderer-{{test_id}}.example.com" path "/events"
+    Then within "30s" a client of every node sees reorderer "held" hold 6 rows
+    # Each held row carries its 1 MiB message, and gathering its columns takes its bytes. A page
+    # read through another node also sets the row's bytes aside for the body that carries it. With
+    # 5 MiB left on the reorderer's owner, its reads of its own state return four rows a page and
+    # every other node's reads two, each page ending where the next row no longer fits, and the rest
+    # follow on the next pages. Every other node keeps the room it takes to receive those pages.
+    When bulk memory on the owner of the last read processor keeps only "5242880" bytes free
+    Then a client of every node reads reorderer "held" state at the default limit in more than one page with unchanged complete counts
+    When bulk memory on every node is released
+    Then within "30s" every node reserves only the bulk memory the scenario holds
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

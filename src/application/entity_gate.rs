@@ -27,13 +27,14 @@ use nervix_interconnect::{
     EmitterPublishingDrainStateEnvelope, EmitterPublishingDrainStatusEnvelope,
     EntityDrainStatusEnvelope, EntityDrainStatusRequest as RemoteEntityDrainStatusRequest,
     EntityGatePurpose, EntityGateReleaseRequest as RemoteEntityGateReleaseRequest,
-    EntityGateRequest as RemoteEntityGateRequest, RemoteOperationFailure, RemoteOperationSubject,
+    EntityGateRequest as RemoteEntityGateRequest, ExchangeDeadline, RemoteOperationFailure,
+    RemoteOperationSubject,
 };
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, DomainName, EntityGateTargets, ModelKind,
     PauseRequirement, QuiesceSubgraph, RelayName, UnitKind,
 };
-use nervix_primitives::time::{interval, sleep};
+use nervix_primitives::time::{interval, sleep, sleep_until};
 use tracing::{debug, warn};
 
 use super::{
@@ -367,10 +368,13 @@ impl SessionServiceImpl {
         }
     }
 
+    /// Ask `node_id` how far its part of `domain` drained. The answer waits for a live node until
+    /// `deadline`, the drain's own ceiling.
     pub(in crate::application) async fn domain_drain_status_on_node(
         &self,
         node_id: &ClusterNodeName,
         domain: &DomainName,
+        deadline: nervix_primitives::time::Instant,
     ) -> error_stack::Result<DomainDrainStatusEnvelope, EntityGateControlError> {
         if node_id == self.inner.consensus.local_node_id() {
             self.inner.runtime.force_flush_domain_if_idle(domain);
@@ -378,12 +382,12 @@ impl SessionServiceImpl {
         }
         self.inner
             .interconnect
-            .request_with_timeout(
+            .request_by(
                 node_id,
                 RemoteDomainDrainStatusRequest {
                     domain: domain.clone(),
                 },
-                self.coordination_rpc_timeout(),
+                ExchangeDeadline::OperationCeiling(deadline),
             )
             .await
             .change_context(EntityGateControlError::Request {
@@ -479,7 +483,6 @@ impl SessionServiceImpl {
             let remaining =
                 deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
             let deadline_millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
-            let reply_timeout = remaining.min(self.coordination_rpc_timeout());
             #[cfg(feature = "testing")]
             let broken_stream = purpose == EntityGatePurpose::OwnershipHandoff
                 && self
@@ -504,18 +507,22 @@ impl SessionServiceImpl {
                     reason: "injected broken interconnect stream".to_string(),
                 }))
             } else if lost_request {
-                // A link that loses the request delivers nothing, so the reply times out.
-                sleep(reply_timeout).await;
-                Err(Report::new(nervix_interconnect::RequestError::Timeout {
+                // A link that loses the request delivers nothing, so the engagement waits for
+                // its answer until the gate's own deadline.
+                sleep_until(deadline).await;
+                Err(Report::new(nervix_interconnect::RequestError::DeadlinePassed {
                     node: node_id.clone(),
                     request:
                         <RemoteEntityGateRequest as nervix_interconnect::InterconnectRequest>::NAME,
-                    timeout: reply_timeout,
+                    deadline: nervix_interconnect::ExchangeDeadlineKind::OperationCeiling,
                 }))
             } else {
+                // The participant answers once its gate holds. A participant that is slow while
+                // it lives costs the engagement latency; only its liveness, or the gate's own
+                // deadline, ends the wait.
                 self.inner
                     .interconnect
-                    .request_with_timeout(
+                    .request_by(
                         node_id,
                         RemoteEntityGateRequest {
                             coordination: coordination.clone(),
@@ -526,24 +533,12 @@ impl SessionServiceImpl {
                             deadline_millis,
                             reason: reason.to_string(),
                         },
-                        reply_timeout,
+                        ExchangeDeadline::OperationCeiling(deadline),
                     )
                     .await
             };
             match response {
                 Ok(response) => break response,
-                Err(error)
-                    if purpose == EntityGatePurpose::OwnershipHandoff
-                        && matches!(
-                            error.current_context(),
-                            nervix_interconnect::RequestError::Timeout { .. }
-                        )
-                        && nervix_primitives::time::Instant::now() < deadline =>
-                {
-                    // Await the same receiver-owned admission fence. Its flush request and
-                    // activation lease remain unchanged when a response is lost.
-                    nervix_primitives::task::consume_budget().await;
-                }
                 Err(error)
                     if purpose == EntityGatePurpose::OwnershipHandoff
                         && matches!(
@@ -614,10 +609,9 @@ impl SessionServiceImpl {
             }
             return Ok(status);
         }
-        let remaining = deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
         self.inner
             .interconnect
-            .request_with_timeout(
+            .request_by(
                 node_id,
                 RemoteEntityDrainStatusRequest {
                     coordination: coordination.clone(),
@@ -626,7 +620,7 @@ impl SessionServiceImpl {
                     targets: targets.clone(),
                     purpose,
                 },
-                remaining.min(self.coordination_rpc_timeout()),
+                ExchangeDeadline::OperationCeiling(deadline),
             )
             .await
             .change_context(EntityGateControlError::Request {
@@ -1370,16 +1364,23 @@ mod tests {
             path,
         } = build_test_service(false).await;
         let domain: DomainName = named("accounts");
-        let peer: ClusterNodeName = named("unavailable_peer");
+        let peer: ClusterNodeName = named("departed_peer");
+        // Membership lists this node alone: the participant left the cluster, so every exchange
+        // with it ends, whether or not it names a ceiling.
+        super::super::test_fixtures::publish_membership_of_this_node_alone(&service);
         let coordination = service
             .inner
             .interconnect
             .next_coordination_identity()
             .expect("the test transport has coordination capacity");
         let error = service
-            .domain_drain_status_on_node(&peer, &domain)
+            .domain_drain_status_on_node(
+                &peer,
+                &domain,
+                nervix_primitives::time::Instant::now() + Duration::from_secs(2),
+            )
             .await
-            .expect_err("the participant has no transport route");
+            .expect_err("a participant that left cannot answer domain drain status");
         assert!(
             matches!(error.current_context(), EntityGateControlError::Request { operation: EntityGateControlOperation::DomainDrainStatus, domain: actual_domain, node } if actual_domain == &domain && node == &peer)
         );

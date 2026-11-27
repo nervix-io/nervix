@@ -145,7 +145,7 @@ async fn checkpoint_answer_after_the_poll_interval_uses_its_operation_deadline()
         .load_full()
         .expect("attached dispatcher")
         .interconnect
-        .shutdown()
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
         .await;
 }
 
@@ -168,7 +168,7 @@ async fn checkpoint_stream_with_a_different_digest_never_becomes_installable() {
         .load_full()
         .expect("attached dispatcher")
         .interconnect
-        .shutdown()
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
         .await;
 }
 
@@ -212,7 +212,7 @@ async fn checkpoint_stream_requires_the_complete_declared_byte_count() {
             .load_full()
             .expect("attached dispatcher")
             .interconnect
-            .shutdown()
+            .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
             .await;
     }
 }
@@ -232,27 +232,56 @@ async fn catalog_answer_after_the_poll_interval_uses_its_operation_deadline() {
         .load_full()
         .expect("attached dispatcher")
         .interconnect
-        .shutdown()
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+        .await;
+}
+
+/// A forced recovery never skips a live source: one that has not answered when the recovery's
+/// budget passes fails the recovery attempt, so the coordinator prepares it again rather than
+/// recreating state that source may hold newer than any other.
+#[nervix_primitives::test]
+async fn a_live_source_that_misses_the_recovery_budget_fails_the_attempt() {
+    let (owner, placement) =
+        remote_owner(Duration::from_secs(6), CheckpointStreamCase::Complete).await;
+    let source = owner.node.clone();
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let failure = owner
+        .runtime
+        .forced_recovery_checkpoint(&placement, std::slice::from_ref(&source), deadline)
+        .await
+        .err()
+        .expect("a live source that has not answered within the budget fails the attempt");
+    assert!(
+        matches!(
+            failure.current_context(),
+            OwnershipHandoffError::BudgetPassed
+        ),
+        "{failure:#}"
+    );
+    assert!(failure.current_context().is_budget_expiry());
+    owner
+        .runtime
+        .inner
+        .remote_dispatcher
+        .load_full()
+        .expect("attached dispatcher")
+        .interconnect
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
         .await;
 }
 
 #[nervix_primitives::test]
-async fn checkpoint_answer_beyond_its_operation_deadline_retains_the_typed_timeout() {
+async fn a_checkpoint_request_waits_for_an_owner_that_answers_slowly() {
+    // The owner reads, admits and hashes its state before it answers. While it lives, a slow
+    // answer costs the replica latency, never the checkpoint.
     let (owner, placement) =
         remote_owner(Duration::from_secs(6), CheckpointStreamCase::Complete).await;
-    let failure = owner
+    let checkpoint = owner
         .checkpoint_after(&placement, Some(6))
         .await
-        .expect_err("an owner that exceeds its operation deadline is refused");
-    assert!(matches!(
-        failure.current_context(),
-        StateReplicationError::Request { .. }
-    ));
-    assert!(matches!(
-        failure.downcast_ref::<nervix_interconnect::RequestError>(),
-        Some(nervix_interconnect::RequestError::Timeout { request: "state_sync", timeout, .. })
-            if *timeout == StateSyncRequest::DEADLINE.declared_default()
-    ));
+        .expect("a live owner's slow answer arrives")
+        .expect("the owner holds a checkpoint after revision 6");
+    assert_eq!(checkpoint.lsm, 7);
     owner
         .runtime
         .inner
@@ -260,34 +289,6 @@ async fn checkpoint_answer_beyond_its_operation_deadline_retains_the_typed_timeo
         .load_full()
         .expect("attached dispatcher")
         .interconnect
-        .shutdown()
-        .await;
-}
-
-#[nervix_primitives::test]
-async fn catalog_answer_beyond_its_operation_deadline_retains_the_typed_timeout() {
-    let (owner, placement) =
-        remote_owner(Duration::from_secs(6), CheckpointStreamCase::Complete).await;
-    let failure = owner
-        .checkpoint_listing(&placement, None)
-        .await
-        .expect_err("an owner that exceeds its catalog deadline is refused");
-    assert!(matches!(
-        failure.current_context(),
-        StateReplicationError::Request { .. }
-    ));
-    assert!(matches!(
-        failure.downcast_ref::<nervix_interconnect::RequestError>(),
-        Some(nervix_interconnect::RequestError::Timeout { request: "branch_checkpoint_listing", timeout, .. })
-            if *timeout == BranchCheckpointListingRequest::DEADLINE.declared_default()
-    ));
-    owner
-        .runtime
-        .inner
-        .remote_dispatcher
-        .load_full()
-        .expect("attached dispatcher")
-        .interconnect
-        .shutdown()
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
         .await;
 }

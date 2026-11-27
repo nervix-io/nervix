@@ -15,7 +15,10 @@ use nervix_primitives::{
 };
 
 use super::*;
-use crate::runtime_ack::{AckCompletion, AckOutcome, AckSet, AckWaitOutcome};
+use crate::{
+    runtime::remote_ack_owner::TestMembership,
+    runtime_ack::{AckCompletion, AckOutcome, AckSet, AckWaitOutcome},
+};
 
 /// Scheduler-independent hang guard for event-driven unit-test observations.
 const ASYNC_EVENT_FAILSAFE: Duration = Duration::from_secs(30);
@@ -33,7 +36,7 @@ async fn runtime_report_chain_remote_admission_response_log() {
         .load_full()
         .assured("the loopback cluster installs its dispatcher")
         .interconnect
-        .shutdown()
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
         .await;
     let admission = RemoteAckRegistration {
         ack_id: 7,
@@ -166,6 +169,58 @@ async fn ack_alive_resets_ingestor_ack_timeout() {
     );
 }
 
+/// A runtime's stop ends an envelope it keeps sending to a node whose process is gone while no
+/// membership publication has removed the node: a stopping node no longer follows membership, so
+/// nothing else would end the resend, and the stop of a node whose peers stop with it would wait
+/// for it forever.
+#[nervix_primitives::test]
+async fn a_runtime_stop_ends_an_envelope_sent_again_to_a_node_nothing_answers_for() {
+    let (runtime, dispatcher) = joined_runtime().await;
+    let gone = ClusterNodeName::parse("node-9").expect("the fixture node name is valid");
+    // Nothing listens on port 1, so every connection to the node is refused, while no published
+    // live set says the node left.
+    dispatcher.interconnect.register_outbound_target(
+        gone.clone(),
+        nervix_models::NodeEndpoint::from(std::net::SocketAddr::from(([127, 0, 0, 1], 1))),
+    );
+    let sending = {
+        let dispatcher = dispatcher.clone();
+        let gone = gone.clone();
+        nervix_primitives::task::spawn(async move {
+            dispatcher
+                .dispatch(
+                    &gone,
+                    Envelope::Control(nervix_interconnect::ControlEnvelope::Terminate),
+                )
+                .await
+        })
+    };
+    sleep(Duration::from_millis(200)).await;
+    assert!(
+        !sending.is_finished(),
+        "an envelope to a node membership keeps is sent again"
+    );
+
+    runtime.shutdown().await;
+
+    let ended = timeout(ASYNC_EVENT_FAILSAFE, sending)
+        .await
+        .expect("the runtime's stop ends the resend")
+        .expect("the sending task joins");
+    let error = ended.expect_err("an envelope that never reached its node is not delivered");
+    assert!(
+        matches!(
+            error.current_context(),
+            RemoteDispatchError::RuntimeStopped { target } if target == &gone
+        ),
+        "{error:?}"
+    );
+    dispatcher
+        .interconnect
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+        .await;
+}
+
 /// A runtime attached to a loopback cluster of one node, and the dispatcher that hands out its
 /// registrations.
 async fn joined_runtime() -> (Runtime, StdArc<RemoteDispatcher>) {
@@ -188,7 +243,7 @@ async fn a_cancelled_remote_delivery_resolves_its_records_and_returns_its_owner(
         .store_pending_acks(
             &receiving_node(),
             vec![acks],
-            Instant::now() + nervix_models::RemoteAckDispatchTimeout::DEFAULT,
+            Instant::now() + REMOTE_RELAY_TOTAL_TIMEOUT,
             nervix_models::RemoteAckTiming::default(),
             std::future::pending(),
         )
@@ -345,11 +400,11 @@ fn after(start: Instant, elapsed: Duration) -> Instant {
         .expect("a fixture instant a few seconds ahead fits the monotonic clock")
 }
 
-/// A failure detector that briefly drops the registrar's run from the live view does not end
-/// that run, so the outcome the root reaches meanwhile waits for the run and is returned once
-/// it is back, instead of being dropped with the watch.
+/// A failure detector that drops the registrar's run from the live view does not end that run:
+/// while membership keeps the registrar's node, the watch keeps reporting, and the outcome the
+/// root reaches meanwhile is returned at once.
 #[nervix_primitives::test]
-async fn an_outcome_reached_while_the_registrar_is_missing_is_returned_once_it_is_back() {
+async fn an_outcome_reached_while_the_live_view_misses_the_registrar_is_returned_at_once() {
     let run = ClusterNodeIncarnation::new(7);
     let (acks, completion) = AckSet::root();
     let mut watch = RemoteAckWatch::new(
@@ -358,12 +413,7 @@ async fn an_outcome_reached_while_the_registrar_is_missing_is_returned_once_it_i
         nervix_models::RemoteAckTiming::default(),
     );
     let start = Instant::now();
-    let RemoteAckWatchReport::Send(first) = watch.next_report(
-        nervix_models::RemoteAckTiming::default(),
-        None,
-        Some(run),
-        start,
-    ) else {
+    let RemoteAckWatchReport::Send(first) = watch.next_report(None, Some(run), true, start) else {
         panic!("a watch reports to a registrar its live view shows");
     };
     assert!(first.is_progress());
@@ -371,39 +421,9 @@ async fn an_outcome_reached_while_the_registrar_is_missing_is_returned_once_it_i
     acks.ack_success();
     let progress = watch.completion.wait_for_progress().await;
     assert_eq!(progress, AckProgress::Complete(AckOutcome::Ack));
-    let missing = after(start, Duration::from_millis(100));
+    let missing = after(start, Duration::from_secs(20));
     assert!(matches!(
-        watch.next_report(
-            nervix_models::RemoteAckTiming::default(),
-            Some(progress),
-            None,
-            missing
-        ),
-        RemoteAckWatchReport::Hold
-    ));
-    // The completion delivered its outcome once; waiting again only passes time.
-    let (mut watch, progress) =
-        wait_remote_ack_progress(watch, &nervix_models::RemoteAckTiming::default()).await;
-    assert_eq!(progress, None);
-    let still_missing = after(start, Duration::from_millis(200));
-    assert!(matches!(
-        watch.next_report(
-            nervix_models::RemoteAckTiming::default(),
-            progress,
-            None,
-            still_missing
-        ),
-        RemoteAckWatchReport::Hold
-    ));
-
-    let back = after(start, Duration::from_millis(300));
-    assert!(matches!(
-        watch.next_report(
-            nervix_models::RemoteAckTiming::default(),
-            None,
-            Some(run),
-            back
-        ),
+        watch.next_report(Some(progress), None, true, missing),
         RemoteAckWatchReport::Send(RemoteAckOutcome::Ack)
     ));
 }
@@ -420,12 +440,9 @@ async fn a_negative_outcome_is_returned_as_the_root_decided_it() {
     );
     acks.no_ack("the attached emitter refused the record");
     let progress = watch.completion.wait_for_progress().await;
-    let RemoteAckWatchReport::Send(outcome) = watch.next_report(
-        nervix_models::RemoteAckTiming::default(),
-        Some(progress),
-        Some(run),
-        Instant::now(),
-    ) else {
+    let RemoteAckWatchReport::Send(outcome) =
+        watch.next_report(Some(progress), Some(run), true, Instant::now())
+    else {
         panic!("a watch reports to a registrar its live view shows");
     };
     assert_eq!(
@@ -434,11 +451,10 @@ async fn a_negative_outcome_is_returned_as_the_root_decided_it() {
     );
 }
 
-/// Once the registrar's run has stayed missing past its own silence bound and one sweep, a
-/// registering node whose run goes on has failed the acknowledgement, so the watch gives the
-/// outcome up.
+/// Once membership removes the registrar's node, nothing the watch could still send reaches a
+/// run that waits for it, so the watch ends.
 #[nervix_primitives::test]
-async fn an_outcome_whose_registrar_stays_missing_past_its_grace_is_given_up() {
+async fn an_outcome_whose_registrar_left_the_cluster_is_given_up() {
     let run = ClusterNodeIncarnation::new(7);
     let (acks, completion) = AckSet::root();
     let mut watch = RemoteAckWatch::new(
@@ -448,33 +464,13 @@ async fn an_outcome_whose_registrar_stays_missing_past_its_grace_is_given_up() {
     );
     let start = Instant::now();
     assert!(matches!(
-        watch.next_report(
-            nervix_models::RemoteAckTiming::default(),
-            None,
-            Some(run),
-            start
-        ),
+        watch.next_report(None, Some(run), true, start),
         RemoteAckWatchReport::Send(_)
     ));
     acks.ack_success();
     let progress = watch.completion.wait_for_progress().await;
     assert!(matches!(
-        watch.next_report(
-            nervix_models::RemoteAckTiming::default(),
-            Some(progress),
-            None,
-            start
-        ),
-        RemoteAckWatchReport::Hold
-    ));
-    let past_grace = after(start, RegistrarPresence::missing_grace());
-    assert!(matches!(
-        watch.next_report(
-            nervix_models::RemoteAckTiming::default(),
-            None,
-            None,
-            past_grace
-        ),
+        watch.next_report(Some(progress), None, false, start),
         RemoteAckWatchReport::Release
     ));
 }
@@ -539,7 +535,9 @@ async fn remote_parked_progress_releases_and_restores_upstream_handoff_ownership
     let registration = dispatcher
         .register_pending_ack(&receiving_node(), acks)
         .assured("the fixture has free correlation capacity");
-    dispatcher.registry.admit_ack(registration.ack_id);
+    dispatcher
+        .registry
+        .admit_ack(registration.ack_id, RECEIVER_RUN);
     assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
 
     runtime.handle_remote_ack_resolution(registration.resolution(RemoteAckOutcome::Progress {
@@ -568,8 +566,10 @@ async fn remote_parked_progress_releases_and_restores_upstream_handoff_ownership
     assert!(!runtime.inner.remote_dispatch.holds_ack(registration.ack_id));
 }
 
+/// A receiver that holds a delivery unadmitted, reporting it alive, costs the delivery latency
+/// only: the sender waits long past any former inactivity bound until the receiver admits it.
 #[nervix_primitives::test]
-async fn remote_relay_admission_alive_resets_dispatch_timeout() {
+async fn a_relay_admission_waits_for_a_live_receiver_however_long_it_holds_the_delivery() {
     let (runtime, dispatcher) = joined_runtime().await;
     nervix_primitives::time::pause();
     let (registration, admission_rx) = dispatcher
@@ -581,23 +581,55 @@ async fn remote_relay_admission_alive_resets_dispatch_timeout() {
     nervix_primitives::task::spawn(async move {
         sleep(Duration::from_millis(100)).await;
         runtime_task.handle_remote_ack_resolution(resolved.resolution(RemoteAckOutcome::Alive));
-        sleep(Duration::from_millis(150)).await;
+        sleep(Duration::from_secs(30)).await;
         runtime_task.handle_remote_ack_resolution(resolved.resolution(RemoteAckOutcome::Ack));
     });
 
     RemoteDispatcher::await_relay_admission(
         &ClusterNodeName::parse("relay-owner").expect("valid name"),
         admission_rx,
-        Duration::from_millis(200),
-        Instant::now() + nervix_models::RemoteAckDispatchTimeout::DEFAULT,
-        nervix_models::RemoteAckTiming::default().remote_relay_total_timeout,
+        std::future::pending(),
+        Instant::now() + REMOTE_RELAY_TOTAL_TIMEOUT,
+        REMOTE_RELAY_TOTAL_TIMEOUT,
     )
     .await
-    .expect("alive progress should preserve the relay admission wait");
+    .expect("a live receiver's admission is waited for");
     assert!(
         !runtime.inner.remote_dispatch.holds_ack(registration.ack_id),
         "terminal admission ack must clear pending admission state"
     );
+}
+
+/// The wait ends as soon as the receiver run that granted the delivery is gone, as liveness and
+/// membership decide, with the cause they gave.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_relay_admission_ends_when_its_receiver_run_is_gone() {
+    let target = ClusterNodeName::parse("relay-owner").expect("valid name");
+    let (_admission_tx, admission_rx) = watch::channel(RelayAdmissionUpdate::Pending);
+    let gone_target = target.clone();
+    let receiver_gone = async move {
+        sleep(Duration::from_secs(1)).await;
+        Report::new(RemoteDispatchError::ReceiverRunEnded {
+            target: gone_target,
+        })
+    };
+    let started = Instant::now();
+
+    let error = RemoteDispatcher::await_relay_admission(
+        &target,
+        admission_rx,
+        receiver_gone,
+        Instant::now() + REMOTE_RELAY_TOTAL_TIMEOUT,
+        REMOTE_RELAY_TOTAL_TIMEOUT,
+    )
+    .await
+    .expect_err("a gone receiver run admits nothing");
+
+    assert_eq!(started.elapsed(), Duration::from_secs(1));
+    assert!(matches!(
+        error.current_context(),
+        RemoteDispatchError::ReceiverRunEnded { target: error_target } if error_target == &target
+    ));
 }
 
 #[nervix_primitives::test]
@@ -747,9 +779,9 @@ async fn remote_relay_admission_rejection_preserves_the_typed_reason() {
     let error = RemoteDispatcher::await_relay_admission(
         &target,
         admission_rx,
-        Duration::from_secs(1),
-        Instant::now() + nervix_models::RemoteAckDispatchTimeout::DEFAULT,
-        nervix_models::RemoteAckTiming::default().remote_relay_total_timeout,
+        std::future::pending(),
+        Instant::now() + REMOTE_RELAY_TOTAL_TIMEOUT,
+        REMOTE_RELAY_TOTAL_TIMEOUT,
     )
     .await
     .expect_err("a rejected relay admission must fail dispatch");
@@ -780,9 +812,9 @@ async fn remote_relay_admission_reports_a_closed_response_channel() {
     let error = RemoteDispatcher::await_relay_admission(
         &target,
         admission_rx,
-        Duration::from_secs(1),
-        Instant::now() + nervix_models::RemoteAckDispatchTimeout::DEFAULT,
-        nervix_models::RemoteAckTiming::default().remote_relay_total_timeout,
+        std::future::pending(),
+        Instant::now() + REMOTE_RELAY_TOTAL_TIMEOUT,
+        REMOTE_RELAY_TOTAL_TIMEOUT,
     )
     .await
     .expect_err("a closed relay admission response must fail dispatch");
@@ -803,9 +835,9 @@ async fn remote_relay_admission_bounds_the_total_wait() {
     let error = RemoteDispatcher::await_relay_admission(
         &target,
         admission_rx,
-        REMOTE_RELAY_TOTAL_TIMEOUT + Duration::from_secs(1),
-        Instant::now() + nervix_models::RemoteAckDispatchTimeout::DEFAULT,
-        nervix_models::RemoteAckTiming::default().remote_relay_total_timeout,
+        std::future::pending(),
+        Instant::now() + REMOTE_RELAY_TOTAL_TIMEOUT,
+        REMOTE_RELAY_TOTAL_TIMEOUT,
     )
     .await
     .expect_err("relay admission must stop at its total deadline");
@@ -1069,9 +1101,14 @@ async fn a_stopping_owner_fails_a_batch_a_swap_holds_back() {
     drop(lease);
 }
 
-/// One acknowledgement forwarded to `receiving_node()`, held by a registry of its own.
+/// The process epoch of the receiver run that admits the forwarded fixtures.
+const RECEIVER_RUN: u64 = 9;
+
+/// One acknowledgement forwarded to `receiving_node()`, held by a registry of its own, and the
+/// membership the registry's sweeps read.
 struct ForwardedAck {
     registry: RemoteDispatchRegistry,
+    membership: TestMembership,
     ack_id: u64,
     completion: AckCompletion,
 }
@@ -1085,6 +1122,7 @@ impl ForwardedAck {
             .assured("the fixture has free correlation capacity");
         Self {
             registry,
+            membership: TestMembership::default(),
             ack_id,
             completion,
         }
@@ -1094,8 +1132,10 @@ impl ForwardedAck {
     fn sweep_without_failing(&self, sweeps: u64) {
         for _ in 0..sweeps {
             assert!(
-                self.registry.fail_silent_acks().is_empty(),
-                "no sweep before the silence bound passes may fail the acknowledgement"
+                self.registry
+                    .sweep_pending_acks_once(&self.membership)
+                    .is_empty(),
+                "no sweep may fail an acknowledgement whose receiver run lives"
             );
         }
     }
@@ -1103,20 +1143,46 @@ impl ForwardedAck {
     /// Requires the next sweep to fail the acknowledgement.
     fn sweep_failing_it(&self) {
         assert_eq!(
-            self.registry.fail_silent_acks().get(&receiving_node()),
+            self.registry
+                .sweep_pending_acks_once(&self.membership)
+                .get(&receiving_node()),
             Some(&1),
-            "the first sweep past the silence bound fails the acknowledgement"
+            "the first sweep after the receiver run ended fails the acknowledgement"
         );
         assert!(!self.registry.holds_ack(self.ack_id));
     }
 }
 
 #[nervix_primitives::test]
-async fn an_admitted_acknowledgement_its_receiver_stops_reporting_fails_at_the_silence_bound() {
+async fn an_admitted_acknowledgement_whose_receiver_run_lives_is_never_given_up() {
     let forwarded = ForwardedAck::registered();
-    forwarded.registry.admit_ack(forwarded.ack_id);
+    forwarded.registry.admit_ack(forwarded.ack_id, RECEIVER_RUN);
 
-    forwarded.sweep_without_failing(REMOTE_ACK_SILENT_SWEEPS);
+    // However long its receiver reports nothing, a run membership keeps holds the record.
+    forwarded.sweep_without_failing(1_000);
+    assert!(forwarded.registry.holds_ack(forwarded.ack_id));
+    assert!(
+        forwarded
+            .registry
+            .resolve_ack(forwarded.ack_id, AckOutcome::Ack)
+    );
+    assert_eq!(
+        timeout(ASYNC_EVENT_FAILSAFE, forwarded.completion.wait())
+            .await
+            .expect("the receiver's outcome resolves the root"),
+        AckOutcome::Ack
+    );
+}
+
+#[nervix_primitives::test]
+async fn an_admitted_acknowledgement_fails_once_a_newer_run_replaces_its_receiver_run() {
+    let forwarded = ForwardedAck::registered();
+    forwarded.registry.admit_ack(forwarded.ack_id, RECEIVER_RUN);
+    forwarded.sweep_without_failing(3);
+
+    forwarded
+        .membership
+        .replace_run(&receiving_node(), RECEIVER_RUN);
     forwarded.sweep_failing_it();
 
     let outcome = timeout(ASYNC_EVENT_FAILSAFE, forwarded.completion.wait())
@@ -1125,7 +1191,9 @@ async fn an_admitted_acknowledgement_its_receiver_stops_reporting_fails_at_the_s
     assert_eq!(
         outcome,
         AckOutcome::NoAck(
-            "node 'node-2' reported nothing about the forwarded record for 15s".to_string()
+            "the run of node 'node-2' that admitted the forwarded record ended before it \
+             acknowledged the record"
+                .to_string()
         )
     );
     assert!(
@@ -1141,22 +1209,39 @@ async fn an_admitted_acknowledgement_its_receiver_stops_reporting_fails_at_the_s
 }
 
 #[nervix_primitives::test]
+async fn an_admitted_acknowledgement_fails_once_membership_removes_its_receiver() {
+    let forwarded = ForwardedAck::registered();
+    forwarded.registry.admit_ack(forwarded.ack_id, RECEIVER_RUN);
+    forwarded.membership.remove_node(&receiving_node());
+    forwarded.sweep_failing_it();
+    assert_eq!(
+        timeout(ASYNC_EVENT_FAILSAFE, forwarded.completion.wait())
+            .await
+            .expect("the failed acknowledgement resolves its root"),
+        AckOutcome::NoAck(
+            "node 'node-2' left the cluster before it acknowledged the forwarded record"
+                .to_string()
+        )
+    );
+}
+
+#[nervix_primitives::test]
 async fn one_sweep_counts_every_acknowledgement_it_fails_against_its_receiver() {
     let registry = RemoteDispatchRegistry::with_capacity(8);
+    let membership = TestMembership::default();
     let mut completions = Vec::new();
     for _ in 0..2 {
         let (acks, completion) = AckSet::root();
         let ack_id = registry
             .register_ack(receiving_node(), acks)
             .assured("the fixture has free correlation capacity");
-        registry.admit_ack(ack_id);
+        registry.admit_ack(ack_id, RECEIVER_RUN);
         completions.push(completion);
     }
-    for _ in 0..REMOTE_ACK_SILENT_SWEEPS {
-        assert!(registry.fail_silent_acks().is_empty());
-    }
+    assert!(registry.sweep_pending_acks_once(&membership).is_empty());
+    membership.replace_run(&receiving_node(), RECEIVER_RUN);
 
-    let failed = registry.fail_silent_acks();
+    let failed = registry.sweep_pending_acks_once(&membership);
 
     assert_eq!(failed.get(&receiving_node()), Some(&2));
     for completion in completions {
@@ -1168,23 +1253,8 @@ async fn one_sweep_counts_every_acknowledgement_it_fails_against_its_receiver() 
 }
 
 #[nervix_primitives::test]
-async fn a_report_restarts_the_silence_of_an_admitted_acknowledgement() {
+async fn an_acknowledgement_admitted_by_a_live_run_survives_the_end_of_an_earlier_run() {
     let forwarded = ForwardedAck::registered();
-    forwarded.registry.admit_ack(forwarded.ack_id);
-    forwarded.sweep_without_failing(REMOTE_ACK_SILENT_SWEEPS);
-
-    assert!(forwarded.registry.report_ack(forwarded.ack_id));
-
-    forwarded.sweep_without_failing(REMOTE_ACK_SILENT_SWEEPS);
-    forwarded.sweep_failing_it();
-}
-
-#[nervix_primitives::test]
-async fn an_acknowledgement_is_not_swept_before_its_delivery_is_admitted() {
-    let forwarded = ForwardedAck::registered();
-    forwarded.sweep_without_failing(REMOTE_ACK_SILENT_SWEEPS);
-    forwarded.sweep_without_failing(REMOTE_ACK_SILENT_SWEEPS);
-
     let registration = RemoteAckRegistration {
         ack_id: forwarded.ack_id,
         registrar: ClusterNodeIdentity::new(
@@ -1192,23 +1262,33 @@ async fn an_acknowledgement_is_not_swept_before_its_delivery_is_admitted() {
             ClusterNodeIncarnation::new(1),
         ),
     };
-    forwarded.registry.admit_acks(&[None, Some(registration)]);
-
-    forwarded.sweep_without_failing(REMOTE_ACK_SILENT_SWEEPS);
+    forwarded
+        .registry
+        .admit_acks(&[None, Some(registration)], RECEIVER_RUN);
+    // An earlier run of the receiver ending says nothing about the run that admitted the record.
+    forwarded
+        .membership
+        .replace_run(&receiving_node(), RECEIVER_RUN - 1);
+    forwarded.sweep_without_failing(3);
+    forwarded
+        .membership
+        .replace_run(&receiving_node(), RECEIVER_RUN);
     forwarded.sweep_failing_it();
 }
 
 #[nervix_primitives::test]
 async fn a_terminal_outcome_leaves_the_sweep_nothing_to_fail() {
     let forwarded = ForwardedAck::registered();
-    forwarded.registry.admit_ack(forwarded.ack_id);
-    forwarded.sweep_without_failing(REMOTE_ACK_SILENT_SWEEPS);
+    forwarded.registry.admit_ack(forwarded.ack_id, RECEIVER_RUN);
 
     assert!(
         forwarded
             .registry
             .resolve_ack(forwarded.ack_id, AckOutcome::Ack)
     );
+    forwarded
+        .membership
+        .replace_run(&receiving_node(), RECEIVER_RUN);
     forwarded.sweep_without_failing(1);
 
     assert_eq!(
@@ -1220,94 +1300,72 @@ async fn a_terminal_outcome_leaves_the_sweep_nothing_to_fail() {
 }
 
 #[nervix_primitives::test(start_paused = true)]
-async fn the_running_sweep_fails_an_acknowledgement_at_the_silence_bound() {
+async fn the_running_sweep_keeps_an_acknowledgement_whose_receiver_run_lives() {
     let registry = Arc::new(RemoteDispatchRegistry::with_capacity(8));
     let (acks, completion) = AckSet::root();
     let ack_id = registry
         .register_ack(receiving_node(), acks)
         .assured("the fixture has free correlation capacity");
-    registry.admit_ack(ack_id);
-    let admitted_at = Instant::now();
+    registry.admit_ack(ack_id, RECEIVER_RUN);
     let sweeping = registry.clone();
-    let sweeps = nervix_primitives::task::spawn(async move { sweeping.sweep_silent_acks().await });
+    let sweeps = nervix_primitives::task::spawn(async move {
+        sweeping
+            .sweep_pending_acks(&TestMembership::default())
+            .await
+    });
 
-    let outcome = completion.wait().await;
-    let silent_for = admitted_at.elapsed();
-
-    assert!(matches!(outcome, AckOutcome::NoAck(_)));
-    assert!(
-        silent_for >= REMOTE_ACK_SILENCE_TIMEOUT,
-        "the acknowledgement failed after {silent_for:?} of silence"
-    );
-    assert!(
-        silent_for <= REMOTE_ACK_SILENCE_TIMEOUT + REMOTE_ACK_SILENCE_SWEEP_INTERVAL,
-        "the acknowledgement failed after {silent_for:?} of silence"
-    );
-    sweeps.abort();
-}
-
-#[nervix_primitives::test(start_paused = true)]
-async fn the_running_sweep_keeps_an_acknowledgement_its_receiver_keeps_reporting() {
-    let registry = Arc::new(RemoteDispatchRegistry::with_capacity(8));
-    let (acks, completion) = AckSet::root();
-    let ack_id = registry
-        .register_ack(receiving_node(), acks)
-        .assured("the fixture has free correlation capacity");
-    registry.admit_ack(ack_id);
-    let sweeping = registry.clone();
-    let sweeps = nervix_primitives::task::spawn(async move { sweeping.sweep_silent_acks().await });
-
-    for _ in 0..10 {
-        sleep(Duration::from_secs(7)).await;
-        assert!(
-            registry.report_ack(ack_id),
-            "an acknowledgement reported within the bound stays pending"
-        );
-    }
+    // A receiver that reports nothing for many minutes, as a held record's does, keeps it.
+    sleep(Duration::from_secs(600)).await;
+    assert!(registry.holds_ack(ack_id));
     assert!(registry.resolve_ack(ack_id, AckOutcome::Ack));
     assert_eq!(completion.wait().await, AckOutcome::Ack);
     sweeps.abort();
 }
 
 #[nervix_primitives::test(start_paused = true)]
-async fn a_stalled_sweep_counts_once_for_the_time_it_missed() {
+async fn the_running_sweep_fails_an_acknowledgement_once_its_receiver_run_ends() {
     let registry = Arc::new(RemoteDispatchRegistry::with_capacity(8));
-    let (acks, _completion) = AckSet::root();
+    let membership = Arc::new(TestMembership::default());
+    let (acks, completion) = AckSet::root();
     let ack_id = registry
         .register_ack(receiving_node(), acks)
         .assured("the fixture has free correlation capacity");
-    registry.admit_ack(ack_id);
+    registry.admit_ack(ack_id, RECEIVER_RUN);
     let sweeping = registry.clone();
-    let sweeps = nervix_primitives::task::spawn(async move { sweeping.sweep_silent_acks().await });
-    nervix_primitives::task::yield_now().await;
+    let sweeping_membership = membership.clone();
+    let sweeps = nervix_primitives::task::spawn(async move {
+        sweeping.sweep_pending_acks(&*sweeping_membership).await
+    });
+    sleep(Duration::from_secs(30)).await;
+    assert!(registry.holds_ack(ack_id));
+    let ended_at = Instant::now();
+    membership.replace_run(&receiving_node(), RECEIVER_RUN);
 
-    // The node's execution stalls for four silence bounds, as a paused container's does, so no
-    // report could have reached it.
-    nervix_primitives::time::advance(REMOTE_ACK_SILENCE_TIMEOUT * 4).await;
-    nervix_primitives::task::yield_now().await;
+    let outcome = completion.wait().await;
 
+    assert!(matches!(outcome, AckOutcome::NoAck(_)));
     assert!(
-        registry.holds_ack(ack_id),
-        "a sweep that ran late counts once rather than for every interval it missed"
+        ended_at.elapsed() <= REMOTE_ACK_SWEEP_INTERVAL,
+        "the next sweep after the run ended fails the acknowledgement"
     );
     sweeps.abort();
 }
 
-/// Runtime teardown cancels the silence sweeps while a sweep that overran its interval runs, so
-/// the next tick is already due when that sweep returns. The sweeps still end there: teardown's
+/// Runtime teardown cancels the acknowledgement sweeps while a sweep that overran its interval
+/// runs, so the next tick is already due when that sweep returns. The sweeps still end there: teardown's
 /// join waits for the sweep in progress and for no other, and the acknowledgement that sweep
 /// left pending ends with the registry rather than by a later sweep.
 ///
 /// The callback returns an already due deadline, the production driver's state after an
 /// overrunning sweep. It must yield before it can scan again even when neither input blocks.
 #[nervix_primitives::test(start_paused = true)]
-async fn teardown_ends_the_silence_sweeps_after_the_overrunning_sweep_it_interrupts() {
+async fn teardown_ends_the_acknowledgement_sweeps_after_the_overrunning_sweep_it_interrupts() {
     use nervix_primitives::sync::{
         Notify,
         atomic::{AtomicUsize, Ordering},
     };
 
-    use crate::runtime::remote_ack_owner::SilenceSweeps;
+    use crate::runtime::remote_ack_owner::PendingAckSweeps;
 
     let runtime = Runtime::default();
     let registry = runtime.inner.remote_dispatch.clone();
@@ -1315,7 +1373,7 @@ async fn teardown_ends_the_silence_sweeps_after_the_overrunning_sweep_it_interru
     let ack_id = registry
         .register_ack(receiving_node(), acks)
         .assured("the fixture has free correlation capacity");
-    registry.admit_ack(ack_id);
+    registry.admit_ack(ack_id, RECEIVER_RUN);
     let sweeps = Arc::new(AtomicUsize::new(0));
     let teardown = runtime.inner.remote_ack_watcher_shutdown.clone();
     let swept = sweeps.clone();
@@ -1323,9 +1381,9 @@ async fn teardown_ends_the_silence_sweeps_after_the_overrunning_sweep_it_interru
     runtime.spawn_remote_ack_watcher_task(async move {
         let changed = Notify::new();
         let next_sweep = nervix_primitives::sync::blocking::Mutex::new(None);
-        SilenceSweeps::watching(&changed, &next_sweep)
+        PendingAckSweeps::watching(&changed, &next_sweep)
             .run(|| {
-                registry.fail_silent_acks();
+                registry.sweep_pending_acks_once(&TestMembership::default());
                 swept.fetch_add(1, Ordering::Relaxed);
                 // Teardown cancels the sweeps while this sweep runs.
                 cancelling.cancel();
@@ -1350,14 +1408,14 @@ async fn teardown_ends_the_silence_sweeps_after_the_overrunning_sweep_it_interru
 }
 
 /// One fresh diagnostic process installs its detector before constructing the registry's
-/// tracked position guards, then ends overrunning silence sweeps through runtime teardown.
+/// tracked position guards, then ends overrunning acknowledgement sweeps through runtime teardown.
 #[cfg(feature = "deloxide")]
 #[test]
-fn deloxide_remote_ack_silence_sweeps() {
+fn deloxide_remote_ack_sweeps() {
     let directory =
         std::env::var_os("NERVIX_DEADLOCK_EVIDENCE").map(nervix_deadlock::EvidenceDirectory::new);
     nervix_deadlock::DiagnosticRun::start(directory)
-        .assured("the silence sweep diagnostic process starts its detector once");
+        .assured("the acknowledgement sweep diagnostic process starts its detector once");
     crate::runtime::remote_ack_owner::policy_tests::policy_epochs();
-    teardown_ends_the_silence_sweeps_after_the_overrunning_sweep_it_interrupts();
+    teardown_ends_the_acknowledgement_sweeps_after_the_overrunning_sweep_it_interrupts();
 }

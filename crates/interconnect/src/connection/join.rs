@@ -171,13 +171,7 @@ impl TransportState {
         )
         .await?;
         if let AnswerEncoding::Encoded(refusal) = refusal {
-            send_response(
-                respond,
-                StatusCode::OK,
-                Some(refusal),
-                self.options.progress_timeout,
-            )
-            .await?;
+            send_response(respond, StatusCode::OK, Some(refusal)).await?;
         }
         Ok(InboundBindingAnswer::Refused(Report::new(
             TransportError::IncompatiblePeer {
@@ -188,14 +182,15 @@ impl TransportState {
     }
 
     /// Lets a refusal answer reach the dialing node before the connection closes: its frames leave
-    /// only while the connection is polled, and the progress timeout bounds how long that takes.
+    /// only while the connection is polled. Refusing a connection is part of binding it, so the
+    /// connection-setup budget, the liveness of dialing, bounds how long that takes.
     pub(super) async fn flush_refusal<T>(&self, connection: &mut server::Connection<T, Bytes>)
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
         connection.graceful_shutdown();
         let closed = timeout(
-            self.options.progress_timeout,
+            self.options.connection_setup_timeout,
             poll_fn(|context| connection.poll_closed(context)),
         )
         .await;
@@ -209,7 +204,8 @@ impl TransportState {
             }
             Err(_) => {
                 debug!(
-                    "a refused interconnect connection did not close within its progress timeout"
+                    "a refused interconnect connection did not close within its connection-setup \
+                     budget"
                 );
             }
         }

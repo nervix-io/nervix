@@ -1374,7 +1374,9 @@ async fn branched_root_without_children_acks_success() {
         AckOutcome::Ack
     );
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 }
@@ -1462,7 +1464,9 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
 
     branched_runtime.stop(RouteStop::Finish).await;
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 }
@@ -1676,7 +1680,9 @@ async fn a_planned_route_stop_finishes_every_delivery_however_long_it_waits() {
     }
     entrypoint
         .owner_task
-        .stop(Duration::from_secs(1))
+        .stop(TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 }
@@ -1703,7 +1709,9 @@ async fn an_enforced_route_stop_ends_its_deliveries_at_once_and_refuses_what_it_
     // The consumer leaves, so the relay owner stops holding what reached it before the stop.
     drop(fan_in);
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 }
@@ -1754,7 +1762,9 @@ async fn an_enforced_route_stop_refuses_what_the_routes_flush_still_holds() {
     );
     drop(fan_in);
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 }
@@ -1907,7 +1917,9 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
 
         route_runtime.stop(RouteStop::Finish).await;
         owner_task
-            .stop(Duration::from_secs(1))
+            .stop(TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("relay owner should stop");
     }

@@ -431,6 +431,26 @@ fn test_session_service(
     }
 }
 
+/// The ceiling a unit test gives its transport's teardown: ten seconds, so a stream a test still
+/// holds is cut instead of hanging the test.
+pub(crate) fn test_teardown_ceiling() -> Option<nervix_interconnect::ExchangeDeadline> {
+    Some(nervix_interconnect::ExchangeDeadline::OperationCeiling(
+        nervix_primitives::time::Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .assured("ten seconds from now fits the monotonic clock"),
+    ))
+}
+
+/// Publishes to `service`'s transport a membership that lists this node alone, so every other node
+/// a test names has left the cluster and a request to it ends at once with `TargetLeft`.
+pub(in crate::application) fn publish_membership_of_this_node_alone(service: &SessionServiceImpl) {
+    let local = service.inner.consensus.local_node_id().clone();
+    service
+        .inner
+        .interconnect
+        .replace_live_nodes(&std::collections::BTreeSet::from([local]));
+}
+
 /// A loopback interconnect for `node_id` in `cluster_id`, under an authority of its own.
 pub(crate) async fn test_interconnect(cluster_id: &str, node_id: &ClusterNodeName) -> Transport {
     TestCertificateAuthority::generate()

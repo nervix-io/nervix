@@ -1,8 +1,11 @@
 @remote_ack_owners
-Feature: Remote record acknowledgements lost between nodes
+Feature: Remote record acknowledgements returned between nodes
+  A receiver sends a record acknowledgement back until it is delivered. A send that fails in
+  transport while the registering node stays live is sent again, so the source commits the record
+  once and never delivers it a second time.
 
   @deloxide_stress
-  Scenario: A record acknowledgement lost on its way back to the relay owner is redelivered instead of stalling its source
+  Scenario: A record acknowledgement whose return fails in transport is sent again and commits its source once
     Given Kafka is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
@@ -63,22 +66,14 @@ Feature: Remote record acknowledgements lost between nodes
       """
       - domain={{domain}} kind=emitter name=lost_ack_emitter owner=node-3
       """
-    Given the next record acknowledgement node "node-3" returns to node "node-2" is lost
+    Given the first send of the next record acknowledgement node "node-3" returns to node "node-2" fails in transport
     When Kafka message is published to topic "lost_ack_in_{{test_id}}"
       """
-      {"event_id":"lost-ack","branch_name":"a","sequence":1}
+      {"event_id":"resent-ack","branch_name":"a","sequence":1}
       """
-    Then within "30s" the observed broker receives payloads
+    Then within "30s" Kafka consumer group "lost_ack_group_{{test_id}}" next offset for topic "lost_ack_in_{{test_id}}" partition 0 is "at least 1"
+    And a send of the record acknowledgement node "node-3" returned to node "node-2" failed in transport
+    And within "30s" the observed broker receives exactly these payloads
       """
-      "event_id":"lost-ack","branch_name":"a","sequence":1
+      {"event_id":"resent-ack","branch_name":"a","sequence":1}
       """
-    And the record acknowledgement node "node-3" returned to node "node-2" was lost
-    When Kafka message is published to topic "lost_ack_in_{{test_id}}"
-      """
-      {"event_id":"after-lost-ack","branch_name":"b","sequence":2}
-      """
-    Then within "90s" the observed broker receives payloads
-      """
-      "event_id":"after-lost-ack","branch_name":"b","sequence":2
-      """
-    And within "30s" Kafka consumer group "lost_ack_group_{{test_id}}" next offset for topic "lost_ack_in_{{test_id}}" partition 0 is "at least 2"

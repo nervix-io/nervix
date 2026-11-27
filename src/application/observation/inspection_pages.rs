@@ -83,6 +83,56 @@ pub(super) fn grow_inspection(
     ))
 }
 
+/// Runs one owner page `read` within allowances of the state-read, restore metadata and bulk
+/// classes, passing it the bulk allowance's executor, through which the page and its reply take
+/// every charge. The bulk share starts at `bulk` bytes. A read whose share has no room for a
+/// charge it requires gives everything back and runs again within the share it needed, which it
+/// waits for while it holds nothing, so a full class holds the read back and never refuses it. A
+/// row after a page's first joins only while the share has room for it now, so it never makes the
+/// read run again. It returns the read's own outcome, or the refusal of a share larger than the
+/// whole class.
+pub(super) async fn within_owner_page_shares<T, F, Fut>(
+    executor: &nervix_execution::Executor,
+    bulk: u64,
+    read: F,
+) -> Result<T, error_stack::Report<nervix_execution::AdmissionError>>
+where
+    F: Fn(nervix_execution::Executor) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    use nervix_execution::{AdmissionError, MemoryClass};
+
+    let read = &read;
+    executor
+        .within_allowance(MemoryClass::StateRead, 0, |state_read| async move {
+            state_read
+                .within_allowance(MemoryClass::RestoreMetadata, 0, |metadata| async move {
+                    metadata
+                        .within_allowance(MemoryClass::Bulk, bulk, |share| async move {
+                            Ok::<_, error_stack::Report<AdmissionError>>(read(share).await)
+                        })
+                        .await?
+                })
+                .await?
+        })
+        .await?
+}
+
+/// The refusal of an owner page whose allowance could not be had: a share larger than the whole
+/// class is a page this node could never hold, and any other refusal means the node admits no
+/// more work.
+pub(super) fn owner_page_refusal(
+    refusal: error_stack::Report<nervix_execution::AdmissionError>,
+) -> StateInspectionRejection {
+    let reason = match refusal.current_context() {
+        nervix_execution::AdmissionError::ExceedsBudget { .. } => {
+            StateInspectionRejection::ReplyTooLarge
+        }
+        _ => StateInspectionRejection::NotReady,
+    };
+    inspection_refusal(refusal, reason)
+}
+
 /// Project an observed internal failure to the fixed inspection protocol refusal.
 /// The diagnostic records the complete report before its wire projection leaves this boundary.
 pub(super) fn inspection_refusal(

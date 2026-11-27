@@ -118,7 +118,7 @@
     "nervix_server::runtime::relay_boundary::{impl#18}::spawn_relay_owner_task::instances",
     "nervix_server::runtime::relay_interaction::RelayInputCollection::pending",
     "nervix_server::runtime::relay_state_task::RelayStateRun::branches",
-    "nervix_server::runtime::state_inspection_read::{impl#0}::capture_materialized_state_page::sources",
+    "nervix_server::runtime::state_inspection_read::{impl#1}::capture_materialized_state_page::sources",
     "nervix_server::runtime::state_replication::checkpoint_listing::{impl#1}::to_remote::removed",
     "nervix_server::runtime::state_replication::handoff_capture::{impl#0}::capture_frozen_ownership_handoff_state::captured",
     "nervix_server::runtime::state_replication::handoff_capture::{impl#0}::capture_frozen_ownership_handoff_state::deduplicators",

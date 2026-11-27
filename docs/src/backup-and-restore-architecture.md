@@ -331,9 +331,10 @@ what remains of the cut's budget, because staging a domain's state takes as long
 large. A live cut's owners receive the default 60-second budget. The coordinator's own share of a
 stopped or live capture runs without a deadline.
 
-An owner accepts a capture only from the current leader. It waits up to five seconds to apply the
-cut revision, brings its runtime plan current, checks the sender is still the leader, and reads the
-domain's status. An owner that cannot reach the revision refuses the capture, which fails the
+An owner accepts a capture only from the current leader. It waits to apply the cut revision, with
+no bound of its own because the cut's budget bounds the whole capture, brings its runtime plan
+current, checks the sender is still the leader, and reads the domain's status. An owner whose
+applied-state authority closes before it reaches the revision refuses the capture, which fails the
 backup.
 
 For a quiesced cut, the owner first asks each ingestor, reingestor and processor it executes to
@@ -405,7 +406,9 @@ a single larger row or key takes a group of its own. Cancellation is checked bet
 identities, keys and entries, and an interrupted conversion drops its private files and returns their
 quota. A section that cannot be staged because the node's staging quota is full is refused rather
 than waited for. A staged section stays registered under the capture's coordination identity until
-the coordinator fetches it or 600 seconds pass.
+the coordinator fetches it or, once its fetch of the domain's sections ends, releases it, or until
+the owner's sweep finds that the coordinator's run ended or that the full `COMMAND_RETRY_VALIDITY`
+has passed since staging.
 
 Only the node the committed schedule names as a unit's primary captures its placements. An owner
 runs the capture steps above for the placements it is the primary of and for no others, so the
@@ -427,18 +430,20 @@ sending process:
 
 | Operation | Direction and form | Pool and subquota | Deadline | What the receiver checks |
 | --- | --- | --- | --- | --- |
-| Drain status | The coordinator to every live node and every node the schedule assigns the domain's work to, unary, polled every 50 ms; the coordinator answers itself in-process | Management, Liveness | 2 seconds per request, within the cut's budget | The sender is the current leader. Without installing runtime state, which the pause already applied, the node starts a force-flush generation while it holds admitted work and none is running, starts a confirming force-flush generation, or only observes, and reports its admitted-work counters. |
-| Capture | The coordinator to every scheduled state owner, and for a live cut every other live node too, concurrently; the coordinator answers itself in-process | Management, Shared | What remains of the cut's budget | The sender is the current leader, the node has applied the cut revision within five seconds, its runtime plan is current and the sender is still the leader. |
-| Capture inventory | The coordinator to each node, unary | Management, Shared | 5 seconds | The sender is the current leader. The reply lists that capture's sections in path order within one management message of at most 68 KiB. |
-| Section fetch | The coordinator to the node that staged a section; a streamed response with its exact length | Bulk, Shared | 30 seconds to open the stream, then 5 seconds without progress | The sender is the current leader and the capture's coordinator. The stage is removed as it is served, so a section is fetched once, in 1 MiB reads. |
+| Drain status | The coordinator to every live node and every node the schedule assigns the domain's work to, unary, polled every 50 ms; the coordinator answers itself in-process | Management, Liveness | What remains of the cut's budget, checked between polls; a request in flight waits for its node for as long as the node lives | The sender is the current leader. Without installing runtime state, which the pause already applied, the node starts a force-flush generation while it holds admitted work and none is running, starts a confirming force-flush generation, or only observes, and reports its admitted-work counters. |
+| Capture | The coordinator to every scheduled state owner, and for a live cut every other live node too, concurrently; the coordinator answers itself in-process | Management, Shared | What remains of the cut's budget | The sender is the current leader, the node has applied the cut revision, which it waits for with no bound of its own, its runtime plan is current and the sender is still the leader. |
+| Capture inventory | The coordinator to each node, unary | Management, Shared | What remains of the cut's budget | The sender is the current leader. The reply lists that capture's sections in path order within one management message of at most 68 KiB. |
+| Section fetch | The coordinator to the node that staged a section; a streamed response with its exact length | Bulk, Shared | None: the cut has ended, so the stream opens and is read for as long as the node and its connection live | The sender is the current leader and the capture's coordinator. The stage is removed as it is served, so a section is fetched once, in 1 MiB reads. |
+| Section release | The coordinator to each node whose inventory it read, unary, once its fetch of the domain's sections ends, whether or not the fetch completed; the coordinator releases its own stages in-process | Management, Shared | None: it waits for the node for as long as the node lives | The sender is the capture's coordinator. The node drops every section that coordination staged there for the domain; a failed release leaves them to the node's sweep. |
 
 The coordinator fetches a domain's sections after it resumed the domain, before it cuts the next
 one. A fetch takes the bulk pool's shared stream and admission rather than the Snapshot subquota
 that materialized readers, replica checkpoint transfers and consensus snapshot transfers share. The
 cut publishes new checkpoint revisions, and a replica catching up a state above the bulk budget
 holds the one Snapshot stream toward its owner for as long as that transfer takes, which on a
-loaded node outlasts the opening deadline. A refusal for capacity alone is retried every 50
-milliseconds within one 30-second opening deadline; any other failure ends the backup. Each fetched
+loaded node can be long. A refusal for capacity alone is retried every 50 milliseconds, for as long
+as the owner lives, because the owner's stage has not been consumed; any other failure ends the
+backup. Each fetched
 section is staged on the coordinator, the stream is released before the copy is sealed, and its
 length and digest are checked against the inventory. Sections the coordinator staged itself are
 taken without a copy.
@@ -787,10 +792,11 @@ remote copy through the state-installation operation, one checkpoint at a time:
 | Finish | The node checks the complete length and digest, then stages the checkpoint into the domain's restored namespace as one 2 MiB storage job. |
 | Publish | Names the complete inventory the node must hold. The node publishes it as one 2 MiB storage job, its authority validated again. |
 
-Each request uses the bulk pool's Snapshot subquota with a 30-second deadline, carries the authority,
-and is accepted only from the authority's leader once the node applied the authority's generation,
-which it waits up to five seconds for. A staged upload a coordinator abandons expires after 600
-seconds. Guest saves stream from the archive file on the coordinator and from the sealed upload on a
+Each request uses the bulk pool's Snapshot subquota and waits for the node's answer for as long as
+the node lives, carries the authority, and is accepted only from the authority's leader once the
+node applied the authority's generation, which it waits for as long as it takes. A staged upload a
+coordinator abandons is released by the node's sweep once the coordinator's run ends, as membership
+and the interconnect decide, or once the full `COMMAND_RETRY_VALIDITY` has passed since it began. Guest saves stream from the archive file on the coordinator and from the sealed upload on a
 remote node; neither path assembles a save in a second full-size buffer or reserves a file-read
 chunk inside a reserved full checkpoint. Native lifecycle and Kafka offsets are converted entry by
 entry into quota-owned files whose ordered 64 KiB windows feed both local installation and remote
@@ -1025,7 +1031,7 @@ A retained archive's read failure is reported before its download sends the fixe
 | Cut reach | A node the schedule assigns the domain's work to is not reported live when a quiesced cut starts, a scheduled state owner is not reported live when any cut captures, or the schedule places an entity whose state the archive captures on no node | Nothing paused when a quiesced cut refused before its pause, otherwise the pause is undone; the lease is released and no archive is assembled | Send the backup again once the node is back, or once failover has moved its placements or a node can host the entity again. |
 | Leader change during a cut | The tenure check fails | The domain is resumed, by the coordinator or by the next leader's reconciliation, and the command stays applying | The next leader re-executes the backup under the same reference; the client retries the reference to receive its archive. |
 | Outcome recording | Leadership moves, or the leader cannot confirm that it still leads, before the backup's outcome is recorded | The command stays applying, and the client receives `OutcomeUnknown` | The leader that resumes the command, or the client's retry of the reference, runs the backup again with new cuts; the client receives that run's outcome and archive. |
-| Owner capture | An owner cannot apply the revision, convert a checkpoint, or stage a section | No archive is assembled. The coordinator's copies and the failing owner's partial files are dropped; other owners' staged sections expire after 600 seconds | Send the backup again; it takes a new cut. |
+| Owner capture | An owner cannot apply the revision, convert a checkpoint, or stage a section | No archive is assembled. The coordinator's copies and the failing owner's partial files are dropped; other owners' staged sections are released when the coordinator's run ends or `COMMAND_RETRY_VALIDITY` passes, unless the coordinator already read their inventories and released them | Send the backup again; it takes a new cut. |
 | Section transfer or assembly | A fetch fails, or the archive cannot be staged or encoded | No archive is retained | Send the backup again. |
 | Retained archive | The node restarts, the retry validity ends, or a download collects it | The recorded outcome remains; its download is refused | Take a new backup. |
 | Archive download from another node | Leadership moved after the outcome was recorded, or another run lost the race to record it, and the client asks a node that does not hold the archive | The archive stays retained on the node the outcome names. A losing run's archive is never streamed; it is released when a download asks for it, or at once when the cluster refuses its outcome | The download is sent on to the named node while its process is live; once that process restarted or left the cluster, the download is refused: take a new backup. |
@@ -1343,9 +1349,12 @@ owns chaos qualification.
 Backup retry cadence and restore conversion's staging wait/retry are node capabilities, with
 50ms backup retries and a 30s conversion staging wait with 50ms retries by default. Each conversion
 keeps its first staging refusal's time and captured policy; a retry releases the failed attempt's
-charges and does not renew that wait. Capture and restored-state staging expiry use two thirds of command
-retry validity, ten minutes by default. Their maintenance sweep uses the local restore-staging
-cadence. Local capture/install revision waits use twenty Raft heartbeats, five seconds by default.
+charges and does not renew that wait. Capture and restored-state staging expire after the full
+command retry validity, `COMMAND_RETRY_VALIDITY`, fifteen minutes by default, or earlier once their
+coordinator's run ends. Their maintenance sweep uses the local restore-staging cadence. An owner's
+wait for the capture revision and a node's wait for a restore authority's generation have no bound
+of their own: a node that applies the leader's log slowly costs the step latency, and only the end
+of its applied-state authority ends either wait sooner.
 
 Captured-section chunks use sixteen executor bulk chunks capped at half the immutable bulk
 pool, preserving the default 1 MiB transfer piece and room for two live read/transport buffers.

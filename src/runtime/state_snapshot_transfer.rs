@@ -39,8 +39,6 @@ impl InterconnectRequest for DescribeStateSnapshot {
 
     const NAME: &'static str = "describe_state_snapshot";
     const CLASS: PoolClass = PoolClass::Commands;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Setup;
 }
 
 /// What the owner sealed when the request succeeded.
@@ -76,6 +74,4 @@ impl InterconnectStreamRequest for FetchStateSnapshot {
     const NAME: &'static str = "fetch_state_snapshot";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Snapshot;
 }

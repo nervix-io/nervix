@@ -853,7 +853,9 @@ mod tests {
         assert!(matches!(*worker.task.lock(), MessageErrorRouteState::Ended));
         assert!(!worker.activate(task.runtime, &plan));
         owner_task
-            .stop(Duration::from_secs(1))
+            .stop(crate::runtime::TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("relay owner stops");
     }
@@ -916,7 +918,9 @@ mod tests {
         .assured("the route failure is queued before its observation deadline");
         assert_eq!(observed, expected);
         owner_task
-            .stop(Duration::from_secs(1))
+            .stop(crate::runtime::TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .assured("the relay owner ends after its domain clock is withdrawn");
     }
@@ -963,7 +967,9 @@ mod tests {
         task.await.expect("message-error task must stop cleanly");
         assert_eq!(completion.wait().await, AckOutcome::Ack);
         owner_task
-            .stop(Duration::from_secs(1))
+            .stop(crate::runtime::TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("relay owner should stop");
     }
@@ -1018,7 +1024,9 @@ mod tests {
         task.await.expect("message-error task must stop cleanly");
         assert_eq!(completion.wait().await, AckOutcome::Ack);
         owner_task
-            .stop(Duration::from_secs(1))
+            .stop(crate::runtime::TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("relay owner should stop");
     }
@@ -1085,7 +1093,9 @@ mod tests {
         );
         route_runtime.shutdown().await;
         owner_task
-            .stop(Duration::from_secs(1))
+            .stop(crate::runtime::TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("relay owner should stop");
     }
@@ -1187,7 +1197,9 @@ mod tests {
         drop(installed);
         runtime.stop_message_error_routes_for_domain(&domain).await;
         owner_task
-            .stop(Duration::from_secs(1))
+            .stop(crate::runtime::TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("relay owner should stop");
     }
@@ -1238,7 +1250,9 @@ mod tests {
         shutdown.send_replace(true);
         task.await.expect("message-error task must stop cleanly");
         owner_task
-            .stop(Duration::from_secs(1))
+            .stop(crate::runtime::TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("relay owner should stop");
     }

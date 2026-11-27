@@ -1058,12 +1058,8 @@ impl Runtime {
         }
         for commands in instance_commands {
             nervix_primitives::task::consume_budget().await;
-            if let Err(error) = ScheduledEmitterTask::reconfigure_via(
-                &commands,
-                policy.clone(),
-                self.task_stop_grace(),
-            )
-            .await
+            if let Err(error) =
+                ScheduledEmitterTask::reconfigure_via(&commands, policy.clone()).await
             {
                 self.restore_failed(
                     restore,
@@ -1332,7 +1328,12 @@ impl Runtime {
             let Some(task) = task else {
                 continue;
             };
-            if let Err(error) = task.stop(self.branch_task_stop_timeout()).await {
+            if let Err(error) = task
+                .stop(TaskStopWait::UntilStopped {
+                    report_after: self.branch_task_stop_timeout(),
+                })
+                .await
+            {
                 self.restore_failed(
                     restore,
                     &node,
@@ -1420,7 +1421,7 @@ impl Runtime {
                         .remove(&RelayUnitRef::new(relay.clone(), started.unit))
                 });
             if let Some(task) = task
-                && let Err(error) = task.stop(self.task_stop_grace()).await
+                && let Err(error) = task.stop(self.planned_task_stop()).await
             {
                 self.restore_failed(
                     restore,

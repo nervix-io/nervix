@@ -113,8 +113,14 @@ async fn cancelling_every_slot_retires_the_peer_targets_in_node_order() {
     state.cancel_all_slots();
 
     assert_eq!(retirements.order().await, nodes);
-    fixture.transport_a.shutdown().await;
-    fixture.transport_b.shutdown().await;
+    fixture
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    fixture
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 #[nervix_primitives::test]
@@ -138,6 +144,12 @@ async fn credential_replacement_retires_the_peer_targets_in_node_order() {
             "the replacement targets start with live slots"
         );
     }
-    fixture.transport_a.shutdown().await;
-    fixture.transport_b.shutdown().await;
+    fixture
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    fixture
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }

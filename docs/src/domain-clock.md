@@ -613,8 +613,9 @@ commit's logical deadline from it, and a retry or drain forces the commit withou
 
 Emitter branch activity is measured at input acceptance in the domain's coordinate. TTL expiry is
 checked by physical maintenance against domain time, independently for each source's held
-branches. A wait for required materialized state belongs to that held work and ends when its
-branch expires. Removing a branch neither reassigns surviving records' execution snapshots nor
+branches. A wait for required materialized state belongs to that held work, so its branch outlives
+the TTL until the wait ends: the scan that finds the branch held counts its TTL again from that
+scan's domain time. Removing a branch neither reassigns surviving records' execution snapshots nor
 creates a publish for an empty buffer. Force flush, retry and stop retain their existing clock
 ownership; branch maintenance does not turn a physical drain deadline into a logical one.
 The emitter retention owner captures the node's configured branch scan interval at startup;
@@ -708,8 +709,8 @@ The monotonic timer is an implementation mechanism for waiting; the due predicat
 domain's logical coordinate. Lifecycle changes are checked after every wake. Cancellation is a
 separate typed outcome rather than a clock read.
 
-Reset coordination and its ninety-second initial-checkpoint deadline are physical, monotonic bounds.
-They do not wait for, pause, or re-anchor logical time. A reset that fails before generation
+Reset coordination and its initial checkpoint wait on the physical, monotonic clock, with no
+deadline of their own. They do not wait for, pause, or re-anchor logical time. A reset that fails before generation
 publication restores the old branch instance with its existing logical deadlines. After generation
 publication, recovery completes the fresh lifetime and never recreates the old instance or its
 timers.
@@ -736,7 +737,7 @@ The architecture keeps four time classes distinct:
 | --- | --- |
 | Domain logical time | Expressions, explicit domain cadence, collection and flush cadence, TTL, retention, window completion, and guest-requested timeouts |
 | Preserved source time | External event timestamps, broker metadata, and window membership inputs |
-| Physical monotonic time | Network deadlines, retry and backoff, acknowledgements, cancellation, shutdown, drain, state checkpoint deadlines, safety timeouts, and physical batching minima |
+| Physical monotonic time | Network deadlines, retry and backoff, acknowledgements, cancellation, shutdown, drain, state checkpoint waits, safety timeouts, and physical batching minima |
 | Actual UTC | Paced projection input, unpaced domain reads, administrative records, security validity, explicitly external observation fields, and the comparison of a server-supplied HTTP date, such as `Retry-After`, with the present |
 
 Logical and physical deadlines are different types, and neither converts to the other. A

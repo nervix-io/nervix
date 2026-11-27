@@ -65,6 +65,9 @@ Options:
                          owner-partition or rolling-restart, and restore-fault one of
                          leader-crash, leader-partition, owner-crash or reclamation-owner-crash.
   --state-partitions N   Stateful fixture branch partitions: 1 or 4 (default: 1).
+  --inspect-state        Read every state inspection family of the stateful graph, beside a
+                         reorderer and a correlator, before, during and after a three-node
+                         owner-crash, and judge the owner and origin each report names.
   --profile NAME         degraded-links profile: all, delay, jitter, random-loss,
                          burst-loss, rate-limit, combined (default: ${degradation_profile}).
   --load-interval-ms N   Fixed producer interval, 100..5000 (default: ${load_interval_ms}).
@@ -156,6 +159,7 @@ isolation_option_set=false
 fault=none
 stateful_partitions=1
 stateful_partitions_set=false
+inspect_state=false
 fault_option_set=false
 degradation_profile=all
 degradation_option_set=false
@@ -335,6 +339,10 @@ while [[ "$#" -gt 0 ]]; do
             stateful_partitions="$2"
             stateful_partitions_set=true
             shift 2
+            ;;
+        --inspect-state)
+            inspect_state=true
+            shift
             ;;
         --profile | --load-interval-ms | --baseline-seconds | --degrade-seconds | --drain-seconds | --max-backlog | --min-throughput-pct)
             [[ "$#" -ge 2 ]] || setup_error "$1 requires a value"
@@ -623,6 +631,13 @@ case "${scenario}" in
 esac
 if [[ "${node_count}" == 1 && "${fault}" != none && "${fault}" != cluster-restart ]]; then
     setup_error "${fault} requires --nodes 3; one node supports none and cluster-restart"
+fi
+# Inspection reads the stateful graph through a survivor while its owner is down, so it needs the
+# three-node owner crash.
+if [[ "${inspect_state}" == true ]]; then
+    [[ "${scenario}" == stateful ]] || setup_error '--inspect-state applies only to stateful'
+    [[ "${node_count}" == 3 && "${fault}" == owner-crash ]] \
+        || setup_error '--inspect-state requires --nodes 3 and --fault owner-crash'
 fi
 if [[ "${scenario}" == pause-resume && "${outage_option_set}" == true ]]; then
     setup_error 'pause-resume selects its own finite durations; --outage-seconds is for crash scenarios'
@@ -1670,6 +1685,12 @@ finish() {
             if [[ "${outage_option_set}" == true ]]; then
                 reproducer+="$(printf ' --outage-seconds %q' "${outage_seconds}")"
             fi
+            if [[ "${stateful_partitions_set}" == true ]]; then
+                reproducer+="$(printf ' --state-partitions %q' "${stateful_partitions}")"
+            fi
+            if [[ "${inspect_state}" == true ]]; then
+                reproducer+=' --inspect-state'
+            fi
         elif [[ "${scenario}" == alteration-handover ]]; then
             # An alteration handover takes no fault or outage, and an expected failure is part of
             # its run.
@@ -2617,6 +2638,9 @@ scenario_topics=()
 if [[ "${scenario}" == stateful ]]; then
     scenario_topics=(chaos_state_input chaos_profile_input chaos_unique_output chaos_window_output
         chaos_enriched_output chaos_counted_output chaos_inferred_output)
+    if [[ "${inspect_state}" == true ]]; then
+        scenario_topics+=(chaos_inspect_input)
+    fi
 elif [[ "${scenario}" == endpoints ]]; then
     scenario_topics=(chaos_edge_primary_http chaos_edge_peer_http chaos_edge_frames)
 elif [[ "${scenario}" == lifetimes ]]; then
@@ -2773,6 +2797,11 @@ if [[ "${scenario}" == stateful ]]; then
         >"${artifact_dir}/public/configure-stateful-plexus.txt" 2>&1
     domain_cli_command "$(<"${script_dir}/fixtures/stateful-inference.plexus")" \
         >"${artifact_dir}/public/configure-stateful-inference-plexus.txt" 2>&1
+    update_manifest '.fixtures.state_inspection = $inspect' --argjson inspect "${inspect_state}"
+    if [[ "${inspect_state}" == true ]]; then
+        domain_cli_command "$(<"${script_dir}/fixtures/stateful-inspection.plexus")" \
+            >"${artifact_dir}/public/configure-stateful-inspection-plexus.txt" 2>&1
+    fi
 fi
 if [[ "${scenario}" == lifetimes ]]; then
     domain_cli_command "$(<"${script_dir}/fixtures/lifetimes.plexus")" \

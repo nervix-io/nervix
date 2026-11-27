@@ -420,12 +420,13 @@ Feature: Branches inherit their external producers' partitions
       {"tenant":"alpha","seq":2}
       """
     Then the current leader node is saved as placeholder "topology_reader"
+    # DESCRIBE names the previous partitions only while the transition is under way, and the
+    # handoff can finish before the first DESCRIBE, so the published epoch is what is asserted.
     And within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{topology_reader}}" contains
       """
       partitions: 16
       external partitions: 16
       partition epoch: 2
-      previous partitions: 12
       """
     And within "60s" every instance of ingestor "inherited_reader" reports running and ready on its scheduled owner
     And within "30s" the observed broker receives payloads keeping the order of each key

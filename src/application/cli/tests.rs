@@ -47,7 +47,7 @@ const SETTINGS_HEADINGS: [&str; 22] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 261] = [
+const SETTING_NAMES: [&str; 253] = [
     "runtime-delivery-capacity",
     "runtime-ingest-group-max-rows",
     "runtime-ingest-group-idle-flush",
@@ -62,9 +62,6 @@ const SETTING_NAMES: [&str; 261] = [
     "runtime-retained-removals",
     "runtime-snapshot-staging-bytes",
     "runtime-snapshot-bytes",
-    "runtime-snapshot-describe-timeout",
-    "runtime-snapshot-fetch-timeout",
-    "runtime-wasm-checkpoint-timeout",
     "runtime-event-capacity",
     "runtime-wasm-recovery-capacity",
     "runtime-immediate-flush-minimum",
@@ -127,8 +124,6 @@ const SETTING_NAMES: [&str; 261] = [
     "interconnect-stream-receive-window",
     "interconnect-connection-receive-window",
     "interconnect-connection-setup-timeout",
-    "interconnect-request-timeout",
-    "interconnect-progress-timeout",
     "interconnect-reconnect-backoff",
     "interconnect-max-reconnect-backoff",
     "raft-heartbeat-interval",
@@ -244,11 +239,8 @@ const SETTING_NAMES: [&str; 261] = [
     "domain-drain-timeout",
     "entity-gate-deadline",
     "remote-ack-alive-interval",
-    "remote-ack-dispatch-timeout",
-    "remote-ack-silence-timeout",
     "remote-ack-sweep-interval",
     "remote-relay-total-timeout",
-    "remote-relay-instantiation-wait",
     "max-batch-messages",
     "client-producer-session-bytes",
     "client-consumer-session-bytes",
@@ -569,7 +561,7 @@ fn infrastructure_overrides_preserve_derived_inputs_and_refuse_invalid_bounds() 
     let settings = NodeSettings::default()
         .with_overrides(&[
             override_of("dns-concurrent-lookups", "16"),
-            override_of("interconnect-request-timeout", "20s"),
+            override_of("interconnect-connection-setup-timeout", "2s"),
             override_of("database-workers", "2"),
             override_of("raft-database-max-open-files", "64"),
             override_of("dns-address-family-policy", "ipv4"),
@@ -591,7 +583,7 @@ fn infrastructure_overrides_preserve_derived_inputs_and_refuse_invalid_bounds() 
 
     for (name, value) in [
         ("dns-concurrent-lookups", "0"),
-        ("interconnect-request-timeout", "0s"),
+        ("interconnect-connection-setup-timeout", "0s"),
         ("interconnect-stream-receive-window", "2GiB"),
         ("interconnect-reconnect-jitter-permille", "1001"),
         ("database-journal-bytes", "1MiB"),

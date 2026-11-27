@@ -350,7 +350,8 @@ impl Runtime {
         ScheduledIngestorStart::Complete
     }
 
-    /// Stops all locally running units of a logical ingestor for a model or domain operation.
+    /// Stops all locally running units of a logical ingestor for a model or domain operation, a
+    /// planned operation that waits for each unit's branched tasks to finish what they hold.
     pub(in crate::runtime) async fn stop_ingestor(
         &self,
         domain: &DomainName,

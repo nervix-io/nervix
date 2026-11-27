@@ -289,7 +289,7 @@ impl Runtime {
         let mut stop_failure = None;
         for task in previous_state_task {
             let unit = task.unit;
-            let stopped = task.stop(self.task_stop_grace()).await;
+            let stopped = task.stop(self.planned_task_stop()).await;
             let withdrawn = registrations.counts(&relay, entity, Some(unit));
             if withdrawn {
                 services.remove_local_unit_runtime_consumer(AckMode::Detached, unit);

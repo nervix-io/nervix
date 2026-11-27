@@ -15,17 +15,16 @@
     )
 )]
 
-use std::{future::poll_fn, time::Duration};
+use std::future::poll_fn;
 
 use bytes::Bytes;
 use error_stack::Report;
 use futures_util::StreamExt as _;
 use h2::{Reason, RecvStream, SendStream, server};
 use http::{Request, Response, StatusCode, Version};
-use meticulous::OptionExt as _;
-use nervix_execution::{ChargedBytes, Executor};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor};
 use nervix_models::ClusterNodeName;
-use nervix_primitives::time::{Instant, timeout};
 
 use super::{
     BODY_CHUNK_BYTES, RawRequest, STREAM_PATH, StreamLease, TransportState, declared_length,
@@ -35,7 +34,7 @@ use crate::{
     PoolClass, RequestError, TransportError,
     observation::TransferDirection,
     request::{
-        RequestAdmission, StreamOpeningFailure, StreamPreconditionDeadline, StreamRequestEnvelope,
+        RequestAdmission, StreamOpeningFailure, StreamPreconditionRefusal, StreamRequestEnvelope,
         StreamingResponse,
     },
     wire,
@@ -62,18 +61,20 @@ pub struct IncomingByteStream {
     class: PoolClass,
     node: ClusterNodeName,
     request: &'static str,
-    progress_timeout: Duration,
     content_length: u64,
     received: u64,
     finished: bool,
+    /// What a chunk carried past the bytes [`IncomingByteStream::read_into`] last copied, and how
+    /// far into it the stream has been read.
+    pending: Option<(Bytes, usize)>,
 }
 
 pub(crate) struct OutboundByteStreamRequest {
     pub(crate) class: PoolClass,
     pub(crate) name: &'static str,
     pub(crate) body: ChargedBytes,
-    /// When the request stops waiting for its stream's answer to begin.
-    pub(crate) deadline: Instant,
+    /// What may end the opening besides the liveness of the peer: only a deadline its caller named.
+    pub(crate) deadline: Option<crate::ExchangeDeadline>,
     pub(crate) admission: RequestAdmission,
     /// The stream the request leased before it encoded its payload.
     pub(crate) lease: StreamLease,
@@ -85,22 +86,135 @@ impl IncomingByteStream {
     }
 
     pub async fn next_chunk(&mut self) -> Result<Option<ChargedBytes>, Report<RequestError>> {
+        if self.pending.is_some() {
+            return Err(Report::new(RequestError::Stream {
+                node: self.node.clone(),
+                request: self.request,
+                reason: "a stream read in exact lengths was read by chunk".to_string(),
+            }));
+        }
+        let Some(chunk) = self.next_data().await? else {
+            return Ok(None);
+        };
+        let chunk_bytes = u64::try_from(chunk.len())
+            .verified("the chunk's length was measured when it was received");
+        let reservation = match self
+            .executor
+            .reserve(self.class.memory_class(), chunk_bytes)
+            .await
+        {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                self.release(chunk.len())?;
+                self.finished = true;
+                return Err(RequestError::stream_with_cause(
+                    error,
+                    self.node.clone(),
+                    self.request,
+                ));
+            }
+        };
+        let bytes = chunk.to_vec();
+        self.release(chunk.len())?;
+        self.lease.state.observations.bulk_transferred(
+            self.class,
+            TransferDirection::Received,
+            chunk_bytes,
+        );
+        Ok(Some(ChargedBytes::from_owned(bytes, reservation)))
+    }
+
+    /// Copies exactly `length` bytes of the stream into `buffer`, whose room the caller already
+    /// admitted, and takes no memory of its own: every chunk goes from the stream's receive window
+    /// straight into the buffer, so the read never waits for memory while its caller holds the
+    /// buffer. What a chunk carries past those bytes stays with the stream for the next read.
+    pub async fn read_into(
+        &mut self,
+        buffer: &mut BudgetedBuffer,
+        length: usize,
+    ) -> Result<(), Report<RequestError>> {
+        let mut left = length;
+        while left > 0 {
+            nervix_primitives::task::consume_budget().await;
+            let (chunk, read) = match self.pending.take() {
+                Some(pending) => pending,
+                None => {
+                    let Some(chunk) = self.next_data().await? else {
+                        return Err(Report::new(RequestError::Stream {
+                            node: self.node.clone(),
+                            request: self.request,
+                            reason: "the stream ended before the bytes its reader asked for"
+                                .to_string(),
+                        }));
+                    };
+                    (chunk, 0)
+                }
+            };
+            let available = chunk
+                .len()
+                .checked_sub(read)
+                .verified("a chunk is never read past its end");
+            let piece = available.min(left);
+            let end = read
+                .checked_add(piece)
+                .verified("a piece ends within its chunk");
+            buffer
+                .try_extend_from_slice(&chunk[read..end])
+                .map_err(|error| {
+                    RequestError::stream_with_cause(error, self.node.clone(), self.request)
+                })?;
+            left = left
+                .checked_sub(piece)
+                .verified("a piece is no longer than what is left");
+            if end == chunk.len() {
+                self.release(chunk.len())?;
+                self.lease.state.observations.bulk_transferred(
+                    self.class,
+                    TransferDirection::Received,
+                    u64::try_from(chunk.len())
+                        .verified("the chunk's length was measured when it was received"),
+                );
+            } else {
+                self.pending = Some((chunk, end));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the stream ends where its reader is, with no byte left unread; a stream that
+    /// carries more is not consumed further.
+    pub async fn ends(&mut self) -> Result<bool, Report<RequestError>> {
+        if self.pending.is_some() {
+            return Ok(false);
+        }
+        match self.next_data().await? {
+            None => Ok(true),
+            Some(chunk) => {
+                self.pending = Some((chunk, 0));
+                Ok(false)
+            }
+        }
+    }
+
+    /// Gives `bytes` of the stream's receive window back once they are consumed.
+    fn release(&mut self, bytes: usize) -> Result<(), Report<RequestError>> {
+        self.body
+            .flow_control()
+            .release_capacity(bytes)
+            .map_err(|error| {
+                RequestError::stream_with_cause(Report::new(error), self.node.clone(), self.request)
+            })
+    }
+
+    /// The next chunk the stream received, checked against its bounds and counted, with its
+    /// receive-window capacity not yet given back; `None` once the stream ended.
+    async fn next_data(&mut self) -> Result<Option<Bytes>, Report<RequestError>> {
         if self.finished {
             return Ok(None);
         }
-        let next = timeout(self.progress_timeout, self.body.data()).await;
-        let next = match next {
-            Ok(next) => next,
-            Err(_) => {
-                self.finished = true;
-                return Err(Report::new(RequestError::Stream {
-                    node: self.node.clone(),
-                    request: self.request,
-                    reason: format!("response made no progress for {:?}", self.progress_timeout),
-                }));
-            }
-        };
-        let Some(next) = next else {
+        // The stream waits for its producer for as long as the connection under it lives: a
+        // producer that is slow costs latency, and a connection that dies fails the stream.
+        let Some(next) = self.body.data().await else {
             self.finished = true;
             if self.received != self.content_length {
                 return Err(Report::new(RequestError::StreamLengthMismatch {
@@ -179,45 +293,8 @@ impl IncomingByteStream {
                 received,
             }));
         }
-        let reservation = match self
-            .executor
-            .reserve(self.class.memory_class(), chunk_bytes)
-            .await
-        {
-            Ok(reservation) => reservation,
-            Err(error) => {
-                self.body
-                    .flow_control()
-                    .release_capacity(chunk.len())
-                    .map_err(|release_error| {
-                        RequestError::stream_with_cause(
-                            Report::new(release_error),
-                            self.node.clone(),
-                            self.request,
-                        )
-                    })?;
-                self.finished = true;
-                return Err(RequestError::stream_with_cause(
-                    error,
-                    self.node.clone(),
-                    self.request,
-                ));
-            }
-        };
-        let bytes = chunk.to_vec();
-        self.body
-            .flow_control()
-            .release_capacity(chunk.len())
-            .map_err(|error| {
-                RequestError::stream_with_cause(Report::new(error), self.node.clone(), self.request)
-            })?;
         self.received = received;
-        self.lease.state.observations.bulk_transferred(
-            self.class,
-            TransferDirection::Received,
-            chunk_bytes,
-        );
-        Ok(Some(ChargedBytes::from_owned(bytes, reservation)))
+        Ok(Some(chunk))
     }
 }
 
@@ -237,15 +314,13 @@ impl TransportState {
             &self.executor,
             class.memory_class(),
             declared,
-            self.options.progress_timeout,
             request.into_body(),
         );
         let received = match until_reset(&mut respond, reading).await {
             Ok(Some(received)) => received,
             Ok(None) => return Ok(()),
             Err(error) => {
-                send_decode_refusal(&mut respond, class, error, self.options.progress_timeout)
-                    .await?;
+                send_decode_refusal(&mut respond, class, error).await?;
                 return Ok(());
             }
         };
@@ -263,8 +338,7 @@ impl TransportState {
             Ok(Some(decoded)) => decoded,
             Ok(None) => return Ok(()),
             Err(error) => {
-                send_decode_refusal(&mut respond, class, error, self.options.progress_timeout)
-                    .await?;
+                send_decode_refusal(&mut respond, class, error).await?;
                 return Ok(());
             }
         };
@@ -282,13 +356,7 @@ impl TransportState {
         };
         let request = request.request;
         if request.class != class {
-            send_static_error(
-                &mut respond,
-                StatusCode::FORBIDDEN,
-                "wrong pool class",
-                self.options.progress_timeout,
-            )
-            .await?;
+            send_static_error(&mut respond, StatusCode::FORBIDDEN, "wrong pool class").await?;
             return Ok(());
         }
         let handled = nervix_primitives::select! {
@@ -307,23 +375,12 @@ impl TransportState {
         let handled = match handled {
             Ok(handled) => handled,
             Err(StreamOpeningFailure::Operation { kind, report }) => {
-                super::body::send_operation_error(
-                    &mut respond,
-                    kind,
-                    &format!("{report:#}"),
-                    self.options.progress_timeout,
-                )
-                .await?;
+                super::body::send_operation_error(&mut respond, kind, &format!("{report:#}"))
+                    .await?;
                 return Ok(());
             }
             Err(StreamOpeningFailure::Request(error)) => {
-                send_static_error(
-                    &mut respond,
-                    error.status(),
-                    &error.to_string(),
-                    self.options.progress_timeout,
-                )
-                .await?;
+                send_static_error(&mut respond, error.status(), &error.to_string()).await?;
                 return Ok(());
             }
         };
@@ -345,7 +402,6 @@ impl TransportState {
             admission,
             lease,
         } = request;
-        let remaining = deadline.saturating_duration_since(Instant::now());
         let (body, content_length) = lease
             .connection
             .request_stream_raw(
@@ -355,12 +411,12 @@ impl TransportState {
                     body: Some(body),
                     response_class: class,
                     response_limit: class.control_body_limit(&self.executor),
-                    timeout: remaining,
+                    deadline,
                     headers: &[],
                 },
             )
             .await
-            .map_err(|error| StreamPreconditionDeadline::attach(error, deadline))?;
+            .map_err(StreamPreconditionRefusal::attach)?;
         Ok(IncomingByteStream {
             body,
             lease,
@@ -369,23 +425,21 @@ impl TransportState {
             class,
             node: node_id.clone(),
             request: name,
-            progress_timeout: self.options.progress_timeout,
             content_length,
             received: 0,
             finished: false,
+            pending: None,
         })
     }
 }
 
 /// Writes one streamed chunk as the reader's flow-control window admits it.
 ///
-/// Only a nonzero capacity grant restarts the progress bound, so a chunk larger than the window
-/// may span many bounds while its reader keeps reading. A reader that grants no capacity for
-/// `progress_timeout` has stopped reading, and the stream is reset.
+/// A reader that grants no capacity is applying backpressure: the chunk waits for it for as long
+/// as the connection under the stream lives, and a connection that dies fails the stream.
 async fn send_stream_chunk(
     stream: &mut SendStream<Bytes>,
     body: ChargedBytes,
-    progress_timeout: Duration,
     chunk_limit: std::num::NonZeroU64,
 ) -> Result<(), Report<TransportError>> {
     let mut offset = 0;
@@ -398,15 +452,7 @@ async fn send_stream_chunk(
         let chunk_limit = usize::try_from(chunk_limit.get()).unwrap_or(usize::MAX);
         let wanted = remaining.min(BODY_CHUNK_BYTES).min(chunk_limit);
         stream.reserve_capacity(wanted);
-        let assigned = match timeout(progress_timeout, granted_send_capacity(stream)).await {
-            Ok(assigned) => assigned?,
-            Err(_) => {
-                stream.send_reset(Reason::CANCEL);
-                return Err(Report::new(TransportError::ProgressTimeout {
-                    timeout: progress_timeout,
-                }));
-            }
-        };
+        let assigned = granted_send_capacity(stream).await?;
         let ready = assigned.min(wanted);
         let end = offset
             .checked_add(ready)
@@ -454,7 +500,6 @@ impl TransportState {
         mut response: StreamingResponse,
         chunk_limit: std::num::NonZeroU64,
     ) -> Result<(), Report<TransportError>> {
-        let progress_timeout = self.options.progress_timeout;
         let headers = Response::builder()
             .status(StatusCode::OK)
             .version(Version::HTTP_2)
@@ -469,16 +514,8 @@ impl TransportState {
         let mut sent = 0_u64;
         loop {
             nervix_primitives::task::consume_budget().await;
-            let next = match timeout(progress_timeout, response.chunks.next()).await {
-                Ok(next) => next,
-                Err(_) => {
-                    stream.send_reset(Reason::CANCEL);
-                    return Err(Report::new(TransportError::ProgressTimeout {
-                        timeout: progress_timeout,
-                    }));
-                }
-            };
-            let Some(chunk) = next else {
+            // The producer is this node's own handler: one that is slow costs its reader latency.
+            let Some(chunk) = response.chunks.next().await else {
                 break;
             };
             let chunk = match chunk {
@@ -506,7 +543,7 @@ impl TransportState {
                     "stream producer exceeded its declared content length".to_string(),
                 )));
             }
-            send_stream_chunk(&mut stream, chunk, progress_timeout, chunk_limit).await?;
+            send_stream_chunk(&mut stream, chunk, chunk_limit).await?;
             self.observations
                 .bulk_transferred(class, TransferDirection::Sent, chunk_bytes);
         }

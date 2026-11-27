@@ -3,11 +3,12 @@
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** The stall bound one delivery's attempts run within, how a capacity refusal of its
-//!   grant holds the delivery back and starts that bound again when the delivery asks again, how
-//!   long a held delivery waits before it asks again, and the delivery's admission bound.
-//! - **Depends on.** The typed grant refusal and the dispatch bounds of the remote dispatcher.
-//! - **Must not know.** The transport, payloads, relays, branches or acknowledgements.
+//! - **Owns.** How a capacity refusal of a delivery's grant, or a send that failed in transport,
+//!   holds the delivery back, how long a held delivery waits before it asks again, and the
+//!   delivery's admission bound, the operator's ceiling for one delivery.
+//! - **Depends on.** The typed grant refusal and the remote acknowledgement timing the delivery
+//!   captured.
+//! - **Must not know.** The transport, membership, payloads, relays, branches or acknowledgements.
 
 #![cfg_attr(
     nervix_lint,
@@ -15,18 +16,8 @@
 )]
 
 use nervix_interconnect::RelayGrantRefusal;
-use nervix_models::SHORTEST_POSITIVE_DURATION;
 
 use super::{remote_dispatch::RemoteDispatchError, *};
-
-/// What a delivery does while its receiver refuses its grant for capacity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum GrantCapacityRefusals {
-    /// The delivery is held back and asks for a grant again until its admission bound passes.
-    Hold,
-    /// The delivery treats the refusal as any failed send, which it retries within the stall bound.
-    GiveUp,
-}
 
 /// Why one attempt to send a delivery failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,63 +42,40 @@ pub(super) enum RelaySendStep {
 pub(super) enum RelaySendEnd {
     /// The receiver refused the delivery's grant permanently.
     Refused(RelayGrantRefusal),
-    /// The receiver answered nothing within the stall bound, and the last attempt failed.
-    Stalled,
-    /// The stall bound passed while an attempt was still running.
-    TimedOut,
-    /// The delivery's admission bound passed while it was held back.
+    /// The delivery's admission bound passed, the operator's ceiling for one delivery.
     AdmissionBound,
 }
 
-/// The bounds one delivery's attempts to send it run within.
+/// The waits between one delivery's attempts to send it.
 ///
-/// Every attempt must end before the stall bound: five seconds after the delivery started, or after
-/// it last asked again following a capacity refusal. A capacity refusal is the receiver answering,
-/// so under [`GrantCapacityRefusals::Hold`] it does not count toward the stall bound: it holds the
-/// delivery back for a wait that starts at the dispatch retry interval and doubles after each
-/// further capacity refusal up to [`RelaySendAttempts::capacity_wait_ceiling`], and the stall bound
-/// starts again when the delivery asks, so each ask has the whole bound for its grant and its body,
-/// as the delivery's first ask has. Nothing outlasts the admission bound the delivery was given.
+/// A receiver that answers with a capacity refusal is applying backpressure, and a send that fails
+/// in transport leaves the delivery to a receiver that liveness still keeps: both hold the
+/// delivery back. It waits the dispatch retry interval, twice as long after each further failure
+/// up to the retry ceiling, and asks again. No attempt has a deadline of its own: the delivery
+/// ends only at a permanent refusal, at its admission bound, or when its receiver leaves or its
+/// route changes, which its sender watches.
 #[derive(Debug, Clone)]
 pub(super) struct RelaySendAttempts {
-    capacity_refusals: GrantCapacityRefusals,
-    stall_deadline: Instant,
     admission_deadline: Instant,
-    capacity_waits: RuntimeReconnectBackoff,
-    timing: nervix_models::RemoteAckTiming,
+    waits: RuntimeReconnectBackoff,
 }
 
 impl RelaySendAttempts {
-    pub(super) fn new(
-        now: Instant,
-        admission_deadline: Instant,
-        capacity_refusals: GrantCapacityRefusals,
-        timing: nervix_models::RemoteAckTiming,
-    ) -> Self {
+    pub(super) fn new(admission_deadline: Instant, timing: nervix_models::RemoteAckTiming) -> Self {
         Self {
-            timing,
-            capacity_refusals,
-            stall_deadline: Self::stall_deadline_after(now, admission_deadline, timing),
             admission_deadline,
-            capacity_waits: RuntimeReconnectBackoff {
+            waits: RuntimeReconnectBackoff {
                 initial: timing.retry_interval(),
                 next: timing.retry_interval(),
-                max: Self::capacity_wait_ceiling(timing),
+                max: timing.retry_ceiling(),
                 settings: nervix_connector::RetryBackoffSettings::default(),
             },
         }
     }
 
-    /// The longest a held delivery waits before it asks for its grant again: half the stall
-    /// bound, so a held delivery notices that room returned at most that late, and asks at most
-    /// once in that time while it waits.
-    pub(super) fn capacity_wait_ceiling(timing: nervix_models::RemoteAckTiming) -> Duration {
-        (timing.remote_ack_dispatch_timeout / 2).max(SHORTEST_POSITIVE_DURATION)
-    }
-
-    /// The instant the next attempt must end by.
-    pub(super) fn attempt_deadline(&self) -> Instant {
-        self.stall_deadline
+    /// The instant the delivery's admission bound passes, which no attempt outlasts.
+    pub(super) fn admission_deadline(&self) -> Instant {
+        self.admission_deadline
     }
 
     /// What the sender does after an attempt that failed at `now`.
@@ -116,55 +84,20 @@ impl RelaySendAttempts {
         failure: RelaySendFailure,
         now: Instant,
     ) -> RelaySendStep {
-        if let RelaySendFailure::Refused(refusal) = failure {
-            if !refusal.is_capacity() {
-                return RelaySendStep::End(RelaySendEnd::Refused(refusal));
-            }
-            if self.capacity_refusals == GrantCapacityRefusals::Hold {
-                return self.hold(now);
-            }
+        if let RelaySendFailure::Refused(refusal) = failure
+            && !refusal.is_capacity()
+        {
+            return RelaySendStep::End(RelaySendEnd::Refused(refusal));
         }
-        let retry_at = now
-            .checked_add(self.timing.retry_interval())
-            .assured("the fixed dispatch retry interval fits the monotonic clock");
-        if retry_at >= self.stall_deadline {
-            return RelaySendStep::End(RelaySendEnd::Stalled);
-        }
-        RelaySendStep::RetryAt(retry_at)
-    }
-
-    /// Why the sender gives a delivery up when an attempt still runs at its deadline, `now`.
-    pub(super) fn after_attempt_deadline(&self, now: Instant) -> RelaySendEnd {
-        if now >= self.admission_deadline {
-            return RelaySendEnd::AdmissionBound;
-        }
-        RelaySendEnd::TimedOut
-    }
-
-    /// Hold the delivery back after its receiver answered with a capacity refusal at `now`.
-    fn hold(&mut self, now: Instant) -> RelaySendStep {
         if now >= self.admission_deadline {
             return RelaySendStep::End(RelaySendEnd::AdmissionBound);
         }
-        let wait = self.capacity_waits.take_next_delay();
+        let wait = self.waits.take_next_delay();
         let retry_at = now
             .checked_add(wait)
-            .assured("a wait bounded by half the stall bound fits the monotonic clock")
+            .assured("a wait bounded by the retry ceiling fits the monotonic clock")
             .min(self.admission_deadline);
-        // The wait is the sender's own, so the ask that follows it has the whole stall bound.
-        self.stall_deadline =
-            Self::stall_deadline_after(retry_at, self.admission_deadline, self.timing);
         RelaySendStep::RetryAt(retry_at)
-    }
-
-    fn stall_deadline_after(
-        now: Instant,
-        admission_deadline: Instant,
-        timing: nervix_models::RemoteAckTiming,
-    ) -> Instant {
-        now.checked_add(timing.remote_ack_dispatch_timeout)
-            .assured("the fixed dispatch stall bound fits the monotonic clock")
-            .min(admission_deadline)
     }
 }
 
@@ -179,12 +112,6 @@ impl RelaySendEnd {
             Self::Refused(refusal) => RemoteDispatchError::GrantRefused {
                 target: target.clone(),
                 refusal,
-            },
-            Self::Stalled => RemoteDispatchError::Send {
-                target: target.clone(),
-            },
-            Self::TimedOut => RemoteDispatchError::SendTimeout {
-                target: target.clone(),
             },
             Self::AdmissionBound => RemoteDispatchError::AdmissionTotalTimeout {
                 target: target.clone(),

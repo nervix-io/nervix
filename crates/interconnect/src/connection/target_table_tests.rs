@@ -2,8 +2,8 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Assertions that the peer target table holds every peer registered or published to
-//!   it, however many there are and however their registrations race, and that a replacement or
-//!   an authentication keeps the targets whose endpoint it leaves unchanged.
+//!   it, however many there are and however their registrations race, and that a replacement, an
+//!   authentication or a restore keeps the targets whose endpoint it leaves unchanged.
 //! - **Depends on.** The production transport state and its target table.
 //! - **Must not know.** Membership, gossip or how the application chooses the peers it publishes.
 
@@ -44,8 +44,14 @@ async fn every_registered_peer_keeps_its_target_however_many_there_are() {
     }
 
     assert_eq!(state.targets.load().len(), usize::from(PEERS));
-    fixture.transport_a.shutdown().await;
-    fixture.transport_b.shutdown().await;
+    fixture
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    fixture
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 #[nervix_primitives::test]
@@ -66,8 +72,14 @@ async fn every_published_peer_keeps_its_target_however_many_there_are() {
         .collect::<BTreeSet<_>>();
     let published = endpoints.into_keys().collect::<BTreeSet<_>>();
     assert_eq!(registered, published);
-    fixture.transport_a.shutdown().await;
-    fixture.transport_b.shutdown().await;
+    fixture
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    fixture
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 #[nervix_primitives::test]
@@ -121,8 +133,14 @@ async fn a_replacement_retires_only_the_peers_it_withdraws_or_moves() {
         !Arc::ptr_eq(&moved_before.pool, &moved_after.pool),
         "a peer published at a new endpoint is dialled through a new pool"
     );
-    fixture.transport_a.shutdown().await;
-    fixture.transport_b.shutdown().await;
+    fixture
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    fixture
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 #[nervix_primitives::test]
@@ -138,8 +156,60 @@ async fn an_authentication_at_the_registered_endpoint_keeps_its_target() {
         Arc::ptr_eq(&first, &again),
         "authenticating the same endpoint again keeps the registered target"
     );
-    fixture.transport_a.shutdown().await;
-    fixture.transport_b.shutdown().await;
+    fixture
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    fixture
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+}
+
+/// A restore installs a peer's target only while the peer has none. A peer registered at another
+/// endpoint, as one that restarted elsewhere is, keeps that endpoint with its pool and connections,
+/// and the restore names the endpoint the peer is reached at.
+#[nervix_primitives::test]
+async fn a_restore_installs_a_missing_target_and_never_moves_a_registered_one() {
+    let fixture = crate::tests::bound_transports_with_options(TransportOptions::default()).await;
+    let transport = &fixture.transport_a;
+    let state = &transport.inner;
+    transport.register_outbound_target(peer(1), endpoint(1));
+    let before = state.targets_in_node_order();
+
+    let restored = transport.restore_outbound_target(peer(0), endpoint(0));
+    let kept = transport.restore_outbound_target(peer(1), NodeEndpoint::new("localhost", 9001));
+    let after = state.targets_in_node_order();
+
+    assert_eq!(restored, endpoint(0), "a missing target is restored");
+    assert_eq!(
+        kept,
+        endpoint(1),
+        "a registered target names its own endpoint"
+    );
+    let restored_target = after
+        .get(&peer(0))
+        .verified("the restore above installed peer-000's missing target");
+    assert_eq!(restored_target.endpoint, endpoint(0));
+    let kept_before = before
+        .get(&peer(1))
+        .verified("peer-001 was registered before the restores");
+    let kept_after = after
+        .get(&peer(1))
+        .verified("a restore never withdraws a registered target");
+    assert_eq!(kept_after.endpoint, endpoint(1));
+    assert!(
+        Arc::ptr_eq(&kept_before.pool, &kept_after.pool),
+        "a restore keeps a registered target's pool and connections"
+    );
+    fixture
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    fixture
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }
 
 // This real-network fixture enters the ordinary runtime from external contender threads.
@@ -178,6 +248,12 @@ async fn racing_registrations_each_publish_their_target() {
         BTreeSet::from([peer(0), peer(1)]),
         "both racing registrations published their target"
     );
-    fixture.transport_a.shutdown().await;
-    fixture.transport_b.shutdown().await;
+    fixture
+        .transport_a
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
+    fixture
+        .transport_b
+        .shutdown(crate::test_teardown_ceiling())
+        .await;
 }

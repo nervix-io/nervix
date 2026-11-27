@@ -22,8 +22,8 @@ pub(super) struct HandoffGateLink {
 
 impl FaultInjection {
     /// Loses every ownership-handoff gate engagement request `coordinator` sends `participant` from
-    /// now on, as a link that drops them does: none arrives, and each attempt waits out its reply
-    /// timeout.
+    /// now on, as a link that drops them does: none arrives, and the engagement waits for its answer
+    /// until the gate's deadline.
     pub fn lose_handoff_gate_engagements(
         &self,
         coordinator: ClusterNodeName,
@@ -68,8 +68,8 @@ impl FaultInjection {
             return false;
         };
         *lost = lost.checked_add(1).assured(
-            "each lost request waits out a reply timeout within one handoff's preparation \
-             deadline, so a scenario counts far fewer than usize::MAX of them",
+            "each lost request waits until its handoff's gate deadline, so a scenario counts far \
+             fewer than usize::MAX of them",
         );
         true
     }

@@ -294,16 +294,13 @@ impl SessionServiceImpl {
             let response = self
                 .inner
                 .interconnect
-                .request_with_timeout(
+                .request(
                     &owner,
                     RemoteDescribeRelayRequest {
                         domain: domain.clone(),
                         relay: describe.relay.clone(),
                         bindings: describe.bindings.clone(),
                     },
-                    self.inner
-                        .interconnect
-                        .request_deadline::<RemoteDescribeRelayRequest>(),
                 )
                 .await;
             match response {
@@ -960,10 +957,12 @@ impl SessionServiceImpl {
         let Some(owner) = node.execution_node() else {
             return self.local_dataflow_node_status_envelope(domain, kind, identifier.clone());
         };
+        // The owner answers while it lives: a slow owner costs the reading command latency, and
+        // the client that issued the command ends the wait by cancelling it.
         let response = self
             .inner
             .interconnect
-            .request_with_timeout(
+            .request(
                 owner,
                 RemoteDataflowNodeStatusRequest {
                     domain: domain.clone(),
@@ -971,7 +970,6 @@ impl SessionServiceImpl {
                     name: identifier.clone(),
                     unit: Unit::SINGLE,
                 },
-                self.coordination_rpc_timeout(),
             )
             .await;
         match response {
@@ -2496,7 +2494,8 @@ mod tests {
         } = build_test_service(false).await;
         let domain = named("accounts");
         let lookup: LookupName = named("balances");
-        let peer: ClusterNodeName = named("unavailable_peer");
+        let peer: ClusterNodeName = named("departed_peer");
+        super::super::test_fixtures::publish_membership_of_this_node_alone(&service);
         let node = super::super::test_fixtures::scheduled_node_on(
             "events",
             ModelKind::Junction,
@@ -2510,7 +2509,7 @@ mod tests {
                 Some(&node),
             )
             .await
-            .expect_err("the scheduled owner has no transport route");
+            .expect_err("membership no longer lists the scheduled owner");
         assert!(
             matches!(error.current_context(), ObservationError::RemoteDescribeRequest { domain: actual_domain, entity, node } if actual_domain == &domain && entity.identifier.as_str() == "events" && node == &peer)
         );
@@ -2519,7 +2518,7 @@ mod tests {
         let error = service
             .lookup_query_remote_candidates(&domain, &lookup, "sensitive-key", vec![peer.clone()])
             .await
-            .expect_err("the lookup owner has no transport route");
+            .expect_err("membership no longer lists the lookup owner");
         assert!(
             matches!(error.current_context(), ObservationError::RemoteLookupRequest { domain: actual_domain, name, node } if actual_domain == &domain && name == &lookup && node == &peer)
         );

@@ -314,11 +314,8 @@ impl Arbitrary<'_> {
                 self.entropy.boundary_biased(1..=u64::from(u32::MAX)),
             ),
             nervix_models::ClusterParameterChange::RemoteAckAliveInterval(ack_unit),
-            nervix_models::ClusterParameterChange::RemoteAckDispatchTimeout(ack_unit),
-            nervix_models::ClusterParameterChange::RemoteAckSilenceTimeout(ack_unit * 10),
             nervix_models::ClusterParameterChange::RemoteAckSweepInterval(ack_unit),
             nervix_models::ClusterParameterChange::RemoteRelayTotalTimeout(ack_unit * 50),
-            nervix_models::ClusterParameterChange::RemoteRelayInstantiationWait(ack_unit * 5),
             nervix_models::ClusterParameterChange::PasswordIterations(
                 self.entropy
                     .boundary_biased(1..=nervix_models::PasswordIterations::MAXIMUM),

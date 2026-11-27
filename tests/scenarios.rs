@@ -296,7 +296,6 @@ mod web_console_request_window;
 mod web_console_restore_faults;
 mod web_console_unreadable;
 mod websocket_lifecycle;
-mod wide_row_intake;
 mod worker_saturation;
 
 const SCENARIOS_PATH: &str = "tests/features";
@@ -718,7 +717,6 @@ struct ScenarioWorld {
     placeholders: BTreeMap<String, String>,
     saved_healthy_placements: Vec<SavedHealthyPlacement>,
     health_fault_started_at: Option<Instant>,
-    runtime_ack_started_at: Option<Instant>,
     /// When the scenario last released a held application progress path: progress reports or
     /// revision replies.
     progress_hold_released_at: Option<Instant>,
@@ -11161,7 +11159,7 @@ async fn given_node_has_large_resource_file(
 }
 
 /// The generated ONNX models a fixture resource directory carries under `models/`.
-const ONNX_FIXTURE_MODELS: [&str; 9] = [
+const ONNX_FIXTURE_MODELS: [&str; 10] = [
     "simple_score.onnx",
     "alternate_score.onnx",
     "batch_score.onnx",
@@ -11171,6 +11169,7 @@ const ONNX_FIXTURE_MODELS: [&str; 9] = [
     "f64_score.onnx",
     "running_sum.onnx",
     "checked_running_sum.onnx",
+    "wide_running_sum.onnx",
 ];
 
 fn onnx_fixture_path(fixture: &str) -> PathBuf {
@@ -16206,15 +16205,18 @@ async fn when_remote_relay_dispatch_pause_is_released(world: &mut ScenarioWorld,
         .release_remote_relay_dispatch_pause(&domain);
 }
 
-#[given(expr = "the next record acknowledgement node {string} returns to node {string} is lost")]
-async fn given_next_remote_acknowledgement_is_lost(
+#[given(
+    expr = "the first send of the next record acknowledgement node {string} returns to node \
+            {string} fails in transport"
+)]
+async fn given_next_remote_acknowledgement_send_fails(
     world: &mut ScenarioWorld,
     resolver: String,
     registrar: String,
 ) {
     let resolver = expand_placeholders(world, &resolver);
     let registrar = expand_placeholders(world, &registrar);
-    world.fault_injection.lose_next_remote_acknowledgement(
+    world.fault_injection.fail_next_remote_acknowledgement_send(
         crate::common::cluster::node_name(&resolver),
         crate::common::cluster::node_name(&registrar),
     );
@@ -16253,8 +16255,11 @@ async fn when_node_briefly_misses_node_in_its_live_view(
     });
 }
 
-#[then(expr = "the record acknowledgement node {string} returned to node {string} was lost")]
-async fn then_remote_acknowledgement_was_lost(
+#[then(
+    expr = "a send of the record acknowledgement node {string} returned to node {string} failed \
+            in transport"
+)]
+async fn then_remote_acknowledgement_send_failed(
     world: &mut ScenarioWorld,
     resolver: String,
     registrar: String,
@@ -16265,12 +16270,12 @@ async fn then_remote_acknowledgement_was_lost(
         Duration::from_secs(30),
         world
             .fault_injection
-            .wait_for_lost_remote_acknowledgement(&resolver, &registrar),
+            .wait_for_failed_remote_acknowledgement_send(&resolver, &registrar),
     )
     .await
     .unwrap_or_else(|error| {
         panic!(
-            "no record acknowledgement from node '{}' to node '{}' was lost: {error}",
+            "no record acknowledgement send from node '{}' to node '{}' failed: {error}",
             resolver.as_str(),
             registrar.as_str()
         )
@@ -22852,6 +22857,34 @@ async fn when_bulk_execution_is_occupied_on_every_node_for(
         for node_name in &node_names {
             fault_injection.release_execution(node_name);
         }
+    });
+}
+
+/// Fill every data worker on `node_id`, and give them back once `duration` has passed. The
+/// scenario goes on while they are held, so a relay grant that node decodes, and every other data
+/// job it is handed, waits out the rest of that time: the node stays live and slow. The release
+/// outlives this step and the scenario's own failure, so the node always gets its workers back.
+#[when(expr = "data execution on node {string} is occupied for {string}")]
+async fn when_data_execution_is_occupied_on_node_for(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    duration: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_name = crate::common::cluster::node_name(&node_id);
+    let fault_injection = world.fault_injection.clone();
+    nervix_primitives::time::timeout(
+        Duration::from_secs(30),
+        fault_injection.occupy_execution(&node_name, nervix_execution::CpuClass::Data),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("data execution on '{node_id}' never filled its workers: {error}")
+    });
+    nervix_primitives::task::spawn(async move {
+        nervix_primitives::time::sleep(duration).await;
+        fault_injection.release_execution(&node_name);
     });
 }
 
@@ -33100,6 +33133,37 @@ async fn when_large_tenant_http_payload_is_posted(
         .expect("failed to post large tenant http payload");
 }
 
+#[when(
+    expr = "http payload for tenant {string} with value {int} and a {int} byte message is posted \
+            to host {string} path {string}"
+)]
+async fn when_large_tenant_value_http_payload_is_posted(
+    world: &mut ScenarioWorld,
+    tenant: String,
+    value: i64,
+    message_size: usize,
+    host: String,
+    path: String,
+) {
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = serde_json::json!({
+        "tenant": tenant,
+        "value": value,
+        "message": "x".repeat(message_size),
+    })
+    .to_string();
+    append_cucumber_log_line(&format!(
+        "http publish large tenant payload: node=node-1 host={host} path={path} value={value} \
+         message_size={message_size}"
+    ));
+    world
+        .cluster()
+        .publish_http("node-1", &host, &path, &payload)
+        .await
+        .expect("failed to post large tenant http payload");
+}
+
 #[when(expr = "http payloads are posted concurrently to host {string} path {string}")]
 async fn when_http_payloads_are_posted_concurrently(
     world: &mut ScenarioWorld,
@@ -35004,20 +35068,35 @@ async fn then_node_eventually_forwards_http_traffic_to_observed_broker(
     let path = expand_placeholders(world, &path);
     let payload = expand_placeholders(world, docstring(step));
     let deadline = Instant::now() + Duration::from_secs(15);
+    // Every post the endpoint accepts is a record the cluster keeps rather than drops, so posts
+    // accepted before the route was ready can still arrive after the copy that ends this probe.
+    let mut accepted: usize = 0;
 
     loop {
-        let _ = world
+        nervix_primitives::task::consume_budget().await;
+        let published = world
             .cluster()
             .publish_http(&node_id, &host, &path, &payload)
             .await;
-        let next_payload = world
+        // A post the endpoint did not accept leaves no record behind, and the probe posts again.
+        if published.is_ok() {
+            accepted = accepted
+                .checked_add(1)
+                .assured("a probe posts a few times a second for at most 15 seconds");
+        }
+        let observer = world
             .broker_observer
             .as_mut()
-            .expect("a broker observer must exist before assertion")
-            .try_next_payload(Duration::from_millis(250))
-            .await;
+            .expect("a broker observer must exist before assertion");
+        let next_payload = observer.try_next_payload(Duration::from_millis(250)).await;
         match next_payload {
             Ok(Some(observed)) if observed.contains(payload.trim()) => {
+                // The copies the endpoint accepted beyond this one are still on their way. Later
+                // steps read what the scenario does next, so the observer passes over them. The
+                // count saturates at zero: with no accepted post, the copy came from a post whose
+                // answer was lost after the endpoint accepted it, and no other copy follows.
+                let later_copies = accepted.saturating_sub(1);
+                observer.expect_probe_copies(&payload, later_copies);
                 world.last_broker_payload = Some(observed);
                 return;
             }

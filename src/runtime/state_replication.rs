@@ -19,9 +19,7 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_interconnect::{
-    BranchCheckpointCursor, InterconnectStreamRequest as _, SyncKafkaOffsets,
-};
+use nervix_interconnect::BranchCheckpointCursor;
 
 use super::{
     branch_checkpoint_catalog::BranchCheckpointCatalog,
@@ -30,7 +28,7 @@ use super::{
 };
 
 mod error;
-pub(crate) use self::error::{AwaitedReplicas, StateReplicationError};
+pub(crate) use self::error::StateReplicationError;
 
 #[derive(Debug)]
 pub(crate) struct StateSyncAck {
@@ -86,6 +84,13 @@ use replica_catch_up::RemoteStateOwner;
 use routing::ReplicatedState;
 pub(crate) use routing::StateReplicationRequest;
 pub(in crate::runtime) use tasks::{CheckpointWriter, StateSnapshotTasks};
+
+/// The unit a forced ownership recovery prepares on this node: its scheduled node, and the replicas
+/// the recovery reads the unit's state from.
+struct ForcedRecoveryTarget {
+    scheduled: ExecutionNode,
+    recovery_sources: Vec<ClusterNodeName>,
+}
 
 impl Runtime {
     /// One process-local lifetime per constructed state, without changing record publication.
@@ -710,46 +715,13 @@ impl Runtime {
         request: nervix_interconnect::PrepareForcedOwnershipRecoveryRequest,
         deadline: Instant,
     ) -> OwnershipHandoffResult<nervix_interconnect::ForcedOwnershipRecoveryPreparation> {
-        let source = &request.source;
-        let destination = &request.destination;
         let domain = &request.domain;
         let entity = &request.entity;
         let unit = request.unit;
-        let base_schedule_fingerprint = request.base_schedule_fingerprint;
-        let scheduled = self
-            .forced_recovery_node_until(domain, entity, base_schedule_fingerprint, deadline)
-            .await?;
-        if scheduled
-            .units
-            .get(&unit)
-            .and_then(|placement| placement.primary_node.as_ref())
-            != Some(source)
-        {
-            return Err(OwnershipHandoffError::participant(format!(
-                "{} '{}' is no longer assigned to lost owner '{}'",
-                entity.kind.as_str(),
-                entity.identifier.as_str(),
-                source
-            )));
-        }
-        let dispatcher = self.inner.remote_dispatcher.load_full().ok_or_else(|| {
-            OwnershipHandoffError::participant("local node identity is unavailable")
-        })?;
-        let local_node = dispatcher.local_node_id();
-        if local_node != destination {
-            return Err(OwnershipHandoffError::participant(format!(
-                "forced ownership recovery targets node '{destination}' but reached '{local_node}'"
-            )));
-        }
-        let recovery_sources = scheduled
-            .units
-            .get(&unit)
-            .ok_or_else(|| OwnershipHandoffError::participant("scheduled unit is unavailable"))?
-            .assigned_nodes
-            .iter()
-            .filter(|node| *node != source && *node != destination)
-            .cloned()
-            .collect::<Vec<_>>();
+        let ForcedRecoveryTarget {
+            scheduled,
+            recovery_sources,
+        } = self.forced_recovery_target(&request, deadline).await?;
         let mut checkpoints = Vec::new();
         let mut resets = BTreeMap::new();
 
@@ -769,7 +741,7 @@ impl Runtime {
                 })?;
             let recovered = self
                 .forced_recovery_checkpoint(&placement, &recovery_sources, deadline)
-                .await;
+                .await?;
             match recovered.snapshot {
                 Some(snapshot) => {
                     let entries = decode_branch_lru_snapshot(&snapshot.payload)
@@ -813,7 +785,7 @@ impl Runtime {
                 })?;
             let recovered = self
                 .forced_recovery_checkpoint(&placement, &recovery_sources, deadline)
-                .await;
+                .await?;
             match recovered.snapshot {
                 Some(snapshot) => checkpoints.push((placement, snapshot)),
                 None => {
@@ -846,7 +818,7 @@ impl Runtime {
                     })?;
                 let recovered = self
                     .forced_recovery_checkpoint(&placement, &recovery_sources, deadline)
-                    .await;
+                    .await?;
                 match recovered.snapshot {
                     Some(snapshot) => checkpoints.push((placement, snapshot)),
                     None => {
@@ -886,6 +858,64 @@ impl Runtime {
                 OwnershipStateRecoveryOutcome::Reset
             },
             resets,
+        })
+    }
+
+    /// Waits, within `deadline`, for the schedule `request` was made under, and confirms that it
+    /// still assigns the request's unit to the lost owner and that the recovery reached its
+    /// destination, this node. Returns the unit's scheduled node and the replicas, neither the
+    /// lost owner nor this node, that the recovery reads the unit's state from.
+    async fn forced_recovery_target(
+        &self,
+        request: &nervix_interconnect::PrepareForcedOwnershipRecoveryRequest,
+        deadline: Instant,
+    ) -> OwnershipHandoffResult<ForcedRecoveryTarget> {
+        let source = &request.source;
+        let destination = &request.destination;
+        let entity = &request.entity;
+        let unit = request.unit;
+        let scheduled = self
+            .forced_recovery_node_until(
+                &request.domain,
+                entity,
+                request.base_schedule_fingerprint,
+                deadline,
+            )
+            .await?;
+        if scheduled
+            .units
+            .get(&unit)
+            .and_then(|placement| placement.primary_node.as_ref())
+            != Some(source)
+        {
+            return Err(OwnershipHandoffError::participant(format!(
+                "{} '{}' is no longer assigned to lost owner '{}'",
+                entity.kind.as_str(),
+                entity.identifier.as_str(),
+                source
+            )));
+        }
+        let dispatcher = self.inner.remote_dispatcher.load_full().ok_or_else(|| {
+            OwnershipHandoffError::participant("local node identity is unavailable")
+        })?;
+        let local_node = dispatcher.local_node_id();
+        if local_node != destination {
+            return Err(OwnershipHandoffError::participant(format!(
+                "forced ownership recovery targets node '{destination}' but reached '{local_node}'"
+            )));
+        }
+        let recovery_sources = scheduled
+            .units
+            .get(&unit)
+            .ok_or_else(|| OwnershipHandoffError::participant("scheduled unit is unavailable"))?
+            .assigned_nodes
+            .iter()
+            .filter(|node| *node != source && *node != destination)
+            .cloned()
+            .collect::<Vec<_>>();
+        Ok(ForcedRecoveryTarget {
+            scheduled,
+            recovery_sources,
         })
     }
 
@@ -999,12 +1029,18 @@ impl Runtime {
         }
     }
 
+    /// The newest checkpoint of `placement` this node or one of `recovery_sources` holds.
+    ///
+    /// A source that liveness ended is skipped. A live source that has not answered when
+    /// `deadline`, the recovery's budget, passes fails the recovery instead: it may hold a newer
+    /// checkpoint than any other, and the recovery never resets or skips state a live replica
+    /// still holds.
     async fn forced_recovery_checkpoint(
         &self,
         placement: &RuntimeStatePlacement,
         recovery_sources: &[ClusterNodeName],
         deadline: Instant,
-    ) -> ForcedRecoveryCheckpoint {
+    ) -> OwnershipHandoffResult<ForcedRecoveryCheckpoint> {
         let mut valid_snapshots = Vec::new();
         let mut reset_cause = OwnershipStateResetCause::MissingCheckpoint;
         match self.capture_state_checkpoint(placement, None).await {
@@ -1025,21 +1061,31 @@ impl Runtime {
         let mut requests = FuturesUnordered::new();
         for source in recovery_sources {
             nervix_primitives::task::consume_budget().await;
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                break;
-            };
+            if Instant::now() >= deadline {
+                return Err(Report::new(OwnershipHandoffError::BudgetPassed));
+            }
             requests.push(self.request_state_sync_with_deadline(
                 source,
                 placement,
                 None,
-                nervix_interconnect::RequestDeadline::Explicit(remaining),
+                Some(nervix_interconnect::ExchangeDeadline::OperationCeiling(
+                    deadline,
+                )),
             ));
         }
         while let Some(response) = requests.next().await {
             nervix_primitives::task::consume_budget().await;
             let snapshot = match response {
                 Ok(Some(snapshot)) => snapshot,
-                Ok(None) | Err(_) => continue,
+                Ok(None) => continue,
+                Err(error) => {
+                    if let Some(nervix_interconnect::RequestError::DeadlinePassed { .. }) =
+                        error.downcast_ref::<nervix_interconnect::RequestError>()
+                    {
+                        return Err(error.change_context(OwnershipHandoffError::BudgetPassed));
+                    }
+                    continue;
+                }
             };
             if self
                 .validate_ownership_handoff_snapshot(placement, &snapshot)
@@ -1053,10 +1099,10 @@ impl Runtime {
             valid_snapshots.push(snapshot);
         }
         let Some(latest_lsm) = valid_snapshots.iter().map(|snapshot| snapshot.lsm).max() else {
-            return ForcedRecoveryCheckpoint {
+            return Ok(ForcedRecoveryCheckpoint {
                 snapshot: None,
                 reset_cause,
-            };
+            });
         };
         let mut latest = valid_snapshots
             .iter()
@@ -1065,10 +1111,10 @@ impl Runtime {
             .next()
             .verified("the maximum LSM was selected from at least one valid checkpoint");
         if latest.any(|snapshot| snapshot != selected) {
-            return ForcedRecoveryCheckpoint {
+            return Ok(ForcedRecoveryCheckpoint {
                 snapshot: None,
                 reset_cause: OwnershipStateResetCause::ConflictingCheckpoint,
-            };
+            });
         }
         debug!(
             domain = placement.domain.as_str(),
@@ -1078,10 +1124,10 @@ impl Runtime {
             lsm = selected.lsm,
             "selected surviving checkpoint for forced ownership recovery"
         );
-        ForcedRecoveryCheckpoint {
+        Ok(ForcedRecoveryCheckpoint {
             snapshot: Some(selected.clone()),
             reset_cause,
-        }
+        })
     }
 
     #[cfg(test)]
@@ -2294,12 +2340,15 @@ impl Runtime {
                       revision"
         )
     )]
+    /// Ask `target_node_id` for its state of `placement` after `after_lsm`. The owner reads, admits
+    /// and hashes what it holds before it answers, and the request waits for it for as long as it
+    /// lives; only `ceiling`, when the caller's operation has one, ends it sooner.
     pub(super) async fn request_state_sync_with_deadline(
         &self,
         target_node_id: &ClusterNodeName,
         placement: &RuntimeStatePlacement,
         after_lsm: Option<u64>,
-        response_deadline: nervix_interconnect::RequestDeadline,
+        ceiling: Option<nervix_interconnect::ExchangeDeadline>,
     ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, StateReplicationError> {
         let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
             return Err(Report::new(StateReplicationError::DispatcherUnavailable {
@@ -2307,23 +2356,22 @@ impl Runtime {
                 placement: placement.clone(),
             }));
         };
-        let response = dispatcher
-            .request_with_timeout(
-                target_node_id,
-                nervix_interconnect::StateSyncRequest {
-                    placement: placement.to_remote(),
-                    after_lsm,
-                },
-                response_deadline.resolve(
-                    dispatcher.interconnect.request_timeout(),
-                    dispatcher.interconnect.liveness(),
-                ),
-            )
-            .await
-            .change_context_lazy(|| StateReplicationError::Request {
-                target: target_node_id.clone(),
-                placement: placement.clone(),
-            })?;
+        let request = nervix_interconnect::StateSyncRequest {
+            placement: placement.to_remote(),
+            after_lsm,
+        };
+        let response = match ceiling {
+            Some(ceiling) => {
+                dispatcher
+                    .request_by(target_node_id, request, ceiling)
+                    .await
+            }
+            None => dispatcher.request(target_node_id, request).await,
+        };
+        let response = response.change_context_lazy(|| StateReplicationError::Request {
+            target: target_node_id.clone(),
+            placement: placement.clone(),
+        })?;
         let snapshot = response.result.map_err(|failure| {
             Report::new(StateReplicationError::RemoteFailure {
                 target: target_node_id.clone(),
@@ -2362,15 +2410,8 @@ impl Runtime {
             state.record_persisted(lsm);
             self.announce_checkpoint(offsets.placement(), offsets.replication(), lsm);
         }
-        offsets
-            .wait_for_replica_quorum(
-                lsm,
-                SyncKafkaOffsets::DEADLINE.resolve(
-                    self.inner.interconnect_request_timeout,
-                    nervix_interconnect::InterconnectLiveness::default(),
-                ),
-            )
-            .await
+        offsets.wait_for_replica_quorum(lsm).await;
+        Ok(())
     }
 
     /// Record a committed Kafka offset and wait until the offset state's replicas hold it.
@@ -2398,15 +2439,8 @@ impl Runtime {
             return Ok(());
         }
         self.announce_checkpoint(offsets.placement(), offsets.replication(), lsm);
-        offsets
-            .wait_for_replica_quorum(
-                lsm,
-                SyncKafkaOffsets::DEADLINE.resolve(
-                    self.inner.interconnect_request_timeout,
-                    nervix_interconnect::InterconnectLiveness::default(),
-                ),
-            )
-            .await
+        offsets.wait_for_replica_quorum(lsm).await;
+        Ok(())
     }
 
     pub(in crate::runtime) async fn reset_domain_kafka_offsets(
@@ -2649,8 +2683,12 @@ impl Runtime {
                 SealedSource::stored(self.inner.executor.clone(), reader)
             }
         };
-        let opened =
-            RestoredMaterializedSnapshot::open_relay(&self.inner.executor, schema, source).await;
+        let opened = RestoredMaterializedSnapshot::open_relay(
+            &self.inner.executor,
+            schema,
+            RelayContainerSource::Sealed(source),
+        )
+        .await;
         let restored = match opened {
             Ok(restored) => restored,
             Err(error) => {

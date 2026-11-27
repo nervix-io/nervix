@@ -1056,20 +1056,24 @@ impl Runtime {
         );
 
         let task = nervix_primitives::task::spawn(async move {
-            let shared_routing = match runtime
-                .wait_for_domain_routing(&task_domain, &task_from_relay)
-                .await
-            {
-                Ok(routing) => routing,
-                Err(error) => {
-                    runtime.events().report_error(format!(
-                        "reingestor '{}' in domain '{}' could not bind its routing snapshot: \
-                         {error:#}",
-                        task_reingestor.as_str(),
-                        task_domain.as_str(),
-                    ));
-                    return;
+            // The installation that started this reingestor publishes its domain's routing once
+            // the whole domain is in place. A stop of the reingestor, or the domain dropping its
+            // sender, ends the wait.
+            let mut routing_shutdown = shutdown_rx.clone();
+            let routing_stop = task_stop.clone();
+            let stopped = async move {
+                nervix_primitives::select! {
+                    signalled = routing_shutdown.wait_for(|stopped| *stopped) => {
+                        signalled.discarded(
+                            "a signalled stop and a dropped domain sender both end the wait",
+                        );
+                    }
+                    () = routing_stop.cancelled() => {}
                 }
+            };
+            let Some(shared_routing) = runtime.wait_for_domain_routing(&task_domain, stopped).await
+            else {
+                return;
             };
             let mut routing = DomainRoutingCache::new(shared_routing);
             let remote_ack_timing = runtime.remote_ack_timing().clone();
@@ -1578,7 +1582,9 @@ mod tests {
         );
         route_runtime.stop(RouteStop::Finish).await;
         owner_task
-            .stop(Duration::from_secs(1))
+            .stop(TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("relay owner should stop");
     }
@@ -1763,7 +1769,9 @@ mod tests {
             assert_eq!(instances.states().len(), 64);
         }
         owner_task
-            .stop(Duration::from_secs(1))
+            .stop(TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("relay owner should stop");
     }
@@ -2130,7 +2138,9 @@ mod tests {
 
         branched_runtime.stop(RouteStop::Finish).await;
         owner_task
-            .stop(Duration::from_secs(1))
+            .stop(TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("relay owner should stop");
     }

@@ -199,7 +199,7 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                         incoming.try_recv().is_err(),
                         "a retained attempt enters the application queue only once"
                     );
-                    server.shutdown().await;
+                    server.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -301,10 +301,9 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                         assert!(
                             matches!(
                                 error.current_context(),
-                                TransportError::RequestTimeout { .. }
-                                    | TransportError::ProgressTimeout { .. }
-                                    | TransportError::Closed(_)
+                                TransportError::Closed(_)
                                     | TransportError::Http2(_)
+                                    | TransportError::Io(_)
                             ),
                             "{error:?}"
                         );
@@ -428,7 +427,7 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                         }
                     }
                     done.send_replace(true);
-                    client.shutdown().await;
+                    client.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -588,7 +587,7 @@ fn exercise_partitioned_relay(run: ScenarioRun) -> Result<(), SimulationError> {
                         incoming.try_recv().is_err(),
                         "each partition's delivery enters the application queue once"
                     );
-                    server.shutdown().await;
+                    server.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -638,10 +637,9 @@ fn exercise_partitioned_relay(run: ScenarioRun) -> Result<(), SimulationError> {
                     assert!(
                         matches!(
                             error.current_context(),
-                            TransportError::RequestTimeout { .. }
-                                | TransportError::ProgressTimeout { .. }
-                                | TransportError::Closed(_)
+                            TransportError::Closed(_)
                                 | TransportError::Http2(_)
+                                | TransportError::Io(_)
                         ),
                         "{error:?}"
                     );
@@ -708,7 +706,7 @@ fn exercise_partitioned_relay(run: ScenarioRun) -> Result<(), SimulationError> {
                          channels",
                     );
                     done.send_replace(true);
-                    client.shutdown().await;
+                    client.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -923,7 +921,7 @@ fn restarted_receiver_fences_unresolved_relay(
                             incoming.try_recv().is_err(),
                             "only the fresh relay was admitted"
                         );
-                        server.shutdown().await;
+                        server.shutdown(super::teardown_ceiling()).await;
                         Ok::<(), io::Error>(())
                     })
                     .await;
@@ -1077,7 +1075,7 @@ fn restarted_receiver_fences_unresolved_relay(
                         );
                         trace.record("client", "fresh relay and authenticated status succeeded");
                         done.send_replace(true);
-                        client.shutdown().await;
+                        client.shutdown(super::teardown_ceiling()).await;
                         Ok::<(), io::Error>(())
                     })
                     .await;
@@ -1262,7 +1260,7 @@ fn sender_retirement_reclaims_capacity_while_an_admitted_intake_is_retained() {
                         );
                         fresh.send_replace(true);
                         wait_for(&mut done).await;
-                        server.shutdown().await;
+                        server.shutdown(super::teardown_ceiling()).await;
                         Ok::<(), io::Error>(())
                     })
                     .await;
@@ -1304,7 +1302,7 @@ fn sender_retirement_reclaims_capacity_while_an_admitted_intake_is_retained() {
                             .await
                             .assured("the first frame reaches the receiver");
                         wait_for(&mut admitted).await;
-                        client.shutdown().await;
+                        client.shutdown(super::teardown_ceiling()).await;
                         departed.send_replace(true);
                         wait_for(&mut retired).await;
                         let client = bind(
@@ -1335,7 +1333,7 @@ fn sender_retirement_reclaims_capacity_while_an_admitted_intake_is_retained() {
                             .assured("the fresh process reaches the retained receiver");
                         wait_for(&mut fresh).await;
                         done.send_replace(true);
-                        client.shutdown().await;
+                        client.shutdown(super::teardown_ceiling()).await;
                         Ok::<(), io::Error>(())
                     })
                     .await;

@@ -1,7 +1,8 @@
-//! Regressions for the sequence assertion used by broker scenarios.
+//! Regressions for the sequence assertion and the readiness probe copies of broker scenarios.
 //!
 //! Layer: test harness.
-//! - **Owns.** A stalled scenario caller and complete sequence/header failure oracles.
+//! - **Owns.** A stalled scenario caller, complete sequence/header failure oracles and the count of
+//!   readiness probe copies a read passes over.
 //! - **Depends on.** The real broker observer, a loopback NATS peer and controlled deliveries.
 //! - **Must not know.** Product execution, placement or connector implementation.
 
@@ -254,4 +255,63 @@ async fn forwarded_reads_preserve_the_complete_message_and_observer() {
             .assured("the next message is buffered"),
         Some("next".to_string())
     );
+}
+
+/// A readiness probe saw the first copy of its payload while the endpoint had accepted two more.
+/// Reads pass over exactly those two, wherever they land among later messages, and a copy beyond
+/// them still reaches the scenario, so the pass-over hides nothing the probe did not post.
+#[nervix_primitives::test]
+async fn reads_pass_over_only_the_copies_a_readiness_probe_left_on_their_way() {
+    const PROBE: &str = "{\"tenant\":\"warmup\",\"seq\":0}";
+    const NEXT: &str = "{\"tenant\":\"replacement\",\"seq\":2}";
+    let (messages, receiver) = mpsc::channel(4);
+    for payload in [PROBE, NEXT, PROBE, PROBE] {
+        messages
+            .send(BrokerMessage::from_bytes(payload.as_bytes(), Vec::new()))
+            .await
+            .assured("the channel has room for every delivery of the regression");
+    }
+    let reader = spawn(async move {
+        let _messages = messages;
+        std::future::pending::<()>().await;
+    });
+    let mut observer = BrokerObserver::forwarded(receiver, reader);
+    observer.expect_probe_copies(&format!("{PROBE}\n"), 2);
+
+    let next = observer
+        .next_message()
+        .await
+        .assured("the message after the first late copy is buffered");
+    assert_eq!(next.payload, NEXT);
+    assert_eq!(
+        observer
+            .try_next_payload(Duration::ZERO)
+            .await
+            .assured("the copy beyond the probe's count is buffered"),
+        Some(PROBE.to_string()),
+        "the second late copy is passed over and the third, which the probe never accepted, is \
+         read"
+    );
+}
+
+/// A probe whose endpoint accepted only the copy it saw leaves nothing to pass over.
+#[nervix_primitives::test]
+async fn a_probe_with_no_later_copies_hides_no_message() {
+    const PROBE: &str = "{\"seq\":0}";
+    let (messages, receiver) = mpsc::channel(1);
+    messages
+        .send(BrokerMessage::from_bytes(PROBE.as_bytes(), Vec::new()))
+        .await
+        .assured("the channel has room for the delivery");
+    let reader = spawn(async move {
+        let _messages = messages;
+        std::future::pending::<()>().await;
+    });
+    let mut observer = BrokerObserver::forwarded(receiver, reader);
+    observer.expect_probe_copies(PROBE, 0);
+    let read = observer
+        .next_message()
+        .await
+        .assured("the delivery is buffered");
+    assert_eq!(read.payload, PROBE);
 }

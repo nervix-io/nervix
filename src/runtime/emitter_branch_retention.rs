@@ -2,8 +2,8 @@
 //!
 //! Layer: data plane.
 //! - **Owns.** Source- and partition-local activity, TTL and LRU retirement, and the physical
-//!   maintenance wake while branch work is held, including cancellation of an expired input's
-//!   processing and removal of retired buffer and retry acknowledgement ownership.
+//!   maintenance wake while branch work is held, keeping every branch whose work the emitter still
+//!   holds, and removal of retired buffer and retry acknowledgement ownership.
 //! - **Depends on.** Typed emitter input plans, the branch instance registry, concrete branch
 //!   keys, the domain clock consumer, physical deadline capabilities, and the emitter host
 //!   buffer, retry and acknowledgement services.
@@ -30,8 +30,8 @@ use super::{EmitterConnectorContext, EmitterTaskLoop, EmitterTaskState};
 use crate::{
     emitter_execution_plan::EmitterInputPlan,
     runtime::{
-        BranchKey, DomainClock, EmitterPublishBatch, NodeQuiesceWorkGuard, RelayPartitioning,
-        RelayRecordBatch, branch_buffering::RuntimeWake,
+        BranchKey, DomainClock, EmitterBatchBuffer, EmitterPublishBatch, NodeQuiesceWorkGuard,
+        RelayPartitioning, RelayRecordBatch, branch_buffering::RuntimeWake,
     },
 };
 
@@ -70,6 +70,39 @@ impl EmitterBranchRetirements {
     }
     pub(in crate::runtime) fn is_empty(&self) -> bool {
         self.branches.is_empty()
+    }
+
+    /// Takes `key` of `source` out of these retirements, and whether it was one of them.
+    pub(in crate::runtime) fn remove(
+        &mut self,
+        source: &RelayName,
+        key: &Option<BranchKey>,
+    ) -> bool {
+        let Some(key) = key else {
+            return false;
+        };
+        let Some(keys) = self.branches.get_mut(source) else {
+            return false;
+        };
+        let removed = keys.remove(key);
+        if keys.is_empty() {
+            self.branches.remove(source);
+        }
+        removed
+    }
+
+    /// Adds every retirement of `other` to these.
+    fn absorb(&mut self, other: Self) {
+        for (source, keys) in other.branches {
+            self.insert(source, keys);
+        }
+    }
+
+    /// Every retired branch, by its source.
+    fn branches(&self) -> impl Iterator<Item = (&RelayName, &BranchKey)> {
+        self.branches
+            .iter()
+            .flat_map(|(source, keys)| keys.iter().map(move |key| (source, key)))
     }
 
     pub(in crate::runtime) fn contains(&self, source: &RelayName, key: &Option<BranchKey>) -> bool {
@@ -284,6 +317,23 @@ impl EmitterBranchRetention {
         retired
     }
 
+    /// Admits again at `now` every branch of `kept`: a branch whose work the emitter still holds
+    /// is active, so its TTL counts from the emitter's last look at that work, never from its last
+    /// input while the emitter itself holds it back. Returns what the branch capacity retires for
+    /// those admissions, which re-admitting branches the same scan just expired never exceeds.
+    fn reactivate(
+        &mut self,
+        kept: &EmitterBranchRetirements,
+        now: Timestamp,
+    ) -> RetentionResult<EmitterBranchRetirements> {
+        let mut retired = EmitterBranchRetirements::default();
+        for (source, key) in kept.branches() {
+            let admission = self.record_activity(source, &Some(key.clone()), now)?;
+            retired.absorb(admission.retired);
+        }
+        Ok(retired)
+    }
+
     /// A newly admitted branch whose input produced no output holds no branch-local work.
     pub(super) fn forget(&mut self, source: &RelayName, key: &Option<BranchKey>) {
         let Some(branches) = self.sources.get_mut(source) else {
@@ -322,9 +372,12 @@ impl EmitterTaskLoop<'_> {
         if !self.retention.is_due() {
             return;
         }
-        let retired = self
-            .context
-            .scan_branch_retention(&mut self.retention, self.stop_signal);
+        let retired = self.context.expired_branches_without_held_work(
+            &mut self.retention,
+            self.stop_signal,
+            &self.state.buffer,
+            None,
+        );
         self.state
             .retire_source_branches(&retired, &mut |report| {
                 self.batch_context.observe_sent(report);
@@ -366,7 +419,6 @@ impl EmitterTaskLoop<'_> {
                 .await;
         }
 
-        let acks = admission.as_ref().map(|_| batch.acks.clone());
         let metrics = self.batch_context.output_metrics;
         let dirty = self.batch_context.metrics_dirty;
         let result = {
@@ -388,22 +440,19 @@ impl EmitterTaskLoop<'_> {
                     result = &mut processing => break result,
                     result = wake.wait() => {
                         result.assured("a physical-only maintenance wake has no logical clock failure");
-                        let retired = self.context.scan_branch_retention(
-                            &mut self.retention, self.stop_signal,
+                        // The batch in processing is work this emitter holds for its branch, so
+                        // that branch is never retired under it.
+                        let retired = self.context.expired_branches_without_held_work(
+                            &mut self.retention,
+                            self.stop_signal,
+                            &self.state.buffer,
+                            Some((source, &key)),
                         );
                         self.state.retire_source_branches(&retired, &mut |report| {
                             metrics.observe(report);
                             dirty.mark();
                         }).await;
                         self.state.keep_buffered_work_alive();
-                        if retired.contains(source, &key) {
-                            // A retained ACK may also be held by the source/transport. Explicit
-                            // NoACK settles it before dropping the parked processing future.
-                            for ack in acks.iter().flatten() {
-                                ack.no_ack("emitter source branch retired");
-                            }
-                            break None;
-                        }
                     }
                 }
             }
@@ -432,6 +481,64 @@ impl EmitterTaskState {
 }
 
 impl EmitterConnectorContext {
+    /// The source branches of `retention` whose TTL passed, apart from those whose work this
+    /// emitter still holds: `buffer`'s rows that no attempt has resolved yet, and the branch of the
+    /// batch it is `processing`. A branch the emitter holds work for is active, however long the
+    /// emitter itself holds that work back, so it is admitted again rather than retired with its
+    /// rows.
+    fn expired_branches_without_held_work(
+        &self,
+        retention: &mut EmitterBranchRetention,
+        stop_signal: &watch::Sender<Option<Instant>>,
+        buffer: &EmitterBatchBuffer,
+        processing: Option<(&RelayName, &Option<BranchKey>)>,
+    ) -> EmitterBranchRetirements {
+        let mut retired = self.scan_branch_retention(retention, stop_signal);
+        if retired.is_empty() {
+            return retired;
+        }
+        let mut kept = EmitterBranchRetirements::default();
+        if let Some((source, key)) = processing
+            && retired.remove(source, key)
+            && let Some(key) = key
+        {
+            kept.insert(source.clone(), [key.clone()]);
+        }
+        buffer.keep_branches_with_held_work(&mut retired, &mut kept);
+        if !kept.is_empty() {
+            let over_capacity = self.reactivate_branches(retention, &kept);
+            retired.absorb(over_capacity);
+        }
+        retired
+    }
+
+    /// Admits the branches of `kept` again at the domain's current time, and returns what the
+    /// branch capacity retires for them. When this emitter cannot read the clock, they stay out of
+    /// the activity registry until their next input, and their held rows stay in the buffer.
+    fn reactivate_branches(
+        &self,
+        retention: &mut EmitterBranchRetention,
+        kept: &EmitterBranchRetirements,
+    ) -> EmitterBranchRetirements {
+        let now = match self.clock.snapshot() {
+            Ok(snapshot) => snapshot.now(),
+            Err(error) => {
+                self.record_failure(format!(
+                    "{:#}",
+                    error.change_context(EmitterBranchRetentionError::Clock)
+                ));
+                return EmitterBranchRetirements::default();
+            }
+        };
+        match retention.reactivate(kept, now) {
+            Ok(over_capacity) => over_capacity,
+            Err(error) => {
+                self.record_failure(format!("{error:#}"));
+                EmitterBranchRetirements::default()
+            }
+        }
+    }
+
     fn scan_branch_retention(
         &self,
         retention: &mut EmitterBranchRetention,
@@ -588,6 +695,41 @@ mod tests {
         retention.clear();
         assert!(!retention.has_work());
         assert!(retention.next_scan.is_none());
+    }
+
+    /// A branch whose work the emitter still holds when its TTL passes is admitted again at that
+    /// scan: its TTL counts from there, and re-admitting a branch the scan just expired retires
+    /// nothing for the branch capacity.
+    #[test]
+    fn a_kept_branch_counts_its_ttl_again_from_the_scan_that_kept_it() {
+        let source = named("events");
+        let key = string_branch_key("tenant", "acme");
+        let mut retention = EmitterBranchRetention::new(
+            &[input("events", Some(ResolvedParametrizerPartitions::ONE))],
+            Duration::from_secs(30),
+        );
+        retention
+            .record_activity(&source, &key, Timestamp::from_unix_nanos(0))
+            .assured("the fixture constructs a concrete key for its declared source");
+        let expired = retention.expire_at(Timestamp::from_unix_nanos(10));
+        assert!(expired.contains(&source, &key));
+        assert!(!retention.has_work());
+
+        let over_capacity = retention
+            .reactivate(&expired, Timestamp::from_unix_nanos(10))
+            .assured("the fixture keeps a concrete key of its declared source");
+        assert!(over_capacity.is_empty());
+        assert!(retention.has_work());
+        assert!(
+            retention
+                .expire_at(Timestamp::from_unix_nanos(19))
+                .is_empty()
+        );
+        assert!(
+            retention
+                .expire_at(Timestamp::from_unix_nanos(20))
+                .contains(&source, &key)
+        );
     }
 
     #[test]

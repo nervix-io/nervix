@@ -30,11 +30,20 @@ use nervix_primitives::sync::blocking::Mutex;
 
 use super::*;
 
-/// Due reports retain weak attempt handles and each attempt's captured send budget.
-type RelayProgressReports =
-    BTreeMap<RemoteAckRegistration, (StdWeak<RelayAdmissionRecord>, Duration)>;
+/// Due reports retain weak attempt handles.
+type RelayProgressReports = BTreeMap<RemoteAckRegistration, StdWeak<RelayAdmissionRecord>>;
 
 impl TransportState {
+    /// Binds `node`'s relay owner to the run with process epoch `epoch`, installing the owner on
+    /// the peer's first connection, and republishes the peer runs. Only a connection binding calls
+    /// it, outbound or inbound.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a connection binding installs or rebinds its peer's relay owner"
+        )
+    )]
     pub(super) fn bind_relay_owner(
         &self,
         node: &ClusterNodeName,
@@ -52,6 +61,7 @@ impl TransportState {
                 .is_none_or(|live| live.contains(node));
             if let Some(owner) = current.owners.get(node) {
                 owner.bind_epoch(epoch, binding_sequence, member);
+                self.peer_runs.republish(&self.relay_owners);
                 return Ok(owner.clone());
             }
             if self.admission_closed.is_cancelled() {
@@ -68,11 +78,34 @@ impl TransportState {
                 .relay_owners
                 .compare_and_swap(&current, StdArc::new(next));
             if StdArc::ptr_eq(&current, &observed) {
+                self.peer_runs.republish(&self.relay_owners);
                 return Ok(owner);
             }
         }
     }
 
+    /// The process epoch of `node`'s run that this transport's relay protocol is bound to, or
+    /// `None` before any connection bound one and once membership removed the node.
+    pub(crate) fn peer_run(&self, node: &ClusterNodeName) -> Option<u64> {
+        self.peer_runs.run(node)
+    }
+
+    /// Resolves once `node`'s run is no longer the one with process epoch `epoch`: a connection
+    /// bound a newer run of the node, or membership removed the node.
+    pub(crate) async fn peer_run_ended(&self, node: &ClusterNodeName, epoch: u64) {
+        self.peer_runs.ended(node, epoch).await;
+    }
+
+    /// Applies the live membership `live` to the relay owners: activates the owners of live peers,
+    /// ends and withdraws those of departed peers unless they still await membership, and
+    /// republishes the peer runs. Only a membership change calls it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a membership change retires the relay owners of departed peers"
+        )
+    )]
     pub(super) fn retire_departed_relay_owners(&self, live: &BTreeSet<ClusterNodeName>) {
         loop {
             let current = self.relay_owners.load_full();
@@ -90,6 +123,7 @@ impl TransportState {
                 .relay_owners
                 .compare_and_swap(&current, StdArc::new(next));
             if StdArc::ptr_eq(&current, &observed) {
+                self.peer_runs.republish(&self.relay_owners);
                 return;
             }
         }
@@ -127,6 +161,75 @@ impl TransportState {
 pub(super) struct RelayOwnersPublication {
     pub(super) owners: BTreeMap<ClusterNodeName, StdArc<RelayPeerOwner>>,
     live_nodes: Option<BTreeSet<ClusterNodeName>>,
+}
+
+/// The process epoch of the run each peer's relay protocol is bound to, republished whole when a
+/// connection binds a run or membership retires a peer, so a reader takes no owner's lock, and the
+/// wake of whoever waits for a peer's run to end.
+pub(super) struct PeerRuns {
+    published: ArcSwap<BTreeMap<ClusterNodeName, u64>>,
+    /// Wakes whoever waits for a peer's run to end, when `published` is republished.
+    changed: Notify,
+}
+
+impl Default for PeerRuns {
+    fn default() -> Self {
+        Self {
+            published: ArcSwap::from_pointee(BTreeMap::new()),
+            changed: Notify::new(),
+        }
+    }
+}
+
+impl PeerRuns {
+    /// Republishes the run each relay owner of `owners` is bound to, and wakes whoever waits for a
+    /// peer's run to end. Connection binding and membership retirement call it, never a recurring
+    /// path.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a connection binding or a membership retirement republishes peer runs"
+        )
+    )]
+    fn republish(&self, owners: &ArcSwap<RelayOwnersPublication>) {
+        // A republication that raced another one computes again from the owners it then finds,
+        // so the last publication always reflects the latest bindings.
+        self.published.rcu(|_| {
+            let owners = owners.load();
+            let mut runs = BTreeMap::new();
+            for (node, owner) in owners.owners.iter() {
+                if let Some(epoch) = owner.bound_epoch() {
+                    runs.insert(node.clone(), epoch);
+                }
+            }
+            runs
+        });
+        self.changed.notify_waiters();
+    }
+
+    /// The process epoch of `node`'s run that the relay protocol is bound to, or `None` before any
+    /// connection bound one and once membership removed the node.
+    fn run(&self, node: &ClusterNodeName) -> Option<u64> {
+        self.published.load().get(node).copied()
+    }
+
+    /// Resolves once `node`'s run is no longer the one with process epoch `epoch`: a connection
+    /// bound a newer run of the node, or membership removed the node. The wait registers for the
+    /// next republication before it reads the runs, so a republication that lands in between
+    /// wakes it.
+    async fn ended(&self, node: &ClusterNodeName, epoch: u64) {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.run(node) != Some(epoch) {
+                return;
+            }
+            changed.await;
+        }
+    }
 }
 
 /// Where the attempt a grant asks for stands against its channel.
@@ -304,6 +407,17 @@ impl RelayPeerOwner {
         )
     }
 
+    /// The process epoch of the peer run this owner is bound to, or `None` before any connection
+    /// bound one and once membership ended the owner.
+    pub(super) fn bound_epoch(&self) -> Option<u64> {
+        match self.state.lock().run {
+            RelayPeerRun::AwaitingMembership { epoch, .. } | RelayPeerRun::Bound { epoch, .. } => {
+                Some(epoch)
+            }
+            RelayPeerRun::Starting | RelayPeerRun::Ended => None,
+        }
+    }
+
     pub(super) fn end(&self) {
         let mut state = self.state.lock();
         state.run = RelayPeerRun::Ended;
@@ -377,8 +491,8 @@ impl RelayPeerOwner {
         let mut next: Option<Instant> = None;
         for record in state.attempts.values() {
             let (report, deadline) = record.take_progress_report(now);
-            if let Some((registration, timeout)) = report {
-                due.insert(registration, (StdArc::downgrade(record), timeout));
+            if let Some(registration) = report {
+                due.insert(registration, StdArc::downgrade(record));
             }
             if let Some(deadline) = deadline {
                 next = Some(match next {

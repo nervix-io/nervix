@@ -26,31 +26,49 @@
 
 use error_stack::ResultExt as _;
 use futures_util::StreamExt as _;
+use nervix_primitives::time::timeout_at;
 
 use super::*;
 
-/// Whether the sends of one relay delivery started an exchange with its receiver.
+/// Whether the sends of one relay delivery started an exchange with its receiver, and with which
+/// run of it.
 ///
 /// A send records the start immediately before it registers the delivery's outbound attempt and
 /// asks the receiver for a grant, which is the first step of a delivery that a receiver can act
 /// on. The sender reads it once a send has ended or been abandoned. A delivery whose sends never
 /// started an exchange left no attempt on its receiver, so the receiver cannot have admitted it
 /// and the sender may hand the delivery to another receiver.
+///
+/// Only the sender's task touches the record: a send borrows it, so no other task can hold it, and
+/// the sender reads it after awaiting or dropping the send. Program order on that one task orders
+/// every store before every later load, so two relaxed atomics hold it without a lock. Together
+/// they describe one optional process epoch: `addressed` means something only once
+/// `exchange_started` is set, and [`Self::receiver_run`] is the only reader.
 #[derive(Debug, Default)]
 pub struct RelaySendProgress {
     exchange_started: AtomicBool,
+    /// The process epoch of the receiver run the delivery's latest exchange addressed, meaningful
+    /// once `exchange_started` is set.
+    addressed: AtomicU64,
 }
 
 impl RelaySendProgress {
-    /// Whether a send of the delivery started an exchange, so that its receiver may hold an
-    /// attempt of it.
-    pub fn exchange_started(&self) -> bool {
-        // Relaxed: the send that records the start runs on the sender's task, which awaits it or
-        // drops it before reading, and that orders the store before this load.
-        self.exchange_started.load(Ordering::Relaxed)
+    /// The process epoch of the receiver run the delivery's latest exchange addressed, or `None`
+    /// when no send of the delivery started an exchange, so that its receiver holds no attempt of
+    /// it. The addressed run holds the delivery's attempt and admits it if anything does: a grant
+    /// or status that another run answers is indeterminate, so an admitted delivery was always
+    /// admitted by this run.
+    pub fn receiver_run(&self) -> Option<u64> {
+        // Relaxed: the sends that record a start run on the sender's task, which awaits them or
+        // drops them before reading, and that orders their stores before these loads.
+        if !self.exchange_started.load(Ordering::Relaxed) {
+            return None;
+        }
+        Some(self.addressed.load(Ordering::Relaxed))
     }
 
-    fn record_exchange_start(&self) {
+    fn record_exchange_start(&self, receiver_epoch: u64) {
+        self.addressed.store(receiver_epoch, Ordering::Relaxed);
         self.exchange_started.store(true, Ordering::Relaxed);
     }
 }
@@ -85,20 +103,17 @@ impl TransportState {
     }
 
     /// Ask `node_id` to cancel `delivery`, whose sender captured `timing`, until it answers a
-    /// terminal status, the transport stops admitting, or the delivery's cancellation window
-    /// passes: its receiver keeps nothing of the delivery to cancel after that.
+    /// terminal status, the transport stops admitting, or the delivery's retention passes: its
+    /// receiver keeps nothing of the delivery to cancel after that.
     pub(super) async fn cancel_relay_until_resolved(
         &self,
         node_id: ClusterNodeName,
         delivery: RelayDelivery,
         timing: nervix_models::RemoteAckTiming,
     ) {
-        let window = self
-            .options
-            .relay_cancellation_retry_window(RelayChannelRetention::captured_by(timing));
         let deadline = Instant::now()
-            .checked_add(window)
-            .assured("a delivery's relay cancellation retry window fits the monotonic clock");
+            .checked_add(RelayChannelRetention::captured_by(timing).duration())
+            .assured("a delivery's relay channel retention fits the monotonic clock");
         let mut backoff = self.options.reconnect_backoff;
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -154,12 +169,8 @@ impl TransportState {
         timing: nervix_models::RemoteAckTiming,
         path: &str,
     ) -> Result<RelayAdmissionStatus, Report<TransportError>> {
-        let timeout_duration = self.options.request_timeout;
-        let deadline = Instant::now()
-            .checked_add(timeout_duration)
-            .ok_or_else(|| TransportError::InvalidOptions {
-                reason: "relay admission deadline exceeds the monotonic clock range".to_string(),
-            })?;
+        // The query waits for its stream and its answer for as long as the receiver and its
+        // connection live: a receiver that is slow to answer costs the query latency.
         let lease = self
             .lease(
                 node_id,
@@ -169,7 +180,7 @@ impl TransportState {
                 } else {
                     RequestSubquota::Liveness
                 },
-                deadline,
+                None,
             )
             .await?;
         let outbound_key = OutboundRelayKey {
@@ -209,24 +220,19 @@ impl TransportState {
                     body: Some(request),
                     response_class: PoolClass::Management,
                     response_limit: self.executor.limits().management_event_bytes.as_u64(),
-                    timeout: deadline.saturating_duration_since(Instant::now()),
+                    deadline: None,
                     headers: &[],
                 },
             )
             .await?;
         // The status is the receiver's verdict on the attempt, and a cancellation it answers is
-        // already applied, so a full class holds the answer back rather than losing it, until the
-        // query's own deadline. It was read with the room its decoding takes.
-        let response = wire::decode_answer::<RelayAdmissionResponse>(
+        // already applied, so a full class holds the answer back rather than losing it. It was
+        // read with the room its decoding takes.
+        let response = wire::decode_rkyv_within::<RelayAdmissionResponse>(
             &self.executor,
             CpuClass::Control,
             response.bytes,
             response.decoding,
-            AnswerDeadline {
-                peer: node_id,
-                at: deadline,
-                timeout: timeout_duration,
-            },
         )
         .await?
         .into_value();
@@ -251,16 +257,13 @@ impl TransportState {
         payload: RelayPayload,
         progress: &RelaySendProgress,
     ) -> Result<(), Report<TransportError>> {
-        let timeout_duration = self.options.request_timeout;
-        let deadline = Instant::now()
-            .checked_add(timeout_duration)
-            .ok_or_else(|| TransportError::InvalidOptions {
-                reason: "request deadline exceeds the monotonic clock range".to_string(),
-            })?;
+        // A delivery waits for its streams, its grant and its body for as long as its receiver and
+        // the connections to it live: a receiver that is slow or applying backpressure costs the
+        // delivery latency. The delivery's owner bounds the whole of it by its operation ceiling.
         // The relay connection and local stream slot are leased before receiver memory is asked
         // for, so a saturated pool never holds a remote application grant.
         let relay = self
-            .lease(node_id, PoolClass::Relay, RequestSubquota::Shared, deadline)
+            .lease(node_id, PoolClass::Relay, RequestSubquota::Shared, None)
             .await?;
         if let Some(bounds) = relay.released.pool.capabilities.receive_bounds()
             && (u64::try_from(payload.batch_ipc.len()).assured("body length fits u64")
@@ -292,7 +295,7 @@ impl TransportState {
                 node_id,
                 PoolClass::Management,
                 RequestSubquota::Admission,
-                deadline,
+                None,
             )
             .await?;
         let outbound_key = OutboundRelayKey {
@@ -315,7 +318,7 @@ impl TransportState {
             .assured("a leased connection completed its authenticated binding");
         // Everything before this point stayed on this node. From here the delivery has an outbound
         // attempt and its grant request may reach the receiver.
-        progress.record_exchange_start();
+        progress.record_exchange_start(management.connection.peer_epoch);
         if relay_owner.register_outbound(
             &outbound_key,
             management.connection.peer_epoch,
@@ -324,13 +327,13 @@ impl TransportState {
         )? {
             self.relay_retention_changed.notify_one();
         }
-        // The receiver may hold the grant back for room for half the stall bound the delivery gives
-        // each attempt, its dispatch timeout, the same half the delivery waits between asks, and no
-        // longer than half of what this exchange has left. It then answers the capacity refusal the
-        // delivery is held back on, which leaves the rest of the attempt for the answer and the body.
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let grant_wait = (payload.ack_timing.remote_ack_dispatch_timeout / 2).min(remaining / 2);
-        let grant_wait = u64::try_from(grant_wait.as_nanos()).unwrap_or(u64::MAX);
+        // The receiver may hold the grant back for its own room for as long as the delivery waits
+        // between asks at most, its retry ceiling. It then answers the capacity refusal the delivery
+        // is held back on and asks again with, so a grant never waits on the receiver longer than
+        // the delivery would have waited on this node.
+        let grant_wait = payload.ack_timing.retry_ceiling();
+        let grant_wait = u64::try_from(grant_wait.as_nanos())
+            .assured("the retry ceiling is twenty-five alive intervals, far below u64 nanoseconds");
         let grant_wait = grant_wait.to_string();
         let grant_response = management
             .request_raw(
@@ -340,7 +343,7 @@ impl TransportState {
                     body: Some(metadata),
                     response_class: PoolClass::Management,
                     response_limit: self.executor.limits().management_event_bytes.as_u64(),
-                    timeout: remaining,
+                    deadline: None,
                     headers: &[(GRANT_WAIT_HEADER, grant_wait.as_str())],
                 },
             )
@@ -361,18 +364,12 @@ impl TransportState {
         };
         // The receiver has already decided the grant, and a grant it issued holds its relay memory
         // until this delivery uses or cancels it, so a full class holds the answer back rather than
-        // leaving the grant to be reconciled, until the delivery's own deadline. It was read with
-        // the room its decoding takes.
-        let grant = wire::decode_answer::<RelayGrantResponse>(
+        // leaving the grant to be reconciled. It was read with the room its decoding takes.
+        let grant = wire::decode_rkyv_within::<RelayGrantResponse>(
             &self.executor,
             CpuClass::Control,
             grant_response.bytes,
             grant_response.decoding,
-            AnswerDeadline {
-                peer: node_id,
-                at: deadline,
-                timeout: timeout_duration,
-            },
         )
         .await?
         .into_value();
@@ -433,7 +430,7 @@ impl TransportState {
                     body: Some(payload.batch_ipc),
                     response_class: PoolClass::Relay,
                     response_limit: RESPONSE_LIMIT,
-                    timeout: deadline.saturating_duration_since(Instant::now()),
+                    deadline: None,
                     headers: &[
                         ("x-nervix-sender-epoch", sender_epoch.as_str()),
                         ("x-nervix-receiver-epoch", receiver_epoch.as_str()),
@@ -474,28 +471,23 @@ impl TransportState {
                         });
                     }
                 }
-                // Registration order is deterministic; every pending RPC is polled independently.
-                for (registration, (record, send_timeout)) in due {
+                // Registration order is deterministic; every pending RPC is polled independently, so
+                // a report that waits for its registrar's connection never holds back another.
+                for (registration, record) in due {
                     nervix_primitives::task::consume_budget().await;
-                    let send_timeout = self.options.relay_progress_send_timeout(send_timeout);
                     let state = self.clone();
                     reports.push(async move {
                         let target = registration.registrar.node_id().clone();
                         let ack_id = registration.ack_id;
-                        let result = timeout(
-                            send_timeout,
-                            state.send(
+                        let result = state
+                            .send(
                                 &target,
                                 Envelope::Ack(registration.resolution(RemoteAckOutcome::Alive)),
-                            ),
-                        )
-                        .await;
+                            )
+                            .await;
                         let failure = match result {
-                            Ok(Ok(())) => None,
-                            Ok(Err(error)) => Some(error.to_string()),
-                            Err(_) => {
-                                Some(format!("relay progress send exceeded {send_timeout:?}"))
-                            }
+                            Ok(()) => None,
+                            Err(error) => Some(error.to_string()),
                         };
                         let next = record
                             .upgrade()
@@ -622,7 +614,6 @@ impl TransportState {
             &self.executor,
             MemoryClass::Management,
             declared,
-            self.options.progress_timeout,
             request.into_body(),
         );
         let Some(received) = until_reset(&mut respond, reading).await? else {
@@ -721,13 +712,7 @@ impl TransportState {
         let AnswerEncoding::Encoded(response) = response else {
             return Ok(RelayAnswer::Ended);
         };
-        send_response(
-            respond,
-            StatusCode::OK,
-            Some(response),
-            self.options.progress_timeout,
-        )
-        .await?;
+        send_response(respond, StatusCode::OK, Some(response)).await?;
         Ok(RelayAnswer::Sent)
     }
 
@@ -767,13 +752,7 @@ impl TransportState {
         let AnswerEncoding::Encoded(response) = response else {
             return Ok(());
         };
-        send_response(
-            respond,
-            StatusCode::OK,
-            Some(response),
-            self.options.progress_timeout,
-        )
-        .await?;
+        send_response(respond, StatusCode::OK, Some(response)).await?;
         Ok(())
     }
 
@@ -787,11 +766,11 @@ impl TransportState {
     ) -> Result<(), Report<TransportError>> {
         // A full relay class holds the grant back, as it holds back every charge: the request is
         // read and decoded under one charge, and once it is known the operation's whole charge is
-        // waited for while the grant holds nothing of the class. The sender gives each ask its
-        // stall bound and declares half of it as the time the grant may be held, the same half it
-        // waits between asks. A grant still without room by then is answered with the capacity
-        // refusal the sender holds its delivery back on and asks again with, so the exchange never
-        // outlasts the bound its sender gives it. The sender's reset also ends every wait.
+        // waited for while the grant holds nothing of the class. The sender declares how long the
+        // grant may be held, the longest it waits between asks. A grant still without room by then
+        // is answered with the capacity refusal the sender holds its delivery back on and asks
+        // again with, so the hold never outlasts the wait its sender declared. The sender's reset
+        // also ends every wait.
         let held_for = Duration::from_nanos(header_u64(&request, GRANT_WAIT_HEADER)?);
         let held_until = Instant::now().checked_add(held_for).ok_or_else(|| {
             Report::new(TransportError::RelayGrant(
@@ -808,7 +787,6 @@ impl TransportState {
                 &self.executor,
                 MemoryClass::Relay,
                 declared,
-                self.options.progress_timeout,
                 request.into_body(),
             ),
         );
@@ -1029,11 +1007,15 @@ impl TransportState {
             observations: self.observations.clone(),
             owner: StdArc::downgrade(&relay_owner),
         });
+        // A grant lives until its body arrives, its sender cancels it, its sender's process ends,
+        // or the delivery's own ceiling passes: the operator's bound on the whole delivery. A
+        // sender that is slow to send the body keeps its grant.
+        let grant_lifetime = record.metadata.ack_timing.remote_relay_total_timeout;
         let expiry = CancellationToken::new();
         let grant = RelayGrant {
             expires_at: Instant::now()
-                .checked_add(self.options.relay_grant_lifetime())
-                .assured("the fixed relay grant lifetime fits the monotonic clock"),
+                .checked_add(grant_lifetime)
+                .assured("a validated relay delivery ceiling fits the monotonic clock"),
             reservation,
             admission: StdArc::clone(&record),
             _expiry: CancelOnDrop::new(expiry.clone()),
@@ -1081,7 +1063,6 @@ impl TransportState {
             }
         }
         let expiring_owner = relay_owner.clone();
-        let grant_lifetime = self.options.relay_grant_lifetime();
         self.tasks.spawn(async move {
             nervix_primitives::select! {
                 _ = expiry.cancelled() => {}
@@ -1150,11 +1131,7 @@ impl TransportState {
             .map_err(|error| TransportError::with_cause(error, TransportError::RelayGrant))?;
         let mut buffer = BudgetedBuffer::with_limit(encoded_reservation, encoded_limit);
         {
-            let reading = read_body_into(
-                &mut buffer,
-                self.options.progress_timeout,
-                request.into_body(),
-            );
+            let reading = read_body_into(&mut buffer, request.into_body());
             tokio::pin!(reading);
             nervix_primitives::select! {
                 _ = grant.admission.cancellation.cancelled() => {
@@ -1205,13 +1182,7 @@ impl TransportState {
             return Err(Report::new(TransportError::IncomingQueueFull));
         }
         body_completion.complete();
-        send_response(
-            respond,
-            StatusCode::NO_CONTENT,
-            None,
-            self.options.progress_timeout,
-        )
-        .await
+        send_response(respond, StatusCode::NO_CONTENT, None).await
     }
 }
 

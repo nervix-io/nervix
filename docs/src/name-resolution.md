@@ -330,11 +330,13 @@ which gossip keeps dialling at the addresses the startup lookup produced.
 [Where The Interconnect Resolves](./interconnect.md#where-the-interconnect-resolves) describes
 both. No path writes a resolved address into its configuration, a plan, a Model or persisted state,
 so a service can move to new addresses without an alteration.
-Captured backup-section openings have one 30-second caller deadline that includes retries for
-request-capacity refusal. Pool connection lookups retain their five-second attempt budget; the
-caller deadline and stream ownership are described in [Membership, Consensus, And Bulk Transfer](./interconnect.md#membership-consensus-and-bulk-transfer).
-Consensus data setup shares one five-second deadline between an initial management-prefix check
-and replication-stream admission, including any connection lookup either needs. Caller-supplied
+A captured backup-section opening has no deadline of its own once its cut has ended: it waits for
+the owner for as long as the owner lives, and asks again after the backup retry interval while the
+owner refuses it for request capacity. Pool connection lookups retain their five-second attempt
+budget; the opening and stream ownership are described in [Membership, Consensus, And Bulk Transfer](./interconnect.md#membership-consensus-and-bulk-transfer).
+Consensus data setup shares one `--raft-append-idle-bound` deadline, five seconds by default,
+between an initial management-prefix check and replication-stream admission, including any
+connection lookup either needs. Caller-supplied
 leading empty probes retain their heartbeat-derived deadline. The pool's resolver and connection
 attempt policy are shared by both paths.
 
@@ -775,8 +777,7 @@ A changed file or override takes effect with the next node run; it does not sile
 resolver that existing clients retain.
 
 Client-link duplex setup receives the active interconnect connection-setup budget, including any
-host lookup within that operation. Control-plane request owners derive their RPC caps from the
-active transport request budget; each caller still passes the remaining operation budget where
-applicable. The native session opening reads authenticated bound metadata over its already
+host lookup within that operation. Control-plane requests carry no transport deadline of their own;
+a caller passes the remaining budget of its operation where the operation has one. The native session opening reads authenticated bound metadata over its already
 resolved channel, preserving resolver ownership, origin validation, TLS name and HTTP authority.
 No announcement lookup or additional connection is introduced.

@@ -1,9 +1,10 @@
 //! Engines and infrastructure.
-//! Owns: bounded HTTP/2 request and response body transfer and its progress deadlines.
+//! Owns: bounded HTTP/2 request and response body transfer; a peer's liveness, never a timer,
+//! ends one.
 //! Depends on: HTTP/2 streams, execution admission and the primitive boundary.
 //! Must not know: transport registries, graph placement or runtime records.
 
-use std::{future::poll_fn, io::Write as _, time::Duration};
+use std::{future::poll_fn, io::Write as _};
 
 use bytes::Bytes;
 use error_stack::Report;
@@ -14,7 +15,6 @@ use nervix_execution::{
     AdmissionError, BudgetedBuffer, ChargedBytes, ExecutionError, Executor, MemoryClass,
     Reservation,
 };
-use nervix_primitives::time::timeout;
 
 use super::BODY_CHUNK_BYTES;
 use crate::{
@@ -22,13 +22,12 @@ use crate::{
     request::RemoteRequestFailure, wire,
 };
 
-/// Read a refused opening under its body and progress bounds, retaining a reported operation
-/// outcome. Protocol and transport errors do not carry an operation outcome.
+/// Read a refused opening under its body bound, retaining a reported operation outcome. Protocol
+/// and transport errors do not carry an operation outcome.
 pub(super) async fn read_error_response(
     executor: &Executor,
     class: PoolClass,
     limit: u64,
-    progress_timeout: Duration,
     response: Response<RecvStream>,
 ) -> Report<TransportError> {
     let status = response.status();
@@ -57,7 +56,6 @@ pub(super) async fn read_error_response(
         executor,
         class.memory_class(),
         declared,
-        progress_timeout,
         response.into_body(),
     )
     .await
@@ -88,7 +86,6 @@ pub(super) async fn send_decode_refusal(
     respond: &mut server::SendResponse<Bytes>,
     class: PoolClass,
     error: Report<TransportError>,
-    progress_timeout: Duration,
 ) -> Result<(), Report<TransportError>> {
     let admission = error.contains::<AdmissionError>()
         || matches!(
@@ -99,13 +96,7 @@ pub(super) async fn send_decode_refusal(
         return Err(error);
     }
     let failure = RemoteRequestFailure::decode(error, class);
-    send_static_error(
-        respond,
-        failure.status(),
-        &failure.to_string(),
-        progress_timeout,
-    )
-    .await
+    send_static_error(respond, failure.status(), &failure.to_string()).await
 }
 
 #[cfg_attr(
@@ -183,7 +174,6 @@ pub(super) async fn send_response(
     mut respond: server::SendResponse<Bytes>,
     status: StatusCode,
     body: Option<ChargedBytes>,
-    progress_timeout: Duration,
 ) -> Result<(), Report<TransportError>> {
     let length = match &body {
         Some(body) => body.len(),
@@ -202,11 +192,7 @@ pub(super) async fn send_response(
     if let Some(body) = body
         && !body.is_empty()
     {
-        timeout(progress_timeout, send_body(&mut stream, body))
-            .await
-            .map_err(|_| TransportError::ProgressTimeout {
-                timeout: progress_timeout,
-            })??;
+        send_body(&mut stream, body).await?;
     }
     Ok(())
 }
@@ -222,12 +208,8 @@ pub(super) async fn send_static_error(
     respond: &mut server::SendResponse<Bytes>,
     status: StatusCode,
     message: &str,
-    progress_timeout: Duration,
 ) -> Result<(), Report<TransportError>> {
-    send_error_response(respond, status, message, progress_timeout, |response| {
-        response
-    })
-    .await
+    send_error_response(respond, status, message, |response| response).await
 }
 
 /// Supplement the full diagnostic with its typed operation outcome. Successful streams retain
@@ -236,7 +218,6 @@ pub(super) async fn send_operation_error(
     respond: &mut server::SendResponse<Bytes>,
     kind: RemoteOperationFailureKind,
     message: &str,
-    progress_timeout: Duration,
 ) -> Result<(), Report<TransportError>> {
     let status = match kind {
         RemoteOperationFailureKind::Rejected => StatusCode::CONFLICT,
@@ -244,7 +225,7 @@ pub(super) async fn send_operation_error(
         RemoteOperationFailureKind::NotReady => StatusCode::TOO_EARLY,
         RemoteOperationFailureKind::Failed => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    send_error_response(respond, status, message, progress_timeout, |response| {
+    send_error_response(respond, status, message, |response| {
         response.header(OPERATION_FAILURE_HEADER, kind.as_ref())
     })
     .await
@@ -261,7 +242,6 @@ async fn send_error_response<F>(
     respond: &mut server::SendResponse<Bytes>,
     status: StatusCode,
     message: &str,
-    progress_timeout: Duration,
     headers: F,
 ) -> Result<(), Report<TransportError>>
 where
@@ -278,49 +258,43 @@ where
     let mut stream = respond
         .send_response(response, false)
         .map_err(TransportError::from)?;
-    timeout(progress_timeout, async {
-        let body = Bytes::copy_from_slice(message.as_bytes());
-        let mut offset = 0;
-        while offset < body.len() {
-            nervix_primitives::task::consume_budget().await;
-            let remaining = body
-                .len()
-                .checked_sub(offset)
-                .verified("the send offset never advances beyond the static error body");
-            let wanted = remaining.min(BODY_CHUNK_BYTES);
-            stream.reserve_capacity(wanted);
-            let assigned = poll_fn(|context| stream.poll_capacity(context))
-                .await
-                .ok_or_else(|| {
-                    TransportError::Decode(
-                        "HTTP/2 stream closed while assigning send capacity".to_string(),
-                    )
-                })?
-                .map_err(TransportError::from)?;
-            let ready = assigned.min(wanted);
-            if ready == 0 {
-                continue;
-            }
-            let end = offset
-                .checked_add(ready)
-                .verified("assigned capacity is bounded by the remaining static error body");
-            let chunk = body.slice(offset..end);
-            offset = end;
-            let end_stream = offset == body.len();
-            stream
-                .send_data(chunk, end_stream)
-                .map_err(TransportError::from)?;
-            if end_stream {
-                break;
-            }
+    let body = Bytes::copy_from_slice(message.as_bytes());
+    let mut offset = 0;
+    while offset < body.len() {
+        nervix_primitives::task::consume_budget().await;
+        let remaining = body
+            .len()
+            .checked_sub(offset)
+            .verified("the send offset never advances beyond the static error body");
+        let wanted = remaining.min(BODY_CHUNK_BYTES);
+        stream.reserve_capacity(wanted);
+        let assigned = poll_fn(|context| stream.poll_capacity(context))
+            .await
+            .ok_or_else(|| {
+                TransportError::Decode(
+                    "HTTP/2 stream closed while assigning send capacity".to_string(),
+                )
+            })?
+            .map_err(TransportError::from)?;
+        let ready = assigned.min(wanted);
+        if ready == 0 {
+            continue;
         }
-        stream.reserve_capacity(0);
-        Ok::<(), Report<TransportError>>(())
-    })
-    .await
-    .map_err(|_| TransportError::ProgressTimeout {
-        timeout: progress_timeout,
-    })?
+        let end = offset
+            .checked_add(ready)
+            .verified("assigned capacity is bounded by the remaining static error body");
+        let chunk = body.slice(offset..end);
+        offset = end;
+        let end_stream = offset == body.len();
+        stream
+            .send_data(chunk, end_stream)
+            .map_err(TransportError::from)?;
+        if end_stream {
+            break;
+        }
+    }
+    stream.reserve_capacity(0);
+    Ok(())
 }
 
 /// The length the sender declared for a body, which its receiver charges before reading any of it.
@@ -374,8 +348,8 @@ pub(super) struct ReceivedBody {
 
 /// Read a body of the `declared` length, charged exactly that much. The reader waits for the
 /// charge while it holds nothing of `class`, so a full class holds the body back until room frees;
-/// only a body the whole class could never hold fails. The caller's reset or deadline ends the
-/// wait.
+/// only a body the whole class could never hold fails. The caller's reset, or a deadline the
+/// caller names, ends the wait.
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -387,14 +361,13 @@ pub(super) async fn read_body(
     executor: &Executor,
     class: MemoryClass,
     declared: u64,
-    progress_timeout: Duration,
     body: RecvStream,
 ) -> Result<ChargedBytes, Report<TransportError>> {
     let charge = executor
         .reserve(class, declared)
         .await
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
-    read_declared(charge, declared, progress_timeout, body).await
+    read_declared(charge, declared, body).await
 }
 
 /// Read a body of the `declared` length together with the room its decoding needs, as one charge
@@ -411,7 +384,6 @@ pub(super) async fn read_body_to_decode(
     executor: &Executor,
     class: MemoryClass,
     declared: u64,
-    progress_timeout: Duration,
     body: RecvStream,
 ) -> Result<ReceivedBody, Report<TransportError>> {
     let whole = declared.checked_mul(2).ok_or_else(|| {
@@ -426,7 +398,7 @@ pub(super) async fn read_body_to_decode(
     let (input, decoding) = charge
         .split(declared)
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
-    let bytes = read_declared(input, declared, progress_timeout, body).await?;
+    let bytes = read_declared(input, declared, body).await?;
     Ok(ReceivedBody { bytes, decoding })
 }
 
@@ -435,11 +407,10 @@ pub(super) async fn read_body_to_decode(
 async fn read_declared(
     charge: Reservation,
     declared: u64,
-    progress_timeout: Duration,
     body: RecvStream,
 ) -> Result<ChargedBytes, Report<TransportError>> {
     let mut buffer = BudgetedBuffer::with_limit(charge, declared);
-    read_body_into(&mut buffer, progress_timeout, body).await?;
+    read_body_into(&mut buffer, body).await?;
     let received = u64::try_from(buffer.len())
         .map_err(|error| TransportError::with_cause(Report::new(error), TransportError::Decode))?;
     if received != declared {
@@ -459,12 +430,11 @@ async fn read_declared(
 )]
 pub(super) async fn read_body_into(
     buffer: &mut BudgetedBuffer,
-    progress_timeout: Duration,
     mut body: RecvStream,
 ) -> Result<(), Report<TransportError>> {
     loop {
         nervix_primitives::task::consume_budget().await;
-        let Some(chunk) = next_body_chunk(&mut body, progress_timeout).await? else {
+        let Some(chunk) = next_body_chunk(&mut body).await? else {
             break;
         };
         buffer.write_all(&chunk).map_err(|error| {
@@ -477,8 +447,9 @@ pub(super) async fn read_body_into(
     Ok(())
 }
 
-/// The next chunk of `body`, or `None` at its end, failing when no chunk arrives for
-/// `progress_timeout`.
+/// The next chunk of `body`, or `None` at its end. The read waits for its sender for as long as the
+/// connection under it lives: a sender that is slow costs latency, and a connection that dies fails
+/// the stream.
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -486,16 +457,8 @@ pub(super) async fn read_body_into(
         reason = "the transport performs this operation for each admitted frame or stream request"
     )
 )]
-async fn next_body_chunk(
-    body: &mut RecvStream,
-    progress_timeout: Duration,
-) -> Result<Option<Bytes>, Report<TransportError>> {
-    let chunk = timeout(progress_timeout, body.data()).await.map_err(|_| {
-        TransportError::ProgressTimeout {
-            timeout: progress_timeout,
-        }
-    })?;
-    let Some(chunk) = chunk else {
+async fn next_body_chunk(body: &mut RecvStream) -> Result<Option<Bytes>, Report<TransportError>> {
+    let Some(chunk) = body.data().await else {
         return Ok(None);
     };
     let chunk = chunk.map_err(TransportError::from)?;

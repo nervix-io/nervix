@@ -530,8 +530,8 @@ The decision requires an actual execution-owner change: retained recovery metada
 replica-only assignment change does not retire delivery channels.
 
 This removes the remote admission wait on a paused or partitioned former owner from graph
-installation. Admission reconciliation retains its existing five-second budget per interrupted
-attempt, independently of the entity gate deadline and the remote admission's longer total budget.
+installation. Admission reconciliation asks the former owner again until it answers, membership
+removes it, or the delivery's admission bound passes, independently of the entity gate deadline.
 Other local preparation and drain work retain their own bounds. Admission that already won keeps
 its record-ACK obligations; an unconfirmed outcome fails those obligations and the acknowledged
 ingestor retries using the replacement channel. Recovery can replay records already processed, so

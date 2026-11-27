@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use meticulous::ResultExt as _;
 use nervix_models::ClusterNodeName;
 
-use super::{ADMISSION_SWEEPS, REMOTE_ACK_SILENT_SWEEPS, ROW_POSITIONS};
+use super::{ADMISSION_SWEEPS, ROW_POSITIONS, ReceiverMembership, ReceiverRunStanding};
 use crate::runtime_ack::AckOutcome;
 
 #[derive(Clone, Copy)]
@@ -74,32 +74,40 @@ impl RecordExpectation {
 
 enum RowPhase {
     AwaitingAdmission(u64),
+    /// The receiver run with this process epoch admitted the row.
     Admitted(u64),
 }
 
 impl RowPhase {
-    fn sweep(&mut self) -> bool {
-        let (sweeps, bound) = match self {
-            Self::AwaitingAdmission(sweeps) => (sweeps, ADMISSION_SWEEPS),
-            Self::Admitted(sweeps) => (sweeps, REMOTE_ACK_SILENT_SWEEPS),
-        };
-        // A row expires at its finite bound before the next operation can sweep it again.
-        *sweeps += 1;
-        *sweeps > bound
-    }
-
-    fn reason(&self, receiver: &ClusterNodeName) -> String {
+    /// One sweep of the row, and why it expires: a row awaiting admission at its finite bound, an
+    /// admitted row once membership ends the run that admitted it, and never otherwise.
+    fn sweep(
+        &mut self,
+        receiver: &ClusterNodeName,
+        membership: &impl ReceiverMembership,
+    ) -> Option<String> {
         match self {
-            Self::AwaitingAdmission(_) => format!(
-                "node '{}' did not admit the forwarded record within {}",
-                receiver,
-                humantime::format_duration(super::REMOTE_RELAY_TOTAL_TIMEOUT),
-            ),
-            Self::Admitted(_) => format!(
-                "node '{}' reported nothing about the forwarded record for {}",
-                receiver,
-                humantime::format_duration(super::REMOTE_ACK_SILENCE_TIMEOUT),
-            ),
+            Self::AwaitingAdmission(sweeps) => {
+                *sweeps += 1;
+                (*sweeps > ADMISSION_SWEEPS).then(|| {
+                    format!(
+                        "node '{}' did not admit the forwarded record within {}",
+                        receiver,
+                        humantime::format_duration(super::REMOTE_RELAY_TOTAL_TIMEOUT),
+                    )
+                })
+            }
+            Self::Admitted(run) => match membership.standing(receiver, *run) {
+                ReceiverRunStanding::Live => None,
+                ReceiverRunStanding::Left => Some(format!(
+                    "node '{receiver}' left the cluster before it acknowledged the forwarded \
+                     record"
+                )),
+                ReceiverRunStanding::Replaced => Some(format!(
+                    "the run of node '{receiver}' that admitted the forwarded record ended before \
+                     it acknowledged the record"
+                )),
+            },
         }
     }
 }
@@ -301,11 +309,11 @@ impl CorrelationModel {
         false
     }
 
-    pub fn admit(&mut self, id: u64) {
+    pub fn admit(&mut self, id: u64, run: u64) {
         if let Some(row) = self.row_mut(id)
             && let RowPhase::AwaitingAdmission(_) = row.phase
         {
-            row.phase = RowPhase::Admitted(0);
+            row.phase = RowPhase::Admitted(run);
         }
     }
 
@@ -322,9 +330,6 @@ impl CorrelationModel {
                     row.progress_sequence = Some(sequence);
                     parking = Some(parked);
                 }
-            }
-            if let RowPhase::Admitted(sweeps) = &mut row.phase {
-                *sweeps = 0;
             }
             if let Some(parked) = parking {
                 self.records[record].park(parked);
@@ -379,15 +384,18 @@ impl CorrelationModel {
         false
     }
 
-    pub fn sweep(&mut self) -> BTreeMap<ClusterNodeName, usize> {
+    pub fn sweep(
+        &mut self,
+        membership: &impl ReceiverMembership,
+    ) -> BTreeMap<ClusterNodeName, usize> {
         let mut expired = Vec::new();
         let mut counts = BTreeMap::new();
         for (base, delivery) in &mut self.deliveries {
             for (index, row) in delivery.rows.iter_mut().enumerate() {
                 let Some(row) = row else { continue };
-                if row.phase.sweep() {
+                if let Some(reason) = row.phase.sweep(&delivery.receiver, membership) {
                     let id = base + u64::try_from(index).assured("at most four rows are generated");
-                    expired.push((id, row.phase.reason(&delivery.receiver)));
+                    expired.push((id, reason));
                     *counts.entry(delivery.receiver.clone()).or_insert(0) += 1;
                 }
             }

@@ -191,18 +191,6 @@ impl<'src> OfferedAssignments<'src> {
                 ClusterParameterChange::RemoteAckAliveInterval,
             ),
             assignment(
-                ClusterParameterKey::RemoteAckDispatchTimeout,
-                Identifier::RemoteAckDispatchTimeout,
-                duration_value(),
-                ClusterParameterChange::RemoteAckDispatchTimeout,
-            ),
-            assignment(
-                ClusterParameterKey::RemoteAckSilenceTimeout,
-                Identifier::RemoteAckSilenceTimeout,
-                duration_value(),
-                ClusterParameterChange::RemoteAckSilenceTimeout,
-            ),
-            assignment(
                 ClusterParameterKey::RemoteAckSweepInterval,
                 Identifier::RemoteAckSweepInterval,
                 duration_value(),
@@ -213,12 +201,6 @@ impl<'src> OfferedAssignments<'src> {
                 Identifier::RemoteRelayTotalTimeout,
                 duration_value(),
                 ClusterParameterChange::RemoteRelayTotalTimeout,
-            ),
-            assignment(
-                ClusterParameterKey::RemoteRelayInstantiationWait,
-                Identifier::RemoteRelayInstantiationWait,
-                duration_value(),
-                ClusterParameterChange::RemoteRelayInstantiationWait,
             ),
             assignment(
                 ClusterParameterKey::DomainDrainTimeout,

@@ -1759,3 +1759,59 @@ Feature: Graceful shutdown
       """
       schema 'held_admission_event' does not exist in domain '{{domain}}'
       """
+
+  # The other scenarios of this feature drain before they stop. This node stops as the harness
+  # stops nodes by default, straight to terminal teardown, which is where a scenario's cleanup
+  # stops every node of its cluster at once.
+  Scenario: A stopping node ends a branched ingestor task that holds a delivery a live peer keeps waiting
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA teardown_event ( id I64, tenant STRING );
+      CREATE WIRE JSON SCHEMA teardown_wire MODE STRICT ( id integer, tenant string );
+      CREATE WIRE JSON CODEC teardown_codec
+        FROM WIRE SCHEMA teardown_wire
+        TO SCHEMA teardown_event;
+      CREATE SCHEMA teardown_key ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA teardown_key TTL 5m;
+      CREATE RELAY teardown_input SCHEMA teardown_event BRANCHED BY by_tenant;
+      CREATE RELAY teardown_output SCHEMA teardown_event BRANCHED BY by_tenant;
+      CREATE VHOST edge teardown-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT teardown_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR teardown_ingestor
+        FROM teardown_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING teardown_codec
+        TO teardown_input INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION teardown_route FROM teardown_input BRANCHED BY by_tenant
+        TO teardown_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      RELOCATE RELAY teardown_input ONTO NODE node-2 IGNORE PREFERENCES;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=relay name=teardown_input owner=node-2
+      """
+    # The relay's owner holds the delivery while it lives, so node-1's branched ingestor task still
+    # holds that delivery when node-1 stops.
+    Given remote relay admission for domain "{{domain}}" is paused
+    When http payload begins posting in the background to node "node-1" with host "teardown-{{test_id}}.example.com" path "/events"
+      """
+      {"id":1,"tenant":"acme"}
+      """
+    Then the remote relay admission pause for domain "{{domain}}" is reached
+    # Terminal teardown ends the branched route at once, as an enforced stop does, however long the
+    # peer would keep that delivery waiting.
+    When node "node-1" is stopped while timing shutdown
+    Then the last cluster operation completes within "30s"
+    When the remote relay admission pause for domain "{{domain}}" is released

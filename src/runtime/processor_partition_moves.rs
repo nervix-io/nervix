@@ -985,7 +985,7 @@ async fn release_key(
         &key,
         task,
         ProcessorBranchStopMode::Handoff(response),
-        context.runtime_handle.task_stop_grace(),
+        context.runtime_handle.planned_task_stop(),
     )
     .await;
     let (restored_at, incarnation) = match receiver.await {
@@ -1091,7 +1091,7 @@ async fn forget_key(
             &key,
             task,
             ProcessorBranchStopMode::Evict,
-            context.runtime_handle.task_stop_grace(),
+            context.runtime_handle.planned_task_stop(),
         )
         .await;
     }

@@ -83,19 +83,16 @@ Feature: Declared data-plane runtime settings
     When these Plexus statements are executed on the leader node
       """
       ALTER CLUSTER SET REMOTE_ACK_ALIVE_INTERVAL = 20ms,
-        REMOTE_ACK_DISPATCH_TIMEOUT = 100ms,
-        REMOTE_ACK_SILENCE_TIMEOUT = 500ms,
         REMOTE_ACK_SWEEP_INTERVAL = 100ms,
-        REMOTE_RELAY_TOTAL_TIMEOUT = 5s,
-        REMOTE_RELAY_INSTANTIATION_WAIT = 1s;
+        REMOTE_RELAY_TOTAL_TIMEOUT = 5s;
       """
-    Then node "node-1" eventually reports status containing "remote-ack-silence-timeout committed=500ms"
-    And node "node-<cluster_size>" eventually reports status containing "node=node-<cluster_size> remote-ack-silence-timeout running=500ms"
-    When these Plexus statements fail with "remote-ack-silence-timeout"
+    Then node "node-1" eventually reports status containing "remote-relay-total-timeout committed=5s"
+    And node "node-<cluster_size>" eventually reports status containing "node=node-<cluster_size> remote-relay-total-timeout running=5s"
+    When these Plexus statements fail with "remote-ack-sweep-interval must divide remote-relay-total-timeout exactly"
       """
-      ALTER CLUSTER SET REMOTE_ACK_SILENCE_TIMEOUT = 200ms;
+      ALTER CLUSTER SET REMOTE_ACK_SWEEP_INTERVAL = 300ms;
       """
-    Then node "node-1" eventually reports status containing "remote-ack-silence-timeout committed=500ms"
+    Then node "node-1" eventually reports status containing "remote-ack-sweep-interval committed=100ms"
 
     Examples:
       | cluster_size |
@@ -208,97 +205,3 @@ Feature: Declared data-plane runtime settings
       | cluster_size |
       | 1            |
       | 3            |
-
-  # Forwarding between distinct owners is specific to three-node topology.
-  @deloxide_stress
-  Scenario: A committed silence policy expires a lost forwarded acknowledgement sooner
-    Given Kafka is running
-    And the production sticky scheduler is configured
-    And a 3 node nervix cluster is started
-    When these Plexus commands are executed on the leader node
-      """
-      ALTER CLUSTER SET REMOTE_ACK_ALIVE_INTERVAL = 50ms,
-        REMOTE_ACK_DISPATCH_TIMEOUT = 500ms,
-        REMOTE_ACK_SILENCE_TIMEOUT = 2s,
-        REMOTE_ACK_SWEEP_INTERVAL = 100ms,
-        REMOTE_RELAY_TOTAL_TIMEOUT = 30s,
-        REMOTE_RELAY_INSTANTIATION_WAIT = 5s;
-      """
-    Given Kafka topic "lost_ack_in_{{test_id}}" exists with 1 partitions
-    And Kafka topic "lost_ack_out_{{test_id}}" is observed
-    And the leader node is configured with these Plexus commands
-      """
-      CREATE UNPACED DOMAIN {{domain}};
-      """
-    When these Plexus commands are executed on the leader node
-      """
-      CREATE SCHEMA lost_ack_event ( event_id STRING, branch_name STRING, sequence I64 );
-      CREATE WIRE JSON SCHEMA lost_ack_wire MODE STRICT (
-        event_id string, branch_name string, sequence integer
-      );
-      CREATE WIRE JSON CODEC lost_ack_codec
-        FROM WIRE SCHEMA lost_ack_wire TO SCHEMA lost_ack_event;
-      CREATE SCHEMA lost_ack_key ( branch_name STRING );
-      CREATE PARAMETRIZER lost_ack_branch SCHEMA lost_ack_key TTL 5m;
-      CREATE RELAY lost_ack_records SCHEMA lost_ack_event BRANCHED BY lost_ack_branch;
-      CREATE KAFKA CLIENT lost_ack_kafka CONFIG {
-        'bootstrap.servers' = '{{kafka_addr}}'
-      };
-      CREATE KAFKA TOPIC INGESTOR lost_ack_ingestor
-        FROM lost_ack_kafka TOPIC 'lost_ack_in_{{test_id}}'
-          OFFSET BY CONSUMER GROUP 'lost_ack_group_{{test_id}}' START AT EARLIEST
-          MODE ACK SEQUENTIAL ACK TIMEOUT 2m RETRY POLICY BACKOFF 100ms MAX 1s
-          ON QUIESCE SUSPEND DECODE USING lost_ack_codec
-        TO lost_ack_records INHERIT ALL
-          BRANCHED BY lost_ack_branch SET branch_name = message.branch_name
-          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG;
-      CREATE KAFKA TOPIC EMITTER lost_ack_emitter
-        FROM lost_ack_records
-        ATTACHED
-        TO lost_ack_kafka TOPIC 'lost_ack_out_{{test_id}}'
-          MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
-          RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING lost_ack_codec
-        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      START;
-      """
-    And these Plexus commands are executed on the leader node
-      """
-      RELOCATE INGESTOR lost_ack_ingestor ONTO NODE node-1 IGNORE PREFERENCES;
-      RELOCATE RELAY lost_ack_records ONTO NODE node-2 IGNORE PREFERENCES;
-      RELOCATE EMITTER lost_ack_emitter ONTO NODE node-3 IGNORE PREFERENCES;
-      SHOW CLUSTER STATUS;
-      """
-    Then the last command output contains
-      """
-      - domain={{domain}} kind=ingestor name=lost_ack_ingestor unit=instance:0 owner=node-1
-      """
-    And the last command output contains
-      """
-      - domain={{domain}} kind=relay name=lost_ack_records owner=node-2
-      """
-    And the last command output contains
-      """
-      - domain={{domain}} kind=emitter name=lost_ack_emitter owner=node-3
-      """
-    Given the next record acknowledgement node "node-3" returns to node "node-2" is lost
-    When the forwarded acknowledgement measurement starts
-    And Kafka message is published to topic "lost_ack_in_{{test_id}}"
-      """
-      {"event_id":"lost-ack","branch_name":"a","sequence":1}
-      """
-    Then within "30s" the observed broker receives payloads
-      """
-      "event_id":"lost-ack","branch_name":"a","sequence":1
-      """
-    And the record acknowledgement node "node-3" returned to node "node-2" was lost
-    When Kafka message is published to topic "lost_ack_in_{{test_id}}"
-      """
-      {"event_id":"after-lost-ack","branch_name":"b","sequence":2}
-      """
-    Then within "90s" the observed broker receives payloads
-      """
-      "event_id":"after-lost-ack","branch_name":"b","sequence":2
-      """
-    And within "30s" Kafka consumer group "lost_ack_group_{{test_id}}" next offset for topic "lost_ack_in_{{test_id}}" partition 0 is "at least 2"
-    And the lost acknowledgement recovers consumer group "lost_ack_group_{{test_id}}" topic "lost_ack_in_{{test_id}}" after at least "2s" and within "12s" of the measurement start

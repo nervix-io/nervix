@@ -44,7 +44,7 @@ struct EmitterInstanceUnit {
 impl SessionServiceImpl {
     /// One summary per instance of `emitter`, in instance order: the node it is scheduled on,
     /// whether its task runs there, and the input partitions it serves. Owners are asked
-    /// concurrently, so an owner that does not answer costs one request deadline, not one per
+    /// concurrently, so a slow owner costs the reading command its latency once, not once per
     /// instance.
     pub(super) async fn emitter_instance_summaries(
         &self,
@@ -153,10 +153,11 @@ impl SessionServiceImpl {
             }
             return EmitterInstanceStatus::Stopped;
         }
+        // The owner answers while it lives: a slow owner costs the reading command latency.
         let response = self
             .inner
             .interconnect
-            .request_with_timeout(
+            .request(
                 owner,
                 RemoteDataflowNodeStatusRequest {
                     domain: domain.clone(),
@@ -164,7 +165,6 @@ impl SessionServiceImpl {
                     name: ModelName::from(emitter),
                     unit,
                 },
-                self.coordination_rpc_timeout(),
             )
             .await;
         match response {
@@ -210,13 +210,14 @@ mod tests {
             EmitterInstanceStatus::Stopped,
             "this node runs no task for the instance"
         );
-        let unreachable: ClusterNodeName = named("unreachable_peer");
+        let departed: ClusterNodeName = named("departed_peer");
+        crate::application::test_fixtures::publish_membership_of_this_node_alone(&service);
         assert_eq!(
             service
-                .emitter_instance_status(&domain, &emitter, unit, Some(&unreachable))
+                .emitter_instance_status(&domain, &emitter, unit, Some(&departed))
                 .await,
             EmitterInstanceStatus::Unknown,
-            "an owner the interconnect cannot reach does not report the instance"
+            "an owner membership no longer lists does not report the instance"
         );
 
         let idle = service
@@ -224,7 +225,7 @@ mod tests {
                 &domain,
                 &emitter,
                 EmitterInstanceUnit { unit, index: 0 },
-                Some(unreachable),
+                Some(departed),
                 Vec::new(),
             )
             .await;

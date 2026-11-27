@@ -345,17 +345,13 @@ repeat a scenario or change product delivery deadlines. A repeated input can hav
 effects under this endpoint's existing acknowledgement contract.
 
 The controlled three-node case pins the relay to node-3 and paces that node's inbound opaque bytes
-at 262,144 bytes per second. One owned observation task runs the acknowledged publication beside
-the exact forwarding-error reader and releases the cadence as soon as that reader observes the
-failure. Both start before the step waits for their result. Delayed scenario polling can therefore
-delay result collection without leaving the byte fault active until the publication deadline.
-The failure reader shares the publication's 30-second bound; neither a missing witness nor a failed
-publication can establish recovery. Dropping the observation cancels both futures and releases the
-session they own. Elapsed-time events retain the release and acknowledgement boundaries without
-logging the row.
+at 262,144 bytes per second, so the row's handoff to its relay takes about twelve seconds. A relay
+owner that is slow while it lives costs the handoff latency and never fails it, so the first
+handoff delivers the row: the acknowledged publication completes through the paced link within its
+30-second bound, with the cadence in force throughout.
 
-After requiring the forwarding witness and acknowledged input completion, the case requires the
-exact subscription row within the separate 30-second receive bound and an active subscription.
+After the acknowledged input completes, the case requires the exact subscription row within the
+separate 30-second receive bound and an active subscription.
 The production scheduler is selected only to establish this fault's target; the ordinary outline
 retains randomized placement. The receive step records the subscription name and encoded frame
 length without logging row contents.
@@ -860,18 +856,16 @@ same rows finishes within seconds and leaves most of them queued past the consol
 The fixture of guest saves above the bulk budget feeds its WASM processor from a Kafka ingestor in
 `MODE ACK SEQUENTIAL`, and every input ends with a 40 MiB guest checkpoint that the processor's
 replica confirms before the ingestor reads the next input. Every wait that follows published input
-covers at least one such checkpoint, and a wait for a sent-message total up to two in sequence. The
-product gives each checkpoint ninety seconds to reach its replica, so these waits are bounded at 300
-seconds. On a loaded runner, two checkpoints that each stayed within their budget outlasted the
-former 120-second bound of a sent-message total. A sent total counts the inputs the ingestor sent,
-not the ones the guest has saved, so before its first cut the fixture waits until both branches have
+covers at least one such checkpoint, and a wait for a sent-message total up to two in sequence. A
+checkpoint has no deadline of its own and waits for its replica for as long as the replica lives, so
+these waits are bounded at 300 seconds: on a loaded runner, two checkpoints outlasted the former
+120-second bound of a sent-message total. A sent total counts the inputs the ingestor sent, not the
+ones the guest has saved, so before its first cut the fixture waits until both branches have
 committed the save of their third input, every replica has confirmed it and no checkpoint has
-failed. No cut then drains an input still on its way, whose checkpoint could fail under load and
-redeliver the input between the cuts the fixture compares. It then holds the next guest checkpoint
+failed. No cut then drains an input still on its way. It then holds the next guest checkpoint
 before its save across the source domain's three cuts. A cut that asked a guest to save again would
 stall on that checkpoint, so the fixture shows that every cut archives the saves the branches
-committed. A checkpoint that misses its ninety seconds still ends the attempt, because the
-redelivered input would no longer match the exact sent totals and archives the fixture compares.
+committed.
 
 The large materialized restore fixture prepares its rows through an acknowledged client producer.
 One round has a 120-second budget and one in-flight batch, including explicit replays of reported
@@ -4485,7 +4479,7 @@ things made a stop that slow, and CPU contention is what turned them into a fail
 a 40-CPU host whose one-minute load was 47 at the median and between 28 and 75.
 
 - **Every node swept its whole acknowledgement registry every second, and a sweep that overran
-  the second could not be cancelled.** The remote acknowledgement silence sweep took a guard for
+  the second could not be cancelled.** The remote acknowledgement sweep took a guard for
   each of a node's 16,384 correlation positions whether or not the node had forwarded anything, and
   a stress build enters Deloxide's one detector twice for each of them. On that host one sweep took
   longer than the second between sweeps. Its task then found the next tick already due and went
@@ -4531,11 +4525,13 @@ during their input rounds, and stopped its restarted clusters in 5.3 seconds at 
 seconds, the same two examples failed, one of them with the missing rows of the retained run, and
 its restarted clusters stopped in 4.5 seconds at the median.
 
-What a three-node stop still costs after this is bounded by the deadlines of the calls its nodes had
-in flight when the stop began, and each wait is named in the node's log. A relay owner that is
-delivering to a peer which has already stopped waits out the five seconds that delivery's admission
-is given and the five its cancellation is given. A checkpoint announcement to a replica that has
-stopped is waited for until its five-second dispatch deadline has passed. A replica's placement task
+What a three-node stop still costs after this is bounded by how long the calls its nodes had in
+flight when the stop began take to end, and each wait is named in the node's log. No call to a
+stopped peer has a deadline of its own: a relay owner that is delivering to a peer which has already
+stopped holds that delivery, and asks for its cancellation, until the transport's liveness view
+drops the peer, and a checkpoint announcement to a replica that has stopped ends when liveness ends
+that replica's connection or when teardown cancels the announcer after domain drain. Whatever is
+still waiting when the stopping node's task grace period passes is closed. A replica's placement task
 that is fetching or acknowledging a checkpoint when its owner stops does not observe the stop, and
 such tasks are aborted one after another, two seconds each. The node's generators share their two
 seconds. In `Every node stopping at once ends its generators together`, the slowest node of the

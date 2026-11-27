@@ -106,6 +106,29 @@ async fn waiting_before_grant(world: &mut ScenarioWorld, domain: String) {
     .expect("the held relay payload reaches its grant boundary");
 }
 
+/// Waits until `observer` hands its transport a live set without `peer`: from then on, a delivery
+/// or request it addresses to `peer` ends as one whose receiver left the cluster.
+#[then(expr = "node {string} stops counting node {string} as a live peer")]
+async fn stops_counting_live_peer(world: &mut ScenarioWorld, observer: String, peer: String) {
+    let observer = ClusterNodeName::parse(&expand_placeholders(world, &observer))
+        .expect("valid observing node");
+    let peer = ClusterNodeName::parse(&expand_placeholders(world, &peer)).expect("valid peer node");
+    nervix_primitives::time::timeout(
+        std::time::Duration::from_secs(120),
+        world
+            .fault_injection
+            .wait_until_live_targets_omit(&observer, &peer),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "node '{}' still counted node '{}' as a live peer after 120s",
+            observer.as_str(),
+            peer.as_str()
+        )
+    });
+}
+
 #[when(expr = "relay payload grant requests for domain {string} are released")]
 async fn release_before_grant(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);

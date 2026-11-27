@@ -48,8 +48,8 @@ async fn not_ready_stream_opening_keeps_the_remote_operation_outcome() {
         Some(&RemoteOperationFailureKind::NotReady),
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -113,6 +113,6 @@ async fn stream_opening_distinguishes_every_operation_refusal_from_transport_fai
             assert!(message.contains("the snapshot reader failed"));
         }
     }
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }

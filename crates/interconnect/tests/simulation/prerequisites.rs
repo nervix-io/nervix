@@ -191,7 +191,7 @@ fn refuse_across_a_partition(run: ScenarioRun) -> Result<(), SimulationError> {
                         MEMBER,
                         "refusing a joiner left the member's own join as it was",
                     );
-                    member.shutdown().await;
+                    member.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -256,7 +256,7 @@ fn refuse_across_a_partition(run: ScenarioRun) -> Result<(), SimulationError> {
                     refused.send_replace(true);
                     let mut joined = joined;
                     wait_for(&mut joined).await;
-                    joiner.shutdown().await;
+                    joiner.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -301,7 +301,7 @@ fn refuse_across_a_partition(run: ScenarioRun) -> Result<(), SimulationError> {
                         "a compatible latecomer joined the member that refused the joiner",
                     );
                     joined.send_replace(true);
-                    latecomer.shutdown().await;
+                    latecomer.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -433,7 +433,7 @@ fn roll_a_heartbeat_change(run: ScenarioRun) -> Result<(), SimulationError> {
                             "alpha stayed joined and connected to charlie while bravo was refused",
                         );
                         done.send_replace(true);
-                        alpha.shutdown().await;
+                        alpha.shutdown(super::teardown_ceiling()).await;
                         Ok::<(), io::Error>(())
                     })
                     .await;
@@ -504,7 +504,7 @@ fn roll_a_heartbeat_change(run: ScenarioRun) -> Result<(), SimulationError> {
                         stage.send_replace(roll::BRAVO_REFUSED);
                         let mut done = done;
                         wait_for(&mut done).await;
-                        bravo.shutdown().await;
+                        bravo.shutdown(super::teardown_ceiling()).await;
                         Ok::<(), io::Error>(())
                     })
                     .await;
@@ -578,7 +578,7 @@ fn roll_a_heartbeat_change(run: ScenarioRun) -> Result<(), SimulationError> {
                         );
                         let mut done = done;
                         wait_for(&mut done).await;
-                        charlie.shutdown().await;
+                        charlie.shutdown(super::teardown_ceiling()).await;
                         Ok::<(), io::Error>(())
                     })
                     .await;
@@ -737,7 +737,7 @@ fn cross_a_stale_route(run: ScenarioRun) -> Result<(), SimulationError> {
                     });
                     let mut done = done;
                     wait_for(&mut done).await;
-                    member.shutdown().await;
+                    member.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -768,7 +768,7 @@ fn cross_a_stale_route(run: ScenarioRun) -> Result<(), SimulationError> {
                     });
                     let mut done = done;
                     wait_for(&mut done).await;
-                    stranger.shutdown().await;
+                    stranger.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -852,7 +852,7 @@ fn cross_a_stale_route(run: ScenarioRun) -> Result<(), SimulationError> {
                         "the returning node joined through the member that still answers",
                     );
                     done.send_replace(true);
-                    returning.shutdown().await;
+                    returning.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;

@@ -143,13 +143,20 @@ Equal keys from different source relays remain separate, and an unbranched sourc
 instances to expire. An upstream relay and another emitter keep their own branch lifetimes; see
 [TTL](relay.md#ttl).
 
-Expiry or LRU eviction discards the affected source branch's unresolved host-buffered rows,
-prepared output and pending materialized-state wait. Discarded members are left unacknowledged.
-Rows already transferred to a staging connector keep its commit and acknowledgement lifecycle.
-State becoming ready later cannot revive the discarded input, and a later input with the same key
-starts fresh work. Surviving branches keep their prepared bytes, member mappings and accepted
-execution snapshots. This retention rule applies with and without `BATCH`, and retains no history
-of completed work.
+A branch's TTL never retires work this emitter still holds. When the TTL of a source branch
+passes while the emitter holds unresolved host-buffered rows for it, or is processing a batch of it,
+such as one waiting for materialized state, the branch stays and its TTL counts again from that
+maintenance scan. A destination that is slow or unavailable therefore costs those rows latency,
+however long it holds them back, and never a negative acknowledgement. A branch whose held rows
+have all been delivered expires at its next TTL.
+
+LRU eviction discards the evicted source branch's unresolved host-buffered rows, prepared output
+and pending materialized-state wait, and leaves the discarded members unacknowledged. Rows already
+transferred to a staging connector keep its commit and acknowledgement lifecycle. State becoming
+ready later cannot revive the discarded input, and a later input with the same key starts fresh
+work. Surviving branches keep their prepared bytes, member mappings and accepted execution
+snapshots. These retention rules apply with and without `BATCH`, and retain no history of completed
+work.
 
 All emitters declare `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE`, and
 `DESCRIBE EMITTER` reports the declared policy on its `flush:` line. `FLUSH`

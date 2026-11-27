@@ -198,7 +198,6 @@ impl RelayBoundaryServices {
                     &remote_batch.batch,
                     RelayDeliveryChannel::new(&outbound_slot, None),
                     deadline,
-                    GrantCapacityRefusals::Hold,
                     registration_owner.as_mut(),
                 )
                 .await;

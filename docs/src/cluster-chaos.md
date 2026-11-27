@@ -84,7 +84,8 @@ Bolero obligation, and none of those discharges a suite.
 | `label-probe.sh` | The [label probe](#the-label-probe) of the restart, recovery and follower-partition scenarios: its owners, edits, reads through every node and verdict |
 | `node-faults.sh`, `network-faults.sh`, `link-degradation.sh`, `link-ping-helper.sh`, `link-rate-helper.sh` | The fault primitives: process faults through Pumba and Docker, and one netem effect on a container's egress toward chosen addresses; partition plans, rules, effect matrices, preflight and healing; link degradation and its ICMP and transfer probes |
 | `mixed-plan.sh`, `mixed-plan.jq` | Seeded plan generation, plan validation and default coverage |
-| `verify-*.sh` | The external verifiers: ledgers, the strict delivery verdict, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes, graceful-stop, outward TLS, node-settings and diagnostic evidence |
+| `verify-*.sh` | The external verifiers: ledgers, the strict delivery verdict, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, state inspection, clock, mixed, endpoint, lifetimes, graceful-stop, outward TLS, node-settings and diagnostic evidence |
+| `state-inspection.sh`, `state-inspection-observation.jq` | The stateful scenario's [state inspection](#state-inspection-during-failover): the statement families it reads, its batches, its four read phases and the observation each typed answer becomes |
 | `burst-load.sh`, `negative-outcomes.sh`, `events-observer.sh`, `observe-events.sh`, `expected-failure.sh` | The shared harness of [correctness reproductions](#correctness-reproductions): the burst load and its accepted-input ledger, the negative-outcome counters, the error-event observers that run inside containers of the image, and the expected failure of a red run |
 | `outward-tls.sh`, `tls-probe.py`, `tls-probe-openssl.cnf` | The three-node leader crash's outward TLS observations, the restricted TLS probe that runs inside the pinned Python image, and the probe's OpenSSL configuration |
 | `continuous-load.sh`, `observe-nodes.sh`, `observe-clock.sh` | The paced producer, the listener observer and the domain-clock observer, each running inside a container |
@@ -219,6 +220,7 @@ reference to one repository digest before shards start. A run builds and install
 | `fixtures/generate-baseline.jq` | The records: a run-scoped `event_id`, a `sequence`, the branches `alpha`, `beta` and `gamma` in turn, and content derived from the sequence |
 | `fixtures/stateful.plexus`, `fixtures/generate-stateful.jq` | The stateful scenario's graph and its two interleaved branches |
 | `fixtures/stateful-inference.plexus` | The stateful scenario's inferencer, its output relay and its emitter, installed after `fixtures/stateful.plexus` |
+| `fixtures/stateful-inspection.plexus`, `fixtures/generate-inspection.jq` | The [state inspection](#state-inspection-during-failover) graph, a reorderer and a correlator that hold every row of their own input, installed after the inferencer, and its two batches on two branches |
 | `fixtures/onnx/models/running_sum.onnx` | The stateful inferencer's model: it adds its input to the state it carries and scores the sum |
 | `fixtures/binding-endpoints.plexus`, `fixtures/generate-endpoints.jq` | The binding client graph and its typed records |
 | `fixtures/paced.plexus`, `fixtures/generate-paced.jq` | The paced domain's graph and its two interleaved branches |
@@ -961,7 +963,7 @@ trap ran exits on its own, 15 minutes after the run's bound.
 | `parameter-return` | 3 | A graceful stop of a follower while `ALTER CLUSTER SET` commits a change, a start refused for naming the parameter as its own setting, and its return | 1 s | 1,000, 1,800 s |
 | `parameter-live` | 3 | None; two `ALTER CLUSTER SET` changes applied live | 1 s | 1,000, 1,800 s |
 | `prerequisite-refusal` | 3 | A graceful stop of a follower, a start with a Raft heartbeat outside the compatibility bound, and its return | 1 s | 1,000, 1,800 s |
-| `stateful` | 1 or 3; one node only with no fault or a cluster restart | None, or a crash, pause or partition of the state owner, or a cluster restart | 1 s, and `state-load` at 1 s | 1,000, 2,700 s |
+| `stateful` | 1 or 3; one node only with no fault or a cluster restart; `--inspect-state` three nodes with an owner crash | None, or a crash, pause or partition of the state owner, or a cluster restart | 1 s, and `state-load` at 1 s | 1,000, 2,700 s |
 | `endpoints` | 1 or 3; one node only with no fault or a cluster restart | None, or a crash or partition of the endpoint owner, or a cluster restart | 1 s, and HTTP endpoint intake at 250 ms | 1,000, 1,800 s |
 | `binding-endpoints` | 1 or 3; one node only with no fault or a cluster restart | None, graceful owner stop/restart, owner crash/restart, or cluster restart | 1 s, and typed package submissions at 250 ms | 1,000 baseline records plus 400 binding records, 1,800 s |
 | `lifetimes` | 1 or 3; one node only with no fault or a cluster restart | None, or a crash or partition of the state owner, or a cluster restart | 1 s, and `life-load` at 500 ms | 1,000, 2,700 s |
@@ -2008,13 +2010,13 @@ run commits two changes under load through the leader:
 
 ```plexus
 ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 20s, REMOTE_ACK_ALIVE_INTERVAL = 200ms,
-  REMOTE_ACK_SILENCE_TIMEOUT = 20s;
+  REMOTE_RELAY_TOTAL_TIMEOUT = 10m;
 ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 10s, REMOTE_ACK_ALIVE_INTERVAL = 100ms,
-  REMOTE_ACK_SILENCE_TIMEOUT = 15s;
+  REMOTE_RELAY_TOTAL_TIMEOUT = 5m;
 ```
 
-The first raises the budget the liveness of every established connection derives from, and widens
-the reporting window of every remote delivery. The second restores the deployment's values, which
+The first raises the budget the liveness of every established connection derives from, and extends
+the admission bound of every remote delivery. The second restores the deployment's values, which
 the record must hold before the first change.
 
 [Node Settings](./node-settings.md#committed-parameter-changes) applies a committed change live:
@@ -2260,6 +2262,84 @@ inferencer count after the fault. `stateful/verdict-*.json`
 keeps each processor's verdict. A failing verdict is a product finding, and the run continues to the
 baseline ledger before it exits nonzero. `results/stateful-progress.json` records the deployment,
 boundaries, milestone, timings and every verdict.
+
+#### State Inspection During Failover
+
+```bash
+just chaos run stateful --image nervix:debian --fault owner-crash --inspect-state
+just chaos run stateful --image nervix:debian --state-partitions 4 --fault owner-crash --inspect-state
+```
+
+`--inspect-state` reads every state inspection statement family through the packaged CLI while the
+state owner is killed and recovers. It applies only to the three-node `owner-crash`.
+
+**The graph.** `fixtures/stateful-inspection.plexus` adds the reorderer `chaos_reorderer` and the
+correlator `chaos_correlator` beside the stateful graph, branched by `chaos_state_branch` and placed
+with it. Their own ingestor reads `chaos_inspect_input` in `MODE NO ACK`, so the rows they hold never
+hold back the stateful source. The reorderer orders by sequence and holds its rows for an hour. The
+correlator waits for a right side that never arrives, so every left row stays pending. Before the
+stateful load starts, the run produces the `held` batch: sequences 3, 1, 4 and 2 of `alpha` and of
+`beta`. After recovery it produces the `recovered` batch: sequences 6 and 5 of each.
+
+**The reads.** Every read goes through a node the fault leaves running, with `FORMAT JSON`, every
+branch selected and the serving node's default row bound, which the graph stays far below. Each
+round reads seven statements:
+
+- `SHOW RELAY chaos_profiles MATERIALIZED STATE`
+- `SHOW DEDUPLICATOR chaos_dedup STATE`
+- `SHOW WINDOW PROCESSOR chaos_window STATE`
+- `SHOW REORDERER chaos_reorderer STATE`
+- `SHOW CORRELATOR chaos_correlator STATE`
+- `SHOW WASM PROCESSOR chaos_counter STATE`
+- `SHOW INFERENCER chaos_running STATE`
+
+A typed refusal is an observation, as a page is. Only an answer without the typed envelope is
+unreadable. The run reads in four phases:
+
+1. **The milestone.** With the stateful source drained and held, and once both processors report
+   the `held` batch, the run reads every family. It also reads the `DESCRIBE` placement of every
+   entity, the live incarnations `DESCRIBE CLUSTER` names, and a first page of two deduplicator
+   keys, whose continuation it keeps.
+2. **The outage.** As soon as the kill is proven, one read of every family starts in the
+   background, beside the wait for the survivors to take the state over.
+3. **The failover.** Once `DESCRIBE` names a survivor for every entity, and while the killed node is
+   still down, each family is read until it answers a page: every 2 seconds, within 120 seconds for
+   all of them. The run keeps every refused attempt, then reads the placement and the incarnations.
+4. **The recovery.** After the killed node has restarted and the cluster has settled, the run
+   produces the `recovered` batch and waits for both processors to report it. It then reads every
+   family, the placement and the incarnations again, and resumes the milestone's continuation.
+
+**The verdict.** `verify-inspection-evidence.sh` judges `stateful/inspection/` into
+`stateful/verdict-inspection.json`:
+
+- **Pages.** Every page lists each execution unit once, its counts are the sum of its units', every
+  branch is `alpha` or `beta`, and it leaves nothing it selected unread.
+- **Owners.** Every unit names the owner `DESCRIBE` names at that time, and was served by that node
+  in the incarnation `DESCRIBE CLUSTER` lists for it then. Its owner is never among its replicas.
+  At the milestone the owner is the state owner. During the outage and the failover it is never the
+  killed node.
+- **Stages.** Processor state reads as `live`. A materialized relay reads as `live` or `stored`: a
+  promoted owner whose relay execution has not started yet answers from the copy its own storage
+  holds, and labels the read `stored`. The run cannot force that answer, so the verdict records the
+  stages it saw.
+- **The outage.** An outage read, and each failover attempt before its page, is either refused as
+  `owner_unavailable`, `not_ready` or `deadline`, or is a page a live owner served.
+- **Durable state.** At the milestone the state is known exactly: both branches hold profile
+  version 2, the deduplicator remembers keys and the window retains rows of both branches, the
+  inferencer reports both branches, and the reorderer and the correlator hold exactly the `held`
+  batch. After the fault, the relay still holds profile version 2 or later for both branches, the
+  deduplicator still remembers every key read at the milestone, and the WASM processor lists one
+  guest checkpoint for each branch.
+- **Held rows.** The reorderer's and the correlator's rows are task-owned and not replicated, so the
+  `held` batch may be lost with the killed owner. After the fault, neither holds a row its input
+  never carried. After recovery, both hold the `recovered` batch.
+- **The continuation.** The milestone's continuation, resumed after recovery, is refused as
+  `stale_continuation`.
+
+No read is answered by a replica beside the owner: every read is answered by the unit's current
+owner. A failing verdict is a product finding. `results/stateful-progress.json` records the owners,
+stages, outage refusals and failover refusals the verdict saw, and the answer to the stale
+continuation.
 
 ### Endpoints
 
@@ -3500,6 +3580,7 @@ The `smoke` suite runs in seven shards:
 | 5 | `binding-endpoints-1-cluster-restart` | `binding-endpoints --nodes 1 --fault cluster-restart` | 12 |
 | 6 | `ingestor-metrics-owner-crash` | `ingestor-owner-crash --connector-metrics --nodes 3 --records 3` | 10 |
 | 6 | `emitter-metrics-owner-crash` | `emitter-owner-crash --connector-metrics --nodes 3` | 10 |
+| 6 | `inspection-partitions-3-owner-crash` | `stateful --nodes 3 --state-partitions 4 --fault owner-crash --inspect-state` | 30 |
 | 7 | `capability-roll` | `capability-roll` | 10 |
 | 7 | `parameter-return` | `parameter-return` | 9 |
 | 7 | `parameter-live` | `parameter-live` | 7 |
@@ -3541,9 +3622,9 @@ shards:
 | 12 | `endpoints-1` 10; `endpoints-1-cluster-restart` 12; `endpoints-3` 10; `endpoints-3-owner-crash`, `endpoints-3-owner-partition`, `endpoints-3-cluster-restart` 12 each |
 | 13 | `lifetimes-1` 20; `lifetimes-1-cluster-restart` 22; `lifetimes-3` 22 |
 | 14 | `lifetimes-3-owner-crash`, `lifetimes-3-owner-partition`, `lifetimes-3-cluster-restart` 25 each |
-| 15 | `stateful-partitions-3-owner-crash` 25 |
+| 15 | `stateful-partitions-3-owner-crash` 25; `inspection-partitions-3-owner-crash` 30; `alteration-handover` 12 |
 | 16 | `binding-endpoints-1` 10; `binding-endpoints-3-owner-stop`, `binding-endpoints-3-owner-crash`, `binding-endpoints-1-cluster-restart` 12 each |
-| 17 | `ingestor-metrics-owner-crash`, `emitter-metrics-owner-crash` 10 each; `graceful-stop` 12 |
+| 17 | `ingestor-metrics-owner-crash`, `emitter-metrics-owner-crash` 10 each; `graceful-stop` 12; `inspection-3-owner-crash` 30 |
 | 18 | `capability-roll` 10; `parameter-return` 9; `parameter-live` 7; `prerequisite-refusal` 10 |
 
 A few soak entries need explanation:
@@ -3977,7 +4058,7 @@ and requalified with the scenario that found it:
 | [Cluster Chaos 22](https://app.clickup.com/t/86bc947an) | A resolution addressed to an earlier incarnation of a node could resolve an unrelated pending acknowledgement or admission of its new process. The IDs are now bound to the registering incarnation |
 | [Cluster Chaos 23](https://app.clickup.com/t/86bc947b1) | In consumer-group mode, a rewind could stall on a partition that a rebalance had moved away, which left the ingestor stalled after the rejection that triggered the rewind |
 | [Cluster Chaos 24](https://app.clickup.com/t/86bc947bp) | The leader re-added a restarted voter at its new interconnect address on every one-second pass, instead of recording the address once |
-| [Cluster Chaos 32](https://app.clickup.com/t/86bc95vz6) | A forwarded record acknowledgement lost during burst loss stalled an `ACK SEQUENTIAL` ingestor. A node now fails a forwarded acknowledgement its receiver stops reporting, as [Cluster Interconnect](./interconnect.md#record-acknowledgements-the-receiver-stops-reporting) describes |
+| [Cluster Chaos 32](https://app.clickup.com/t/86bc95vz6) | A forwarded record acknowledgement lost during burst loss stalled an `ACK SEQUENTIAL` ingestor. A receiver now sends a forwarded acknowledgement until it is delivered, and a node fails one only when its receiver leaves the cluster or the receiver run that admitted it ends, as [Cluster Interconnect](./interconnect.md#record-acknowledgements-follow-the-receiver-run) describes |
 | [Cluster Chaos 39](https://app.clickup.com/t/86bcd4hzv) | A restarted voter lost its work when gossip heard of it before observing it live |
 | [Cluster Chaos 40](https://app.clickup.com/t/86bcd8q49) | A stopping follower's drain needed a user password. It now uses the node's own certificate |
 | [Cluster Chaos 43](https://app.clickup.com/t/86bcdg30p) and [58](https://app.clickup.com/t/86bcdknqt) | A restarted window owner discarded its open windows. The restore was then requalified on an official image |

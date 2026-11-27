@@ -93,6 +93,6 @@ async fn a_request_holds_its_stream_while_its_payload_waits_for_room() {
         0,
         "the request gives its stream back once its answer is decoded"
     );
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }

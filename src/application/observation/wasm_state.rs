@@ -629,17 +629,25 @@ impl SessionServiceImpl {
         if request.target.node_id() == self.inner.consensus.local_node_id() {
             return self.native_wasm_state_page(request).await;
         }
-        let deadline = *self
-            .inner
-            .runtime
-            .state_inspection_settings()
-            .read_timeout
-            .value();
+        // The client's read holds its input and waits on this answer: its read timeout is the
+        // caller's deadline, which it answers with a typed refusal when it passes.
+        let deadline = nervix_interconnect::ExchangeDeadline::Caller(
+            nervix_primitives::time::Instant::now()
+                .checked_add(
+                    *self
+                        .inner
+                        .runtime
+                        .state_inspection_settings()
+                        .read_timeout
+                        .value(),
+                )
+                .assured("the inspection read deadline is a bounded setting"),
+        );
         let target = request.target.clone();
         let response = match self
             .inner
             .interconnect
-            .request_with_timeout(target.node_id(), request, deadline)
+            .request_by(target.node_id(), request, deadline)
             .await
         {
             Ok(response) => response,

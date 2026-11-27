@@ -385,11 +385,13 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_232bb63881d08871_` keyspaces and `ClusterState`
-metadata encoding 60 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
+Consensus's `raft_bfe352c69af44e98_` keyspaces and `ClusterState`
+metadata encoding 61 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
 domain, resource and user labels, the one label edit that sets and removes keys, node selector statements, placement node rules,
 inferencer working memory, each WASM processor's `MAX TABLE ELEMENTS`, each emitter's `RETRY POLICY` with its optional `GIVE UP AFTER`, the `DURATION` type with the duration literals Models hold, each node's trace export and web console pacing capabilities, each node's WASM memory guard and growth reserve, the database volume size each node record's capacity claim carries, interconnect capabilities
-that carry no relay watermark count, listener bounds that carry the gRPC listener's HTTP/2 windows, send buffer and reset limits,
+that carry no relay watermark count and no request or progress timeout, runtime capabilities that
+carry no state-snapshot or WASM checkpoint deadline, remote acknowledgement timing that carries only
+the alive interval, the sweep interval and the total relay timeout, listener bounds that carry the gRPC listener's HTTP/2 windows, send buffer and reset limits,
 the HTTP/1 header count and the WebSocket write buffer, and the partition
 count of every resolved
 parametrizer in the committed schedule, the partition epoch the schedule records for each
@@ -602,8 +604,9 @@ same completed snapshot without confusing its absence with index zero.
 
 **Remote acknowledgements and admission.** A routing position is open with its generation and
 optional correlation, or permanently closed. A correlation owns either a delivery's record rows
-or an admission response channel. Pending rows distinguish waiting for admission from admitted
-silence; ordered parked progress retains its required-wait guard. The wire number is an opaque
+or an admission response channel. A pending row is either waiting for admission, with its count of
+sweeps toward the delivery's admission bound, or admitted by one receiver run, which it names by
+that run's process epoch; ordered parked progress retains its required-wait guard. The wire number is an opaque
 position/generation/row encoding, validated behind this owner with the registrar process identity.
 No numeric value means missing, and an exhausted generation never wraps into a live identity.
 An authenticated peer is starting, awaiting membership with its bound epoch, live with that epoch,

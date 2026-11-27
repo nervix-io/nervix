@@ -288,18 +288,6 @@ impl Arbitrary<'_> {
                     .verified("the generated value fits u32")
                     % 1_000_000_000,
             ),
-            request_timeout: std::time::Duration::new(
-                self.entropy.any_u64(),
-                u32::try_from(self.entropy.up_to(u64::from(u32::MAX)))
-                    .verified("the generated value fits u32")
-                    % 1_000_000_000,
-            ),
-            progress_timeout: std::time::Duration::new(
-                self.entropy.any_u64(),
-                u32::try_from(self.entropy.up_to(u64::from(u32::MAX)))
-                    .verified("the generated value fits u32")
-                    % 1_000_000_000,
-            ),
             reconnect_backoff: std::time::Duration::new(
                 self.entropy.any_u64(),
                 u32::try_from(self.entropy.up_to(u64::from(u32::MAX)))

@@ -570,7 +570,6 @@ impl Application {
         let runtime = {
             let mapping_input = Runtime::with_environment(
                 RuntimeEnvironment {
-                    interconnect_request_timeout: settings.interconnect.request_timeout(),
                     executor,
                     client_endpoints,
                     outward_tls: outward_tls.clone(),
@@ -625,6 +624,7 @@ impl Application {
             runtime,
             consensus: None,
             interconnect: None,
+            task_grace_period: settings.shutdown.task_grace_period(),
             fault_injection: fault_injection.clone(),
         };
         startup
@@ -845,6 +845,7 @@ impl Application {
             runtime,
             consensus,
             interconnect,
+            task_grace_period: _,
             fault_injection: _,
         } = startup;
         let consensus =
@@ -1689,6 +1690,8 @@ impl Application {
             }
         }));
         let interconnect_for_health = interconnect.clone();
+        #[cfg(feature = "testing")]
+        let fault_injection_for_health = fault_injection.clone();
         let cluster_for_health = cluster.clone();
         let mut health_topology = cluster.subscribe_live_node_states().await;
         let local_node_id = node_id;
@@ -1762,6 +1765,9 @@ impl Application {
                 }
                 if !awaiting_initial_bootstrap_peer {
                     interconnect_for_health.replace_live_nodes(&live_node_ids);
+                    #[cfg(feature = "testing")]
+                    fault_injection_for_health
+                        .observe_published_live_targets(&local_node_id, &live_node_ids);
                     interconnect_for_health.replace_outbound_targets(&outbound_targets);
                 }
 
@@ -1771,7 +1777,17 @@ impl Application {
                     let interconnect = interconnect_for_health.clone();
                     async move {
                         let outcome = match interconnect
-                            .request_with_timeout(target.node_id(), ApplicationHealthProbe, interconnect.liveness().probe_timeout())
+                            .request_by(
+                                target.node_id(),
+                                ApplicationHealthProbe,
+                                // A health probe is liveness itself: its timer is the committed
+                                // liveness policy's probe budget.
+                                nervix_interconnect::ExchangeDeadline::Protocol(
+                                    nervix_primitives::time::Instant::now()
+                                        .checked_add(interconnect.liveness().probe_timeout())
+                                        .assured("the committed probe budget fits the clock"),
+                                ),
+                            )
                             .await
                         {
                             Ok(identity) if &identity == target.identity() => {
@@ -2876,7 +2892,9 @@ impl Application {
             .shutdown()
             .await
             .change_context(AppError::ShutdownCluster);
-        interconnect.shutdown().await;
+        interconnect
+            .shutdown(Some(startup::teardown_ceiling(grace_period)))
+            .await;
 
         let executor = runtime.executor().clone();
         #[cfg(feature = "testing")]

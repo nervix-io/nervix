@@ -622,7 +622,12 @@ impl Runtime {
         };
         for task in owner_tasks {
             nervix_primitives::task::consume_budget().await;
-            if let Err(error) = task.stop(self.branch_task_stop_timeout()).await {
+            if let Err(error) = task
+                .stop(TaskStopWait::Teardown {
+                    grace: self.branch_task_stop_timeout(),
+                })
+                .await
+            {
                 warn!(
                     domain = domain.as_str(),
                     relay = relay.as_str(),
@@ -633,7 +638,7 @@ impl Runtime {
         }
         for task in state_tasks {
             nervix_primitives::task::consume_budget().await;
-            if let Err(error) = task.stop(self.task_stop_grace()).await {
+            if let Err(error) = task.stop(self.teardown_task_stop()).await {
                 warn!(
                     domain = domain.as_str(),
                     relay = relay.as_str(),

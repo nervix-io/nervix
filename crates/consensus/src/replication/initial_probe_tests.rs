@@ -30,7 +30,7 @@ use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, SanType};
 use super::AppendPath;
 use crate::{
     AppendStreamOpenRecorder, CommittedLeaderIdOf, ConnectivityFault, LeaseRefusal, LogIdOf,
-    NetworkClient, NetworkFactory, SnapshotTransferIds, TypeConfig, wire,
+    NetworkClient, NetworkFactory, SnapshotTransferIds, TypeConfig, test_teardown_ceiling, wire,
 };
 
 #[derive(Clone, Default)]
@@ -550,7 +550,7 @@ async fn an_unavailable_data_prefix_ends_its_input_before_stream_admission() {
         .await
         .assured("the initial probe has an answer")
         .assured("the transport answers");
-    peer.follower.shutdown().await;
+    peer.follower.shutdown(test_teardown_ceiling()).await;
     let failed = answers
         .next()
         .await
@@ -760,8 +760,11 @@ async fn initial_empty_append_probes_use_management_before_one_data_stream() {
     );
     assert!(answers.next().await.is_none(), "the finite data input ends");
     drop(answers);
-    peer.client.interconnect.shutdown().await;
-    peer.follower.shutdown().await;
+    peer.client
+        .interconnect
+        .shutdown(test_teardown_ceiling())
+        .await;
+    peer.follower.shutdown(test_teardown_ceiling()).await;
     assert_eq!(
         peer.management_calls.load(Ordering::Relaxed),
         3,
@@ -825,8 +828,11 @@ impl ProbePeer {
     }
 
     async fn close(&self) {
-        self.client.interconnect.shutdown().await;
-        self.follower.shutdown().await;
+        self.client
+            .interconnect
+            .shutdown(test_teardown_ceiling())
+            .await;
+        self.follower.shutdown(test_teardown_ceiling()).await;
     }
 }
 
@@ -984,7 +990,7 @@ async fn a_failed_following_probe_ends_before_data_stream_admission() {
             .assured("the transport succeeds"),
         Ok(Some(boundary))
     );
-    peer.follower.shutdown().await;
+    peer.follower.shutdown(test_teardown_ceiling()).await;
     assert!(
         answers
             .next()
@@ -998,7 +1004,10 @@ async fn a_failed_following_probe_ends_before_data_stream_admission() {
         "the failed probe ends the input"
     );
     drop(answers);
-    peer.client.interconnect.shutdown().await;
+    peer.client
+        .interconnect
+        .shutdown(test_teardown_ceiling())
+        .await;
     assert_eq!(peer.management_calls.load(Ordering::Relaxed), 1);
     assert_eq!(peer.append_streams.load(Ordering::Relaxed), 0);
 }

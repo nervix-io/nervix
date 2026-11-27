@@ -4,9 +4,11 @@
 //!
 //! - **Owns.** One owner delivery of a producer's batch, from its dispatch gates through the
 //!   storage of its acknowledgement records to its admission, and how it ends: admitted, failed,
-//!   or carried on to the unit's owner on the route that replaced the one it was sent on.
+//!   or carried on to the unit's owner on its current route, after a route change replaced the
+//!   one it was sent on or the owner that route names returned to the cluster it had left.
 //! - **Depends on.** The relay boundary's channels, routes and dispatch gates, the remote
-//!   dispatcher and the interconnect's report of whether a send reached its receiver.
+//!   dispatcher, the interconnect's report of whether a send reached its receiver and of whether
+//!   membership lists that receiver, and whether this node's intake closed because it stops.
 //! - **Must not know.** Plexus text, placement policy, transactions or connector internals.
 
 #![cfg_attr(
@@ -35,10 +37,27 @@ pub(in crate::runtime) enum OwnerDelivery {
     Admitted,
     /// The rows no owner admitted, whose acknowledgements the delivery failed.
     Failed(Box<RelayRecordBatch>),
-    /// The unit's route changed before the delivery reached the owner it had named, so no owner
+    /// The unit's route changed before the delivery reached the owner it had named, or that owner
+    /// left the cluster before the delivery reached it and has returned since, so no owner
     /// admitted these rows. Their acknowledgements are untouched, and they go to the unit's owner
     /// on its current route.
     Rerouted(Box<RelayRecordBatch>),
+}
+
+/// What ended the wait of a delivery whose owner left the cluster before any send of the delivery
+/// reached that owner.
+enum DepartedOwnerWait {
+    /// The delivery's channel ended: the route change that replaces the owner retired it, or the
+    /// delivery's producer ended.
+    ChannelEnded,
+    /// Membership lists the owner live again.
+    OwnerReturned,
+    /// This node is stopping. No route that replaces the owner is awaited: when every node stops,
+    /// failover publishes none, and a stopping node's save holds its installation turn, so none
+    /// would reach the node while it saves.
+    NodeStopping,
+    /// The delivery's admission bound passed first.
+    BoundPassed,
 }
 
 impl RelayBoundaryServices {
@@ -47,7 +66,8 @@ impl RelayBoundaryServices {
     /// The owner reports the batch's records alive to their sources once it has admitted them, and
     /// not before. Until then this node holds them on their sources' behalf, so it reports them
     /// alive itself while the delivery waits for its gates, its channel, the storage of its
-    /// records, a grant or the owner's admission. An ingestor's `ACK TIMEOUT` therefore measures how
+    /// records, a grant, the owner's admission or the route that replaces an owner that left the
+    /// cluster before the delivery reached it. An ingestor's `ACK TIMEOUT` therefore measures how
     /// long its records make no progress, not how long they take to reach their owner.
     #[cfg_attr(
         nervix_lint,
@@ -115,7 +135,7 @@ impl RelayBoundaryServices {
             Some(lifetime) => lifetime.run_until_cancelled(permits).await,
             None => Some(permits.await),
         };
-        let Some(_permits) = permits else {
+        let Some(permits) = permits else {
             return reject_owner_delivery(batch, "relay producer lifetime ended");
         };
         let Some(owner_node) = self.owner_of(unit) else {
@@ -136,7 +156,7 @@ impl RelayBoundaryServices {
         // read from, including a route change the gates held this delivery back for.
         let ingress_slot = branch.ingress();
         let channel = RelayDeliveryChannel::new(&ingress_slot, producer_lifetime);
-        let Some(_slot) = channel
+        let Some(slot) = channel
             .while_producer_lives(channel.slot.lock_for_delivery())
             .await
             .flatten()
@@ -223,11 +243,10 @@ impl RelayBoundaryServices {
                 &batch.batch,
                 channel,
                 deadline,
-                GrantCapacityRefusals::Hold,
                 Some(&mut remote_acks),
             )
             .await;
-        let Err(error) = admission_result else {
+        let Err(mut error) = admission_result else {
             return OwnerDelivery::Admitted;
         };
         let admitted = remote_acks.admitted_rows();
@@ -241,21 +260,55 @@ impl RelayBoundaryServices {
                 .slice(admitted, remaining)
                 .verified("the unadmitted suffix lies within this batch"),
         );
+        let mut owner_returned = false;
         if let RemoteDispatchError::Unreached { .. } = error.current_context()
-            && channel.slot.cancellation().is_cancelled()
+            && !channel.slot.cancellation().is_cancelled()
+            && RemoteDispatchError::receiver_left(&error)
+        {
+            // The owner the route names left the cluster before any send of the delivery reached
+            // it, and this node has not installed the route that replaces that owner yet, which
+            // failover publishes and every node installs on its own. Nothing of the delivery
+            // reached the owner, so it waits for that route, or for the owner's return, within its
+            // admission bound, unless this node is stopping. It gives its channel and its dispatch
+            // gates back first: the installation of that route, or of any other change, takes
+            // them without waiting for this delivery.
+            drop(slot);
+            drop(permits);
+            match dispatcher
+                .wait_for_departed_owner(&owner_node, channel, deadline)
+                .await
+            {
+                DepartedOwnerWait::ChannelEnded => {}
+                DepartedOwnerWait::OwnerReturned => owner_returned = true,
+                DepartedOwnerWait::NodeStopping => {
+                    error = error.change_context(RemoteDispatchError::ReceiverLeftWhileStopping {
+                        target: owner_node.clone(),
+                    });
+                }
+                DepartedOwnerWait::BoundPassed => {
+                    error = error.change_context(RemoteDispatchError::AdmissionTotalTimeout {
+                        target: owner_node.clone(),
+                        timeout: timing.remote_relay_total_timeout,
+                    });
+                }
+            }
+        }
+        if let RemoteDispatchError::Unreached { .. } = error.current_context()
+            && (channel.slot.cancellation().is_cancelled() || owner_returned)
             && !channel.producer_ended()
             && branch.is_live()
         {
-            // A route change retired the channel while the delivery was still trying to reach
-            // the owner it had named, and nothing of it reached that owner. The rows no owner
-            // admitted go to the unit's owner on the new route instead.
+            // A route change retired the channel, or the owner the delivery had named returned to
+            // the cluster it had left, while nothing of the delivery reached that owner. The rows
+            // no owner admitted go to the unit's owner on its current route instead.
             debug!(
                 domain = domain.as_str(),
                 relay = relay.as_str(),
                 scope = %BranchScope::from(&batch.key),
-                former_owner = %owner_node,
+                named_owner = %owner_node,
+                owner_returned,
                 rows = remaining,
-                "relay batch follows its unit's new route before reaching its former owner"
+                "relay batch that reached no owner goes to its unit's owner on the current route"
             );
             remote_acks.release_unadmitted();
             return OwnerDelivery::Rerouted(unadmitted);
@@ -294,6 +347,41 @@ impl RelayBoundaryServices {
             return OwnerDelivery::Rerouted(Box::new(batch.clone()));
         }
         reject_owner_delivery(batch, channel.cancellation_reason())
+    }
+}
+
+impl RemoteDispatcher {
+    /// Waits, for a delivery that found `owner` gone from membership before any send of the
+    /// delivery reached that owner, until the delivery can carry on or must end: `channel` ends,
+    /// as the route change that replaces the owner or the end of the delivery's producer ends it,
+    /// membership lists `owner` live again, this node is stopping, or `deadline`, the delivery's
+    /// admission bound, passes. A node already stopping ends the wait at once.
+    async fn wait_for_departed_owner(
+        &self,
+        owner: &ClusterNodeName,
+        channel: RelayDeliveryChannel<'_>,
+        deadline: nervix_primitives::time::Instant,
+    ) -> DepartedOwnerWait {
+        nervix_primitives::select! {
+            biased;
+            () = channel.cancelled() => DepartedOwnerWait::ChannelEnded,
+            () = self.interconnect.target_returned(owner) => DepartedOwnerWait::OwnerReturned,
+            () = self.node_stops() => DepartedOwnerWait::NodeStopping,
+            () = nervix_primitives::time::sleep_until(deadline) => DepartedOwnerWait::BoundPassed,
+        }
+    }
+
+    /// Resolves once this node is stopping: its intake closed, which never reopens, or the runtime
+    /// that owns the intake ended.
+    async fn node_stops(&self) {
+        let mut intake = self.local_intake.clone();
+        let closed = intake
+            .wait_for(|intake| *intake == LocalIntake::Closed)
+            .await;
+        closed.discarded(
+            "a closed intake and an ended runtime both mean the node is stopping, and the value \
+             seen is not needed",
+        );
     }
 }
 

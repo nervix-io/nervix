@@ -225,8 +225,18 @@ impl SubscriptionInterestPublication {
 
     fn publish(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
         let index = subscription_interests_from_live_nodes(nodes);
-        self.index.store(StdArc::new(index));
         let runs = membership::live_incarnations(nodes);
+        self.install(index, runs);
+    }
+
+    /// Puts `index` and `runs` in place, then announces them, so a waiter that marks the
+    /// announcements it saw before it reads the index misses none.
+    fn install(
+        &self,
+        index: SubscriptionInterestIndex,
+        runs: BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+    ) {
+        self.index.store(StdArc::new(index));
         self.live_runs.store(StdArc::new(runs));
         self.changed.send_replace(());
     }
@@ -254,6 +264,48 @@ impl SubscriptionInterestPublication {
             changes.changed().await.assured(
                 "the subscription-interest publication retains its change sender for the server \
                  lifetime",
+            );
+        }
+    }
+}
+
+/// What a relay owner keeps of the subscription interest publication, from the moment it attaches
+/// to its cluster: the published index and a receiver of its announcements.
+#[derive(Clone)]
+pub(crate) struct SubscriptionInterestWatch {
+    publication: StdArc<SubscriptionInterestPublication>,
+    changes: watch::Receiver<()>,
+}
+
+impl SubscriptionInterestWatch {
+    /// Resolves once the published index no longer lists `subscriber` for `relay` of `domain`, as
+    /// when that node's last subscription to the relay ended. A node that advertises a newer
+    /// interest in the relay is still listed.
+    pub(crate) async fn until_withdrawn(
+        &self,
+        subscriber: &ClusterNodeName,
+        domain: &str,
+        relay: &str,
+    ) {
+        let mut changes = self.changes.clone();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            // The publication announces an index once it is in place, so the announcements seen
+            // are marked before the index is read: a publication after the read wakes the wait.
+            changes.mark_unchanged();
+            let listed = {
+                let index = self.publication.load();
+                match index.nodes(domain, relay) {
+                    Some(nodes) => nodes.contains_key(subscriber),
+                    None => false,
+                }
+            };
+            if !listed {
+                return;
+            }
+            changes.changed().await.assured(
+                "this watch holds the subscription-interest publication, and with it the change \
+                 sender, for as long as it lives",
             );
         }
     }
@@ -969,8 +1021,6 @@ impl InterconnectRequest for GossipExchange {
     const NAME: &'static str = "gossip_exchange";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Discovery;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Control;
     const REQUIRES_LIVE_TARGET: bool = false;
 }
 
@@ -1110,14 +1160,43 @@ impl InterconnectGossipTransport {
             .map_err(|_| GossipExchangeRefusal::ReceiverClosed)
     }
 
-    fn refresh_routes(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
-        for (id, state) in nodes {
+    /// The newest run of every node `ids` name, this node apart. A node that restarted is live
+    /// under its earlier run too until that run is declared dead, and only its newest run says
+    /// where the node is reached now.
+    fn newest_runs<'a>(
+        &self,
+        ids: impl IntoIterator<Item = &'a ChitchatId>,
+    ) -> BTreeMap<ClusterNodeName, &'a ChitchatId> {
+        let mut newest = BTreeMap::<ClusterNodeName, &'a ChitchatId>::new();
+        for id in ids {
             let Ok(node_id) = ClusterNodeName::parse(&id.node_id) else {
                 continue;
             };
             if &node_id == self.inner.interconnect.node_id() {
                 continue;
             }
+            match newest.entry(node_id) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(id);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if id.generation_id > entry.get().generation_id {
+                        entry.insert(id);
+                    }
+                }
+            }
+        }
+        newest
+    }
+
+    /// Dials every live node at the endpoint its newest run advertises. Registering an earlier
+    /// run's endpoint too would move the node's target back and forth, retiring its connections
+    /// each time.
+    fn refresh_routes(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
+        for (node_id, id) in self.newest_runs(nodes.keys()) {
+            let Some(state) = nodes.get(id) else {
+                continue;
+            };
             let Some(endpoint) = advertised_endpoint(state) else {
                 continue;
             };
@@ -1217,9 +1296,20 @@ impl InterconnectGossipTransport {
                 // The application-health topology can retire a peer after Chitchat declares it
                 // dead. Chitchat still probes that peer, including on a bootstrap node with no
                 // configured seeds, so restore the authenticated route before trying the probe.
-                self.inner
+                // Only a missing target is restored. A node with a target keeps it, wherever the
+                // route's endpoint is: the address an earlier run of a restarted node advertised
+                // stays a route until Chitchat forgets that run, and the probe then reaches the
+                // node's current run instead of moving the node back to the run that is gone.
+                let restored = self
+                    .inner
                     .interconnect
-                    .register_outbound_target(node_id.clone(), route.target.endpoint());
+                    .restore_outbound_target(node_id.clone(), route.target.endpoint());
+                debug!(
+                    peer = %to,
+                    node = %node_id,
+                    endpoint = %restored,
+                    "gossip probes a route through the endpoint its node is reached at"
+                );
                 node_id
             }
             GossipRoutePeer::Expected(expectation) => {
@@ -1872,6 +1962,16 @@ impl ClusterHandle {
         self.subscription_interest.load()
     }
 
+    /// The subscription interest publication as a relay owner keeps it, taken once as the owner's
+    /// node attaches to its cluster, so a fan-out that a subscriber node holds back can end once
+    /// that node withdraws its interest.
+    pub(crate) fn subscription_interest_watch(&self) -> SubscriptionInterestWatch {
+        SubscriptionInterestWatch {
+            publication: self.subscription_interest.clone(),
+            changes: self.subscription_interest.changed.subscribe(),
+        }
+    }
+
     /// Wait until this node's live Chitchat view contains the interest advertised by the exact
     /// subscriber incarnation at or beyond the requested interest key version. The interconnect
     /// request that calls this method owns the deadline.
@@ -2170,3 +2270,6 @@ pub fn derive_peer_addr(grpc_addr: SocketAddr) -> Option<SocketAddr> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "shuttle"))]
+mod subscription_interest_shuttle_tests;

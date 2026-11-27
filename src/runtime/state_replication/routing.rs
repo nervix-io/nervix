@@ -426,6 +426,20 @@ impl StateReplicationRouting {
             .collect()
     }
 
+    /// The inference state `placement` names while its route currently holds one, as
+    /// [`Self::visit_inferencers`] visits it.
+    pub(in crate::runtime) fn inferencer(
+        &self,
+        placement: &RuntimeStatePlacement,
+    ) -> Option<Arc<ReplicatedInferencerState>> {
+        let route = self.resolve(placement)?;
+        let current = route.current_state()?;
+        match current.as_ref() {
+            ReplicatedState::Inferencer(state) => Some(Arc::clone(state)),
+            _ => None,
+        }
+    }
+
     /// Inspect current inference handles from one immutable routing cut. The visitor admits
     /// retained handles before cloning them and can stop at cancellation or admission refusal.
     #[cfg_attr(

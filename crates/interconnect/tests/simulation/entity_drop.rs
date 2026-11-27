@@ -6,7 +6,7 @@
 //! - **Owns.** One coordinator and two nodes exchanging the production drop report request, a
 //!   partition on the late node's link, and the reports the coordinator collects.
 //! - **Depends on.** The authenticated transport fixture and the production drop report request
-//!   shape, its deadline and its coordination identity.
+//!   shape, the collection ceiling its coordinator names and its coordination identity.
 //! - **Must not know.** Raft, the server's coordinator, or how a node destroys an entity.
 
 use nervix_interconnect::entity_drop::{DropReportAnswer, DropReportRequest};
@@ -27,6 +27,9 @@ const STAGE_DEADLINE: Duration = Duration::from_secs(75);
 const RUN_DEADLINE: Duration = Duration::from_secs(80);
 /// The runtime revision that published the drop.
 const DROP_REVISION: u64 = 9;
+/// The ceiling a drop's coordinator gives its report requests in this fixture, as the
+/// collection's ceiling, the domain drain timeout, bounds them.
+const REPORT_CEILING: Duration = Duration::from_secs(5);
 
 /// What the coordinator lets the late node do next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -109,13 +112,17 @@ fn ended_within(started: Instant, deadline: Duration) -> bool {
     started.elapsed() <= deadline + deadline / 4
 }
 
-/// Whether `outcome` is the failure a request meets when its peer cannot answer in time.
+/// Whether `outcome` is the failure a report request meets when its peer cannot answer: the
+/// collection's ceiling passed, or liveness ended the link before it.
 fn unanswered<T: std::fmt::Debug>(outcome: &Result<T, error_stack::Report<RequestError>>) -> bool {
     match outcome {
         Ok(_) => false,
         Err(error) => matches!(
             error.current_context(),
-            RequestError::Timeout { .. } | RequestError::Transport { .. }
+            RequestError::DeadlinePassed {
+                deadline: nervix_interconnect::ExchangeDeadlineKind::OperationCeiling,
+                ..
+            } | RequestError::Transport { .. }
         ),
     }
 }
@@ -212,13 +219,21 @@ fn drop_with_a_partitioned_node(run: ScenarioRun) -> Result<(), SimulationError>
                     // The late node is partitioned across the drop.
                     turmoil::partition(COORDINATOR, LATE);
                     let started = Instant::now();
-                    let partitioned = transport.request(&late, report(&coordination)).await;
+                    let partitioned = transport
+                        .request_by(
+                            &late,
+                            report(&coordination),
+                            nervix_interconnect::ExchangeDeadline::OperationCeiling(
+                                started + REPORT_CEILING,
+                            ),
+                        )
+                        .await;
                     assert!(
                         unanswered(&partitioned),
                         "partitioned report outcome: {partitioned:?}"
                     );
                     assert!(
-                        ended_within(started, DropReportRequest::DEADLINE.declared_default()),
+                        ended_within(started, REPORT_CEILING),
                         "the partitioned report ended after {:?}",
                         started.elapsed()
                     );
@@ -258,7 +273,7 @@ fn drop_with_a_partitioned_node(run: ScenarioRun) -> Result<(), SimulationError>
                     );
                     trace.record(COORDINATOR, "every node's report is collected after repair");
                     done.send_replace(true);
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -285,7 +300,7 @@ fn drop_with_a_partitioned_node(run: ScenarioRun) -> Result<(), SimulationError>
                     ready.send_replace(true);
                     wait_for(&mut coordinator_ready).await;
                     wait_until(&mut done, true).await;
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -326,7 +341,7 @@ fn drop_with_a_partitioned_node(run: ScenarioRun) -> Result<(), SimulationError>
                     applied.send_replace(true);
                     trace.record(LATE, "drop applied");
                     wait_until(&mut done, true).await;
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;

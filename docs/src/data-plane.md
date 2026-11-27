@@ -119,12 +119,12 @@ fails those acknowledgements instead of completing them, and the ingestor redeli
 the current routes. See
 [Consumers That Leave The Receiver](interconnect.md#consumers-that-leave-the-receiver).
 
-A node that sent a record's acknowledgement to another node waits for it only while that node keeps
-reporting it. When the other node reports nothing about it for fifteen seconds after admitting the
-batch, because its outcome was lost on the way back or its process ended, the acknowledgement fails
-and the ingestor redelivers the record. An acknowledgement lost between two nodes on a record's path
-therefore fails the ingestor attempt instead of keeping it waiting. See
-[Record Acknowledgements The Receiver Stops Reporting](interconnect.md#record-acknowledgements-the-receiver-stops-reporting).
+A node that sent a record's acknowledgement to another node waits for it for as long as the run of
+that node which admitted the batch lives. The other node sends the outcome back until it is
+delivered, so a live pair of nodes loses none. When the other node leaves the cluster, or a newer
+run of it replaces the run that admitted the batch, the acknowledgement fails and the ingestor
+redelivers the record, instead of waiting for an outcome no live run holds. See
+[Record Acknowledgements Follow The Receiver Run](interconnect.md#record-acknowledgements-follow-the-receiver-run).
 
 ACK guards, tokens, and maps remain in memory. They do not record a transactional per-emitter commit
 ledger. After ingestor redelivery, every attached path processes the record again. This is why an

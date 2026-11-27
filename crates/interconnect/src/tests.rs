@@ -165,7 +165,6 @@ impl InterconnectRequest for EchoRequest {
     type Response = EchoResponse;
 
     const NAME: &'static str = "test_echo";
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -179,7 +178,6 @@ impl InterconnectRequest for BlockingBulkRequest {
 
     const NAME: &'static str = "test_blocking_bulk";
     const CLASS: PoolClass = PoolClass::Bulk;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -195,7 +193,6 @@ impl InterconnectRequest for ReplicationRequest {
 
     const NAME: &'static str = "test_replication";
     const CLASS: PoolClass = PoolClass::Replication;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -209,7 +206,6 @@ impl InterconnectRequest for ManagementRequest {
 
     const NAME: &'static str = "test_management";
     const CLASS: PoolClass = PoolClass::Management;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -223,7 +219,6 @@ impl InterconnectRequest for BlockingManagementRequest {
 
     const NAME: &'static str = "test_blocking_management";
     const CLASS: PoolClass = PoolClass::Management;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -238,7 +233,6 @@ impl InterconnectRequest for CancellationRequest {
     const NAME: &'static str = "test_cancellation";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Cancellation;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -253,7 +247,6 @@ impl InterconnectRequest for BlockingDiscoveryRequest {
     const NAME: &'static str = "test_blocking_discovery";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Discovery;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -263,21 +256,8 @@ struct BlockingProgressRequest;
 struct BlockingProgressResponse;
 
 const LIVENESS_QUOTA_EVENT_FAILSAFE_SECONDS: u64 = 30;
-const LIVENESS_QUOTA_REQUEST_TIMEOUT_MULTIPLIER: u64 = 2;
-const LIVENESS_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = match LIVENESS_QUOTA_EVENT_FAILSAFE_SECONDS
-    .checked_mul(LIVENESS_QUOTA_REQUEST_TIMEOUT_MULTIPLIER)
-{
-    Some(seconds) => seconds,
-    None => panic!("the fixed liveness quota test deadlines fit in u64"),
-};
 const LIVENESS_QUOTA_EVENT_FAILSAFE: Duration =
     Duration::from_secs(LIVENESS_QUOTA_EVENT_FAILSAFE_SECONDS);
-const LIVENESS_QUOTA_REQUEST_TIMEOUT: Duration =
-    Duration::from_secs(LIVENESS_QUOTA_REQUEST_TIMEOUT_SECONDS);
-const _: () = assert!(
-    LIVENESS_QUOTA_REQUEST_TIMEOUT_SECONDS > LIVENESS_QUOTA_EVENT_FAILSAFE_SECONDS,
-    "blocked progress requests must remain active throughout the liveness observation"
-);
 
 impl InterconnectRequest for BlockingProgressRequest {
     type Response = BlockingProgressResponse;
@@ -285,8 +265,6 @@ impl InterconnectRequest for BlockingProgressRequest {
     const NAME: &'static str = "test_blocking_progress";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
-    const DEADLINE: crate::RequestDeadline =
-        crate::RequestDeadline::Explicit(LIVENESS_QUOTA_REQUEST_TIMEOUT);
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -301,8 +279,6 @@ impl InterconnectRequest for LivenessRequest {
     const NAME: &'static str = "test_liveness";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const DEADLINE: crate::RequestDeadline =
-        crate::RequestDeadline::Explicit(LIVENESS_QUOTA_REQUEST_TIMEOUT);
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -315,7 +291,6 @@ impl InterconnectRequest for HangingRequest {
     type Response = HangingResponse;
 
     const NAME: &'static str = "test_hanging";
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Snapshot;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -324,7 +299,6 @@ struct ResourceStreamRequest;
 impl InterconnectStreamRequest for ResourceStreamRequest {
     const NAME: &'static str = "test_resource_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Resource;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -333,7 +307,6 @@ struct SnapshotStreamRequest;
 impl InterconnectStreamRequest for SnapshotStreamRequest {
     const NAME: &'static str = "test_snapshot_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -344,8 +317,6 @@ struct DeadlineStreamRequest {
 impl InterconnectStreamRequest for DeadlineStreamRequest {
     const NAME: &'static str = "test_deadline_stream";
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline =
-        crate::RequestDeadline::Explicit(Duration::from_millis(200));
 }
 
 pub(crate) struct ConnectedTransports {
@@ -458,8 +429,8 @@ async fn send_waits_for_a_target_registered_after_the_operation_starts() {
         Envelope::Control(ControlEnvelope::Terminate)
     ));
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[test]
@@ -482,7 +453,7 @@ fn invalid_transport_options_report_the_failed_contract() {
         (
             "transport deadlines",
             TransportOptions {
-                request_timeout: Duration::ZERO,
+                connection_setup_timeout: Duration::ZERO,
                 ..TransportOptions::default()
             },
         ),
@@ -530,8 +501,8 @@ async fn one_way_control_send_refuses_a_typed_request() {
             if reason.contains("typed request envelopes cannot be sent as one-way controls")
     ));
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[test]
@@ -567,8 +538,8 @@ async fn connection_binding_drives_response_flow_control() {
     .await
     .expect("binding responses should advance beyond the one-byte stream window");
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -605,8 +576,8 @@ async fn rejected_tls_replacement_keeps_the_previous_identity_usable() {
         Envelope::Control(ControlEnvelope::Terminate)
     ));
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 mod coordination;
@@ -729,8 +700,8 @@ async fn resource_streams_leave_the_reserved_snapshot_slot_responsive() {
         );
     }
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// A quiesced cut publishes new checkpoint revisions, and a replica catching up a state above the
@@ -845,54 +816,8 @@ async fn a_held_snapshot_stream_leaves_a_backup_section_fetch_its_own_slot() {
             .is_none()
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
-}
-
-#[nervix_primitives::test]
-async fn streamed_response_times_out_when_its_producer_stops_making_progress() {
-    let options = TransportOptions {
-        progress_timeout: Duration::from_millis(50),
-        ..TransportOptions::default()
-    };
-    let ConnectedTransports {
-        transport_a,
-        transport_b,
-        node_b,
-        ..
-    } = connected_transports_with_options(options).await;
-    transport_b
-        .register_stream_handler::<ResourceStreamRequest, _, _>(|_context, _request| async {
-            Ok(StreamingResponse::new(
-                1,
-                futures_util::stream::pending::<Result<ChargedBytes, Report<StreamHandlerError>>>(),
-            ))
-        })
-        .expect("resource stream handler should register");
-    timeout(Duration::from_secs(5), async {
-        while !transport_a.is_connected_to(&node_b) {
-            nervix_primitives::task::consume_budget().await;
-            nervix_primitives::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the target should become ready");
-
-    let mut response = transport_a
-        .request_stream(&node_b, ResourceStreamRequest)
-        .await
-        .expect("stream response headers should arrive");
-    let error = timeout(Duration::from_secs(1), response.next_chunk())
-        .await
-        .expect("the stalled response should honor its progress timeout")
-        .expect_err("a stalled response must fail");
-    assert!(matches!(
-        error.current_context(),
-        RequestError::Stream { .. }
-    ));
-
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -937,8 +862,8 @@ async fn streamed_response_reports_a_producer_failure_to_the_reader() {
         RequestError::Stream { .. }
     ));
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -988,78 +913,8 @@ async fn rejected_stream_opening_retains_the_transport_cause() {
         "the reporting boundary preserves the stream handler's underlying cause: {message}",
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
-}
-
-#[nervix_primitives::test]
-async fn stream_slot_queueing_consumes_the_request_deadline() {
-    let ConnectedTransports {
-        transport_a,
-        transport_b,
-        node_b,
-        ..
-    } = connected_transports().await;
-    transport_b
-        .register_stream_handler::<DeadlineStreamRequest, _, _>(|_context, request| async move {
-            if request.response_delay_ms != 0 {
-                nervix_primitives::time::sleep(Duration::from_millis(request.response_delay_ms))
-                    .await;
-            }
-            Ok(StreamingResponse::new(
-                1,
-                futures_util::stream::pending::<Result<ChargedBytes, Report<StreamHandlerError>>>(),
-            ))
-        })
-        .assured("the deadline stream handler has a unique test name");
-    timeout(Duration::from_secs(5), async {
-        while !transport_a.is_connected_to(&node_b) {
-            nervix_primitives::task::consume_budget().await;
-            nervix_primitives::task::yield_now().await;
-        }
-    })
-    .await
-    .assured("the connected test transports become ready");
-
-    let held_stream = transport_a
-        .request_stream(
-            &node_b,
-            DeadlineStreamRequest {
-                response_delay_ms: 0,
-            },
-        )
-        .await
-        .assured("the first request holds the reserved snapshot stream slot");
-
-    let queued_transport = transport_a.clone();
-    let queued_node = node_b.clone();
-    let queued = nervix_primitives::task::spawn(async move {
-        queued_transport
-            .request_stream(
-                &queued_node,
-                DeadlineStreamRequest {
-                    response_delay_ms: 150,
-                },
-            )
-            .await
-    });
-    nervix_primitives::time::sleep(Duration::from_millis(150)).await;
-    drop(held_stream);
-
-    let result = queued
-        .await
-        .assured("the queued stream request task remains attached");
-    let error = match result {
-        Ok(_) => panic!("queueing must consume the stream setup deadline"),
-        Err(error) => error,
-    };
-    assert!(matches!(
-        error.current_context(),
-        RequestError::Stream { reason, .. } if reason.contains("timed out")
-    ));
-
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -1139,8 +994,8 @@ async fn queued_replication_request_wakes_when_the_stream_slot_is_released() {
     .await
     .expect("queued replication work should advance without connection churn");
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -1198,8 +1053,8 @@ async fn bulk_work_does_not_block_the_management_pool() {
         BlockingBulkResponse
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -1276,8 +1131,8 @@ async fn slow_management_work_cannot_consume_cancellation_streams() {
             .expect("blocking management request should join")
             .expect("blocking management request should finish after release");
     }
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// Twice as many cancellations to one peer as its connection has cancellation streams are all
@@ -1342,8 +1197,8 @@ async fn cancellations_beyond_a_connections_streams_wait_for_one_instead_of_bein
             CancellationResponse
         );
     }
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 mod duplex;
@@ -1432,8 +1287,8 @@ async fn discovery_beyond_its_streams_waits_and_never_crowds_out_management_requ
             BlockingDiscoveryResponse
         );
     }
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -1560,8 +1415,8 @@ async fn relay_terminal_capacity_is_held_until_the_application_finishes() {
         .expect("the next relay grant should fit after the terminal outcome");
 
     timeout(Duration::from_secs(1), async {
-        transport_a.shutdown().await;
-        transport_b.shutdown().await;
+        transport_a.shutdown(crate::test_teardown_ceiling()).await;
+        transport_b.shutdown(crate::test_teardown_ceiling()).await;
     })
     .await
     .expect("redeemed grant expiry work should not delay transport shutdown");
@@ -1686,8 +1541,8 @@ async fn the_next_relay_on_a_channel_is_granted_before_the_outcome_of_the_one_be
         .await
         .expect("the channel continues after the next relay retires");
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// A relay grant for a position its channel has not reached is refused out of order, a permanent
@@ -1754,8 +1609,8 @@ async fn a_relay_grant_that_skips_its_channels_next_position_is_refused_out_of_o
         .await
         .expect("the channel's next position is still granted");
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// A grant the receiver's relay budget has no room for waits for that room instead of being refused
@@ -1837,8 +1692,8 @@ async fn a_grant_the_relay_budget_has_no_room_for_waits_and_is_granted_once_room
         0,
         "the sender was refused no grant for capacity"
     );
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[test]
@@ -1980,8 +1835,8 @@ async fn terminal_relay_outcome_waits_for_application_queue_capacity() {
         Envelope::Ack(registration(52, &node_a).resolution(RemoteAckOutcome::Ack))
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -2041,8 +1896,8 @@ async fn confirmed_cancellation_fences_attempt_before_grant_arrives() {
         "a delivery cancelled before its grant must never enter the application queue"
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -2215,8 +2070,8 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
         "a cancelled relay delivery must not enter the application queue again"
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -2286,8 +2141,8 @@ async fn same_epoch_retry_of_admitted_relay_does_not_enqueue_twice() {
         Envelope::Ack(registration(44, &node_a).resolution(RemoteAckOutcome::Ack))
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 /// The next envelope other than admission progress, which the receiver reports while it holds a
@@ -2404,8 +2259,8 @@ async fn an_outcome_addressed_to_an_earlier_registrar_run_leaves_the_current_adm
         RelayAdmissionStatus::Admitted
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -2452,7 +2307,7 @@ async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
         .expect("the unresolved relay should enter the application queue")
         .expect("the application queue should remain open");
 
-    transport_b.shutdown().await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
     drop(unresolved);
     let (replacement_b, _replacement_incoming) = Transport::bind(
         "127.0.0.1:0".parse().expect("test address should be valid"),
@@ -2485,8 +2340,8 @@ async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
         RelayAdmissionStatus::Indeterminate
     );
 
-    transport_a.shutdown().await;
-    replacement_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    replacement_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -2543,8 +2398,8 @@ async fn reserved_relay_work_reports_progress_before_runtime_admission() {
         Envelope::Ack(registration(51, &node_a).resolution(RemoteAckOutcome::Alive))
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -2600,8 +2455,8 @@ async fn bootstrap_rejects_a_certificate_from_another_cluster() {
         "a bootstrap exchange that ends in a refusal ends the join"
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -2668,8 +2523,8 @@ async fn a_recorded_endpoint_another_clusters_node_answers_is_a_stale_route() {
         "a stale route refuses no one, so the join goes on"
     );
 
-    transport_a.shutdown().await;
-    transport_x.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_x.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -2728,8 +2583,8 @@ async fn a_recorded_member_that_moved_to_another_cluster_is_a_cluster_identity_r
         "the node the endpoint was recorded for names another cluster, so this node is refused"
     );
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -2774,7 +2629,7 @@ async fn bootstrap_times_out_when_a_tcp_peer_never_completes_tls() {
             if *timeout == Duration::from_millis(100)
     ));
 
-    transport_a.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -2784,7 +2639,7 @@ async fn shutdown_refuses_bootstrap_before_opening_a_connection() {
         transport_b,
         ..
     } = bound_transports_with_options(TransportOptions::default()).await;
-    transport_a.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
     let error = transport_a
         .bootstrap_target(
             PeerTarget::new(transport_b.local_addr(), "localhost"),
@@ -2796,7 +2651,7 @@ async fn shutdown_refuses_bootstrap_before_opening_a_connection() {
         error.current_context(),
         TransportError::ShuttingDown
     ));
-    transport_b.shutdown().await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -2872,8 +2727,8 @@ async fn membership_removal_cancels_an_active_request() {
             if node == &node_b && request == &HangingRequest::NAME
     ));
 
-    transport_a.shutdown().await;
-    transport_b.shutdown().await;
+    transport_a.shutdown(crate::test_teardown_ceiling()).await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }
 
 #[nervix_primitives::test]
@@ -2907,9 +2762,9 @@ async fn shutdown_cancels_an_active_request() {
         .await
         .expect("hanging request should reach its handler");
 
-    timeout(Duration::from_secs(2), transport_a.shutdown())
+    timeout(Duration::from_secs(2), transport_a.shutdown(None))
         .await
-        .expect("transport shutdown should respect its drain bound");
+        .expect("transport shutdown ends once its requests are cancelled");
     let error = timeout(Duration::from_secs(2), request)
         .await
         .expect("shutdown should cancel the request")
@@ -2921,5 +2776,5 @@ async fn shutdown_cancels_an_active_request() {
             if node == &node_b && request == &HangingRequest::NAME
     ));
 
-    transport_b.shutdown().await;
+    transport_b.shutdown(crate::test_teardown_ceiling()).await;
 }

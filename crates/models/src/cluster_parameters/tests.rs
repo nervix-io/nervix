@@ -23,11 +23,8 @@ fn parameters(input: &[u8; 384]) -> ClusterParameterValues {
         password_iterations: Some(generated.password_iterations()),
         node_unavailability_timeout: Some(generated.node_unavailability_timeout()),
         remote_ack_alive_interval: Some(generated.remote_ack_alive_interval()),
-        remote_ack_dispatch_timeout: Some(generated.remote_ack_dispatch_timeout()),
-        remote_ack_silence_timeout: Some(generated.remote_ack_silence_timeout()),
         remote_ack_sweep_interval: Some(generated.remote_ack_sweep_interval()),
         remote_relay_total_timeout: Some(generated.remote_relay_total_timeout()),
-        remote_relay_instantiation_wait: Some(generated.remote_relay_instantiation_wait()),
         domain_drain_timeout: Some(generated.domain_drain_timeout()),
         entity_gate_deadline: Some(generated.entity_gate_deadline()),
         transaction_idle_timeout: Some(generated.transaction_idle_timeout()),
@@ -119,11 +116,8 @@ fn every_duration_refuses_zero_at_its_definition_boundary() {
         ClusterParameterChange::LicensingRetryBackoffMax(Duration::ZERO),
         ClusterParameterChange::LicensingStreamIdleTimeout(Duration::ZERO),
         ClusterParameterChange::RemoteAckAliveInterval(Duration::ZERO),
-        ClusterParameterChange::RemoteAckDispatchTimeout(Duration::ZERO),
-        ClusterParameterChange::RemoteAckSilenceTimeout(Duration::ZERO),
         ClusterParameterChange::RemoteAckSweepInterval(Duration::ZERO),
         ClusterParameterChange::RemoteRelayTotalTimeout(Duration::ZERO),
-        ClusterParameterChange::RemoteRelayInstantiationWait(Duration::ZERO),
         ClusterParameterChange::ForcedRecoveryBudget(Duration::ZERO),
         ClusterParameterChange::OwnershipHandoffPollInterval(Duration::ZERO),
         ClusterParameterChange::EntityGatePollInterval(Duration::ZERO),
@@ -307,27 +301,24 @@ fn remote_ack_timing_changes_are_one_coherent_atomic_group() {
     let current = ClusterParameterValues::default();
     let updates = ClusterParameterUpdates::try_from(vec![
         ClusterParameterChange::RemoteAckAliveInterval(Duration::from_millis(1)),
-        ClusterParameterChange::RemoteAckDispatchTimeout(Duration::from_millis(1)),
-        ClusterParameterChange::RemoteAckSilenceTimeout(Duration::from_millis(10)),
         ClusterParameterChange::RemoteAckSweepInterval(Duration::from_millis(1)),
         ClusterParameterChange::RemoteRelayTotalTimeout(Duration::from_millis(50)),
-        ClusterParameterChange::RemoteRelayInstantiationWait(Duration::from_millis(5)),
     ])
     .assured("one assignment per timing");
     let committed = current
         .changed(&updates)
         .assured("the complete group is coherent");
+    // A sweep interval must divide the total timeout, whichever of the two an assignment changes.
     let invalid = [
-        ClusterParameterChange::RemoteAckSilenceTimeout(Duration::from_millis(4)),
         ClusterParameterChange::RemoteAckSweepInterval(Duration::from_millis(3)),
-        ClusterParameterChange::RemoteRelayTotalTimeout(Duration::from_millis(2)),
+        ClusterParameterChange::RemoteRelayTotalTimeout(Duration::from_micros(2500)),
     ];
     for change in invalid {
         let updates = ClusterParameterUpdates::try_from(vec![change]).assured("one assignment");
         assert!(committed.changed(&updates).is_err());
         assert_eq!(
-            committed.remote_ack_silence_timeout(),
-            Duration::from_millis(10)
+            committed.remote_ack_sweep_interval(),
+            Duration::from_millis(1)
         );
         assert_eq!(
             committed.remote_relay_total_timeout(),

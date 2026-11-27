@@ -1,25 +1,23 @@
 //! Frame-write liveness against a real HTTP/2 flow-control window.
 //!
 //! Layer: test harness.
-//! - **Owns.** Moving and stalled receiver checks for the duplex frame writer.
+//! - **Owns.** Moving and held receiver checks for the duplex frame writer.
 //! - **Depends on.** The writer, execution reservations, HTTP/2 and permitted in-memory I/O.
 //! - **Must not know.** Raft commands, peer discovery or runtime graph ownership.
+
+use std::time::Duration;
 
 use bytes::Bytes;
 use h2::{client, server};
 use http::Request;
 use nervix_execution::{Executor, MemoryClass};
-use nervix_primitives::{
-    sync::oneshot,
-    task::spawn,
-    time::{Instant, sleep},
-};
+use nervix_primitives::{sync::oneshot, task::spawn, time::sleep};
+use nervix_recovery::Discarded as _;
 
 use super::*;
 
 const PAYLOAD_BYTES: usize = 64 * 1024;
 const RECEIVE_WINDOW: u32 = 512;
-const PROGRESS_BOUND: Duration = Duration::from_secs(1);
 const READ_CADENCE: Duration = Duration::from_millis(20);
 
 /// Poll the connection while its body is read, releasing a small window at a steady cadence.
@@ -76,8 +74,7 @@ async fn a_moving_duplex_frame_outlasts_one_write_progress_bound() {
         )
         .await
         .expect("the test payload fits its memory class");
-    let mut writer = FrameWriter::new(stream, PROGRESS_BOUND);
-    let started = Instant::now();
+    let mut writer = FrameWriter::new(stream);
     let result = writer
         .send_frame(ChargedBytes::from_owned(
             vec![0x5a; PAYLOAD_BYTES],
@@ -86,12 +83,7 @@ async fn a_moving_duplex_frame_outlasts_one_write_progress_bound() {
         .await;
     assert!(
         result.is_ok(),
-        "a frame whose receiver continually releases capacity must outlast one write progress \
-         bound: {result:?}"
-    );
-    assert!(
-        started.elapsed() >= 2 * PROGRESS_BOUND,
-        "the moving frame must span multiple progress intervals"
+        "a frame whose receiver continually releases capacity is written whole: {result:?}"
     );
     writer.finish().expect("the completed frame half-closes");
     let observed = reader
@@ -111,25 +103,44 @@ async fn a_moving_duplex_frame_outlasts_one_write_progress_bound() {
     let _ = driver.await;
 }
 
+/// A receiver that releases no capacity is applying backpressure, not failing: the frame waits for
+/// it, with no reset, for as long as the connection lives, and is written whole once it reads.
 #[nervix_primitives::test]
-async fn a_duplex_frame_without_released_capacity_reaches_its_write_progress_bound() {
+async fn a_duplex_frame_waits_for_a_receiver_that_holds_its_window_and_is_written_whole() {
     let (client_io, server_io) = tokio::io::duplex(1024);
-    let (release, released) = oneshot::channel();
-    let receiver = spawn(async move {
+    let (accepted, has_accepted) = oneshot::channel();
+    let (read, may_read) = oneshot::channel::<()>();
+    let reader = spawn(async move {
         let mut builder = server::Builder::new();
         builder.initial_window_size(RECEIVE_WINDOW);
-        let mut connection = builder
-            .handshake::<_, Bytes>(server_io)
-            .await
-            .expect("the test server handshakes");
-        let (_request, _respond) = connection
+        let mut connection = builder.handshake::<_, Bytes>(server_io).await?;
+        let (request, _respond) = connection
             .accept()
             .await
-            .expect("the test opens one request")
-            .expect("the test request is valid");
+            .expect("the test opens one request")?;
+        accepted
+            .send(())
+            .discarded("the test waits for the receiver to accept before it checks the write");
+        let reading = async {
+            may_read
+                .await
+                .discarded("the test lets the receiver read once it checked the held write");
+            let mut body = request.into_body();
+            let mut bytes = Vec::new();
+            while let Some(chunk) = body.data().await {
+                let chunk = chunk?;
+                body.flow_control().release_capacity(chunk.len())?;
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok::<_, h2::Error>(bytes)
+        };
+        tokio::pin!(reading);
         nervix_primitives::select! {
-            _ = released => {}
-            _ = futures_util::future::poll_fn(|context| connection.poll_closed(context)) => {}
+            read = &mut reading => read,
+            closed = futures_util::future::poll_fn(|context| connection.poll_closed(context)) => {
+                closed?;
+                Err(h2::Reason::CANCEL.into())
+            }
         }
     });
     let (mut client, connection) = client::handshake(client_io)
@@ -154,19 +165,49 @@ async fn a_duplex_frame_without_released_capacity_reaches_its_write_progress_bou
         )
         .await
         .expect("the test payload fits its memory class");
-    let mut writer = FrameWriter::new(stream, PROGRESS_BOUND);
-    let result = writer
-        .send_frame(ChargedBytes::from_owned(
-            vec![0x5a; PAYLOAD_BYTES],
-            reservation,
-        ))
-        .await;
+    let writing = spawn(async move {
+        let mut writer = FrameWriter::new(stream);
+        let result = writer
+            .send_frame(ChargedBytes::from_owned(
+                vec![0x5a; PAYLOAD_BYTES],
+                reservation,
+            ))
+            .await;
+        (result, writer)
+    });
+    has_accepted
+        .await
+        .expect("the receiver accepts the stream before the test checks the write");
+    // Several poll rounds pass with the window held, and the write neither fails nor completes.
+    for _ in 0..64 {
+        nervix_primitives::task::yield_now().await;
+    }
+    sleep(READ_CADENCE).await;
     assert!(
-        matches!(result, Err(ref error) if matches!(error.current_context(), TransportError::ProgressTimeout { timeout } if *timeout == PROGRESS_BOUND)),
-        "a receiver that releases no capacity must reach the unchanged progress bound: {result:?}"
+        !writing.is_finished(),
+        "a frame waits for a receiver that holds its window"
     );
-    let _ = release.send(());
-    receiver.await.expect("the silent receiver joins");
+    read.send(())
+        .discarded("the receiver waits for the test to let it read");
+    let (result, mut writer) = writing.await.expect("the writing task joins");
+    assert!(
+        result.is_ok(),
+        "the held frame is written whole once its receiver reads: {result:?}"
+    );
+    writer.finish().expect("the completed frame half-closes");
+    let observed = reader
+        .await
+        .expect("the reader task joins")
+        .expect("the reader receives the complete frame");
+    let mut expected = u32::try_from(PAYLOAD_BYTES)
+        .expect("the bounded frame fits its length prefix")
+        .to_be_bytes()
+        .to_vec();
+    expected.extend(vec![0x5a; PAYLOAD_BYTES]);
+    assert_eq!(
+        observed, expected,
+        "the complete current frame is preserved"
+    );
     driver.abort();
     let _ = driver.await;
 }

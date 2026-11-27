@@ -22,8 +22,6 @@ impl InterconnectRequest for PublicationRequest {
     const NAME: &'static str = "simulation_parameter_publication";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Discovery;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Control;
     const REQUIRES_LIVE_TARGET: bool = false;
 }
 
@@ -90,7 +88,7 @@ fn publication_after_partition(run: ScenarioRun) -> Result<(), SimulationError> 
                         .assured("the fixture registers its handler once");
                     ready.send_replace(true);
                     wait_for(&mut done).await;
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -114,15 +112,32 @@ fn publication_after_partition(run: ScenarioRun) -> Result<(), SimulationError> 
                     let known = serde_json::to_string(&ClusterParameterPublication::new(stale))
                         .assured("the returning host's current-shape publication encodes");
                     turmoil::partition("client", "server");
+                    // Discovery stops waiting at its own deadline; across the partition no
+                    // connection can carry the request before then.
                     let result = transport
-                        .request(
+                        .request_by(
                             &peer,
                             PublicationRequest {
                                 known: known.clone(),
                             },
+                            nervix_interconnect::ExchangeDeadline::Caller(
+                                nervix_primitives::time::Instant::now() + Duration::from_secs(10),
+                            ),
                         )
                         .await;
-                    assert!(matches!(&result, Err(error) if matches!(error.current_context(), RequestError::Timeout { .. } | RequestError::Transport { .. })), "partition outcome: {result:?}");
+                    assert!(
+                        matches!(
+                            &result,
+                            Err(error) if matches!(
+                                error.current_context(),
+                                RequestError::DeadlinePassed {
+                                    deadline: nervix_interconnect::ExchangeDeadlineKind::Caller,
+                                    ..
+                                } | RequestError::Transport { .. }
+                            )
+                        ),
+                        "partition outcome: {result:?}"
+                    );
                     trace.record(
                         "client",
                         "discovery cannot adopt a policy across the partition",
@@ -156,7 +171,7 @@ fn publication_after_partition(run: ScenarioRun) -> Result<(), SimulationError> 
                         "live construction policy gates activation until the applied record \
                          catches up",
                     );
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     done.send_replace(true);
                     Ok::<(), io::Error>(())
                 })

@@ -36,7 +36,7 @@ use nervix_models::{
 };
 
 use super::*;
-use crate::runtime::named;
+use crate::runtime::{MaterializedGeneration, PageReply, named};
 
 fn owner() -> ClusterNodeIdentity {
     ClusterNodeIdentity::new(named("node-1"), ClusterNodeIncarnation::new(1))
@@ -67,7 +67,7 @@ fn section(section: ProcessorStateSection, rows: u64) -> ProcessorStateSectionTr
         section,
         rows,
         fields: Vec::new(),
-        body: None,
+        bodies: Vec::new(),
     }
 }
 
@@ -410,9 +410,13 @@ async fn owner_body(executor: &Executor, rows: RecordBatch) -> (StatePageBody, C
         .encode_arrow_snapshot_section(executor)
         .await
         .assured("a bounded section encodes");
-    identified_body(executor, body)
+    let job = executor
+        .try_reserve(MemoryClass::Bulk, PageReply::DIGEST_JOB_BYTES)
+        .assured("an idle pool admits the digest job");
+    let IdentifiedBody { identity, body, .. } = identified_body(executor, body, job)
         .await
-        .assured("a resident body is identified")
+        .assured("a resident body is identified");
+    (identity, body)
 }
 
 /// The first page of a reorderer holding five rows that returns `returned` of them in one run,
@@ -434,16 +438,26 @@ fn returning_page(
         section: ProcessorStateSection::Pending,
         rows: 5,
         fields,
-        body,
+        bodies: body.into_iter().collect(),
     }];
     page
 }
 
-/// The bytes of the page stream an owner sends for `reply`, as `stream_processor_page` frames it:
-/// the reply's eight-byte little-endian length, its bounded rkyv bytes, then `bodies` in order.
+/// The bytes of the page stream an owner sends for `reply`, as `stream_processor_page` frames it.
 async fn sent_page(
     executor: &Executor,
     reply: ProcessorStatePageReply,
+    bodies: &[&[u8]],
+) -> ChargedBytes {
+    sent_reply(executor, reply, bodies).await
+}
+
+/// The bytes of the page stream an owner sends for `reply`, as `stream_processor_page` and
+/// `stream_materialized_page` frame it: the reply's eight-byte little-endian length, its bounded
+/// rkyv bytes, then `bodies` in order.
+async fn sent_reply<R: RkyvMessage>(
+    executor: &Executor,
+    reply: R,
     bodies: &[&[u8]],
 ) -> ChargedBytes {
     let (header, _header_charge) = reply
@@ -469,6 +483,100 @@ async fn sent_page(
     ChargedBytes::from_owned(stream, charge)
 }
 
+/// The length of every chunk a test stream delivers: small and uneven, so the reader's reads cross
+/// chunk ends everywhere.
+const TEST_CHUNK: usize = 1000;
+
+/// A page stream as an interconnect stream delivers it: the bytes a sent page holds, in chunks of
+/// [`TEST_CHUNK`] bytes, read in exact lengths across them.
+struct SentChunks {
+    chunks: std::collections::VecDeque<ChargedBytes>,
+    /// The chunk being read, and how much of it was read.
+    current: Option<(ChargedBytes, usize)>,
+    length: u64,
+}
+
+impl SentChunks {
+    fn of(sent: &ChargedBytes) -> Self {
+        let mut chunks = std::collections::VecDeque::new();
+        let mut start = 0;
+        while start < sent.len() {
+            let end = (start + TEST_CHUNK).min(sent.len());
+            chunks.push_back(
+                sent.slice(start, end)
+                    .assured("a chunk lies within its stream"),
+            );
+            start = end;
+        }
+        Self {
+            chunks,
+            current: None,
+            length: u64::try_from(sent.len()).assured("a fixture stream length fits u64"),
+        }
+    }
+}
+
+impl PageStream for SentChunks {
+    fn content_length(&self) -> u64 {
+        self.length
+    }
+
+    async fn read_into(
+        &mut self,
+        buffer: &mut BudgetedBuffer,
+        length: usize,
+    ) -> Result<(), Report<StatePageExchangeError>> {
+        let mut left = length;
+        while left > 0 {
+            let (chunk, read) = match self.current.take() {
+                Some(current) => current,
+                None => match self.chunks.pop_front() {
+                    Some(chunk) => (chunk, 0),
+                    None => return Err(Report::new(StatePageExchangeError::Receive)),
+                },
+            };
+            let piece = (chunk.len() - read).min(left);
+            buffer
+                .try_extend_from_slice(&chunk[read..read + piece])
+                .change_context(StatePageExchangeError::Admission)?;
+            left -= piece;
+            if read + piece < chunk.len() {
+                self.current = Some((chunk, read + piece));
+            }
+        }
+        Ok(())
+    }
+
+    async fn ends(&mut self) -> Result<bool, Report<StatePageExchangeError>> {
+        Ok(self.current.is_none() && self.chunks.is_empty())
+    }
+}
+
+/// A read deadline far beyond what any test takes.
+fn far_deadline() -> Instant {
+    Instant::now()
+        .checked_add(std::time::Duration::from_secs(30))
+        .assured("a test deadline is a few seconds away")
+}
+
+/// Receives the page stream `sent` holds as a coordinator does, within a far deadline.
+async fn receive_sent(
+    executor: &Executor,
+    sent: &ChargedBytes,
+    request: &ReadProcessorStatePage,
+    payload: &[(ProcessorStateSection, Vec<SchemaField>)],
+) -> Result<Result<ReceivedProcessorPage, StateInspectionRejection>, Report<StatePageExchangeError>>
+{
+    receive_processor_page(
+        executor,
+        SentChunks::of(sent),
+        request,
+        payload,
+        far_deadline(),
+    )
+    .await
+}
+
 /// Why the coordinator refused a received page. A page it presents, or reads as an owner's typed
 /// refusal, fails the check.
 #[track_caller]
@@ -488,34 +596,6 @@ fn refusal(
     }
 }
 
-/// The room a page stream's descriptor decodes within, taken beside the stream as the coordinator
-/// takes it when the page arrives.
-/// The rooms a received page's decoders draw from, as the receive charges them with the page.
-fn page_rooms(executor: &Executor, stream: &ChargedBytes) -> PageRooms {
-    let length = u64::try_from(stream.len()).assured("a bounded fixture stream's length fits u64");
-    PageRooms {
-        descriptor: descriptor_room(executor, stream),
-        body: executor
-            .try_reserve(
-                MemoryClass::Bulk,
-                RestoredMaterializedSnapshot::decode_scratch_bound(executor, length),
-            )
-            .assured("the fixture class has room for a body's decoding"),
-    }
-}
-
-fn descriptor_room(executor: &Executor, stream: &ChargedBytes) -> Reservation {
-    let length = u64::try_from(stream.len()).assured("a bounded fixture stream's length fits u64");
-    executor
-        .try_reserve(
-            MemoryClass::Bulk,
-            length
-                .checked_mul(2)
-                .assured("a bounded fixture stream's decoding fits u64"),
-        )
-        .assured("the fixture class has room for a descriptor's decoding")
-}
-
 #[nervix_primitives::test]
 async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_their_rows() {
     let executor = Executor::default();
@@ -526,15 +606,9 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
         &[&body[..]],
     )
     .await;
-    let received = ReceivedProcessorPage::decode(
-        &executor,
-        &stream,
-        page_rooms(&executor, &stream),
-        &read(10),
-        &expected_sections(),
-    )
-    .await
-    .assured("the page agrees with its descriptor and the read");
+    let received = receive_sent(&executor, &stream, &read(10), &expected_sections())
+        .await
+        .assured("the page agrees with its descriptor and the read");
     let Ok(page) = received else {
         panic!("an owner that returned rows did not refuse the read");
     };
@@ -546,10 +620,9 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
         (ProcessorStateSection::Pending, 5, &declared_fields()),
         "the section keeps its complete count and its declared fields"
     );
-    let rows = section
-        .batch
-        .as_ref()
-        .assured("a section that returned rows carries them");
+    let [rows] = section.batches.as_slice() else {
+        panic!("a section that returned rows carries them in its one body");
+    };
     assert_eq!(
         rows.column(1).as_primitive::<Int64Type>().values().to_vec(),
         vec![1, 2, 3],
@@ -564,15 +637,9 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
         &[],
     )
     .await;
-    let received = ReceivedProcessorPage::decode(
-        &executor,
-        &counted,
-        page_rooms(&executor, &counted),
-        &read(0),
-        &[],
-    )
-    .await
-    .assured("a page that returns no row agrees with a count-only read");
+    let received = receive_sent(&executor, &counted, &read(0), &[])
+        .await
+        .assured("a page that returns no row agrees with a count-only read");
     let Ok(page) = received else {
         panic!("an owner that counted its rows did not refuse the read");
     };
@@ -580,22 +647,16 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
         panic!("a reorderer page carries its one held-row section");
     };
     assert_eq!(
-        (section.rows, section.batch.is_none()),
+        (section.rows, section.batches.is_empty()),
         (5, true),
         "a count-only page carries the section's complete count and none of its rows"
     );
 
     // An owner's typed refusal arrives as that refusal, and carries no body.
     let refused = sent_page(&executor, Err(StateInspectionRejection::NotReady), &[]).await;
-    let received = ReceivedProcessorPage::decode(
-        &executor,
-        &refused,
-        page_rooms(&executor, &refused),
-        &read(10),
-        &expected_sections(),
-    )
-    .await
-    .assured("a refusal is a complete reply");
+    let received = receive_sent(&executor, &refused, &read(10), &expected_sections())
+        .await
+        .assured("a refusal is a complete reply");
     assert!(
         matches!(received, Err(StateInspectionRejection::NotReady)),
         "the coordinator reports the owner's refusal as the owner typed it"
@@ -606,16 +667,7 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
         &[&body[..]],
     )
     .await;
-    let error = refusal(
-        ReceivedProcessorPage::decode(
-            &executor,
-            &trailing,
-            page_rooms(&executor, &trailing),
-            &read(10),
-            &expected_sections(),
-        )
-        .await,
-    );
+    let error = refusal(receive_sent(&executor, &trailing, &read(10), &expected_sections()).await);
     assert!(matches!(
         error.current_context(),
         StatePageExchangeError::Framing
@@ -640,16 +692,8 @@ async fn a_body_whose_columns_or_types_disagree_with_its_declared_fields_is_refu
             &[&body[..]],
         )
         .await;
-        let error = refusal(
-            ReceivedProcessorPage::decode(
-                &executor,
-                &stream,
-                page_rooms(&executor, &stream),
-                &read(10),
-                &expected_sections(),
-            )
-            .await,
-        );
+        let error =
+            refusal(receive_sent(&executor, &stream, &read(10), &expected_sections()).await);
         assert!(
             matches!(error.current_context(), StatePageExchangeError::Columns),
             "a body of {body_fields:?} under the declared fields is undecodable, found {error:?}"
@@ -779,6 +823,22 @@ async fn a_body_whose_rows_identity_or_bounds_disagree_with_the_descriptor_or_th
         .await,
         read(10),
     ));
+    // The section's bodies hold more rows than its runs return.
+    let mut doubled = full();
+    doubled.sections[0].bodies.push(other_identity.clone());
+    cases.push((
+        "bodies holding more rows than the runs return",
+        sent_page(&executor, Ok(doubled), &[&body[..], &other_body[..]]).await,
+        read(10),
+    ));
+    // The section names more bodies than it returns rows, which every body holds one of at least.
+    let mut crowded = returning_page(1, declared_fields(), Some(identity.clone()));
+    crowded.sections[0].bodies.push(other_identity.clone());
+    cases.push((
+        "more bodies than returned rows",
+        sent_page(&executor, Ok(crowded), &[&body[..], &other_body[..]]).await,
+        read(10),
+    ));
     // The section's declared fields, with a body that decodes under them, do not begin with the
     // payload fields the read expects.
     let mut reordered = declared_fields();
@@ -797,21 +857,370 @@ async fn a_body_whose_rows_identity_or_bounds_disagree_with_the_descriptor_or_th
     ));
 
     for (case, stream, request) in cases {
-        let error = refusal(
-            ReceivedProcessorPage::decode(
-                &executor,
-                &stream,
-                page_rooms(&executor, &stream),
-                &request,
-                &expected,
-            )
-            .await,
-        );
+        let error = refusal(receive_sent(&executor, &stream, &request, &expected).await);
         assert!(
             matches!(error.current_context(), StatePageExchangeError::Framing),
             "{case} is a framing violation, found {error:?}"
         );
     }
+}
+
+/// The node's bound on one snapshot section, narrowed so a fixture page outgrows it.
+const NARROW_SECTION_BYTES: u64 = 64 * 1024;
+
+/// An executor whose snapshot sections hold at most [`NARROW_SECTION_BYTES`], as a node with a
+/// narrower section bound than the default.
+fn narrow_sections() -> Executor {
+    Executor::new(nervix_execution::ExecutionConfig {
+        limits: nervix_execution::OperationLimits {
+            snapshot_section_bytes: ubyte::ByteUnit::Byte(NARROW_SECTION_BYTES),
+            ..nervix_execution::OperationLimits::default()
+        },
+        ..nervix_execution::ExecutionConfig::default()
+    })
+    .assured("a narrow section bound within the default budgets is valid")
+}
+
+/// One row of `fields` per sequence, like [`held_rows`], whose text columns carry `width` bytes.
+fn wide_rows(fields: &[SchemaField], sequences: &[i64], width: usize) -> RecordBatch {
+    let mut columns = Vec::<ArrayRef>::with_capacity(fields.len());
+    for field in fields {
+        let column: ArrayRef = match &field.ty {
+            ParseAsType::String => StdArc::new(StringArray::from_iter_values(
+                sequences
+                    .iter()
+                    .map(|sequence| format!("{sequence:08}{}", "w".repeat(width))),
+            )),
+            ParseAsType::I64 => {
+                StdArc::new(Int64Array::from_iter_values(sequences.iter().copied()))
+            }
+            ParseAsType::U32 => StdArc::new(UInt32Array::from_iter_values(
+                sequences.iter().map(|_| 0_u32),
+            )),
+            other => panic!("the fixture builds no {other:?} column"),
+        };
+        columns.push(column);
+    }
+    RecordBatch::try_new(StdArc::new(SchemaField::arrow_schema(fields)), columns)
+        .assured("every fixture column matches its declared field")
+}
+
+/// The first and only page of a reorderer holding `held` rows, returning all of them in one run.
+fn whole_page(held: u64) -> ProcessorStatePageDescriptor {
+    let mut page = pending_page();
+    page.counts.rows = held;
+    page.offset = held;
+    page.more = false;
+    page.runs = vec![run(ProcessorStateSection::Pending, held)];
+    page.sections = vec![ProcessorStateSectionTransfer {
+        section: ProcessorStateSection::Pending,
+        rows: held,
+        fields: declared_fields(),
+        bodies: Vec::new(),
+    }];
+    page
+}
+
+/// A section whose rows outgrow one snapshot section reaches the coordinator whole. The owner
+/// carries it in bodies that each stay within the section bound, and the coordinator presents
+/// every row, in the order the owner returned them.
+#[nervix_primitives::test]
+async fn a_section_beyond_one_snapshot_section_reaches_the_coordinator_whole() {
+    let executor = narrow_sections();
+    let sequences = (1..=48).collect::<Vec<i64>>();
+    let held = u64::try_from(sequences.len()).assured("a fixture row count fits u64");
+    // 48 rows of 4 KiB text are about three times the section bound.
+    let rows = wide_rows(&declared_fields(), &sequences, 4096);
+    let request = read(held);
+    let parts = processor_page_reply(
+        &executor,
+        Ok((
+            whole_page(held),
+            vec![ProcessorPageSection {
+                batches: vec![rows],
+            }],
+        )),
+        request.max_bytes,
+        None,
+    )
+    .await
+    .assured("an owner carries a section beyond one snapshot section instead of failing");
+    let PageReplyParts { reply, bodies, .. } = parts;
+    assert!(
+        reply.is_ok(),
+        "an owner refused a page it can carry: {reply:?}"
+    );
+    assert!(bodies.len() > 1, "the section outgrows one body");
+    for body in &bodies {
+        let length = u64::try_from(body.len()).assured("a bounded body fits u64");
+        assert!(
+            length <= NARROW_SECTION_BYTES,
+            "a body of {length} bytes exceeds the {NARROW_SECTION_BYTES}-byte section bound"
+        );
+    }
+    let sent = bodies.iter().map(|body| &body[..]).collect::<Vec<_>>();
+    let stream = sent_page(&executor, reply, &sent).await;
+    let received = receive_sent(&executor, &stream, &request, &expected_sections())
+        .await
+        .assured("the coordinator accepts the bodies the owner sent");
+    let Ok(page) = received else {
+        panic!("an owner that returned rows did not refuse the read");
+    };
+    let [section] = page.sections.as_slice() else {
+        panic!("a reorderer page carries its one held-row section");
+    };
+    assert!(
+        section.batches.len() > 1,
+        "the section arrives in the batches its bodies carried"
+    );
+    let mut returned = Vec::new();
+    for batch in &section.batches {
+        returned.extend_from_slice(batch.column(1).as_primitive::<Int64Type>().values());
+    }
+    assert_eq!(
+        returned, sequences,
+        "every row arrives once, in the order the owner returned them"
+    );
+}
+
+/// A row whose own body would exceed the section bound cannot travel, and the owner refuses the
+/// page as too large instead of failing its stream.
+#[nervix_primitives::test]
+async fn a_row_beyond_one_snapshot_section_is_refused_as_too_large() {
+    let executor = narrow_sections();
+    // One row of twice the section bound.
+    let rows = wide_rows(&declared_fields(), &[1], 128 * 1024);
+    let request = read(1);
+    let PageReplyParts { reply, bodies, .. } = processor_page_reply(
+        &executor,
+        Ok((
+            whole_page(1),
+            vec![ProcessorPageSection {
+                batches: vec![rows],
+            }],
+        )),
+        request.max_bytes,
+        None,
+    )
+    .await
+    .assured("an owner answers a row it cannot carry with a typed refusal");
+    assert!(
+        matches!(reply, Err(StateInspectionRejection::ReplyTooLarge)),
+        "a row beyond the section bound is refused as too large, found {reply:?}"
+    );
+    assert!(bodies.is_empty(), "a refused page names no body");
+}
+
+/// A page whose own memory leaves the bulk pool less room than its reply takes is still answered.
+/// Its owner encodes the bodies and the descriptor from what the page set aside for them while
+/// admitting its rows, and never waits for room in the pool, which only that page could free.
+#[nervix_primitives::test]
+async fn a_page_holding_most_of_the_pool_is_answered_without_waiting_for_room() {
+    let executor = Executor::default();
+    let capacity = executor.snapshot().bulk_memory.capacity_bytes;
+    let left = 1024 * 1024;
+    // The page's own memory: all of the bulk pool but one MiB.
+    let held_memory = executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            capacity
+                .checked_sub(left)
+                .assured("the bulk pool holds more than one MiB"),
+        )
+        .assured("an idle pool admits the page's memory");
+    let sequences = (1..=4).collect::<Vec<i64>>();
+    let held = u64::try_from(sequences.len()).assured("a fixture row count fits u64");
+    // Four rows of 1 MiB text: more than the pool has left.
+    let rows = wide_rows(&declared_fields(), &sequences, 1024 * 1024);
+    let PageReply::Remote {
+        descriptor,
+        framing,
+    } = PageReply::remote(&executor)
+    else {
+        panic!("a reply to another node sets memory aside");
+    };
+    // What the page set aside while admitting its rows: the descriptor, and its one section's
+    // rows with their body's framing.
+    let bodies = batch_payload_bytes(&rows)
+        .checked_add(framing)
+        .assured("a fixture page fits u64");
+    let (descriptor_memory, rest) = held_memory
+        .split(descriptor)
+        .assured("the page holds its descriptor's memory");
+    let (body_memory, rest) = rest
+        .split(bodies)
+        .assured("the page holds its bodies' memory");
+    let memory = ProcessorStatePageMemory {
+        _reservation: rest,
+        _windows: Vec::new(),
+        reply: Some(ReplyMemory {
+            descriptor: descriptor_memory,
+            bodies: body_memory,
+            framing,
+        }),
+    };
+    let mut request = read(held);
+    request.max_bytes = 16 * 1024 * 1024;
+    nervix_primitives::time::timeout(
+        std::time::Duration::from_secs(30),
+        stream_processor_page(
+            &executor,
+            Ok((
+                whole_page(held),
+                vec![ProcessorPageSection {
+                    batches: vec![rows],
+                }],
+            )),
+            request.max_bytes,
+            Some(memory),
+        ),
+    )
+    .await
+    .assured("the owner answers without waiting for room in the pool")
+    .assured("the page's reply is framed");
+}
+
+/// A page that set nothing aside for its reply draws each body through the page's allowance. A
+/// further body of a split section the share has no room for runs the reply again within a larger
+/// share, which it waits for holding nothing: it never waits while it holds the section's earlier
+/// bodies, never refuses the read, and frames every body once the pool has room.
+#[nervix_primitives::test]
+async fn a_split_section_of_a_page_without_reply_memory_runs_again_within_a_share_that_holds_it() {
+    let executor = narrow_sections();
+    let capacity = executor.snapshot().bulk_memory.capacity_bytes;
+    // Room for the first body, at most one section bound, but not for a second as well.
+    let left = NARROW_SECTION_BYTES + NARROW_SECTION_BYTES / 2;
+    let held_memory = executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            capacity
+                .checked_sub(left)
+                .assured("the bulk pool holds more than a section and a half"),
+        )
+        .assured("an idle pool admits the held memory");
+    let sequences = (1..=48).collect::<Vec<i64>>();
+    let held = u64::try_from(sequences.len()).assured("a fixture row count fits u64");
+    // 48 rows of 4 KiB text travel in four bodies under a 64 KiB section bound.
+    let rows = wide_rows(&declared_fields(), &sequences, 4096);
+    let request = read(held);
+    let rows = &rows;
+    let mut replying =
+        std::pin::pin!(
+            executor.within_allowance(MemoryClass::Bulk, 1, |share| async move {
+                processor_page_reply(
+                    &share,
+                    Ok((
+                        whole_page(held),
+                        vec![ProcessorPageSection {
+                            batches: vec![rows.clone()],
+                        }],
+                    )),
+                    request.max_bytes,
+                    None,
+                )
+                .await
+            })
+        );
+    assert!(
+        nervix_primitives::time::timeout(std::time::Duration::from_millis(200), replying.as_mut())
+            .await
+            .is_err(),
+        "the reply waits, holding nothing, for a share that holds its bodies"
+    );
+    drop(held_memory);
+    let PageReplyParts { reply, bodies, .. } =
+        nervix_primitives::time::timeout(std::time::Duration::from_secs(30), replying)
+            .await
+            .assured("the reply is framed once the pool has room")
+            .assured("the pool grants the share")
+            .assured("the owner answers");
+    assert!(reply.is_ok(), "the page is framed, found {reply:?}");
+    assert_eq!(bodies.len(), 4, "the section travels in its four bodies");
+}
+
+/// A page that set nothing aside for its reply never waits for room while it holds a body it
+/// already encoded: the next section's body draws through the page's allowance, and a share
+/// without room for it runs the reply again within a larger share, which it waits for holding
+/// nothing. The page is framed once the pool has room, and the read is never refused.
+#[nervix_primitives::test]
+async fn a_page_without_reply_memory_runs_again_within_a_share_that_holds_its_bodies() {
+    let executor = Executor::default();
+    let capacity = executor.snapshot().bulk_memory.capacity_bytes;
+    // Room for the first section's body, its 1 MiB row and its framing, but not for the second's.
+    let left = 3 * 1024 * 1024 / 2;
+    let held_memory = executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            capacity
+                .checked_sub(left)
+                .assured("the bulk pool holds more than one and a half MiB"),
+        )
+        .assured("an idle pool admits the held memory");
+    let first = wide_rows(&declared_fields(), &[1], 1024 * 1024);
+    let second = wide_rows(&declared_fields(), &[2], 1024 * 1024);
+    // A correlator page returning one row on each side, each side its own section.
+    let mut page = whole_page(2);
+    page.runs = vec![
+        run(ProcessorStateSection::Left, 1),
+        run(ProcessorStateSection::Right, 1),
+    ];
+    page.sections = vec![
+        ProcessorStateSectionTransfer {
+            section: ProcessorStateSection::Left,
+            rows: 1,
+            fields: declared_fields(),
+            bodies: Vec::new(),
+        },
+        ProcessorStateSectionTransfer {
+            section: ProcessorStateSection::Right,
+            rows: 1,
+            fields: declared_fields(),
+            bodies: Vec::new(),
+        },
+    ];
+    let mut request = read(2);
+    // A reply bound that holds both bodies, so only the memory decides.
+    request.max_bytes = 16 * 1024 * 1024;
+    let page = &page;
+    let first = &first;
+    let second = &second;
+    let mut replying =
+        std::pin::pin!(
+            executor.within_allowance(MemoryClass::Bulk, 1, |share| async move {
+                processor_page_reply(
+                    &share,
+                    Ok((
+                        page.clone(),
+                        vec![
+                            ProcessorPageSection {
+                                batches: vec![first.clone()],
+                            },
+                            ProcessorPageSection {
+                                batches: vec![second.clone()],
+                            },
+                        ],
+                    )),
+                    request.max_bytes,
+                    None,
+                )
+                .await
+            })
+        );
+    assert!(
+        nervix_primitives::time::timeout(std::time::Duration::from_millis(200), replying.as_mut())
+            .await
+            .is_err(),
+        "the reply waits, holding nothing, for a share that holds both bodies"
+    );
+    drop(held_memory);
+    let PageReplyParts { reply, bodies, .. } =
+        nervix_primitives::time::timeout(std::time::Duration::from_secs(30), replying)
+            .await
+            .assured("the reply is framed once the pool has room")
+            .assured("the pool grants the share")
+            .assured("the owner answers");
+    assert!(reply.is_ok(), "the page is framed, found {reply:?}");
+    assert_eq!(bodies.len(), 2, "each section travels in its body");
 }
 
 /// An executor whose bulk class has one worker.
@@ -920,10 +1329,11 @@ async fn an_owner_frames_a_page_once_its_full_bulk_class_frees_instead_of_refusi
         Ok((
             returning_page(3, declared_fields(), None),
             vec![ProcessorPageSection {
-                batch: Some(held_rows(&declared_fields(), &[1, 2, 3])),
+                batches: vec![held_rows(&declared_fields(), &[1, 2, 3])],
             }],
         )),
         u64::MAX,
+        None,
     ));
     assert!(
         framing.as_mut().now_or_never().is_none(),
@@ -956,13 +1366,7 @@ async fn a_coordinator_presents_a_received_page_once_its_full_bulk_class_frees_i
     let full = FullBulkClass::fill(&coordinator).await;
     let request = read(10);
     let expected = expected_sections();
-    let mut decoding = std::pin::pin!(ReceivedProcessorPage::decode(
-        &coordinator,
-        &stream,
-        page_rooms(&coordinator, &stream),
-        &request,
-        &expected,
-    ));
+    let mut decoding = std::pin::pin!(receive_sent(&coordinator, &stream, &request, &expected,));
     assert!(
         decoding.as_mut().now_or_never().is_none(),
         "a full bulk class holds the received page back"
@@ -977,13 +1381,539 @@ async fn a_coordinator_presents_a_received_page_once_its_full_bulk_class_frees_i
     let [section] = page.sections.as_slice() else {
         panic!("a reorderer page carries its one held-row section");
     };
-    let rows = section
-        .batch
-        .as_ref()
-        .assured("a section that returned rows carries them");
+    let [rows] = section.batches.as_slice() else {
+        panic!("a section of three small rows travels in one body");
+    };
     assert_eq!(
         rows.column(1).as_primitive::<Int64Type>().values().to_vec(),
         vec![1, 2, 3],
         "the rows are the body's rows in the order the owner returned them"
+    );
+}
+
+/// A page of three rows of 256 KiB text as its owner sends it, with the read that asked for it.
+async fn wide_page_stream(owner: &Executor) -> (ChargedBytes, ReadProcessorStatePage) {
+    let rows = wide_rows(&declared_fields(), &[1, 2, 3], 256 * 1024);
+    let (identity, body) = owner_body(owner, rows).await;
+    let stream = sent_page(
+        owner,
+        Ok(returning_page(3, declared_fields(), Some(identity))),
+        &[&body[..]],
+    )
+    .await;
+    let mut request = read(10);
+    request.max_bytes = 16 * 1024 * 1024;
+    (stream, request)
+}
+
+/// A reader holds nothing while it waits for the memory its page takes, so a reader whose bulk
+/// memory is taken waits for room instead of refusing the page, and presents the page once room
+/// frees, with the decoded rows still charged.
+#[nervix_primitives::test]
+async fn a_received_page_waits_for_room_and_is_presented_once_memory_frees() {
+    let owner = Executor::default();
+    let (stream, request) = wide_page_stream(&owner).await;
+    let coordinator = Executor::default();
+    let capacity = coordinator.snapshot().bulk_memory.capacity_bytes;
+    // Every byte of the reader's bulk memory but one KiB, as other reads would hold it.
+    let held = coordinator
+        .try_reserve(
+            MemoryClass::Bulk,
+            capacity
+                .checked_sub(1024)
+                .assured("the bulk pool holds more than one KiB"),
+        )
+        .assured("an idle pool admits the hold");
+    let expected = expected_sections();
+    let mut receiving = std::pin::pin!(receive_sent(&coordinator, &stream, &request, &expected));
+    assert!(
+        receiving.as_mut().now_or_never().is_none(),
+        "a reader without room waits for it instead of refusing the page"
+    );
+    drop(held);
+    let received = receiving
+        .await
+        .assured("the reader receives the page once its memory frees");
+    let Ok(page) = received else {
+        panic!("an owner that returned rows did not refuse the read");
+    };
+    let [section] = page.sections.as_slice() else {
+        panic!("a reorderer page carries its one held-row section");
+    };
+    let [rows] = section.batches.as_slice() else {
+        panic!("three rows of 256 KiB travel in one body");
+    };
+    assert_eq!(
+        rows.column(1).as_primitive::<Int64Type>().values().to_vec(),
+        vec![1, 2, 3],
+        "the rows are the body's rows in the order the owner returned them"
+    );
+    assert!(
+        page.memory.is_some(),
+        "the decoded rows keep their charge until they are presented"
+    );
+}
+
+/// A reader that finds no room for its page before the read's deadline goes without the page with
+/// the typed deadline refusal.
+#[nervix_primitives::test]
+async fn a_received_page_without_room_before_its_deadline_is_refused_as_deadline() {
+    let owner = Executor::default();
+    let (stream, request) = wide_page_stream(&owner).await;
+    let coordinator = Executor::default();
+    let capacity = coordinator.snapshot().bulk_memory.capacity_bytes;
+    let held = coordinator
+        .try_reserve(
+            MemoryClass::Bulk,
+            capacity
+                .checked_sub(1024)
+                .assured("the bulk pool holds more than one KiB"),
+        )
+        .assured("an idle pool admits the hold");
+    let deadline = Instant::now()
+        .checked_add(std::time::Duration::from_millis(100))
+        .assured("a test deadline is a moment away");
+    let received = receive_processor_page(
+        &coordinator,
+        SentChunks::of(&stream),
+        &request,
+        &expected_sections(),
+        deadline,
+    )
+    .await
+    .assured("the reader answers once its deadline passes");
+    assert!(
+        matches!(received, Err(StateInspectionRejection::Deadline)),
+        "a reader without room by its deadline refuses the page as a deadline, found {:?}",
+        received.err()
+    );
+    drop(held);
+}
+
+/// A page whose bodies and their decoding together exceed what the reader's whole bulk class could
+/// ever hold is refused at once as too large, instead of waiting for room that can never exist.
+#[nervix_primitives::test]
+async fn a_received_page_the_reader_could_never_hold_is_refused_at_once_as_too_large() {
+    let owner = narrow_sections();
+    let sequences = (1..=128).collect::<Vec<i64>>();
+    let held = u64::try_from(sequences.len()).assured("a fixture row count fits u64");
+    // 128 rows of 4 KiB text, about 512 KiB in bodies within a 64 KiB section bound.
+    let rows = wide_rows(&declared_fields(), &sequences, 4096);
+    let mut request = read(held);
+    request.max_bytes = 16 * 1024 * 1024;
+    let PageReplyParts { reply, bodies, .. } = processor_page_reply(
+        &owner,
+        Ok((
+            whole_page(held),
+            vec![ProcessorPageSection {
+                batches: vec![rows],
+            }],
+        )),
+        request.max_bytes,
+        None,
+    )
+    .await
+    .assured("the owner carries the rows in bounded bodies");
+    let sent = bodies.iter().map(|body| &body[..]).collect::<Vec<_>>();
+    let stream = sent_page(&owner, reply, &sent).await;
+    // A reader whose whole bulk class is the least an executor with the same section bound
+    // accepts: one section and the chunk it moves.
+    let limits = nervix_execution::OperationLimits {
+        snapshot_section_bytes: ubyte::ByteUnit::Byte(NARROW_SECTION_BYTES),
+        ..nervix_execution::OperationLimits::default()
+    };
+    let bulk = limits
+        .snapshot_section_operation_bytes()
+        .assured("a narrow section's operation fits u64");
+    let defaults = nervix_execution::ExecutionConfig::default();
+    let coordinator = Executor::new(nervix_execution::ExecutionConfig {
+        limits,
+        budgets: nervix_execution::MemoryBudgets {
+            bulk: ubyte::ByteUnit::Byte(bulk),
+            ..defaults.budgets
+        },
+        ..defaults
+    })
+    .assured("the least bulk class the section bound admits is valid");
+    let mut need = 0_u64;
+    for body in &bodies {
+        let encoded = u64::try_from(body.len()).assured("a body length fits u64");
+        need += encoded + RuntimeRecordBatch::snapshot_section_scratch(&coordinator, encoded);
+    }
+    assert!(
+        need > bulk,
+        "the fixture page takes {need} bytes, which the {bulk}-byte class could hold"
+    );
+    let refused = nervix_primitives::time::timeout(
+        std::time::Duration::from_secs(30),
+        receive_sent(&coordinator, &stream, &request, &expected_sections()),
+    )
+    .await
+    .assured("the reader refuses at once instead of waiting")
+    .assured("the reader answers");
+    assert!(
+        matches!(refused, Err(StateInspectionRejection::ReplyTooLarge)),
+        "a page no reader of this size could hold is too large, found {:?}",
+        refused.err()
+    );
+}
+
+/// A materialized relay generation with one record in each tenant's branch, in order, each record
+/// a sequence and `payload` bytes of text.
+fn tenant_generation(tenants: &[&str], payload: usize) -> MaterializedGeneration {
+    let mut records = Vec::with_capacity(tenants.len());
+    for (index, tenant) in tenants.iter().enumerate() {
+        let sequence = i64::try_from(index).assured("a fixture holds few records");
+        let row = crate::runtime_schema::test_runtime_row([
+            (
+                "seq".to_string(),
+                crate::runtime_schema::RuntimeValue::I64(sequence),
+            ),
+            (
+                "payload".to_string(),
+                crate::runtime_schema::RuntimeValue::String("p".repeat(payload)),
+            ),
+        ]);
+        let branch = crate::runtime::BranchKey::from_fields([(
+            FieldName::try_from("tenant".to_string()).assured("a fixture field name is valid"),
+            crate::runtime_schema::RuntimeValue::String((*tenant).to_string()),
+        )])
+        .assured("a one-field branch key is well formed");
+        records.push(MaterializedGenerationRecord {
+            branch: Some(branch),
+            row,
+        });
+    }
+    let schema = records[0].row.arrow_schema();
+    MaterializedGeneration::new(7, 3, 5, schema, records)
+}
+
+/// The schema a materialized page of `generation` decodes against.
+fn generation_schema(generation: &MaterializedGeneration) -> StdArc<arrow_schema::Schema> {
+    generation.records()[0].row.arrow_schema()
+}
+
+/// A materialized relay page that returns every one of `generation`'s records, as its owner
+/// describes it.
+fn materialized_descriptor(generation: &MaterializedGeneration) -> MaterializedStatePageDescriptor {
+    let records =
+        u64::try_from(generation.records().len()).assured("a fixture record count fits u64");
+    let last_branch = match generation.records().last() {
+        Some(record) => record.branch.as_ref().map(|branch| branch.fingerprint()),
+        None => None,
+    };
+    MaterializedStatePageDescriptor {
+        origin: StateInspectionOrigin {
+            node: owner(),
+            fingerprint: [1; 32],
+            generation: generation.branch_generation(),
+            revision: generation.revision(),
+            stage: StateInspectionStage::Live,
+        },
+        fence: generation.fence(),
+        counts: StateInspectionCounts {
+            branches: records,
+            rows: records,
+            bytes: 64,
+        },
+        offset: records,
+        last_branch,
+        more: false,
+    }
+}
+
+/// A first read of a materialized relay that returns up to `max_rows` of its records.
+fn materialized_read(max_rows: u64) -> ReadMaterializedStatePage {
+    ReadMaterializedStatePage {
+        domain: named("orders"),
+        relay: named("events"),
+        unit: Unit::SINGLE,
+        control_revision: 1,
+        schema: SchemaFingerprint::from_digest([7; 32]),
+        selection: StateInspectionBranchSelection::All,
+        after: None,
+        max_rows,
+        max_bytes: 16 * 1024 * 1024,
+        target: owner(),
+    }
+}
+
+/// A materialized page as its owner sends it, with the read that asked for it and the layout of
+/// the container it carries.
+struct SentMaterializedPage {
+    stream: ChargedBytes,
+    request: ReadMaterializedStatePage,
+    layout: SealedContainerLayout,
+    /// The length of the container the page carries.
+    container: u64,
+}
+
+/// The page stream an owner sends for a first page returning every record of `generation`, with
+/// `declare` applied to the layout its descriptor names.
+async fn materialized_stream_declaring(
+    owner: &Executor,
+    generation: &MaterializedGeneration,
+    declare: impl FnOnce(&mut Vec<MaterializedStatePageGroup>),
+) -> SentMaterializedPage {
+    let container = generation
+        .encode_resident_container(owner)
+        .await
+        .assured("a bounded generation encodes");
+    let layout = container.layout;
+    let mut groups = layout
+        .groups
+        .iter()
+        .map(MaterializedStatePageGroup::from)
+        .collect::<Vec<_>>();
+    declare(&mut groups);
+    let job = owner
+        .try_reserve(MemoryClass::Bulk, PageReply::DIGEST_JOB_BYTES)
+        .assured("an idle pool admits the digest job");
+    let IdentifiedBody { identity, body, .. } = identified_body(owner, container.bytes, job)
+        .await
+        .assured("a resident container is identified");
+    let reply: MaterializedStatePageReply = Ok(MaterializedStatePageTransfer {
+        page: materialized_descriptor(generation),
+        body: Some(MaterializedStatePageBody {
+            identity,
+            records: layout.records,
+            groups,
+        }),
+    });
+    let container = u64::try_from(body.len()).assured("a fixture container's length fits u64");
+    let stream = sent_reply(owner, reply, &[&body[..]]).await;
+    SentMaterializedPage {
+        stream,
+        request: materialized_read(layout.records),
+        layout,
+        container,
+    }
+}
+
+/// The page stream an owner sends for a first page returning every record of `generation`.
+async fn materialized_stream(
+    owner: &Executor,
+    generation: &MaterializedGeneration,
+) -> SentMaterializedPage {
+    materialized_stream_declaring(owner, generation, |_| {}).await
+}
+
+/// Every byte of `executor`'s bulk memory but one KiB, as other reads would hold it: room for a
+/// page's descriptor, not for opening its container.
+fn hold_all_but_a_kibibyte(executor: &Executor) -> Reservation {
+    let capacity = executor.snapshot().bulk_memory.capacity_bytes;
+    executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            capacity
+                .checked_sub(1024)
+                .assured("the bulk pool holds more than one KiB"),
+        )
+        .assured("an idle pool admits the hold")
+}
+
+/// A materialized page's reader holds nothing while it waits for the memory the page takes, so a
+/// reader whose bulk memory is taken waits for room instead of refusing the page, and presents the
+/// page once room frees. The opened rows keep their share of the read's memory until they are
+/// presented, and nothing else stays charged.
+#[nervix_primitives::test]
+async fn a_received_materialized_page_waits_for_room_and_is_presented_once_memory_frees() {
+    let owner = Executor::default();
+    let generation = tenant_generation(&["alpha", "beta"], 1024);
+    let schema = generation_schema(&generation);
+    let sent = materialized_stream(&owner, &generation).await;
+    let coordinator = Executor::default();
+    let held = hold_all_but_a_kibibyte(&coordinator);
+    let mut receiving = std::pin::pin!(receive_materialized_page(
+        &coordinator,
+        SentChunks::of(&sent.stream),
+        &schema,
+        &sent.request,
+        far_deadline(),
+    ));
+    let early =
+        nervix_primitives::time::timeout(std::time::Duration::from_millis(200), receiving.as_mut())
+            .await;
+    assert!(
+        early.is_err(),
+        "a reader without room waits for it instead of answering"
+    );
+    drop(held);
+    let received = receiving
+        .await
+        .assured("the reader receives the page once its memory frees");
+    let Ok(page) = received else {
+        panic!("an owner that returned rows did not refuse the read");
+    };
+    assert_eq!(page.len(), generation.records().len());
+    for (index, expected) in generation.records().iter().enumerate() {
+        let record = page
+            .record(index)
+            .assured("the page holds every returned record");
+        assert_eq!(
+            record.branch, expected.branch,
+            "record {index} keeps its branch"
+        );
+        assert_eq!(
+            record.row.value_at(0).assured("the sequence loads"),
+            expected.row.value_at(0).assured("the sequence loads"),
+            "record {index} keeps its sequence"
+        );
+    }
+    assert!(
+        coordinator.snapshot().bulk_memory.reserved_bytes > 0,
+        "the opened rows keep their share of the read's memory until they are presented"
+    );
+    drop(page);
+    assert_eq!(
+        coordinator.snapshot().bulk_memory.reserved_bytes,
+        0,
+        "presenting the rows gives back everything the read admitted"
+    );
+}
+
+/// A reader that finds no room for a materialized page before the read's deadline goes without
+/// the page with the typed deadline refusal.
+#[nervix_primitives::test]
+async fn a_received_materialized_page_without_room_before_its_deadline_is_refused_as_deadline() {
+    let owner = Executor::default();
+    let generation = tenant_generation(&["alpha", "beta"], 1024);
+    let schema = generation_schema(&generation);
+    let sent = materialized_stream(&owner, &generation).await;
+    let coordinator = Executor::default();
+    let held = hold_all_but_a_kibibyte(&coordinator);
+    let deadline = Instant::now()
+        .checked_add(std::time::Duration::from_millis(100))
+        .assured("a test deadline is a moment away");
+    let received = receive_materialized_page(
+        &coordinator,
+        SentChunks::of(&sent.stream),
+        &schema,
+        &sent.request,
+        deadline,
+    )
+    .await
+    .assured("the reader answers once its deadline passes");
+    assert!(
+        matches!(received, Err(StateInspectionRejection::Deadline)),
+        "a reader without room by its deadline refuses the page as a deadline, found {:?}",
+        received.err()
+    );
+    drop(held);
+    assert_eq!(
+        coordinator.snapshot().bulk_memory.reserved_bytes,
+        0,
+        "a refused read holds nothing"
+    );
+}
+
+/// Operation limits whose sections and identity records hold at most `bytes`.
+fn sections_of(bytes: u64) -> nervix_execution::OperationLimits {
+    nervix_execution::OperationLimits {
+        snapshot_section_bytes: ubyte::ByteUnit::Byte(bytes),
+        snapshot_record_bytes: ubyte::ByteUnit::Byte(bytes),
+        ..nervix_execution::OperationLimits::default()
+    }
+}
+
+/// A materialized page whose container and its opening together exceed what the reader's whole
+/// bulk class could ever hold is refused at once as too large, instead of waiting for room that
+/// can never exist.
+#[nervix_primitives::test]
+async fn a_received_materialized_page_the_reader_could_never_hold_is_refused_at_once_as_too_large()
+{
+    // The owner seals in sections of half the reader's bound, so every section it writes is one
+    // the reader may open.
+    let owner = Executor::new(nervix_execution::ExecutionConfig {
+        limits: sections_of(NARROW_SECTION_BYTES / 2),
+        ..nervix_execution::ExecutionConfig::default()
+    })
+    .assured("narrow sections within the default budgets are valid");
+    // A reader whose whole bulk class is the least its section bound accepts: one section and the
+    // chunk it moves.
+    let limits = sections_of(NARROW_SECTION_BYTES);
+    let bulk = limits
+        .snapshot_section_operation_bytes()
+        .assured("a narrow section's operation fits u64");
+    let defaults = nervix_execution::ExecutionConfig::default();
+    let coordinator = Executor::new(nervix_execution::ExecutionConfig {
+        limits,
+        budgets: nervix_execution::MemoryBudgets {
+            bulk: ubyte::ByteUnit::Byte(bulk),
+            ..defaults.budgets
+        },
+        ..defaults
+    })
+    .assured("the least bulk class the section bound admits is valid");
+    // Sixteen records of 16 KiB text: about 256 KiB of columns in narrow groups.
+    let tenants = [
+        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p",
+    ];
+    let generation = tenant_generation(&tenants, 16 * 1024);
+    let schema = generation_schema(&generation);
+    let sent = materialized_stream(&owner, &generation).await;
+    let container = sent.container;
+    let opening = sent
+        .layout
+        .relay_opening(&coordinator, container)
+        .assured("every section the owner wrote fits the reader's bounds")
+        .need()
+        .assured("the opening's parts add up within u64");
+    assert!(
+        container + opening > bulk,
+        "the fixture page takes {} bytes, which the {bulk}-byte class could hold",
+        container + opening
+    );
+    let refused = nervix_primitives::time::timeout(
+        std::time::Duration::from_secs(30),
+        receive_materialized_page(
+            &coordinator,
+            SentChunks::of(&sent.stream),
+            &schema,
+            &sent.request,
+            far_deadline(),
+        ),
+    )
+    .await
+    .assured("the reader refuses at once instead of waiting")
+    .assured("the reader answers");
+    assert!(
+        matches!(refused, Err(StateInspectionRejection::ReplyTooLarge)),
+        "a page no reader of this size could hold is too large, found {:?}",
+        refused.err()
+    );
+}
+
+/// A container that differs from the layout its descriptor names is refused before any row is
+/// presented, even when it has the declared length and digest, and the refused read holds nothing.
+#[nervix_primitives::test]
+async fn a_materialized_page_whose_container_differs_from_its_declared_layout_is_refused() {
+    let owner = Executor::default();
+    let generation = tenant_generation(&["alpha", "beta"], 1024);
+    let schema = generation_schema(&generation);
+    // One byte moves from the group's columns to its identities: the same length, another layout.
+    let sent = materialized_stream_declaring(&owner, &generation, |groups| {
+        let group = groups.first_mut().assured("a page container holds a group");
+        group.identities += 1;
+        group.columns -= 1;
+    })
+    .await;
+    let coordinator = Executor::default();
+    let refused = receive_materialized_page(
+        &coordinator,
+        SentChunks::of(&sent.stream),
+        &schema,
+        &sent.request,
+        far_deadline(),
+    )
+    .await;
+    assert!(
+        matches!(&refused, Err(error) if matches!(error.current_context(), StatePageExchangeError::Columns)),
+        "a container that differs from its declared layout is refused as unreadable"
+    );
+    assert_eq!(
+        coordinator.snapshot().bulk_memory.reserved_bytes,
+        0,
+        "a refused read holds nothing"
     );
 }

@@ -57,9 +57,10 @@ declarations, defaults and inspection of these capabilities.
 Coordination guarantees use the committed parameter record: forced-recovery budgets, handoff
 reconciliation polling, entity-gate polling, domain-drain polling and readiness propagation.
 An operation captures its applicable values at admission. A polling tick never restarts or
-extends the operation's deadline. RPC attempts remain bounded by their remaining operation
-budget and the deadline derived from the transport request timeout. Startup reconciliation waits
-derive from the gossip round and remain cancellable during shutdown.
+extends the operation's deadline. An RPC an operation sends waits for its peer for as long as the
+peer lives, bounded only by the operation's remaining budget, as
+[Liveness And Deadlines](./interconnect.md#liveness-and-deadlines) states. Startup reconciliation
+waits derive from the gossip round and remain cancellable during shutdown.
 
 A control-plane mutation returns its semantic result only after Raft has committed it and the
 leader has durably applied it. The applied write stores the changed semantic records together with
@@ -279,8 +280,9 @@ graph; an encoding or transport failure yields no successful partial inspection.
 
 Actual quiescence is an ordered engagement history, distinct from the frozen plan. Each attempt
 records its request and then whether engagement was confirmed, definitively failed, or remained
-uncertain; a confirmed cleanup records release. A request timeout is uncertain when the remote node
-may already have engaged its gate, so it contributes its possible scope to the executed aggregate.
+uncertain; a confirmed cleanup records release. A request that ends unanswered, at the gate's own
+deadline or with its connection, is uncertain when the remote node may already have engaged its
+gate, so it contributes its possible scope to the executed aggregate.
 A definitive failure before any engagement leaves the actual level `DYNAMIC`. If runtime activation
 cannot perform the planned entity swap on a node, that node puts back what the swap had replaced and
 the report keeps the entity attempt with the activation's failure; nothing widens into a rebuild.
@@ -815,9 +817,9 @@ local affected work with the intake and boundary gates already closed. Routes an
 therefore finish the obligations that make their state ready to capture. A held handoff denotes
 that completed drain and the installed freeze; frozen owners retain their state until capture and
 activation finish. Preparation retains its original deadline, distinct from the gate lease that
-protects activation. Repeated engagement requests use the same coordination identity and scope;
-a bounded reply timeout does not create another flush, and an engagement that carries a later
-deadline renews the lease to it.
+protects activation. An engagement request waits for its participant's answer until the gate's own
+deadline, and a repeated one uses the same coordination identity and scope, creates no other
+flush, and renews the lease to a later deadline it carries.
 
 The coordinator prepares the moves of one handoff at the same time, not one after another. It
 captures each moved unit's state and prepares it on its destination and replicas. A reader whose
@@ -997,7 +999,10 @@ Duplicates](inferencer-state.md#replay-skips-and-duplicates).
 A survivor can also accept a batch before its own installation of the failover revision reaches the
 new route, and forward it to the lost owner. Such a batch never reached the lost owner, so it is
 neither refused nor redelivered: once the survivor has installed the route, the batch goes to the
-unit's new owner exactly once, without a negative acknowledgement. A batch the lost owner may have
+unit's new owner exactly once, without a negative acknowledgement. This holds as well when the
+survivor learns from membership that the lost owner left before it installs the route: the batch
+waits for that route, holding back nothing the installation needs. A lost owner that returns within
+the grace keeps its work and receives the batch itself. A batch the lost owner may have
 received before it stopped is still failed for redelivery; see
 [Cancellation And Branch Changes](./interconnect.md#cancellation-and-branch-changes).
 

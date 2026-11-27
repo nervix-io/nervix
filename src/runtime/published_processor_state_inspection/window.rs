@@ -84,7 +84,7 @@ impl WindowBranch<'_> {
                 }
             }
             reserve_item::<StructureRow>(&mut page.memory)?;
-            reserve_bytes(&mut page.memory, 256)?;
+            page.reserve_metadata(256)?;
             reserve_item::<ProcessorStateRun>(&mut page.memory)?;
             page.structures.push(StructureRow {
                 index: u32::try_from(index)
@@ -102,7 +102,7 @@ impl WindowBranch<'_> {
                 .ok_or_else(|| Report::new(ProcessorStatePageError::Columns))?;
         }
         reserve_item::<HeaderRow>(&mut page.memory)?;
-        reserve_bytes(&mut page.memory, 256)?;
+        page.reserve_metadata(256)?;
         reserve_item::<ProcessorStateRun>(&mut page.memory)?;
         page.headers.push(HeaderRow {
             revision,
@@ -125,7 +125,7 @@ impl WindowBranch<'_> {
 pub(super) fn snapshot_charge(
     snapshot: &WindowProcessorStateSnapshot,
     plan: &WindowAccumulatorPlan,
-    memory: &mut GrowingCharge,
+    memory: &mut Reservation,
     cancellation: &Cancellation,
 ) -> ReadResult<u64> {
     use std::collections::hash_map::Entry;

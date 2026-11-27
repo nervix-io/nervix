@@ -1244,13 +1244,6 @@ fn rebind_resource_before_for(input: &str, cursor: usize) -> Option<ResourceName
 }
 
 impl SessionServiceImpl {
-    pub(in crate::application) fn coordination_rpc_timeout(&self) -> std::time::Duration {
-        nervix_interconnect::RequestDeadline::Coordination.resolve(
-            self.inner.interconnect.request_timeout(),
-            self.inner.interconnect.liveness(),
-        )
-    }
-
     pub(in crate::application) fn session_limits(&self) -> nervix_client_wire::SessionLimits {
         self.inner.session_limits
     }

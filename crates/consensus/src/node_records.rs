@@ -30,16 +30,6 @@ impl nervix_interconnect::InterconnectRequest for NodeRecordAnnouncement {
     type Response = NodeRecordAnnouncementReply;
     const NAME: &'static str = "consensus.announce_node_record";
     const CLASS: nervix_interconnect::PoolClass = nervix_interconnect::PoolClass::Commands;
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "this required trait projection is exactly the existing runtime-admission \
-                      read deadline; it defines no independent numeric policy"
-        )
-    )]
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        <wire::RuntimeAdmissionRead as nervix_interconnect::InterconnectRequest>::DEADLINE;
 }
 
 impl Consensus {

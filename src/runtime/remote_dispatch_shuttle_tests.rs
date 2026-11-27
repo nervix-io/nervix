@@ -1,9 +1,10 @@
-//! The silence sweep of forwarded record acknowledgements, explored under Shuttle.
+//! The sweep of forwarded record acknowledgements, explored under Shuttle.
 //!
 //! Layer: test harness.
-//! - **Owns.** The single-resolution and reported-share invariants the production registry of
-//!   forwarded acknowledgements is held to while its sweep races reports and terminal outcomes,
-//!   and reporting to a newly admitted registrar before its live view catches up.
+//! - **Owns.** The single-resolution invariants the production registry of forwarded
+//!   acknowledgements is held to while its sweep, which gives up the shares of receiver runs that
+//!   membership ended, races reports and terminal outcomes, and reporting to a newly admitted
+//!   registrar before its live view catches up.
 //! - **Depends on.** The remote dispatch registry, acknowledgement roots, and the server Shuttle
 //!   runner.
 //! - **Must not know.** Relays, deliveries, the interconnect, or what the acknowledged records are.
@@ -21,11 +22,14 @@ use nervix_primitives::{sync::Arc, thread, time::Instant};
 
 use crate::{
     runtime::{
-        remote_ack_owner::RemoteDispatchRegistry,
-        remote_dispatch::{REMOTE_ACK_SILENT_SWEEPS, RelayAdmissionUpdate},
+        remote_ack_owner::{RemoteDispatchRegistry, TestMembership},
+        remote_dispatch::RelayAdmissionUpdate,
     },
     runtime_ack::{AckCompletion, AckOutcome, AckSet},
 };
+
+/// The process epoch of the receiver run that admits the checks' records.
+const RECEIVER_RUN: u64 = 5;
 
 const JOINED: &str =
     "a modeled thread's panic fails the Shuttle execution before its joiner resumes";
@@ -66,12 +70,7 @@ fn shuttle_a_new_registrar_keeps_its_terminal_ack_while_its_live_view_publicatio
                 let live = reading.load().as_deref().copied();
                 assert!(
                     matches!(
-                        watch.next_report(
-                            nervix_models::RemoteAckTiming::default(),
-                            Some(progress),
-                            live,
-                            Instant::now()
-                        ),
+                        watch.next_report(Some(progress), live, true, Instant::now()),
                         RemoteAckWatchReport::Send(RemoteAckOutcome::Ack)
                     ),
                     "a delayed preceding incarnation never retires the admitted registrar's \
@@ -89,11 +88,12 @@ fn receiver() -> ClusterNodeName {
     ClusterNodeName::parse("node-3").assured("the fixture node name is valid")
 }
 
-/// A registry holding one forwarded acknowledgement of an admitted delivery whose receiver reported
-/// nothing for every sweep but the one that fails it, with the number it is registered under and
-/// the completion of the root it stands for.
+/// A registry holding one forwarded acknowledgement of an admitted delivery whose receiver run a
+/// newer run replaced, so the next sweep gives it up, with the number it is registered under, the
+/// membership that ended the run and the completion of the root it stands for.
 struct OneSweepFromFailing {
     registry: Arc<RemoteDispatchRegistry>,
+    membership: Arc<TestMembership>,
     ack_id: u64,
     completion: AckCompletion,
 }
@@ -101,19 +101,20 @@ struct OneSweepFromFailing {
 impl OneSweepFromFailing {
     fn new() -> Self {
         let registry = Arc::new(RemoteDispatchRegistry::with_capacity(2));
+        let membership = Arc::new(TestMembership::default());
         let (acks, completion) = AckSet::root();
         let ack_id = registry
             .register_ack(receiver(), acks)
             .assured("the fixture has free correlation capacity");
-        registry.admit_ack(ack_id);
-        for _ in 0..REMOTE_ACK_SILENT_SWEEPS {
-            assert!(
-                registry.fail_silent_acks().is_empty(),
-                "a share fails only at the first sweep past the silence bound"
-            );
-        }
+        registry.admit_ack(ack_id, RECEIVER_RUN);
+        assert!(
+            registry.sweep_pending_acks_once(&*membership).is_empty(),
+            "a share whose receiver run lives is never given up"
+        );
+        membership.replace_run(&receiver(), RECEIVER_RUN);
         Self {
             registry,
+            membership,
             ack_id,
             completion,
         }
@@ -132,7 +133,8 @@ fn shuttle_a_terminal_outcome_racing_the_final_sweep_resolves_the_share_once() {
     check_interleavings(|| {
         let model = OneSweepFromFailing::new();
         let sweeping = model.registry.clone();
-        let sweep = thread::spawn(move || sweeping.fail_silent_acks());
+        let membership = model.membership.clone();
+        let sweep = thread::spawn(move || sweeping.sweep_pending_acks_once(&*membership));
         let resolving = model.registry.clone();
         let ack_id = model.ack_id;
         let resolve = thread::spawn(move || resolving.resolve_ack(ack_id, AckOutcome::Ack));
@@ -162,40 +164,27 @@ fn shuttle_a_terminal_outcome_racing_the_final_sweep_resolves_the_share_once() {
     });
 }
 
-/// The receiver's report arrives while the sweep that would fail the share runs. A report that
-/// reaches the share keeps it pending; only a report that finds it already removed lets it fail.
+/// A report sent before its receiver run ended arrives while the sweep that gives the share up runs.
+/// A report never keeps the share of a run membership ended: the sweep fails the share once,
+/// whether the report reached it first or found it already removed.
 #[test]
-fn shuttle_a_report_racing_the_final_sweep_keeps_the_share_it_reached() {
+fn shuttle_a_report_racing_the_sweep_of_an_ended_run_never_keeps_its_share() {
     check_interleavings(|| {
         let model = OneSweepFromFailing::new();
         let sweeping = model.registry.clone();
-        let sweep = thread::spawn(move || sweeping.fail_silent_acks());
+        let membership = model.membership.clone();
+        let sweep = thread::spawn(move || sweeping.sweep_pending_acks_once(&*membership));
         let reporting = model.registry.clone();
         let ack_id = model.ack_id;
         let report = thread::spawn(move || reporting.report_ack(ack_id));
 
         let failed = sweep.join().assured(JOINED);
-        let reached = report.join().assured(JOINED);
+        report.join().assured(JOINED);
 
-        if reached {
-            assert!(
-                failed.is_empty(),
-                "a share its receiver reported before the sweep's removal must not fail"
-            );
-            assert!(
-                model.registry.holds_ack(ack_id),
-                "a reported share stays pending for its receiver's outcome"
-            );
-            assert!(
-                model.outcome().is_none(),
-                "a pending share must leave its root unresolved"
-            );
-            return;
-        }
         assert_eq!(
             failed.get(&receiver()),
             Some(&1),
-            "a report that found no share came after the sweep failed it"
+            "the sweep gives up the share of an ended run once"
         );
         assert!(!model.registry.holds_ack(ack_id));
         assert!(
@@ -205,56 +194,41 @@ fn shuttle_a_report_racing_the_final_sweep_keeps_the_share_it_reached() {
     });
 }
 
-/// A delivery claims its position for the first time while a sweep runs. The sweep bounds its scan
-/// by the positions claimed so far, so it counts the new share or leaves it to the next sweep, and
-/// no later sweep skips it: the share fails once its receiver has stayed silent for the bound.
+/// A delivery claims its position for the first time while a sweep runs, for a receiver run that
+/// membership already ended. The sweep bounds its scan by the positions claimed so far, so it
+/// gives the new share up or leaves it to the next sweep, and no later sweep skips it.
 #[test]
 fn shuttle_a_first_claim_racing_a_sweep_is_counted_by_that_sweep_or_the_next() {
     check_interleavings(|| {
         let registry = Arc::new(RemoteDispatchRegistry::with_capacity(1));
+        let membership = Arc::new(TestMembership::default());
+        membership.replace_run(&receiver(), RECEIVER_RUN);
         let (acks, completion) = AckSet::root();
         let registering = registry.clone();
         let registration = thread::spawn(move || {
             let ack_id = registering
                 .register_ack(receiver(), acks)
                 .assured("the fixture has free correlation capacity");
-            registering.admit_ack(ack_id);
+            registering.admit_ack(ack_id, RECEIVER_RUN);
             ack_id
         });
         let sweeping = registry.clone();
-        let sweep = thread::spawn(move || sweeping.fail_silent_acks());
+        let sweeping_membership = membership.clone();
+        let sweep = thread::spawn(move || sweeping.sweep_pending_acks_once(&*sweeping_membership));
 
         let ack_id = registration.join().assured(JOINED);
         let racing = sweep.join().assured(JOINED);
-        assert!(
-            racing.is_empty(),
-            "a share cannot fail in the sweep it registers beside"
-        );
-
-        let mut later_sweeps = 0_u64;
-        let failed = loop {
-            later_sweeps = later_sweeps
-                .checked_add(1)
-                .assured("the check sweeps a bounded number of times");
-            let failed = registry.fail_silent_acks();
-            if !failed.is_empty() {
-                break failed;
-            }
-            assert!(
-                later_sweeps <= REMOTE_ACK_SILENT_SWEEPS,
-                "a registered share must fail once its silence bound has passed"
+        if racing.is_empty() {
+            assert_eq!(
+                registry
+                    .sweep_pending_acks_once(&*membership)
+                    .get(&receiver()),
+                Some(&1),
+                "the sweep after the racing one gives the share up"
             );
-        };
-        assert_eq!(failed.get(&receiver()), Some(&1));
-        // The racing sweep either counted the admitted share, which leaves the bound itself to the
-        // later sweeps, or left the share to them, which takes one sweep more.
-        assert!(
-            matches!(
-                later_sweeps.checked_sub(REMOTE_ACK_SILENT_SWEEPS),
-                Some(0 | 1)
-            ),
-            "the share failed after {later_sweeps} later sweeps"
-        );
+        } else {
+            assert_eq!(racing.get(&receiver()), Some(&1));
+        }
         assert!(!registry.holds_ack(ack_id));
         assert!(matches!(
             completion.wait().now_or_never(),
@@ -274,7 +248,7 @@ fn shuttle_a_sweep_waits_for_no_position_a_side_has_not_claimed() {
         let ack_id = registry
             .register_ack(receiver(), acks)
             .assured("the fixture has free correlation capacity");
-        registry.admit_ack(ack_id);
+        registry.admit_ack(ack_id, RECEIVER_RUN);
         // The registration claimed the first delivery position. The second delivery position is
         // unclaimed, and so are both admission positions after it.
         let unclaimed_delivery = 1;
@@ -283,13 +257,14 @@ fn shuttle_a_sweep_waits_for_no_position_a_side_has_not_claimed() {
         // A sweep that waited for the held position would never return, which the scheduler
         // reports as a deadlock of this execution.
         let (failed, reached) = registry.while_position_is_held(unclaimed_delivery, || {
-            let sweep = thread::spawn(move || sweeping.fail_silent_acks());
+            let sweep =
+                thread::spawn(move || sweeping.sweep_pending_acks_once(&TestMembership::default()));
             let report = thread::spawn(move || reporting.report_ack(ack_id));
             (sweep.join().assured(JOINED), report.join().assured(JOINED))
         });
         assert!(
             failed.is_empty(),
-            "one sweep cannot exhaust a new share's bound"
+            "a sweep never gives up the share of a live receiver run"
         );
         assert!(reached, "a report must reach the share that is pending");
         assert!(registry.holds_ack(ack_id));
@@ -372,7 +347,7 @@ fn shuttle_a_departed_admission_waiter_racing_its_reply_returns_one_position() {
         let dropping = registry.clone();
         let departure = thread::spawn(move || {
             drop(updates);
-            dropping.fail_silent_acks();
+            dropping.sweep_pending_acks_once(&TestMembership::default());
         });
         let replying = registry.clone();
         let reply = thread::spawn(move || replying.resolve_ack(id, AckOutcome::Ack));
@@ -394,33 +369,37 @@ fn shuttle_retained_deliveries_keep_their_policy_and_late_sweeps_skip_missed_tic
     check_interleavings(|| {
         crate::runtime::remote_ack_owner::policy_tests::policy_epochs();
         let registry = Arc::new(RemoteDispatchRegistry::with_capacity(1));
-        let captured = registry.timing();
-        let bound = captured.remote_ack_silence_timeout.as_nanos()
-            / captured.remote_ack_sweep_interval.as_nanos();
+        let short = nervix_models::RemoteAckTiming {
+            remote_ack_alive_interval: std::time::Duration::from_millis(1),
+            remote_ack_sweep_interval: std::time::Duration::from_millis(10),
+            remote_relay_total_timeout: std::time::Duration::from_millis(50),
+        };
+        short.validate().assured("the short policy is coherent");
+        registry.install_timing(short);
+        let bound = short.admission_sweeps();
+        // The delivery never reports its admission, so it is given up at its captured bound.
         let (acks, completion) = AckSet::root();
         let id = registry
             .register_ack(receiver(), acks)
             .assured("the position is free");
-        registry.admit_ack(id);
         let changing = registry.clone();
         let update = thread::spawn(move || {
-            let mut later = captured;
-            later.remote_ack_silence_timeout *= 2;
-            later.remote_ack_dispatch_timeout *= 2;
+            let mut later = short;
+            later.remote_relay_total_timeout *= 2;
             later.validate().assured("the later revision is coherent");
             changing.install_timing(later);
         });
         let sweeping = registry.clone();
         let sweep = thread::spawn(move || {
             for _ in 0..=bound {
-                sweeping.fail_silent_acks();
+                sweeping.sweep_pending_acks_once(&TestMembership::default());
             }
         });
         update.join().assured(JOINED);
         sweep.join().assured(JOINED);
         assert!(
             matches!(completion.wait().now_or_never(), Some(AckOutcome::NoAck(_))),
-            "a racing longer policy cannot extend the retained cohort's silence bound"
+            "a racing longer policy cannot extend the retained cohort's admission bound"
         );
         assert!(!registry.holds_ack(id));
         registry.shutdown();
@@ -449,7 +428,7 @@ fn shuttle_registration_deadlines_survive_a_racing_sweep() {
         });
         let sweeping = registry.clone();
         let sweep = thread::spawn(move || {
-            sweeping.fail_silent_acks();
+            sweeping.sweep_pending_acks_once(&TestMembership::default());
         });
         let arriving = registration.join().assured(JOINED);
         sweep.join().assured(JOINED);

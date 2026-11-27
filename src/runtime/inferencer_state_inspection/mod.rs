@@ -24,22 +24,20 @@ use std::collections::BTreeSet;
 use arrow_array::builder::{Float32Builder, ListBuilder, StringBuilder, UInt64Builder};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{
-    Attempt, Cancellation, CpuClass, Executor, GrowingCharge, MemoryClass, Reservation,
-};
+use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass, Reservation};
 use nervix_models::{
-    BranchKeyFingerprint, ClusterNodeName, ModelKind, NodeRef, NodeUnitRef, ProcessorStateSection,
+    BranchKeyFingerprint, ClusterNodeName, ModelKind, NodeUnitRef, ProcessorStateSection,
     StateInspectionBranchSelection, StateInspectionCounts, Unit,
 };
 use nervix_primitives::sync::StdArc;
 
 use super::{
-    BranchKey, RelayProcessorOperationTemplate, Runtime, RuntimeStateKind,
+    BranchKey, RelayProcessorOperationTemplate, Runtime, RuntimeStateKind, RuntimeStatePlacement,
     inferencer_state::{InferencerGeneration, ReplicatedInferencerState},
     processor_state_inspection::{
-        ProcessorStatePage, ProcessorStatePageBounds, ProcessorStatePageError,
+        PageReply, ProcessorStatePage, ProcessorStatePageBounds, ProcessorStatePageError,
         ProcessorStatePageMemory, ProcessorStatePageRead, ProcessorStateRun,
-        ProcessorStateSectionColumns, ProcessorStateSelection, extend_runs,
+        ProcessorStateSectionColumns, ReplyMemory, extend_runs,
     },
     published_generation::Generation,
 };
@@ -54,14 +52,25 @@ mod tests;
 
 type ReadResult<T> = error_stack::Result<T, ProcessorStatePageError>;
 
+/// What a page reads of one selected branch without retaining its publication: the branch's
+/// identity, the revision of its current publication and how far that revision is persisted and
+/// confirmed by replicas.
 #[derive(Clone)]
 struct CapturedBranch {
     key: Option<BranchKey>,
     registration: [u8; 16],
-    generation: StdArc<Generation<Option<InferencerGeneration>>>,
+    revision: u64,
     persisted: u64,
     confirmed: u64,
     replicas: u64,
+}
+
+/// A branch a page returns tensors from, read again with the publication the page retains while
+/// it copies them, so its identity and its tensors come from one cut.
+#[derive(Clone)]
+struct RetainedBranch {
+    branch: CapturedBranch,
+    generation: StdArc<Generation<Option<InferencerGeneration>>>,
 }
 
 #[derive(Clone, Copy, strum::AsRefStr)]
@@ -74,7 +83,7 @@ enum PersistenceStage {
 
 impl CapturedBranch {
     fn stage(&self) -> PersistenceStage {
-        if self.persisted < self.generation.revision {
+        if self.persisted < self.revision {
             PersistenceStage::Published
         } else if self.replicas != 0 && self.confirmed == self.replicas {
             PersistenceStage::ReplicaConfirmed
@@ -82,7 +91,9 @@ impl CapturedBranch {
             PersistenceStage::Persisted
         }
     }
+}
 
+impl RetainedBranch {
     fn value(&self) -> ReadResult<&InferencerGeneration> {
         self.generation
             .value
@@ -91,11 +102,13 @@ impl CapturedBranch {
     }
 }
 
-/// Count `bytes` more of a page and grow its charge to cover them. A class without room for
-/// them now fails with the [`nervix_execution::Shortfall`] the page needs.
-fn reserve(memory: &mut GrowingCharge, bytes: u64) -> ReadResult<()> {
+fn reserve(memory: &mut Reservation, bytes: u64) -> ReadResult<()> {
+    let total = memory
+        .bytes()
+        .checked_add(bytes)
+        .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
     memory
-        .grow_by(bytes)
+        .grow_to(total)
         .change_context(ProcessorStatePageError::Admission)
 }
 

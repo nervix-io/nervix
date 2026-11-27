@@ -108,7 +108,7 @@ const KEY_LAST_PURGED: &[u8] = b"last_purged";
 /// And Replication chapter states the convention.
 macro_rules! consensus_keyspace_name {
     ($role:literal) => {
-        concat!("raft_", "232bb63881d08871", "_", $role)
+        concat!("raft_", "bfe352c69af44e98", "_", $role)
     };
 }
 
@@ -284,7 +284,7 @@ fn keyspace_options() -> KeyspaceCreateOptions {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 60,
+    ClusterState = 61,
 }
 
 #[derive(Debug)]

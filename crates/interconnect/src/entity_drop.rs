@@ -2,8 +2,9 @@
 //! entities a change dropped.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** The drop report wire contract and its pool, quota, deadline and coordination
-//!   identity declarations.
+//! - **Owns.** The drop report wire contract and its pool, quota and coordination identity
+//!   declarations. The collecting coordinator names the request's deadline: its collection's
+//!   operation ceiling.
 //! - **Depends on.** The authenticated request surface and typed vocabulary identities.
 //! - **Must not know.** How a node destroys an entity, what it counts, or how an answer presents
 //!   the report.
@@ -49,7 +50,6 @@ impl InterconnectRequest for DropReportRequest {
     const NAME: &'static str = "entity_drop_report";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)

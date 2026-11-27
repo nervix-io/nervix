@@ -6,13 +6,13 @@ Feature: Declared infrastructure settings
     Given a 10 node nervix cluster is started
     When 16 domains named "infrastructure_append" are created on the leader node
     Then within "120s" every node has applied 16 domains named "infrastructure_append"
-    And node "node-1" eventually describes node "node-10" with "interconnect: handshakes=32 queue=1024 stream-window=65536 connection-window=262144 setup=5s request=10s progress=5s backoff=200ms max-backoff=5s jitter-permille=0"
+    And node "node-1" eventually describes node "node-10" with "interconnect: handshakes=32 queue=1024 stream-window=65536 connection-window=262144 setup=5s backoff=200ms max-backoff=5s jitter-permille=0"
 
-  Scenario Outline: A configured request timeout is visible on a cluster of <cluster_size>
-    Given node-1 starts with interconnect-request-timeout = 20s
+  Scenario Outline: A configured handshake capacity is visible on a cluster of <cluster_size>
+    Given node-1 starts with interconnect-concurrent-handshakes = 8
     And node-1 starts with partition-topology-poll-interval = 250ms
     And a <cluster_size> node nervix cluster is started
-    Then node "node-<cluster_size>" eventually describes node "node-1" with "interconnect: handshakes=32 queue=1024 stream-window=65536 connection-window=262144 setup=5s request=20s progress=5s backoff=200ms max-backoff=5s jitter-permille=0"
+    Then node "node-<cluster_size>" eventually describes node "node-1" with "interconnect: handshakes=8 queue=1024 stream-window=65536 connection-window=262144 setup=5s backoff=200ms max-backoff=5s jitter-permille=0"
     And the last command output contains
       """
       partition-topology-poll-interval=250ms

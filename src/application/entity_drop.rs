@@ -159,7 +159,19 @@ impl SessionServiceImpl {
                 let answer = if &node == self.inner.consensus.local_node_id() {
                     self.handle_drop_report_request(&node, request).await
                 } else {
-                    match self.inner.interconnect.request(&node, request).await {
+                    // The collection's deadline is the operation's ceiling, so it bounds each
+                    // request too: a node that is live but does not answer by then is named as
+                    // not reporting, as one that answers too late is.
+                    let answered = self
+                        .inner
+                        .interconnect
+                        .request_by(
+                            &node,
+                            request,
+                            nervix_interconnect::ExchangeDeadline::OperationCeiling(deadline),
+                        )
+                        .await;
+                    match answered {
                         Ok(answer) => answer,
                         Err(_) => {
                             still_waiting.insert(node);

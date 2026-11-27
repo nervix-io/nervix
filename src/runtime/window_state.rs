@@ -460,14 +460,16 @@ async fn encode_window_processor_snapshot_within(
         .await
         .change_context(WindowSnapshotError::Encode {
             section: WindowSnapshotSection::Input,
-        })?;
+        })?
+        .bytes;
     let arguments = generations
         .arguments
         .encode_resident_container(executor)
         .await
         .change_context(WindowSnapshotError::Encode {
             section: WindowSnapshotSection::Arguments,
-        })?;
+        })?
+        .bytes;
     let typed = WindowTypedSections::of(&snapshot.accumulators, executor)?;
     let typed_count = typed.count()?;
     let mut typed_sections = Vec::with_capacity(typed.sections.len());

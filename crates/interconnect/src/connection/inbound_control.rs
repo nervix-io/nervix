@@ -45,7 +45,6 @@ impl TransportState {
             &self.executor,
             peer.class.memory_class(),
             declared,
-            self.options.progress_timeout,
             request.into_body(),
         );
         let Some(received) = until_reset(&mut respond, reading).await? else {
@@ -68,13 +67,7 @@ impl TransportState {
         };
         let (control, reservation) = decoded.into_parts();
         if control.pool_class() != peer.class {
-            send_response(
-                respond,
-                StatusCode::FORBIDDEN,
-                None,
-                self.options.progress_timeout,
-            )
-            .await?;
+            send_response(respond, StatusCode::FORBIDDEN, None).await?;
             return Ok(());
         }
 
@@ -116,24 +109,12 @@ impl TransportState {
                 AnswerEncoding::Encoded(response) => response,
                 AnswerEncoding::Ended => return Ok(()),
             };
-            send_response(
-                respond,
-                StatusCode::OK,
-                Some(response),
-                self.options.progress_timeout,
-            )
-            .await?;
+            send_response(respond, StatusCode::OK, Some(response)).await?;
             return Ok(());
         }
 
         if let ControlEnvelope::Response(_) = control {
-            send_response(
-                respond,
-                StatusCode::BAD_REQUEST,
-                None,
-                self.options.progress_timeout,
-            )
-            .await?;
+            send_response(respond, StatusCode::BAD_REQUEST, None).await?;
             return Ok(());
         }
 
@@ -143,12 +124,6 @@ impl TransportState {
             Envelope::Control(control),
             Some(reservation),
         )?;
-        send_response(
-            respond,
-            StatusCode::NO_CONTENT,
-            None,
-            self.options.progress_timeout,
-        )
-        .await
+        send_response(respond, StatusCode::NO_CONTENT, None).await
     }
 }

@@ -30,7 +30,7 @@ use nervix_models::{
 use nervix_primitives::{
     publication::{ArcSwap, ArcSwapOption},
     sync::{Arc, Notify, StdArc},
-    time::{Instant, timeout},
+    time::Instant,
 };
 use rkyv::{
     Archive, Deserialize, Serialize,
@@ -59,6 +59,7 @@ use crate::{
         StreamLease,
     },
     observation::{ConnectionDirection, RequestOutcome, TransportObservations},
+    settings::within,
 };
 
 #[doc(hidden)]
@@ -215,6 +216,29 @@ pub trait RkyvMessage: Archive + Sized + Send + 'static {
         limit: u64,
     ) -> impl Future<Output = Result<(Vec<u8>, Reservation), Report<TransportError>>> + Send;
 
+    /// Serialize as [`Self::encode_rkyv`] does, into `charge`, memory of the class the caller
+    /// already holds for it, instead of first waiting for room in the class. The message grows past
+    /// `charge` only while the class can back it at once, and an output it cannot hold fails rather
+    /// than waiting for room while its caller holds memory.
+    fn encode_rkyv_within(
+        self,
+        executor: Executor,
+        class: PoolClass,
+        limit: u64,
+        charge: Reservation,
+    ) -> impl Future<Output = Result<(Vec<u8>, Reservation), Report<TransportError>>> + Send;
+
+    /// Validate and deserialize from `payload`, bytes whose charge the caller holds, into
+    /// `decoded`, memory of the class the caller already holds for the decoded value: as many bytes
+    /// as the payload. Neither is reserved here, so the decoding never waits for or fails for
+    /// memory.
+    fn decode_rkyv_charged_within(
+        executor: Executor,
+        class: PoolClass,
+        payload: ChargedBytes,
+        decoded: Reservation,
+    ) -> impl Future<Output = Result<(Self, Reservation), Report<TransportError>>> + Send;
+
     fn decode_rkyv(
         executor: Executor,
         class: PoolClass,
@@ -253,6 +277,29 @@ where
         )
         .await
         .map(wire::EncodedPayload::into_parts)
+    }
+
+    async fn encode_rkyv_within(
+        self,
+        executor: Executor,
+        class: PoolClass,
+        limit: u64,
+        charge: Reservation,
+    ) -> Result<(Vec<u8>, Reservation), Report<TransportError>> {
+        wire::encode_rkyv_payload_within(&executor, class.cpu_class(), limit, self, charge)
+            .await
+            .map(wire::EncodedPayload::into_parts)
+    }
+
+    async fn decode_rkyv_charged_within(
+        executor: Executor,
+        class: PoolClass,
+        payload: ChargedBytes,
+        decoded: Reservation,
+    ) -> Result<(Self, Reservation), Report<TransportError>> {
+        wire::decode_rkyv_within::<Self>(&executor, class.cpu_class(), payload, decoded)
+            .await
+            .map(wire::Decoded::into_parts)
     }
 
     async fn decode_rkyv(
@@ -366,7 +413,6 @@ pub trait InterconnectRequest: RkyvMessage {
     const NAME: &'static str;
     const CLASS: PoolClass = PoolClass::Commands;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
-    const DEADLINE: crate::RequestDeadline;
 
     /// Discovery requests are permitted before the first live-membership view exists.
     const REQUIRES_LIVE_TARGET: bool = true;
@@ -387,7 +433,6 @@ impl InterconnectRequest for ApplicationHealthProbe {
     const NAME: &'static str = "application_health_probe";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Liveness;
 }
 
 /// The application progress one process incarnation has reached for control-plane completion.
@@ -539,7 +584,6 @@ impl InterconnectRequest for ApplicationRevisionRequest {
     const NAME: &'static str = "application_revision";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 /// One process incarnation's application progress, reported to the Raft leader it observes.
@@ -569,9 +613,6 @@ impl InterconnectRequest for ApplicationProgressReport {
     const NAME: &'static str = "application_progress";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
-    /// A report carries the record a revision query answers, over the same progress subquota, so it
-    /// has the query's deadline.
-    const DEADLINE: crate::RequestDeadline = ApplicationRevisionRequest::DEADLINE;
 }
 
 /// The live process incarnations a leader currently requires for command completion, and the
@@ -597,7 +638,6 @@ impl InterconnectRequest for ApplicationCompletionPeersRequest {
     const NAME: &'static str = "application_completion_peers";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 /// Where one process incarnation's HTTPS listener stands against a requested runtime revision.
@@ -643,7 +683,6 @@ impl InterconnectRequest for HttpsListenerInstallationRequest {
     const NAME: &'static str = "https_listener_installation";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 /// Opens progress delivery after this receiver installed the addressed clock authority.
@@ -673,14 +712,6 @@ impl InterconnectRequest for DomainClockAttachRequest {
     const NAME: &'static str = "domain_clock_attach";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "clock attachment and progress requests must share one attempt deadline"
-        )
-    )]
-    const DEADLINE: crate::RequestDeadline = DomainClockProgressRequest::DEADLINE;
 }
 
 impl InterconnectRequest for DomainClockProgressRequest {
@@ -689,7 +720,6 @@ impl InterconnectRequest for DomainClockProgressRequest {
     const NAME: &'static str = "domain_clock_progress";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Progress;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 /// A typed request that opens one ordered bidirectional frame stream.
@@ -716,8 +746,6 @@ pub trait InterconnectStreamRequest: RkyvMessage {
     const NAME: &'static str;
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
-    /// The operation's relative budget, resolved by its transport from configured settings.
-    const DEADLINE: crate::RequestDeadline;
     const REQUIRES_LIVE_TARGET: bool = true;
 
     /// Bind a coordinated stream to the authenticated peer process before its handler runs.
@@ -748,19 +776,17 @@ impl StreamHandlerError {
     }
 }
 
-/// The opening attempt's existing absolute bound, retained only on a precondition refusal.
-#[derive(Debug)]
-pub(crate) struct StreamPreconditionDeadline(Instant);
+/// Marks a stream opening its producer refused because the state it described changed, so its
+/// caller can describe the state again and open the replacement.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StreamPreconditionRefusal;
 
-impl StreamPreconditionDeadline {
-    pub(crate) fn attach(
-        error: Report<TransportError>,
-        deadline: Instant,
-    ) -> Report<TransportError> {
+impl StreamPreconditionRefusal {
+    pub(crate) fn attach(error: Report<TransportError>) -> Report<TransportError> {
         if let TransportError::RemoteRejected { status, .. } = error.current_context()
             && *status == http::StatusCode::PRECONDITION_FAILED.as_u16()
         {
-            return error.attach(Self(deadline));
+            return error.attach(Self);
         }
         error
     }
@@ -826,11 +852,11 @@ pub enum RequestError {
         node: ClusterNodeName,
         request: &'static str,
     },
-    #[error("timed out after {timeout:?} waiting for request '{request}' on node '{node}'")]
-    Timeout {
+    #[error("request '{request}' on node '{node}' reached its {deadline} deadline")]
+    DeadlinePassed {
         node: ClusterNodeName,
         request: &'static str,
-        timeout: Duration,
+        deadline: crate::ExchangeDeadlineKind,
     },
     #[error("node '{node}' rejected interconnect request '{request}': {failure}")]
     RemoteRejected {
@@ -859,7 +885,6 @@ pub enum RequestError {
     StreamPreconditionChanged {
         node: ClusterNodeName,
         request: &'static str,
-        deadline: Instant,
     },
     #[error(
         "streamed response for '{request}' from node '{node}' declared {declared} bytes but \
@@ -889,7 +914,6 @@ impl RequestError {
         cause: Report<super::TransportError>,
         node: &ClusterNodeName,
         request: &'static str,
-        timeout: Duration,
     ) -> Report<Self> {
         let request_error = match cause.current_context() {
             super::TransportError::PeerProcessChanged {
@@ -904,11 +928,10 @@ impl RequestError {
                 node: node.clone(),
                 request,
             },
-            super::TransportError::RequestTimeout { .. }
-            | super::TransportError::ProgressTimeout { .. } => Self::Timeout {
+            super::TransportError::DeadlinePassed { deadline, .. } => Self::DeadlinePassed {
                 node: node.clone(),
                 request,
-                timeout,
+                deadline: *deadline,
             },
             super::TransportError::PoolExhausted => Self::ConnectionCapacityExhausted {
                 node: node.clone(),
@@ -928,13 +951,8 @@ impl RequestError {
         node: ClusterNodeName,
         request: &'static str,
     ) -> Report<Self> {
-        if let Some(deadline) = cause.downcast_ref::<StreamPreconditionDeadline>() {
-            let deadline = deadline.0;
-            return cause.change_context(Self::StreamPreconditionChanged {
-                node,
-                request,
-                deadline,
-            });
+        if cause.downcast_ref::<StreamPreconditionRefusal>().is_some() {
+            return cause.change_context(Self::StreamPreconditionChanged { node, request });
         }
         let reason = cause.to_string();
         cause.change_context(Self::Stream {
@@ -945,11 +963,9 @@ impl RequestError {
     }
 
     /// A changed stream precondition may be retried only within its original opening deadline.
-    pub const fn stream_precondition_deadline(&self) -> Option<Instant> {
-        match self {
-            Self::StreamPreconditionChanged { deadline, .. } => Some(*deadline),
-            _ => None,
-        }
+    /// Whether the producer refused the opening because the state it described changed.
+    pub const fn is_stream_precondition_change(&self) -> bool {
+        matches!(self, Self::StreamPreconditionChanged { .. })
     }
 
     /// Whether this request was refused solely because a local or remote admission quota was full.
@@ -966,7 +982,7 @@ impl RequestError {
             | Self::Decode { .. }
             | Self::ShuttingDown { .. }
             | Self::TargetLeft { .. }
-            | Self::Timeout { .. }
+            | Self::DeadlinePassed { .. }
             | Self::RemoteRejected { .. }
             | Self::Transport { .. }
             | Self::ResponseMismatch { .. }
@@ -1695,13 +1711,24 @@ impl RequestState {
         self.membership_changed.notify_waiters();
     }
 
-    async fn target_left(&self, node: &ClusterNodeName) {
+    pub(crate) async fn target_left(&self, node: &ClusterNodeName) {
+        self.until_membership(node, |live| !live).await;
+    }
+
+    pub(crate) async fn target_returned(&self, node: &ClusterNodeName) {
+        self.until_membership(node, |live| live).await;
+    }
+
+    /// Resolves once `holds` accepts whether membership lists `node` as live. The wait registers
+    /// for the next membership change before it reads the current one, so a change published
+    /// between that read and the wait still ends the wait.
+    async fn until_membership(&self, node: &ClusterNodeName, holds: impl Fn(bool) -> bool) {
         loop {
             nervix_primitives::task::consume_budget().await;
             let changed = self.membership_changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if !self.target_is_live(node) {
+            if holds(self.target_is_live(node)) {
                 return;
             }
             changed.await;
@@ -1715,18 +1742,15 @@ impl RequestState {
 }
 
 impl Transport {
-    pub fn request_deadline<M: InterconnectRequest>(&self) -> Duration {
-        M::DEADLINE.resolve(self.inner.request_timeout(), self.liveness())
-    }
-    pub fn stream_request_deadline<M: InterconnectStreamRequest>(&self) -> Duration {
-        M::DEADLINE.resolve(self.inner.request_timeout(), self.liveness())
-    }
-    pub fn duplex_setup_deadline<M: InterconnectDuplexRequest>(&self) -> Duration {
-        M::SETUP_DEADLINE.resolve(
-            self.inner.connection_setup_timeout(),
-            self.inner.request_timeout(),
-            self.liveness(),
-        )
+    /// What bounds opening a duplex stream of `M`: the connection-setup budget, the liveness of
+    /// dialing, or nothing beyond the liveness of its peer.
+    fn duplex_setup_deadline<M: InterconnectDuplexRequest>(&self) -> Option<Duration> {
+        match M::SETUP_DEADLINE {
+            crate::DuplexSetupDeadline::ConnectionSetup => {
+                Some(self.inner.connection_setup_timeout())
+            }
+            crate::DuplexSetupDeadline::Liveness => None,
+        }
     }
 }
 
@@ -1772,9 +1796,9 @@ impl Transport {
 
     /// Open one ordered bidirectional frame stream to `node`.
     ///
-    /// The setup deadline covers reaching the peer and its acceptance. Once the stream is open it
-    /// stays open until a half-close or a transport failure; an idle stream is not a failure, so
-    /// the caller applies its own deadline to whatever work it has outstanding.
+    /// A link bound to dialing opens within the connection-setup budget; any other waits for its
+    /// peer's acceptance while the peer lives. Once the stream is open it stays open until a
+    /// half-close or a transport failure: an idle or slow stream is not a failure.
     pub async fn open_duplex_stream<M>(
         &self,
         node: &ClusterNodeName,
@@ -1833,7 +1857,7 @@ impl Transport {
                     class: M::CLASS,
                     subquota: M::SUBQUOTA,
                     body,
-                    timeout: self.duplex_setup_deadline::<M>(),
+                    setup: self.duplex_setup_deadline::<M>(),
                     admission,
                 },
             )
@@ -1846,6 +1870,37 @@ impl Transport {
         self.inner.retire_departed_connections(live_nodes);
     }
 
+    /// Whether membership keeps `node` live: the live set the node last published to this
+    /// transport lists it, or no set has been published yet.
+    pub fn target_is_live(&self, node: &ClusterNodeName) -> bool {
+        self.inner.requests().target_is_live(node)
+    }
+
+    /// Resolves once membership no longer lists `node` as live.
+    pub async fn target_left(&self, node: &ClusterNodeName) {
+        self.inner.requests().target_left(node).await;
+    }
+
+    /// Resolves once membership lists `node` as live again, at once when it does now.
+    pub async fn target_returned(&self, node: &ClusterNodeName) {
+        self.inner.requests().target_returned(node).await;
+    }
+
+    /// The process epoch of `node`'s run that this transport's relay protocol is bound to: the run
+    /// its latest connection with the node authenticated. `None` before any connection bound one,
+    /// and once membership removed the node.
+    pub fn peer_run(&self, node: &ClusterNodeName) -> Option<u64> {
+        self.inner.peer_run(node)
+    }
+
+    /// Resolves once `node`'s run is no longer the one with process epoch `epoch`: a connection
+    /// bound a newer run of the node, or membership removed the node.
+    pub async fn peer_run_ended(&self, node: &ClusterNodeName, epoch: u64) {
+        self.inner.peer_run_ended(node, epoch).await;
+    }
+
+    /// Send one typed request and wait for its answer for as long as its peer and connection
+    /// live: only the transport's liveness, membership, shutdown or the peer's own answer ends it.
     pub async fn request<M>(
         &self,
         node: &ClusterNodeName,
@@ -1854,8 +1909,7 @@ impl Transport {
     where
         M: InterconnectRequest,
     {
-        self.request_with_timeout(node, message, self.request_deadline::<M>())
-            .await
+        self.request_with_fence(node, message, None, ()).await
     }
 
     /// Refuses `message` when one typed request of its kind could not carry it on this node: its
@@ -1901,13 +1955,13 @@ impl Transport {
         Ok(())
     }
 
-    /// Leases the stream a control request `M` exchanges on, by `deadline`.
+    /// Leases the stream a control request `M` exchanges on, waiting while liveness keeps its peer
+    /// and until `deadline` when the caller names one.
     async fn lease_control_stream<M, F>(
         &self,
         node: &ClusterNodeName,
-        deadline: Instant,
+        deadline: Option<crate::ExchangeDeadline>,
         fence: F,
-        timeout_duration: Duration,
     ) -> Result<StreamLease, Report<RequestError>>
     where
         M: InterconnectRequest,
@@ -1916,33 +1970,27 @@ impl Transport {
         self.inner
             .lease_control(node, M::CLASS, M::SUBQUOTA, deadline, fence)
             .await
-            .map_err(|error| {
-                RequestError::control_with_cause(error, node, M::NAME, timeout_duration)
-            })
+            .map_err(|error| RequestError::control_with_cause(error, node, M::NAME))
     }
 
-    /// Leases the stream a byte-stream request `M` opens on, by a deadline `timeout` from now, and
-    /// returns the stream with that deadline.
+    /// Leases the stream a byte-stream request `M` opens on, waiting while liveness keeps its peer
+    /// and until `deadline` when the caller names one.
     async fn lease_byte_stream<M>(
         &self,
         node: &ClusterNodeName,
-        timeout: Duration,
-    ) -> Result<(StreamLease, Instant), Report<RequestError>>
+        deadline: Option<crate::ExchangeDeadline>,
+    ) -> Result<StreamLease, Report<RequestError>>
     where
         M: InterconnectStreamRequest,
     {
-        let deadline = self
-            .inner
-            .request_deadline(timeout)
-            .map_err(|error| RequestError::stream_with_cause(error, node.clone(), M::NAME))?;
-        let lease = self
-            .inner
+        self.inner
             .lease(node, M::CLASS, M::SUBQUOTA, deadline)
             .await
-            .map_err(|error| RequestError::stream_with_cause(error, node.clone(), M::NAME))?;
-        Ok((lease, deadline))
+            .map_err(|error| RequestError::stream_with_cause(error, node.clone(), M::NAME))
     }
 
+    /// Open a typed request's response stream and wait for it for as long as its peer and
+    /// connection live.
     pub async fn request_stream<M>(
         &self,
         node: &ClusterNodeName,
@@ -1951,16 +1999,29 @@ impl Transport {
     where
         M: InterconnectStreamRequest,
     {
-        self.request_stream_with_timeout(node, message, self.stream_request_deadline::<M>())
-            .await
+        self.open_request_stream(node, message, None).await
     }
 
-    /// Open the same admitted stream with the caller's remaining operation deadline.
-    pub async fn request_stream_with_timeout<M>(
+    /// Open the same admitted stream, ending the opening at `deadline`, the deadline its caller
+    /// names and says the kind of.
+    pub async fn request_stream_by<M>(
         &self,
         node: &ClusterNodeName,
         message: M,
-        timeout: Duration,
+        deadline: crate::ExchangeDeadline,
+    ) -> Result<super::IncomingByteStream, Report<RequestError>>
+    where
+        M: InterconnectStreamRequest,
+    {
+        self.open_request_stream(node, message, Some(deadline))
+            .await
+    }
+
+    async fn open_request_stream<M>(
+        &self,
+        node: &ClusterNodeName,
+        message: M,
+        deadline: Option<crate::ExchangeDeadline>,
     ) -> Result<super::IncomingByteStream, Report<RequestError>>
     where
         M: InterconnectStreamRequest,
@@ -1994,7 +2055,7 @@ impl Transport {
         let early_lease = if admission.holds_a_place() {
             None
         } else {
-            let leased = self.lease_byte_stream::<M>(node, timeout).await?;
+            let leased = self.lease_byte_stream::<M>(node, deadline).await?;
             Some(leased)
         };
         let (payload, payload_reservation) = message
@@ -2019,9 +2080,9 @@ impl Transport {
         let body = wire::encode_stream_request(self.inner.executor(), request)
             .await
             .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
-        let (lease, deadline) = match early_lease {
+        let lease = match early_lease {
             Some(leased) => leased,
-            None => self.lease_byte_stream::<M>(node, timeout).await?,
+            None => self.lease_byte_stream::<M>(node, deadline).await?,
         };
         self.inner
             .open_byte_stream(
@@ -2039,17 +2100,18 @@ impl Transport {
             .map_err(|error| RequestError::stream_with_cause(error, node.clone(), M::NAME))
     }
 
-    /// Send one typed request with a caller-owned end-to-end deadline.
-    pub fn request_with_timeout<M>(
+    /// Send one typed request that also ends at `deadline`, the deadline its caller names and says
+    /// the kind of: an operation's ceiling, a waiting caller's own deadline or a protocol's timer.
+    pub fn request_by<M>(
         &self,
         node: &ClusterNodeName,
         message: M,
-        timeout_duration: Duration,
+        deadline: crate::ExchangeDeadline,
     ) -> impl Future<Output = Result<M::Response, Report<RequestError>>>
     where
         M: InterconnectRequest,
     {
-        self.request_with_fence(node, message, timeout_duration, ())
+        self.request_with_fence(node, message, Some(deadline), ())
     }
 
     /// Send only through a connection to the named authenticated process. A replacement process
@@ -2063,19 +2125,14 @@ impl Transport {
     where
         M: InterconnectRequest,
     {
-        self.request_with_fence(
-            node,
-            message,
-            self.request_deadline::<M>(),
-            peer_process_epoch,
-        )
+        self.request_with_fence(node, message, None, peer_process_epoch)
     }
 
     async fn request_with_fence<M, F>(
         &self,
         node: &ClusterNodeName,
         message: M,
-        timeout_duration: Duration,
+        deadline: Option<crate::ExchangeDeadline>,
         fence: F,
     ) -> Result<M::Response, Report<RequestError>>
     where
@@ -2105,12 +2162,6 @@ impl Transport {
                         subquota: M::SUBQUOTA,
                     })
                 })?;
-            let deadline = self
-                .inner
-                .request_deadline(timeout_duration)
-                .map_err(|error| {
-                    RequestError::control_with_cause(error, node, M::NAME, timeout_duration)
-                })?;
             // The payload's copy goes uncharged while the envelope's encoding waits for room, and so
             // does the answer's payload while its typed decoding waits. A request holding a place of
             // the incoming queue is bounded by that place and leases its stream only to exchange.
@@ -2121,7 +2172,7 @@ impl Transport {
                 None
             } else {
                 let lease = self
-                    .lease_control_stream::<M, F>(node, deadline, fence, timeout_duration)
+                    .lease_control_stream::<M, F>(node, deadline, fence)
                     .await?;
                 Some(lease)
             };
@@ -2144,7 +2195,7 @@ impl Transport {
             let lease = match early_lease {
                 Some(lease) => lease,
                 None => {
-                    self.lease_control_stream::<M, F>(node, deadline, fence, timeout_duration)
+                    self.lease_control_stream::<M, F>(node, deadline, fence)
                         .await?
                 }
             };
@@ -2152,9 +2203,7 @@ impl Transport {
                 .inner
                 .exchange_control(&lease, request, deadline)
                 .await
-                .map_err(|error| {
-                    RequestError::control_with_cause(error, node, M::NAME, timeout_duration)
-                })?;
+                .map_err(|error| RequestError::control_with_cause(error, node, M::NAME))?;
             // Only a request whose stream bounds its answer's copy keeps the stream while that
             // answer decodes.
             let held_lease = if admission.holds_a_place() {
@@ -2181,8 +2230,8 @@ impl Transport {
             }
             let answer = match response.result {
                 Ok(payload) => {
-                    // The peer already did the work, so a full queue holds the answer back until
-                    // the request's own deadline rather than discarding it.
+                    // The peer already did the work, so a full class holds the answer back rather
+                    // than discarding it.
                     let mapping_input =
                         M::Response::decode_rkyv(self.inner.executor().clone(), M::CLASS, payload)
                             .await
@@ -2218,12 +2267,12 @@ impl Transport {
                     request: M::NAME,
                 }))
             }
-            result = timeout(timeout_duration, operation) => match result {
+            result = within(deadline, operation) => match result {
                 Ok(result) => result,
-                Err(_) => Err(Report::new(RequestError::Timeout {
+                Err(deadline) => Err(Report::new(RequestError::DeadlinePassed {
                     node: node.clone(),
                     request: M::NAME,
-                    timeout: timeout_duration,
+                    deadline,
                 })),
             },
         };
@@ -2242,7 +2291,6 @@ impl InterconnectRequest for DescribeIngestorRequest {
     type Response = Result<IngestorDescribeEnvelope, RemoteOperationFailure>;
 
     const NAME: &'static str = "describe_ingestor";
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 impl InterconnectRequest for CaptureOwnershipHandoffStateRequest {
@@ -2250,7 +2298,6 @@ impl InterconnectRequest for CaptureOwnershipHandoffStateRequest {
 
     const NAME: &'static str = "capture_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -2262,7 +2309,6 @@ impl InterconnectRequest for PrepareOwnershipHandoffStateRequest {
 
     const NAME: &'static str = "prepare_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -2274,7 +2320,6 @@ impl InterconnectRequest for ConfirmOwnershipHandoffStateRequest {
 
     const NAME: &'static str = "confirm_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -2286,7 +2331,6 @@ impl InterconnectRequest for PrepareForcedOwnershipRecoveryRequest {
 
     const NAME: &'static str = "prepare_forced_ownership_recovery";
     const CLASS: PoolClass = PoolClass::Replication;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.round.coordination)
@@ -2298,7 +2342,6 @@ impl InterconnectRequest for DiscardForcedOwnershipRecoveryRequest {
 
     const NAME: &'static str = "discard_forced_ownership_recovery";
     const CLASS: PoolClass = PoolClass::Replication;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.preparation.round.coordination)
@@ -2310,7 +2353,6 @@ impl InterconnectRequest for ActivateOwnershipHandoffStateRequest {
 
     const NAME: &'static str = "activate_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -2322,7 +2364,6 @@ impl InterconnectRequest for DiscardOwnershipHandoffStateRequest {
 
     const NAME: &'static str = "discard_ownership_handoff_state";
     const CLASS: PoolClass = PoolClass::Replication;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -2334,7 +2375,6 @@ impl InterconnectRequest for ReconcileOwnershipHandoffPreparationsRequest {
 
     const NAME: &'static str = "reconcile_ownership_handoff_preparations";
     const CLASS: PoolClass = PoolClass::Replication;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -2355,19 +2395,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stream_precondition_refusals_retain_the_original_deadline_and_transport_cause() {
+    fn stream_precondition_refusals_are_marked_and_retain_their_transport_cause() {
         let node = ClusterNodeName::parse("owner").assured("the fixture node name is valid");
-        let deadline = Instant::now() + Duration::from_secs(7);
         let refused = Report::new(TransportError::RemoteRejected {
             status: http::StatusCode::PRECONDITION_FAILED.as_u16(),
             message: "the producer's precondition changed".to_owned(),
         });
-        let refused = StreamPreconditionDeadline::attach(refused, deadline);
+        let refused = StreamPreconditionRefusal::attach(refused);
         let error = RequestError::stream_with_cause(refused, node.clone(), "fetch_state_snapshot");
-        assert_eq!(
-            error.current_context().stream_precondition_deadline(),
-            Some(deadline)
-        );
+        assert!(error.current_context().is_stream_precondition_change());
         assert!(error.contains::<TransportError>());
         assert!(!error.current_context().is_capacity_exhaustion());
 
@@ -2379,14 +2415,14 @@ mod tests {
                 status: status.as_u16(),
                 message: "the producer's precondition changed".to_owned(),
             });
-            let refused = StreamPreconditionDeadline::attach(refused, deadline);
+            let refused = StreamPreconditionRefusal::attach(refused);
             let error =
                 RequestError::stream_with_cause(refused, node.clone(), "fetch_state_snapshot");
             assert!(matches!(
                 error.current_context(),
                 RequestError::Stream { .. }
             ));
-            assert_eq!(error.current_context().stream_precondition_deadline(), None);
+            assert!(!error.current_context().is_stream_precondition_change());
         }
     }
 
@@ -2399,7 +2435,6 @@ mod tests {
         const NAME: &'static str = "test_bulk_decode";
         const CLASS: PoolClass = PoolClass::Bulk;
         const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-        const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
     }
 
     /// A stream request whose class has no room to decode it now waits for room instead of being
@@ -2499,10 +2534,6 @@ mod tests {
         assert_eq!(ApplicationHealthProbe::NAME, "application_health_probe");
         assert_eq!(ApplicationHealthProbe::CLASS, PoolClass::Management);
         assert_eq!(ApplicationHealthProbe::SUBQUOTA, RequestSubquota::Liveness);
-        assert_eq!(
-            ApplicationHealthProbe::DEADLINE.declared_default(),
-            Duration::from_secs(1)
-        );
     }
 
     #[test]
@@ -2526,10 +2557,6 @@ mod tests {
             HttpsListenerInstallationRequest::SUBQUOTA,
             RequestSubquota::Progress
         );
-        assert_eq!(
-            HttpsListenerInstallationRequest::DEADLINE.declared_default(),
-            Duration::from_secs(2)
-        );
     }
 
     #[test]
@@ -2552,10 +2579,6 @@ mod tests {
             ApplicationRevisionRequest::SUBQUOTA,
             RequestSubquota::Progress
         );
-        assert_eq!(
-            ApplicationRevisionRequest::DEADLINE.declared_default(),
-            Duration::from_secs(2)
-        );
 
         assert_receipt_response::<ApplicationProgressReport>();
         assert_eq!(ApplicationProgressReport::NAME, "application_progress");
@@ -2563,10 +2586,6 @@ mod tests {
         assert_eq!(
             ApplicationProgressReport::SUBQUOTA,
             RequestSubquota::Progress
-        );
-        assert_eq!(
-            ApplicationProgressReport::DEADLINE.declared_default(),
-            Duration::from_secs(2)
         );
     }
 
@@ -2701,10 +2720,6 @@ mod tests {
             DomainClockProgressRequest::SUBQUOTA,
             RequestSubquota::Progress
         );
-        assert_eq!(
-            DomainClockProgressRequest::DEADLINE.declared_default(),
-            Duration::from_secs(2)
-        );
     }
 
     #[test]
@@ -2726,10 +2741,10 @@ mod tests {
             node: node.clone(),
             request: "application_health_probe",
         };
-        let peer_timeout = RequestError::Timeout {
+        let peer_timeout = RequestError::DeadlinePassed {
             node,
             request: "application_health_probe",
-            timeout: Duration::from_secs(1),
+            deadline: crate::ExchangeDeadlineKind::Protocol,
         };
 
         assert!(local_capacity.is_capacity_exhaustion());

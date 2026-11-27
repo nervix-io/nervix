@@ -92,7 +92,6 @@ impl InterconnectRequest for BackupDrainStatusRequest {
     const NAME: &'static str = "backup_domain_drain_status";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -103,7 +102,6 @@ impl InterconnectRequest for CaptureDomainStateRequest {
     type Response = Result<(), RemoteOperationFailure>;
     const NAME: &'static str = "backup_capture_domain_state";
     const CLASS: PoolClass = PoolClass::Management;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Snapshot;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -146,7 +144,25 @@ impl InterconnectRequest for CaptureInventoryRequest {
     type Response = Result<Vec<CapturedSectionInventory>, RemoteOperationFailure>;
     const NAME: &'static str = "backup_capture_inventory";
     const CLASS: PoolClass = PoolClass::Management;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
+
+    fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
+        Some(&self.coordination)
+    }
+}
+
+/// A coordinator's backup of `domain` ended: the owner releases every section `coordination`
+/// staged there and still holds, so a backup that ended before fetching them gives their staging
+/// room back at once.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseCapturedSections {
+    pub coordination: CoordinationIdentity,
+    pub domain: DomainName,
+}
+
+impl InterconnectRequest for ReleaseCapturedSections {
+    type Response = ();
+    const NAME: &'static str = "backup_release_captured_sections";
+    const CLASS: PoolClass = PoolClass::Management;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -168,7 +184,6 @@ impl InterconnectStreamRequest for FetchCapturedSection {
     /// holds the peer connection's one Snapshot stream for as long as its transfer takes, which
     /// would otherwise keep the coordinator from opening a completed cut's sections.
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Snapshot;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -207,7 +222,6 @@ impl InterconnectRequest for InstallRestoredStateRequest {
     const NAME: &'static str = "backup_install_restored_state";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Snapshot;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)

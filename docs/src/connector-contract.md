@@ -1965,7 +1965,8 @@ message it unfolded into has completed its own route or error delivery.
 Remote delivery retains that host-owned ACK share in a bounded delivery owner, with independent
 row outcomes and an exact generation identity. Admission refusal or cancellation before admission
 returns the share negatively; admitted records remain pending through keepalives and required
-waits until their terminal outcome or the silence bound. A delivery that finds no relay memory for
+waits until their terminal outcome, or until the receiving node leaves the cluster or the run of it
+that admitted them ends. A delivery that finds no relay memory for
 it, on the receiving node for its grant or its acknowledgement watches, or on the sending node for
 its acknowledgement records, is held back rather than refused, within one five-minute bound;
 [Ingestor loops while a delivery is held](#ingestor-loops-while-a-delivery-is-held) describes what that

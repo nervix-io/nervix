@@ -4,6 +4,7 @@
 //! - **Must not know.** Transport, persisted records or graph placement.
 
 use super::*;
+use crate::runtime::remote_dispatch::REMOTE_RELAY_TOTAL_TIMEOUT;
 
 #[cfg(not(feature = "shuttle"))]
 #[nervix_primitives::test(start_paused = true)]
@@ -21,9 +22,10 @@ async fn registrations_before_the_next_deadline_do_not_repeat_the_registry_scan(
         .register_ack(receiver.clone(), first)
         .assured("first free position");
     let scans = Cell::new(0_usize);
-    let driver = SilenceSweeps::watching(&owners.changed, &owners.next_sweep).run(|| {
+    let membership = TestMembership::default();
+    let driver = PendingAckSweeps::watching(&owners.changed, &owners.next_sweep).run(|| {
         scans.set(scans.get() + 1);
-        owners.sweep_acks(Some(Instant::now())).1
+        owners.sweep_acks(Some(Instant::now()), &membership).1
     });
     let mut driver = std::pin::pin!(driver);
     let mut context = Context::from_waker(Waker::noop());
@@ -95,7 +97,7 @@ fn deliveries_sharing_an_interval_keep_one_registry_scan_per_tick() {
         .register_ack_with_clock(receiver, second, || second_arrival)
         .assured("second free position");
 
-    let (_, next) = owners.sweep_acks(Some(first_tick));
+    let (_, next) = owners.sweep_acks(Some(first_tick), &TestMembership::default());
     assert_eq!(next, Some(first_tick + interval));
     owners.shutdown();
 }
@@ -135,20 +137,17 @@ pub(in crate::runtime) fn assert_announced_deadline_covers_retained_records(
 
 pub(in crate::runtime) fn policy_epochs() {
     let owners = RemoteDispatchRegistry::with_capacity(2);
+    let membership = TestMembership::default();
     let start = Instant::now();
     let receiver = ClusterNodeName::parse("receiver").assured("valid fixture name");
     let (prior, _prior_completion) = AckSet::root();
     let prior = owners
         .register_ack_with_clock(receiver.clone(), prior, || start)
         .assured("free slot");
-    owners.admit_ack(prior);
     let timing = RemoteAckTiming {
         remote_ack_alive_interval: std::time::Duration::from_millis(1),
-        remote_ack_dispatch_timeout: std::time::Duration::from_millis(1),
-        remote_ack_silence_timeout: std::time::Duration::from_millis(10),
         remote_ack_sweep_interval: std::time::Duration::from_millis(1),
         remote_relay_total_timeout: std::time::Duration::from_millis(50),
-        remote_relay_instantiation_wait: std::time::Duration::from_millis(5),
     };
     timing.validate().assured("coherent fixture policy");
     owners.install_timing(timing);
@@ -156,9 +155,12 @@ pub(in crate::runtime) fn policy_epochs() {
     let current = owners
         .register_ack_with_clock(receiver, current, || start)
         .assured("free slot");
-    owners.admit_ack(current);
-    for tick in 1..=11 {
-        owners.sweep_acks(Some(start + std::time::Duration::from_millis(tick)));
+    // Neither delivery reports its admission: each is given up at the admission bound it captured.
+    for tick in 1..=51 {
+        owners.sweep_acks(
+            Some(start + std::time::Duration::from_millis(tick)),
+            &membership,
+        );
     }
     assert!(!owners.holds_ack(current));
     assert!(
@@ -166,14 +168,23 @@ pub(in crate::runtime) fn policy_epochs() {
         "a new policy cannot shorten a retained cohort"
     );
     let late = start + std::time::Duration::from_secs(16);
-    owners.sweep_acks(Some(late));
+    owners.sweep_acks(Some(late), &membership);
     assert!(
         owners.holds_ack(prior),
         "a late sweep counts once, skipping missed ticks"
     );
-    for tick in 1..=15 {
-        owners.sweep_acks(Some(late + std::time::Duration::from_secs(tick)));
+    let admission_sweeps = REMOTE_RELAY_TOTAL_TIMEOUT.as_secs();
+    for tick in 1..admission_sweeps {
+        owners.sweep_acks(
+            Some(late + std::time::Duration::from_secs(tick)),
+            &membership,
+        );
     }
+    assert!(owners.holds_ack(prior), "the bound has not passed yet");
+    owners.sweep_acks(
+        Some(late + std::time::Duration::from_secs(admission_sweeps)),
+        &membership,
+    );
     assert!(!owners.holds_ack(prior));
     owners.shutdown();
 }
@@ -190,18 +201,21 @@ async fn an_idle_sweeper_wakes_for_a_new_cohort_and_releases_its_charge() {
     use futures_util::FutureExt as _;
     let owners = Arc::new(RemoteDispatchRegistry::with_capacity(1));
     let sweeping = owners.clone();
-    let task = nervix_primitives::task::spawn(async move { sweeping.sweep_silent_acks().await });
+    let task = nervix_primitives::task::spawn(async move {
+        sweeping
+            .sweep_pending_acks(&TestMembership::default())
+            .await
+    });
     nervix_primitives::task::yield_now().await;
     let timing = RemoteAckTiming {
         remote_ack_sweep_interval: std::time::Duration::from_millis(1),
-        remote_ack_silence_timeout: std::time::Duration::from_millis(10),
         remote_ack_alive_interval: std::time::Duration::from_millis(1),
-        remote_ack_dispatch_timeout: std::time::Duration::from_millis(1),
-        remote_relay_total_timeout: std::time::Duration::from_millis(50),
-        remote_relay_instantiation_wait: std::time::Duration::from_millis(5),
+        remote_relay_total_timeout: std::time::Duration::from_millis(10),
     };
     timing.validate().assured("coherent short cohort");
     owners.install_timing(timing);
+    // The delivery never reports its admission, so the sweep gives its record up at the delivery's
+    // admission bound.
     let (acks, completion) = AckSet::root();
     let id = owners
         .register_ack(
@@ -209,7 +223,6 @@ async fn an_idle_sweeper_wakes_for_a_new_cohort_and_releases_its_charge() {
             acks,
         )
         .assured("free position");
-    owners.admit_ack(id);
     for _ in 0..12 {
         nervix_primitives::time::advance(std::time::Duration::from_millis(1)).await;
         nervix_primitives::task::yield_now().await;
@@ -233,7 +246,11 @@ async fn an_idle_sweeper_wakes_for_a_new_cohort_and_releases_its_charge() {
 async fn departed_admission_waiters_are_reaped_without_any_record_deliveries() {
     let owners = Arc::new(RemoteDispatchRegistry::with_capacity(1));
     let sweeping = owners.clone();
-    let task = nervix_primitives::task::spawn(async move { sweeping.sweep_silent_acks().await });
+    let task = nervix_primitives::task::spawn(async move {
+        sweeping
+            .sweep_pending_acks(&TestMembership::default())
+            .await
+    });
     nervix_primitives::task::yield_now().await;
     let (_, waiter) = owners
         .register_admission()

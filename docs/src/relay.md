@@ -360,6 +360,10 @@ Expiration semantics:
   state and the relay delivery channels it owns or publishes through for the branch. Other
   entities and an emitter's other sources keep their own branches and deliveries in flight, even
   when their branch keys and schemas are equal
+- an emitter never retires a source branch while it holds rows of that branch no attempt has
+  resolved, or a batch of it in processing: the branch stays, and its TTL counts again from that
+  scan, so a slow or unavailable destination costs latency rather than rows (see
+  [Emitters](emitters.md))
 - relay TTL and `MAX INSTANCES ... EVICT LRU` are enforced once by the relay owner across all
   producers in the cluster. A partitioned relay enforces them in each partition owner on the keys
   of that partition, so `MAX INSTANCES` caps each partition

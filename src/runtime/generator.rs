@@ -649,20 +649,18 @@ impl Runtime {
             )
         )]
         let task = nervix_primitives::task::spawn(async move {
-            let shared_routing = match runtime
-                .wait_for_domain_routing(&task_domain, &source_relay)
-                .await
-            {
-                Ok(routing) => routing,
-                Err(error) => {
-                    task_events.report_error(format!(
-                        "generator '{}' in domain '{}' could not bind its routing snapshot: \
-                         {error:#}",
-                        task_generator.as_str(),
-                        task_domain.as_str(),
-                    ));
-                    return;
-                }
+            // The installation that started this generator publishes its domain's routing once
+            // the whole domain is in place; a stop, or the domain dropping its sender, ends the wait.
+            let mut routing_stop = shutdown_rx.clone();
+            let stopped = async move {
+                routing_stop
+                    .wait_for(|stopped| *stopped)
+                    .await
+                    .discarded("a signalled stop and a dropped domain sender both end the wait");
+            };
+            let Some(shared_routing) = runtime.wait_for_domain_routing(&task_domain, stopped).await
+            else {
+                return;
             };
             let mut routing = DomainRoutingCache::new(shared_routing);
             let mut source_generation = MaterializedGenerationReadCache::default();

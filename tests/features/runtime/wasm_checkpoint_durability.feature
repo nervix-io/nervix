@@ -235,8 +235,8 @@ Feature: WASM guest-state checkpoint durability
       | 3            | 1             | 4                  |
 
   # The checkpoint is held for longer than the source's ACK TIMEOUT, so the source sends the held
-  # input again unless the branch reports it alive, and well inside the checkpoint's own ninety
-  # seconds. The source is sequential: it commits no later offset before the held batch resolves,
+  # input again unless the branch reports it alive. The checkpoint has no deadline of its own.
+  # The source is sequential: it commits no later offset before the held batch resolves,
   # so once the later input is committed every resend has already reached the relay and the exact
   # relay total settles the outcome.
   Scenario Outline: A checkpoint that outlasts its source's ACK TIMEOUT keeps the input alive on <cluster_size> nodes
@@ -389,7 +389,6 @@ Feature: WASM guest-state checkpoint durability
       """
       kind=wasm_processor name=filter_even_rows owner=
       """
-    And the first replica for scheduled "wasm_processor" "filter_even_rows" in the last cluster status is saved as placeholder "wasm_replica"
     And Kafka consumer group "wasm_checkpoint_replica_group_{{test_id}}" eventually has 1 consumers
     When Kafka message is published to topic "wasm_checkpoint_replica_in_{{test_id}}"
       """
@@ -405,24 +404,21 @@ Feature: WASM guest-state checkpoint durability
       """
       {"value":2,"tenant":"alpha"}
       """
-    Then within "120s" the active session observes a server error containing
+    # The callback's output leaves before its checkpoint. The live replica refuses to install the
+    # checkpoint, so its source acknowledgement waits for that replica instead of failing.
+    Then within "60s" the relay subscription receives payloads containing all fragments
       """
-      wasm processor 'filter_even_rows' state replication failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1
+      key={"tenant":"alpha"} | "tenant":"alpha" | "value":2
       """
-    And the last server error contains
-      """
-      {{wasm_replica}}
-      """
-    And within "4s" Kafka consumer group "wasm_checkpoint_replica_group_{{test_id}}" next offset for topic "wasm_checkpoint_replica_in_{{test_id}}" partition 0 is "below 3"
+    And within "15s" Kafka consumer group "wasm_checkpoint_replica_group_{{test_id}}" next offset for topic "wasm_checkpoint_replica_in_{{test_id}}" partition 0 is "below 3"
     When runtime state replica installations succeed again on every node
     And Kafka message is published to topic "wasm_checkpoint_replica_in_{{test_id}}"
       """
       {"value":12,"tenant":"beta"}
       """
     Then within "90s" Kafka consumer group "wasm_checkpoint_replica_group_{{test_id}}" next offset for topic "wasm_checkpoint_replica_in_{{test_id}}" partition 0 is "at least 4"
-    And within "10s" the relay subscription receives payloads containing all fragments
+    And within "10s" the relay subscription receives exactly one payload for each fragment set
       """
-      key={"tenant":"alpha"} | "tenant":"alpha" | "value":2
       key={"tenant":"beta"} | "tenant":"beta" | "value":12
       """
 

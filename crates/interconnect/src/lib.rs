@@ -118,13 +118,12 @@ pub use runtime_state::{
 };
 pub use settings::{
     BulkChunkBytes, BulkReceiveWindow, BulkReceiveWindowError, ConcurrentHandshakes,
-    ConnectionReceiveWindow, ConnectionSetupTimeout, DuplexSetupDeadline,
-    HTTP2_INITIAL_CONNECTION_WINDOW_BYTES, IncomingQueueCapacity, InterconnectLiveness,
-    MAX_HTTP2_WINDOW_BYTES, MaxReconnectBackoff, PeerReceiveOverrides, PeerReceiveSettings,
-    PeerReceiveSettingsError, PingInterval, PingTimeout, ProgressTimeout, ReconnectBackoff,
+    ConnectionReceiveWindow, ConnectionSetupTimeout, DuplexSetupDeadline, ExchangeDeadline,
+    ExchangeDeadlineKind, HTTP2_INITIAL_CONNECTION_WINDOW_BYTES, IncomingQueueCapacity,
+    InterconnectLiveness, MAX_HTTP2_WINDOW_BYTES, MaxReconnectBackoff, PeerReceiveOverrides,
+    PeerReceiveSettings, PeerReceiveSettingsError, PingInterval, PingTimeout, ReconnectBackoff,
     ReconnectJitterPermille, RelayBatchBytes, RelayChannelRetention, RelayDecodedBytes,
-    RequestDeadline, RequestTimeout, StreamReceiveWindow, TransportSettingValues,
-    TransportSettings, TransportSettingsError,
+    StreamReceiveWindow, TransportSettingValues, TransportSettings, TransportSettingsError,
 };
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,
@@ -168,11 +167,8 @@ pub struct TransportOptions {
     /// with a `bulk_window` reservation for as long as it is open.
     pub max_header_bytes: u32,
     pub connection_setup_timeout: Duration,
-    pub request_timeout: Duration,
-    pub progress_timeout: Duration,
     pub reconnect_backoff: Duration,
     pub max_reconnect_backoff: Duration,
-    pub shutdown_drain_timeout: Duration,
     /// The source of this transport's process epoch and relay grant identifiers.
     pub entropy: TransportEntropy,
 }
@@ -184,30 +180,6 @@ impl Default for TransportOptions {
 }
 
 impl TransportOptions {
-    pub(crate) fn relay_grant_lifetime(&self) -> Duration {
-        self.progress_timeout.min(self.request_timeout)
-    }
-    /// How long a sender keeps asking a receiver to cancel an abandoned delivery: three request
-    /// budgets, and never past `retention`, the delivery's own retention, after which its receiver
-    /// keeps nothing of it to cancel.
-    pub(crate) fn relay_cancellation_retry_window(
-        &self,
-        retention: RelayChannelRetention,
-    ) -> Duration {
-        self.request_timeout
-            .checked_mul(3)
-            .verified("the request budget fits twelvefold")
-            .min(retention.duration())
-    }
-    /// Progress control keeps its share of the local request budget and body-progress bound.
-    /// The delivery's captured dispatch policy may shorten that host limit.
-    pub(crate) fn relay_progress_send_timeout(&self, captured: Duration) -> Duration {
-        (self.request_timeout / 10)
-            .min(self.progress_timeout)
-            .max(SHORTEST_POSITIVE_DURATION)
-            .min(captured)
-    }
-
     /// Jitter never increases the configured retry ceiling and consumes no entropy when disabled.
     pub(crate) fn retry_delay(&self, base: Duration) -> Duration {
         if self.reconnect_jitter_permille == 0 {
@@ -250,12 +222,7 @@ impl TransportOptions {
                 reason: "HTTP/2 windows and header limit must be greater than zero".to_string(),
             }));
         }
-        if self.connection_setup_timeout.is_zero()
-            || self.request_timeout.is_zero()
-            || self.progress_timeout.is_zero()
-            || self.reconnect_backoff.is_zero()
-            || self.shutdown_drain_timeout.is_zero()
-        {
+        if self.connection_setup_timeout.is_zero() || self.reconnect_backoff.is_zero() {
             return Err(Report::new(TransportError::InvalidOptions {
                 reason: "transport deadlines must be greater than zero".to_string(),
             }));
@@ -265,8 +232,11 @@ impl TransportOptions {
                 reason: "max_reconnect_backoff must not be below reconnect_backoff".to_string(),
             }));
         }
-        TransportSettings::validate_deadline("interconnect-request-timeout", self.request_timeout)
-            .change_context(TransportError::Settings)?;
+        TransportSettings::validate_deadline(
+            "interconnect-connection-setup-timeout",
+            self.connection_setup_timeout,
+        )
+        .change_context(TransportError::Settings)?;
         Ok(())
     }
 }
@@ -621,6 +591,10 @@ pub enum OwnershipHandoffFailure {
     /// incarnation advertised that it is terminating, whatever its coordinator's view still shows.
     #[error("destination node '{node}' is terminating")]
     DestinationTerminating { node: ClusterNodeName },
+    /// The operation's own budget passed before the participant finished, while every node it
+    /// waited for still lived. The operation fails and every node keeps what it held.
+    #[error("the operation's budget passed before the participant finished")]
+    BudgetPassed,
 }
 
 impl OwnershipHandoffFailure {
@@ -983,7 +957,6 @@ impl InterconnectRequest for DataflowNodeStatusRequest {
     const NAME: &'static str = "dataflow_node_status";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 impl InterconnectRequest for DomainDrainStatusRequest {
@@ -992,7 +965,6 @@ impl InterconnectRequest for DomainDrainStatusRequest {
     const NAME: &'static str = "domain_drain_status";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 }
 
 impl InterconnectRequest for EntityGateRequest {
@@ -1001,7 +973,6 @@ impl InterconnectRequest for EntityGateRequest {
     const NAME: &'static str = "entity_gate";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Admission;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -1014,7 +985,6 @@ impl InterconnectRequest for EntityDrainStatusRequest {
     const NAME: &'static str = "entity_drain_status";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -1027,7 +997,6 @@ impl InterconnectRequest for EntityGateReleaseRequest {
     const NAME: &'static str = "entity_gate_release";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Cancellation;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Coordination;
 
     fn coordination_identity(&self) -> Option<&CoordinationIdentity> {
         Some(&self.coordination)
@@ -1038,28 +1007,24 @@ impl InterconnectRequest for DescribeMetricsRequest {
     type Response = DescribeMetricsResponse;
 
     const NAME: &'static str = "describe_metrics";
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 impl InterconnectRequest for DescribeRelayRequest {
     type Response = DescribeRelayResponse;
 
     const NAME: &'static str = "describe_relay";
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Control;
 }
 
 impl InterconnectRequest for DescribeLookupRequest {
     type Response = DescribeLookupResponse;
 
     const NAME: &'static str = "describe_lookup";
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 impl InterconnectRequest for LookupRequest {
     type Response = LookupResponse;
 
     const NAME: &'static str = "lookup";
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 impl InterconnectRequest for SubscriptionInterestVisibilityRequest {
@@ -1070,10 +1035,8 @@ impl InterconnectRequest for SubscriptionInterestVisibilityRequest {
     // Gossip convergence can keep this request open, so it must not occupy capacity reserved for
     // short liveness probes.
     const SUBQUOTA: RequestSubquota = RequestSubquota::Shared;
-    // This request spans gossip convergence during membership changes. Target departure and node
-    // shutdown cancel it independently, so the deadline is only the bound for a live but
-    // non-converging cluster.
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
+    // This request spans gossip convergence during membership changes; target departure and
+    // node shutdown end it.
 }
 
 #[derive(Debug)]
@@ -1170,10 +1133,6 @@ impl Transport {
             .install_liveness(settings::InterconnectLiveness::from_parameters(&values));
         self.inner
             .install_relay_retention(RelayChannelRetention::committed(&values));
-    }
-
-    pub fn request_timeout(&self) -> Duration {
-        self.inner.request_timeout()
     }
 
     /// What one relay channel watermark a receiver retains is charged to its relay memory class,
@@ -1296,6 +1255,18 @@ impl Transport {
         self.inner.register_outbound_target(node_id, endpoint);
     }
 
+    /// Add `node_id`'s pool target at `endpoint` only when the node has no target, and return the
+    /// endpoint the node is dialled at afterwards: `endpoint`, or the one it already had. Unlike
+    /// [`Self::register_outbound_target`], this never moves a node, so restoring the route to an
+    /// address one of its earlier runs advertised cannot take its target from where it runs now.
+    pub fn restore_outbound_target(
+        &self,
+        node_id: ClusterNodeName,
+        endpoint: NodeEndpoint,
+    ) -> NodeEndpoint {
+        self.inner.restore_outbound_target(node_id, endpoint)
+    }
+
     /// Reports whether every outbound pool except bulk is ready for node traffic.
     pub fn is_connected_to(&self, node_id: &ClusterNodeName) -> bool {
         self.inner.is_connected_to(node_id)
@@ -1318,9 +1289,23 @@ impl Transport {
         self.inner.replace_tls(tls).await
     }
 
-    pub async fn shutdown(&self) {
-        self.inner.shutdown().await;
+    /// Stop this transport: no new exchange is admitted, and the ones in flight finish before it
+    /// returns. Only `ceiling`, the teardown budget its caller passes, if any, forces the rest
+    /// closed: a node passes the task grace period of its terminal teardown.
+    pub async fn shutdown(&self, ceiling: Option<ExchangeDeadline>) {
+        self.inner.shutdown(ceiling).await;
     }
+}
+
+/// The teardown ceiling a test passes to [`Transport::shutdown`]: the streams a test still holds
+/// open are closed at most this long after it stops the transport.
+#[cfg(test)]
+pub(crate) fn test_teardown_ceiling() -> Option<ExchangeDeadline> {
+    Some(ExchangeDeadline::OperationCeiling(
+        nervix_primitives::time::Instant::now()
+            .checked_add(Duration::from_secs(10))
+            .expect("a ten-second teardown ceiling fits the monotonic clock"),
+    ))
 }
 
 impl Envelope {
@@ -1404,13 +1389,11 @@ pub enum TransportError {
         endpoint: NodeEndpoint,
         failure: DnsLookupFailure,
     },
-    #[error("request to node '{peer}' timed out after {timeout:?}")]
-    RequestTimeout {
+    #[error("an exchange with node '{peer}' reached its {deadline} deadline")]
+    DeadlinePassed {
         peer: ClusterNodeName,
-        timeout: Duration,
+        deadline: ExchangeDeadlineKind,
     },
-    #[error("body stream made no progress for {timeout:?}")]
-    ProgressTimeout { timeout: Duration },
     #[error(
         "a {window}-byte bulk receive window does not fit the {budget}-byte bulk_window memory \
          budget that backs it"
@@ -1533,6 +1516,48 @@ pub struct JoinRefusal {
 }
 
 impl TransportError {
+    /// Whether sending again can succeed while the peer stays live: a connection that failed or
+    /// closed is set up anew, and a full queue or pool has room again later. This node's own
+    /// shutdown, an envelope it cannot encode or that exceeds its class limit, invalid settings and
+    /// a refused join fail every later send the same way.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            Self::Io(_)
+            | Self::Tls(_)
+            | Self::Http2(_)
+            | Self::Decode(_)
+            | Self::PoolExhausted
+            | Self::ConnectionSetupTimeout { .. }
+            | Self::Resolution { .. }
+            | Self::DeadlinePassed { .. }
+            | Self::BulkReceiveWindowRefused { .. }
+            | Self::Closed(_)
+            | Self::RemoteRejected { .. }
+            | Self::IncomingQueueFull
+            | Self::RelayGrant(_)
+            | Self::RelayGrantRefused(_)
+            | Self::RelayBoundsRefused(_)
+            | Self::RelayCancelled
+            | Self::RelayIndeterminate
+            | Self::RelayRejected(_)
+            | Self::PeerProcessChanged { .. }
+            | Self::StaleRoute { .. } => true,
+            Self::RelayAckTiming
+            | Self::Settings
+            | Self::InvalidOptions { .. }
+            | Self::InvalidServerName(_)
+            | Self::Encode(_)
+            | Self::Http(_)
+            | Self::PayloadTooLarge { .. }
+            | Self::BulkReceiveWindowUnbacked { .. }
+            | Self::Http2StreamCapacity { .. }
+            | Self::InvalidHandshake(_)
+            | Self::ShuttingDown
+            | Self::RefusedByPeer { .. }
+            | Self::IncompatiblePeer { .. } => false,
+        }
+    }
+
     /// Preserve a typed cause while retaining the transport's existing failure wording.
     #[cfg_attr(
         nervix_lint,
@@ -1638,11 +1663,12 @@ mod runtime_error_event_properties;
 
 mod state_inspection;
 pub use state_inspection::{
-    MaterializedKeyCatalogResponse, MaterializedPartitionFilter, MaterializedStatePageDescriptor,
-    MaterializedStatePageReply, MaterializedStatePageTransfer, ProcessorStatePageDescriptor,
-    ProcessorStatePageReply, ProcessorStateRunTransfer, ProcessorStateSectionTransfer,
-    ReadMaterializedKeyCatalog, ReadMaterializedStatePage, ReadPartitionedMaterializedStatePage,
-    ReadProcessorStatePage, StatePageBody,
+    MaterializedKeyCatalogResponse, MaterializedPartitionFilter, MaterializedStatePageBody,
+    MaterializedStatePageDescriptor, MaterializedStatePageGroup, MaterializedStatePageReply,
+    MaterializedStatePageTransfer, ProcessorStatePageDescriptor, ProcessorStatePageReply,
+    ProcessorStateRunTransfer, ProcessorStateSectionTransfer, ReadMaterializedKeyCatalog,
+    ReadMaterializedStatePage, ReadPartitionedMaterializedStatePage, ReadProcessorStatePage,
+    StatePageBody,
 };
 
 mod wasm_state_inspection;

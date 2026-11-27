@@ -5,8 +5,9 @@
 Processor state inspection reports `not_ready` when installation or forget changes a branch catalog
 between its partition census and owner page, or when two holders identify no installed claimant.
 It returns no partial page or inflated counts. A census that exceeds the session byte budget is
-`reply_too_large`; failed Bulk admission remains `not_ready`, and unavailable owners and expired
-read deadlines retain their existing typed outcomes. These refusals contain no branch field values.
+`reply_too_large`. A full Bulk class holds an inspection back until it has room, within the read
+deadline, and is never a refusal; unavailable owners and expired read deadlines retain their
+existing typed outcomes. These refusals contain no branch field values.
 
 Secure random values come from `nervix-crypto`. Its pinned AWS-LC generator returns complete
 random bytes or aborts if sufficient entropy cannot be obtained; it has no recoverable entropy
@@ -535,7 +536,7 @@ generation as committed. Successful replies build no failure context.
 | Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical Plexus cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
 | Plexus language and formatter | Source text the lexer or parser rejects, with the stage that rejected it, the rejected text, and every diagnostic's message and byte span; statements the formatter cannot render, and formatted output that does not reparse to the statements it came from | Report the stage and underline each diagnostic in the text that was submitted, or leave a file unchanged and report the formatter defect. |
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
-| Bounded execution | A memory charge larger than its whole class, or taken from a class that closed because the node stops (`AdmissionError`), a budgeted buffer that would pass its operation's limit (`BufferGrowthError::LimitExceeded`), a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A full memory class or busy workers are never a failure: the executor's pools are backpressure, so every charge waits for room and every job waits for a worker in FIFO order, requests included, with nothing bounding how many wait, and whatever feeds the waiting work is held back meanwhile. A caller bounds the wait by its own limit (a statement's deadline, an HTTP body's deadline, an interconnect request's deadline) or by dropping it, which gives up its turn. Work that already holds part of a class never waits for more of it: it takes its whole working set as one share up front (`Executor::reserve_allowance`, `Executor::within_allowance`), and a charge its share has no room for fails at once with the share it needs (`Shortfall`), so its owner gives everything back and runs it again within that share, waited for while it holds nothing. A synchronous job whose buffer finds its class full does the same (`BufferGrowthError::NotCharged` with the `Shortfall` beneath it, `Executor::run_cpu_growing`). None of these reaches a caller as a refusal: an endpoint body, a client batch, an inspection, a request one node sends another and its answer, an ack resolution, a checkpoint, a state transfer, a backup cut, a restore conversion and an Iceberg commit all wait, and an answer whose caller ends its exchange or passes its deadline gives back its place and its charge. A processor task's restore of its branches waits for its place and room too: its executor handle tells the task while the restore waits, and the task answers its commands as unrestored meanwhile instead of waiting with it ([Restoring Processor Branches](./shutdown.md#restoring-processor-branches)). A claimed key's branch build and a new key's branch build wait the same way beside the task's commands, and neither is refused and tried again later ([Control Commands Beside Data Work](./data-plane-concurrency.md#control-commands-beside-data-work)). A materialized snapshot's open waits for room for each section and for the state-read share it keeps, rather than answering an inspection as not ready or failing an installation. An Iceberg commit that waits for room shows the wait as its emitter's transient status until the charge is granted. A panic is the job's own defect. The executor catches it at that callback, reports `JobPanicked` to its caller, completes its service accounting and continues draining its admitted successors. |
+| Bounded execution | A memory charge larger than its whole class, or taken from a class that closed because the node stops (`AdmissionError`), a budgeted buffer that would pass its operation's limit (`BufferGrowthError::LimitExceeded`), a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A full memory class or busy workers are never a failure: the executor's pools are backpressure, so every charge waits for room and every job waits for a worker in FIFO order, requests included, with nothing bounding how many wait, and whatever feeds the waiting work is held back meanwhile. A caller bounds the wait by its own limit (a statement's deadline, an HTTP body's deadline, an interconnect request's deadline) or by dropping it, which gives up its turn. Work that already holds part of a class never waits for more of it: it takes its whole working set as one share up front (`Executor::reserve_allowance`, `Executor::within_allowance`), and a charge its share has no room for fails at once with the share it needs (`Shortfall`), so its owner gives everything back and runs it again within that share, waited for while it holds nothing. An optional extra the work goes without when its share has no room for it now, such as a row after an inspection page's first, takes `Executor::try_reserve` or `Reservation::try_grow_to`, which never record a shortfall, so the work's own answer without the extra stands and it does not run again. A synchronous job whose buffer finds its class full does the same (`BufferGrowthError::NotCharged` with the `Shortfall` beneath it, `Executor::run_cpu_growing`). None of these reaches a caller as a refusal: an endpoint body, a client batch, an inspection, a request one node sends another and its answer, an ack resolution, a checkpoint, a state transfer, a backup cut, a restore conversion and an Iceberg commit all wait, and an answer whose caller ends its exchange or passes its deadline gives back its place and its charge. A processor task's restore of its branches waits for its place and room too: its executor handle tells the task while the restore waits, and the task answers its commands as unrestored meanwhile instead of waiting with it ([Restoring Processor Branches](./shutdown.md#restoring-processor-branches)). A claimed key's branch build and a new key's branch build wait the same way beside the task's commands, and neither is refused and tried again later ([Control Commands Beside Data Work](./data-plane-concurrency.md#control-commands-beside-data-work)). A materialized snapshot's open waits for room for each section and for the state-read share it keeps, rather than answering an inspection as not ready or failing an installation. An Iceberg commit that waits for room shows the wait as its emitter's transient status until the charge is granted. A panic is the job's own defect. The executor catches it at that callback, reports `JobPanicked` to its caller, completes its service accounting and continues draining its admitted successors. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
 | Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures, and a processor task's restore of the branches its lifecycle checkpoint names (`ProcessorBranchTaskError`) | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. A restore that fails installs no branch and stays pending: the task retries it after a backoff, holds its input, and refuses a lifecycle checkpoint or guest-state reset with `BranchesUnrestored` until an attempt succeeds. [Shutdown And Recovery](./shutdown.md#restoring-processor-branches) owns that sequence. |
 | Connector crates and host | Integration-specific configuration, decoding, external ingestor and emitter outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from an ingestor or emitter failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
@@ -564,8 +565,8 @@ The remote delivery owner maps a cancelled or unconfirmed admission through its 
 delivery failure and fails the record ACKs it retained, rather than reporting successful processing
 or a codec/message error. The acknowledged ingestor can then retry through the newly published route.
 An already admitted result keeps its record-ACK obligations; uncertainty can produce replay
-duplicates. Cancellation reconciliation keeps its five-second attempt budget independently of the
-entity gate deadline. [Cluster Interconnect](./interconnect.md#cancellation-and-branch-changes)
+duplicates. Cancellation reconciliation asks the former owner again until it answers, membership
+removes it, or the delivery's admission bound passes, independently of the entity gate deadline. [Cluster Interconnect](./interconnect.md#cancellation-and-branch-changes)
 owns the admission verdict and [Execution Plans](./execution-plans.md#incremental-changes-and-rebuilds) owns
 installation and publication.
 
@@ -809,9 +810,11 @@ Loading, replica conversion and backup capture all use that owning decoder; no m
 filled from domain metadata.
 
 Kafka's canonical-start coordination retains its typed offer, encoding, allocation and transfer
-causes beneath `StateReplicationError::KafkaStart`. A capture freeze reports `KafkaStartFrozen`;
-the shared checkpoint-transfer deadline reports `KafkaStartDeadline`. Changed lifecycle or
-assignment authority reports `Superseded`. The interconnect handler rejects a source node that
+causes beneath `StateReplicationError::KafkaStart`. A capture freeze reports `KafkaStartFrozen`.
+A start request carries no deadline of its own: the requesting unit waits for the coordinator's
+answer for as long as the coordinator lives, and one that liveness ends fails the request as a
+transport request failure beneath `Request`. Changed lifecycle or assignment authority reports
+`Superseded`. The interconnect handler rejects a source node that
 does not match its authenticated peer before reading or changing state. Runtime admission also
 checks the current membership incarnation. These failures end that initialization attempt; the
 host retries through its existing ingestor lifecycle without polling from substitute positions.
@@ -2648,19 +2651,28 @@ handoff destination converts the same fetch failure to a checkpoint preparation 
 persisting or activating the candidate state. Diagnostics include the revision and lengths when
 useful, never guest bytes.
 Forced-recovery preparation treats an absent destination execution during startup as an installation
-wait within its current operation deadline. Its `ScheduleInstallationDeadline` context carries the
-typed domain and node when that wait expires. An installed fingerprint mismatch remains a schedule
-validation failure. Neither diagnostic includes checkpoint contents.
+wait within the recovery's budget. Its `ScheduleInstallationDeadline` context carries the typed
+domain and node when that wait expires. A live source that has not answered with its checkpoint
+when the budget passes fails the preparation with `BudgetPassed` instead of being skipped. Both
+are budget expiries, which cross the interconnect as the typed `BudgetPassed` rejection rather than
+as rendered text, so the leader fails the attempt without resetting what live replicas hold. It
+logs `forced ownership recovery reached its budget before its destination prepared; the next
+scheduling pass prepares it again` at `warn` with the move and the complete report, then
+`discarded an automatic schedule before publication` at `info` with the reason `a forced recovery
+reached its budget while the replicas it waited for lived`, and the next scheduling pass prepares
+the recovery again. An installed fingerprint mismatch remains a schedule validation
+failure. None of these diagnostics includes checkpoint contents.
 Kafka offset replica catch-up uses the same typed envelope for its revision description. A
 subsequent bulk stream failure remains a transport request failure, with the target, placement and
 typed staging, admission, verification or native conversion cause retained beneath it. The
 replica diagnostic prints that cause chain. Cancellation or failed conversion publishes no
 partial table, and an assignment-token refusal keeps a delayed transfer from overwriting a
-promoted owner. A commit that lacks its required replica acknowledgement still reports the
-existing quorum deadline; catch-up retries do not turn that deadline into a successful commit.
-Kafka start coordination preserves typed admission, native conversion, memory and bulk-transfer
-causes through its reporting boundary. A frozen unit reports its exact placement, and a
-coordination deadline names the domain, source and unit. The current node incarnation, ownership
+promoted owner. A commit completes only once enough assigned replicas report holding its revision:
+it waits for them for as long as they live, a replica that leaves is replaced by one that catches up
+and reports, and no catch-up retry completes a commit its quorum has not reached. Kafka start
+coordination preserves typed admission, native conversion, memory and bulk-transfer causes through
+its reporting boundary. A frozen unit reports its exact placement, and a failed coordination names
+the domain, source and unit. The current node incarnation, ownership
 fingerprint and originating assignment fence stale work. A count transition refuses incomplete
 source inventories, foreign partition ownership and repeated metric identities before preparing
 target state; a failed preparation cannot publish a partial layout.
@@ -2743,18 +2755,24 @@ declares what Arrow's reader would panic on, a field type Nervix does not carry 
 at odds with its own schema, is refused by the same scan as `ArrowBodyError::Decode`, a defect of
 the body, before the reader reads it. Should the reader still panic on a body the scan admitted,
 that ends its decode job, and the decoder reports it as `ArrowBodyError::Decode` too rather than
-as work the node could not execute: decoding the same body again would panic again. A decoded
+as work the node could not execute: decoding the same body again would panic again. On the
+encoding side, a writer whose output outgrows its carriage's limit before the body is complete is
+`ArrowBodyError::EncodedPastLimit`, carrying the bytes it reached and the limit, with Arrow's
+writer error beneath; any other writer failure stays `ArrowBodyError::Encode`. A processor state
+page owner decides on that variant alone to carry the rows in smaller bodies, and refuses a single
+row past the limit as `reply_too_large`. A decoded
 batch the local relay boundary refuses is the separate
 `RuntimeError::DispatchRemoteRelay`. Remote payload handling returns these as `error-stack`
 reports: the receiver logs the whole chain, and a payload it refused before admitting it is
 answered with the chain rendered as the reason.
 [Cluster Interconnect](./interconnect.md)
-defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries. A record
-acknowledgement lost between two nodes becomes an ordinary negative acknowledgement: the node that
-forwarded it fails it once the receiver has reported nothing about it for fifteen seconds, with a
-reason that names the silent receiver, and the ingestor retries the record as it retries any failed
-acknowledgement; see
-[Record Acknowledgements The Receiver Stops Reporting](./interconnect.md#record-acknowledgements-the-receiver-stops-reporting).
+defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries. A receiver
+sends a record acknowledgement back until it is delivered, so none is lost between two live nodes.
+A record acknowledgement whose receiver leaves the cluster, or whose admitting receiver run ends,
+becomes an ordinary negative acknowledgement: the node that forwarded it fails it with a reason that
+names the receiver and which of the two ended it, and the ingestor retries the record as it retries
+any failed acknowledgement; see
+[Record Acknowledgements Follow The Receiver Run](./interconnect.md#record-acknowledgements-follow-the-receiver-run).
 Local interconnect transport, typed request, and streaming-handler failures carry reports through
 their callers. A layer that changes the failure's meaning adds context to the existing report, so
 the caller can still inspect the transport or producer cause. The HTTP/2 and rkyv boundary sends
@@ -3278,9 +3296,9 @@ includes guest bytes. Stored materialized capture refuses
 malformed headers, inconsistent group or row counts, oversized identity or column frames,
 truncated checkpoints and failed stored chunk digests. These
 typed codec/storage failures follow the same domain capture failure path without column bytes.
-An owner still applying the selected revision waits within a five-second bound; a closed
-applied-state authority or an expired catch-up
-wait is a domain capture failure. A leadership change during that wait refuses the capture before
+An owner still applying the selected revision waits for it with no bound of its own, since the cut's
+budget bounds the whole capture; a closed applied-state authority, reported as `capture revision
+authority is unavailable`, is a domain capture failure. A leadership change during that wait refuses the capture before
 state is read. The failed command's message is `backup failed:` followed by the complete
 domain-capture context and cause chain, including an interrupted guest or native-metadata capture.
 A download the server does not serve is answered with a typed refusal,

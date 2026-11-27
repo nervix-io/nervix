@@ -96,6 +96,16 @@ enum StandaloneSetback {
     Ended(Box<CommandResult>),
 }
 
+/// What recording a commit refusal as the command's outcome came to.
+enum StandaloneRefusalRecord {
+    /// The command's outcome, recorded or reported.
+    Answered(Box<CommandResult>),
+    /// The transaction's preview moved after the refusal was planned, as an allowed planning
+    /// change moves it, so the ledger kept the preview that now stands and recorded nothing: the
+    /// command plans its commit again against it.
+    PreviewMoved(Report<ConsensusTransactionError>),
+}
+
 /// A planning report keeps its typed cause until progress and pause recovery have been checked.
 enum StandaloneRefusal {
     Preflight(Report<super::TransactionPreflightError>),
@@ -510,10 +520,29 @@ impl SessionServiceImpl {
                     {
                         continue;
                     }
-                    let result = self
+                    let moved = match self
                         .refuse_standalone_commit(command, &current, &refusal)
+                        .await
+                    {
+                        StandaloneRefusalRecord::Answered(result) => {
+                            return Err(result);
+                        }
+                        StandaloneRefusalRecord::PreviewMoved(moved) => moved,
+                    };
+                    // No one was shown this command's preview, so a preview that moved under its
+                    // refusal is planned again, as a commit admission refused for a moved preview
+                    // is: the command answers against the planning inputs that now stand.
+                    let refreshed = self
+                        .inner
+                        .consensus
+                        .current_transaction(command.transaction_id)
                         .await;
-                    return Err(Box::new(result));
+                    let Some(refreshed) = refreshed else {
+                        let result = self.transaction_consensus_error_response(moved).await;
+                        return Err(Box::new(result));
+                    };
+                    current = refreshed;
+                    continue;
                 }
             };
             let admission = self
@@ -596,13 +625,15 @@ impl SessionServiceImpl {
 
     /// The command's outcome when its commit planning is refused against a transaction that has
     /// not moved: the refusal fails the commit when the plan names the operation it fails at, and
-    /// is answered as it stands otherwise.
+    /// is answered as it stands otherwise. The ledger records a failed commit only against the
+    /// transaction's current preview; when that preview moved after the refusal was planned, the
+    /// refusal is planned again rather than answered as a stale preview.
     async fn refuse_standalone_commit(
         &self,
         command: &StandaloneCommand<'_>,
         transaction: &ReplicatedTransaction,
         refusal: &Report<TransactionCommitError>,
-    ) -> CommandResult {
+    ) -> StandaloneRefusalRecord {
         let failed = self
             .fail_incomplete_transaction_commit(
                 transaction,
@@ -612,9 +643,26 @@ impl SessionServiceImpl {
             )
             .await;
         match failed {
-            Ok(Some(transaction)) => standalone_transaction_result(&transaction),
-            Ok(None) => command_error(transaction_commit_error_message(refusal)),
-            Err(error) => self.transaction_consensus_error_response(error).await,
+            Ok(Some(transaction)) => StandaloneRefusalRecord::Answered(Box::new(
+                standalone_transaction_result(&transaction),
+            )),
+            Ok(None) => StandaloneRefusalRecord::Answered(Box::new(command_error(
+                transaction_commit_error_message(refusal),
+            ))),
+            Err(error)
+                if matches!(
+                    error.current_context(),
+                    ConsensusTransactionError::Mutation(
+                        TransactionMutationError::PreviewStale { .. }
+                            | TransactionMutationError::PlanningInputsChanged { .. }
+                    )
+                ) =>
+            {
+                StandaloneRefusalRecord::PreviewMoved(error)
+            }
+            Err(error) => StandaloneRefusalRecord::Answered(Box::new(
+                self.transaction_consensus_error_response(error).await,
+            )),
         }
     }
 

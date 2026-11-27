@@ -72,10 +72,12 @@ mod execution;
 mod explicit_commit;
 mod forced_recovery;
 mod handoff_gate_link;
+mod health_links;
 mod ingestor_fault;
 mod interest_visibility;
 mod licensing;
 mod listener_accept;
+mod live_targets;
 mod live_view_gap;
 #[cfg(test)]
 mod live_view_gap_tests;
@@ -396,6 +398,10 @@ struct FaultInjectionState {
     /// Gaps a scenario opens in the live view one node's acknowledgement watchers read. Each keeps
     /// whether a watcher read it, so a scenario waits for the read instead of assuming it.
     live_view_gaps: DashMap<LiveViewGap, watch::Sender<LiveViewGapState>, RandomState>,
+    /// The interconnect live set each node last published to its transport, so a scenario waits
+    /// for a node to stop counting a stopped peer live instead of assuming when its application
+    /// health gives that peer up.
+    published_live_targets: watch::Sender<live_targets::PublishedLiveTargets>,
     /// Nodes whose relay memory a scenario fills, at once or just before their relay work reaches
     /// an armed point, and the memory each fill holds.
     relay_memory_fills: DashMap<ClusterNodeName, RelayMemoryFill, RandomState>,
@@ -599,6 +605,7 @@ impl Default for FaultInjection {
         let (listener_accept_failures, _) = watch::channel(ListenerAcceptFailures::default());
         let (session_backpressure, _) = watch::channel(None);
         let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
+        let (published_live_targets, _) = watch::channel(live_targets::PublishedLiveTargets::new());
         Self {
             inner: Arc::new(FaultInjectionState {
                 licensing_clock_offset: watch::channel(std::time::Duration::ZERO).0,
@@ -663,6 +670,7 @@ impl Default for FaultInjection {
                 relay_before_grant_pauses: DashMap::default(),
                 lost_remote_acknowledgements: DashMap::default(),
                 live_view_gaps: DashMap::default(),
+                published_live_targets,
                 relay_memory_fills: DashMap::default(),
                 relay_memory_owners: DashMap::default(),
                 owner_relay_fanout_pauses: DashMap::default(),
@@ -1356,104 +1364,6 @@ impl FaultInjection {
             .insert(node_id, ());
     }
 
-    pub fn arm_health_response_pause(
-        &self,
-        probing_node: ClusterNodeName,
-        responding_node: ClusterNodeName,
-    ) {
-        self.inner.health_response_pauses.insert(
-            HealthResponsePauseKey {
-                probing_node,
-                responding_node,
-            },
-            Arc::new(TestPause::default()),
-        );
-    }
-
-    pub fn fail_health_responses_from(&self, responding_node: ClusterNodeName) {
-        self.inner
-            .failed_health_responders
-            .insert(responding_node, ());
-    }
-
-    pub fn fail_health_responses_between(
-        &self,
-        probing_node: ClusterNodeName,
-        responding_node: ClusterNodeName,
-    ) {
-        self.inner.failed_health_links.insert(
-            HealthResponsePauseKey {
-                probing_node,
-                responding_node,
-            },
-            (),
-        );
-    }
-
-    pub fn restore_health_responses_between(
-        &self,
-        probing_node: &ClusterNodeName,
-        responding_node: &ClusterNodeName,
-    ) {
-        self.inner
-            .failed_health_links
-            .remove(&HealthResponsePauseKey {
-                probing_node: probing_node.clone(),
-                responding_node: responding_node.clone(),
-            });
-    }
-
-    pub fn block_gossip_for_node(&self, node: ClusterNodeName, send_delay: Duration) {
-        self.inner.blocked_gossip_nodes.insert(node, send_delay);
-    }
-
-    pub fn restore_gossip_for_node(&self, node: &ClusterNodeName) {
-        self.inner.blocked_gossip_nodes.remove(node);
-    }
-
-    pub(crate) fn gossip_exchange_is_blocked(
-        &self,
-        sending_node: &ClusterNodeName,
-        receiving_node: &ClusterNodeName,
-    ) -> bool {
-        self.inner.blocked_gossip_nodes.contains_key(sending_node)
-            || self.inner.blocked_gossip_nodes.contains_key(receiving_node)
-            || self.startup_voter_gossip_exchange_is_blocked(sending_node, receiving_node)
-    }
-
-    pub(crate) fn gossip_send_delay(&self, destination: &ClusterNodeName) -> Option<Duration> {
-        self.inner
-            .blocked_gossip_nodes
-            .get(destination)
-            .map(|delay| *delay.value())
-    }
-
-    pub async fn wait_for_health_response_pause(
-        &self,
-        probing_node: &ClusterNodeName,
-        responding_node: &ClusterNodeName,
-    ) {
-        let pause = self.health_response_pause(probing_node, responding_node);
-        pause.wait_until_reached().await;
-    }
-
-    pub fn release_health_response_pause(
-        &self,
-        probing_node: &ClusterNodeName,
-        responding_node: &ClusterNodeName,
-    ) {
-        let pause = self.health_response_pause(probing_node, responding_node);
-        pause.release();
-    }
-
-    pub fn release_all_health_responses(&self) {
-        for pause in &self.inner.health_response_pauses {
-            pause.release();
-        }
-        self.inner.health_response_pauses.clear();
-        self.inner.failed_health_responders.clear();
-    }
-
     pub fn pause_command_admission_on(&self, node_id: ClusterNodeName) {
         self.arm_command_pause(CommandPausePoint::Admission(node_id));
     }
@@ -1755,10 +1665,10 @@ impl FaultInjection {
         pause.release();
     }
 
-    /// Loses the next terminal record acknowledgement `resolver` returns to `registrar`. The
-    /// resolving node drops it instead of sending it, as a link that loses every attempt of the
-    /// send does, and reports nothing more about that record.
-    pub fn lose_next_remote_acknowledgement(
+    /// Fails the first send of the next terminal record acknowledgement `resolver` returns to
+    /// `registrar` in transport, as a connection that breaks under the send does. The resolving
+    /// node sends the acknowledgement again while the registrar stays live.
+    pub fn fail_next_remote_acknowledgement_send(
         &self,
         resolver: ClusterNodeName,
         registrar: ClusterNodeName,
@@ -1771,8 +1681,8 @@ impl FaultInjection {
         self.inner.lost_remote_acknowledgements.insert(link, loss);
     }
 
-    /// Waits until the loss armed from `resolver` to `registrar` has taken an acknowledgement.
-    pub async fn wait_for_lost_remote_acknowledgement(
+    /// Waits until the failure armed from `resolver` to `registrar` has failed a send.
+    pub async fn wait_for_failed_remote_acknowledgement_send(
         &self,
         resolver: &ClusterNodeName,
         registrar: &ClusterNodeName,
@@ -2634,13 +2544,13 @@ impl FaultInjection {
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "the scenario drops only the first acknowledgement on an armed link",
+            reason = "the scenario fails only the first acknowledgement send on an armed link",
             key = "one test resolver and registrar link",
             bound = "one keyed read and a terminal retained watch transition; no guard across \
                      await"
         )
     )]
-    pub(crate) fn loses_remote_acknowledgement(
+    pub(crate) fn fails_remote_acknowledgement_send(
         &self,
         resolver: &ClusterNodeName,
         registrar: &ClusterNodeName,

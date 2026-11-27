@@ -20,7 +20,6 @@ use nervix_client_wire::{
     RowBranch, RowSchema, SessionLimits, StateInspection, StateInspectionPage,
     StateInspectionResult, StateInspectionSection, StateInspectionUnit, StateRowsEncoder,
 };
-use nervix_execution::MemoryClass;
 use nervix_interconnect::{
     ProcessorStatePageDescriptor, ProcessorStateRunTransfer, ProcessorStateSectionTransfer,
     ReadProcessorStatePage, StreamHandlerError, StreamingResponse,
@@ -38,14 +37,15 @@ use nervix_primitives::time::timeout;
 
 use super::inspection_pages::{
     InspectionGrowth, add_counts, distinct_field, grow_inspection, inspection_owner,
-    inspection_refusal, rendered_inspection, resume_position,
+    inspection_refusal, owner_page_refusal, rendered_inspection, resume_position,
+    within_owner_page_shares,
 };
 use crate::{
     application::{AppError, command_result::CommandResult, session_service::SessionServiceImpl},
     client_row::{ArrowRowBatch, write_runtime_value},
     runtime::{
-        BranchKey, ProcessorStatePageBounds, ProcessorStatePageError, ProcessorStatePageRead,
-        ProcessorStateSelection,
+        BranchKey, PageReply, ProcessorStatePageBounds, ProcessorStatePageError,
+        ProcessorStatePageRead, ProcessorStateSelection,
         state_inspection_exchange::{
             ProcessorPageSection, ReceivedProcessorPage, receive_processor_page,
             stream_processor_page,
@@ -594,7 +594,9 @@ pub(in crate::application) struct OwnerSection {
     section: ProcessorStateSection,
     fields: Vec<SchemaField>,
     rows: u64,
-    batch: Option<RecordBatch>,
+    /// The section's returned rows, in row order across the batches they arrived in; empty when
+    /// the page returned none of them.
+    batches: Vec<RecordBatch>,
 }
 
 /// A run of consecutive returned rows of one section and one branch, in the unit's row order.
@@ -609,8 +611,9 @@ pub(in crate::application) struct OwnerPage {
     descriptor: ProcessorStatePageDescriptor,
     runs: Vec<OwnerRun>,
     sections: Vec<OwnerSection>,
-    /// Retains the published reader's allocation admission through projection and encoding.
-    _memory: Option<crate::runtime::ProcessorStatePageMemory>,
+    /// Retains the published reader's allocation admission through projection and encoding, with
+    /// what a page read for another node set aside for its reply.
+    memory: Option<crate::runtime::ProcessorStatePageMemory>,
 }
 
 impl SessionServiceImpl {
@@ -930,7 +933,9 @@ impl SessionServiceImpl {
         plan: &ProcessorInspectionPlan,
     ) -> Result<OwnerPage, StateInspectionRejection> {
         if request.target.node_id() == self.inner.consensus.local_node_id() {
-            return self.native_processor_state_page(request).await;
+            return self
+                .native_processor_state_page(request, PageReply::Local)
+                .await;
         }
         let deadline = *self
             .inner
@@ -938,11 +943,18 @@ impl SessionServiceImpl {
             .state_inspection_settings()
             .read_timeout
             .value();
+        let read_deadline = nervix_primitives::time::Instant::now()
+            .checked_add(deadline)
+            .assured("the inspection read deadline is a bounded setting");
         let target = request.target.clone();
         let stream = match self
             .inner
             .interconnect
-            .request_stream_with_timeout(request.target.node_id(), request.clone(), deadline)
+            .request_stream_by(
+                request.target.node_id(),
+                request.clone(),
+                nervix_interconnect::ExchangeDeadline::Caller(read_deadline),
+            )
             .await
         {
             Ok(stream) => stream,
@@ -964,6 +976,7 @@ impl SessionServiceImpl {
             stream,
             &request,
             &payload,
+            read_deadline,
         )
         .await
         {
@@ -999,14 +1012,14 @@ impl SessionServiceImpl {
                 section: section.section,
                 fields: section.fields,
                 rows: section.rows,
-                batch: section.batch,
+                batches: section.batches,
             })
             .collect();
         Ok(OwnerPage {
             descriptor: received.descriptor,
             runs,
             sections,
-            _memory: None,
+            memory: received.memory,
         })
     }
 
@@ -1034,52 +1047,35 @@ impl SessionServiceImpl {
             .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?
     }
 
-    /// Reads one page of a local unit's reorderer or correlator state and projects its columns
-    /// into the sections' complete fields.
-    /// Read this node's page of a processor unit's state, within allowances of the state-read,
-    /// restore metadata and bulk classes the read draws every charge from. A read that runs short
-    /// of its shares, however it answered, is made again within the shares it needed.
+    /// Reads one page of a local unit's processor state within the allowances it draws every
+    /// charge from ([`within_owner_page_shares`]), and projects its columns into the sections'
+    /// complete fields. `reply` says how the page reaches its reader.
     pub(in crate::application) async fn native_processor_state_page(
         &self,
         request: ReadProcessorStatePage,
+        reply: PageReply,
     ) -> Result<OwnerPage, StateInspectionRejection> {
         let request = &request;
-        let outcome = self
-            .inner
-            .runtime
-            .inspection_executor()
-            .within_allowance(MemoryClass::StateRead, 0, |state_read| async move {
-                state_read
-                    .within_allowance(MemoryClass::RestoreMetadata, 0, |metadata| async move {
-                        metadata
-                            .within_allowance(MemoryClass::Bulk, 1, |bulk| async move {
-                                Ok::<_, Report<nervix_execution::AdmissionError>>(
-                                    self.native_processor_state_page_with(&bulk, request).await,
-                                )
-                            })
-                            .await?
-                    })
-                    .await?
-            })
-            .await;
-        match outcome {
-            Ok(Ok(page)) => page,
-            Ok(Err(failure)) => Err(inspection_refusal(
-                failure,
-                StateInspectionRejection::NotReady,
-            )),
-            Err(refusal) => Err(inspection_refusal(
-                refusal,
-                StateInspectionRejection::NotReady,
-            )),
+        let executor = self.inner.runtime.inspection_executor();
+        let share = reply.initial_share(executor, request.max_rows, request.max_bytes);
+        let read = within_owner_page_shares(executor, share, |page_executor| async move {
+            self.native_processor_state_page_with(&page_executor, request, reply)
+                .await
+        })
+        .await;
+        match read {
+            Ok(page) => page,
+            Err(refusal) => Err(owner_page_refusal(refusal)),
         }
     }
 
-    /// One read of this node's page, drawing every charge through `executor`.
+    /// One attempt at this node's page of a processor unit's state, every charge drawn through
+    /// `executor`, the page's allowance.
     async fn native_processor_state_page_with(
         &self,
         executor: &nervix_execution::Executor,
         request: &ReadProcessorStatePage,
+        reply: PageReply,
     ) -> Result<OwnerPage, StateInspectionRejection> {
         let local = ClusterNodeIdentity::new(
             self.inner.consensus.local_node_id().clone(),
@@ -1130,6 +1126,7 @@ impl SessionServiceImpl {
                             u64::try_from(SessionLimits::DEFAULT.transfer_bytes())
                                 .assured("session limits fit u64"),
                         ),
+                        reply,
                     },
                 },
             )
@@ -1188,7 +1185,7 @@ impl SessionServiceImpl {
                     section: section.section,
                     rows: section.rows,
                     fields: section.fields.clone(),
-                    body: None,
+                    bodies: Vec::new(),
                 })
                 .collect(),
         };
@@ -1196,7 +1193,7 @@ impl SessionServiceImpl {
             descriptor,
             runs,
             sections,
-            _memory: page.memory,
+            memory: page.memory,
         })
     }
 
@@ -1232,60 +1229,44 @@ impl SessionServiceImpl {
             .read_timeout
             .value();
         let executor = self.inner.runtime.inspection_executor();
-        // The read and its stream are one attempt within allowances of the state-read, restore
-        // metadata and bulk classes: the stream encodes while the read page holds its charges, so
-        // both draw from the shares, and an attempt that runs short is made again within the
-        // shares it needed.
+        // The page travels to another node, so admitting its rows also sets aside its reply. The
+        // read and its stream are one attempt within the page's allowances: the stream encodes
+        // while the page holds its charges, so both draw from the shares.
+        let reply = PageReply::remote(executor);
+        let share = reply.initial_share(executor, request.max_rows, max_bytes);
         let request = &request;
         let answered = timeout(
             deadline,
-            executor.within_allowance(MemoryClass::StateRead, 0, |state_read| async move {
-                state_read
-                    .within_allowance(MemoryClass::RestoreMetadata, 0, |metadata| async move {
-                        metadata
-                            .within_allowance(MemoryClass::Bulk, 1, |bulk| async move {
-                                let read =
-                                    self.native_processor_state_page_with(&bulk, request).await;
-                                let mut memory = None;
-                                let result = match read {
-                                    Ok(page) => {
-                                        memory = page._memory;
-                                        Ok((
-                                            page.descriptor,
-                                            page.sections
-                                                .into_iter()
-                                                .map(|section| ProcessorPageSection {
-                                                    batch: section.batch,
-                                                })
-                                                .collect::<Vec<_>>(),
-                                        ))
-                                    }
-                                    Err(reason) => Err(reason),
-                                };
-                                let response =
-                                    stream_processor_page(&bulk, result, max_bytes).await;
-                                drop(memory);
-                                response
-                            })
-                            .await
-                            .map_err(StreamHandlerError::with_cause)?
-                    })
-                    .await
-                    .map_err(StreamHandlerError::with_cause)?
+            within_owner_page_shares(executor, share, |page_executor| async move {
+                let read = self
+                    .native_processor_state_page_with(&page_executor, request, reply)
+                    .await;
+                let mut memory = None;
+                let result = match read {
+                    Ok(page) => {
+                        memory = page.memory;
+                        Ok((
+                            page.descriptor,
+                            page.sections
+                                .into_iter()
+                                .map(|section| ProcessorPageSection {
+                                    batches: section.batches,
+                                })
+                                .collect::<Vec<_>>(),
+                        ))
+                    }
+                    Err(reason) => Err(reason),
+                };
+                stream_processor_page(&page_executor, result, max_bytes, memory).await
             }),
         )
         .await;
-        match answered {
-            Ok(Ok(response)) => response,
-            Ok(Err(refusal)) => {
-                let rejection = inspection_refusal(refusal, StateInspectionRejection::NotReady);
-                stream_processor_page(executor, Err(rejection), max_bytes).await
-            }
-            Err(_) => {
-                stream_processor_page(executor, Err(StateInspectionRejection::Deadline), max_bytes)
-                    .await
-            }
-        }
+        let refusal = match answered {
+            Ok(Ok(streamed)) => return streamed,
+            Ok(Err(refusal)) => owner_page_refusal(refusal),
+            Err(_) => StateInspectionRejection::Deadline,
+        };
+        stream_processor_page(executor, Err(refusal), max_bytes, None).await
     }
 
     /// The `branches:`, `rows:` and `state bytes:` lines `DESCRIBE` reports for each unit of a
@@ -1367,7 +1348,9 @@ impl SessionServiceImpl {
         request: ReadProcessorStatePage,
     ) -> Result<StateInspectionCounts, StateInspectionRejection> {
         if request.target.node_id() == self.inner.consensus.local_node_id() {
-            let page = self.native_processor_state_page(request).await?;
+            let page = self
+                .native_processor_state_page(request, PageReply::Local)
+                .await?;
             return Ok(page.descriptor.counts);
         }
         let deadline = *self
@@ -1376,10 +1359,17 @@ impl SessionServiceImpl {
             .state_inspection_settings()
             .read_timeout
             .value();
+        let read_deadline = nervix_primitives::time::Instant::now()
+            .checked_add(deadline)
+            .assured("the inspection read deadline is a bounded setting");
         let stream = self
             .inner
             .interconnect
-            .request_stream_with_timeout(request.target.node_id(), request.clone(), deadline)
+            .request_stream_by(
+                request.target.node_id(),
+                request.clone(),
+                nervix_interconnect::ExchangeDeadline::Caller(read_deadline),
+            )
             .await
             .map_err(|error| {
                 inspection_refusal(error, StateInspectionRejection::OwnerUnavailable)
@@ -1389,6 +1379,7 @@ impl SessionServiceImpl {
             stream,
             &request,
             &[],
+            read_deadline,
         )
         .await
         .map_err(|error| inspection_refusal(error, StateInspectionRejection::OwnerUnavailable))??;
@@ -1445,7 +1436,7 @@ fn project_sections(
                 section: section.section,
                 fields: Vec::new(),
                 rows: section.rows,
-                batch: None,
+                batches: Vec::new(),
             });
             continue;
         }
@@ -1465,7 +1456,7 @@ fn project_sections(
             section: section.section,
             fields,
             rows: section.rows,
-            batch: Some(batch),
+            batches: vec![batch],
         });
     }
     Ok(projected)
@@ -1495,7 +1486,7 @@ fn encode_page(
         descriptor,
         runs,
         sections,
-        _memory,
+        memory: _memory,
     } = page;
     let mut schemas = Vec::with_capacity(sections.len());
     for section in &sections {
@@ -1504,19 +1495,11 @@ fn encode_page(
             branch: branch.cloned(),
         });
     }
-    let mut columns = Vec::with_capacity(sections.len());
+    let mut section_rows = Vec::with_capacity(sections.len());
     for (section, schema) in sections.iter().zip(&schemas) {
-        columns.push(match &section.batch {
-            Some(batch) => {
-                Some(ArrowRowBatch::new(schema, batch).map_err(|error| {
-                    inspection_refusal(error, StateInspectionRejection::NotReady)
-                })?)
-            }
-            None => None,
-        });
+        section_rows.push(SectionRows::new(schema, &section.batches)?);
     }
     let mut frames = vec![Vec::new(); sections.len()];
-    let mut next_row = vec![0_usize; sections.len()];
     let mut frame_bytes = 0_usize;
     let mut rows = 0_usize;
     let mut last_branch = None;
@@ -1526,14 +1509,14 @@ fn encode_page(
             return Err(StateInspectionRejection::NotReady);
         };
         let key = &run.branch;
-        let columns = columns[index]
-            .as_ref()
-            .ok_or(StateInspectionRejection::NotReady)?;
         for _ in 0..run.rows {
             cancellation
                 .check()
                 .map_err(|error| inspection_refusal(error, StateInspectionRejection::Deadline))?;
-            let row = next_row[index];
+            let returned = &mut section_rows[index];
+            let Some((columns, row)) = returned.next() else {
+                return Err(StateInspectionRejection::NotReady);
+            };
             let mut encoder = match (branch, key) {
                 (None, None) => StateRowsEncoder::unbranched(limits),
                 (Some(branch), Some(key)) => {
@@ -1579,9 +1562,7 @@ fn encode_page(
             };
             frame_bytes = total;
             frames[index].push(frame);
-            next_row[index] = row
-                .checked_add(1)
-                .assured("a section's rows are counted by an addressable batch");
+            section_rows[index].advance();
             if !run.section.is_metadata() {
                 rows = rows
                     .checked_add(1)
@@ -1616,6 +1597,72 @@ fn encode_page(
         more: descriptor.more || full,
         last_branch,
     })
+}
+
+/// One section's returned rows in Row presentation, in the batches they arrived in, read in
+/// order.
+struct SectionRows<'a> {
+    batches: Vec<SectionBatch<'a>>,
+    /// The batch holding the section's next row, and that row's index in it.
+    batch: usize,
+    row: usize,
+}
+
+/// One batch of a section's returned rows and how many rows it holds.
+struct SectionBatch<'a> {
+    columns: ArrowRowBatch<'a>,
+    rows: usize,
+}
+
+impl<'a> SectionRows<'a> {
+    fn new(
+        schema: &'a RowSchema,
+        batches: &'a [RecordBatch],
+    ) -> Result<Self, StateInspectionRejection> {
+        let mut presented = Vec::with_capacity(batches.len());
+        for batch in batches {
+            let columns = ArrowRowBatch::new(schema, batch)
+                .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
+            presented.push(SectionBatch {
+                columns,
+                rows: batch.num_rows(),
+            });
+        }
+        Ok(Self {
+            batches: presented,
+            batch: 0,
+            row: 0,
+        })
+    }
+
+    /// The section's next row, as its batch's columns and its index there, moving on to the next
+    /// batch once one is written out; `None` once every returned row is written.
+    fn next(&mut self) -> Option<(&ArrowRowBatch<'a>, usize)> {
+        loop {
+            let current = self.batches.get(self.batch)?;
+            if self.row < current.rows {
+                break;
+            }
+            self.batch = self
+                .batch
+                .checked_add(1)
+                .assured("a section holds fewer batches than usize::MAX");
+            self.row = 0;
+        }
+        let current = self
+            .batches
+            .get(self.batch)
+            .verified("the loop above stopped at the batch holding the row");
+        Some((&current.columns, self.row))
+    }
+
+    /// Records the row [`Self::next`] returned as written.
+    fn advance(&mut self) {
+        self.row = self
+            .row
+            .checked_add(1)
+            .assured("a section's rows are counted by addressable batches");
+    }
 }
 
 #[cfg(test)]

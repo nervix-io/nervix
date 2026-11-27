@@ -43,19 +43,41 @@ impl Default for Headers {
 }
 
 impl Headers {
-    pub(super) fn append(&mut self, branch: &CapturedBranch, bytes: u64) -> ReadResult<()> {
+    pub(super) fn append(&mut self, retained: &RetainedBranch, bytes: u64) -> ReadResult<()> {
+        let branch = &retained.branch;
         match &branch.key {
             Some(key) => self.fingerprint.append_value(key.fingerprint().to_string()),
             None => self.fingerprint.append_null(),
         }
-        self.incarnation.append_value(branch.value()?.incarnation);
-        self.revision.append_value(branch.generation.revision);
+        self.incarnation.append_value(retained.value()?.incarnation);
+        self.revision.append_value(branch.revision);
         self.persisted.append_value(branch.persisted);
         self.bytes.append_value(bytes);
         self.confirmed.append_value(branch.confirmed);
         self.replicas.append_value(branch.replicas);
         self.stage.append_value(branch.stage().as_ref());
         Ok(())
+    }
+
+    /// The bytes `branch`'s header row adds to the body that carries it: its fingerprint and stage
+    /// text with their offsets, and its six counters.
+    pub(super) fn row_bytes(branch: &CapturedBranch) -> u64 {
+        let fingerprint = match &branch.key {
+            Some(key) => key.fingerprint().to_string().len(),
+            None => 0,
+        };
+        let texts = fingerprint
+            .checked_add(branch.stage().as_ref().len())
+            .assured("a header row's text is tiny");
+        let offsets = std::mem::size_of::<i32>()
+            .checked_mul(2)
+            .assured("two text offsets are tiny");
+        let counters = std::mem::size_of::<u64>()
+            .checked_mul(6)
+            .assured("six counters are tiny");
+        let bytes = texts.checked_add(offsets).assured("a header row is tiny");
+        let bytes = bytes.checked_add(counters).assured("a header row is tiny");
+        u64::try_from(bytes).assured("a header row's size fits u64")
     }
 
     pub(super) fn finish(mut self, total: u64) -> ProcessorStateSectionColumns {

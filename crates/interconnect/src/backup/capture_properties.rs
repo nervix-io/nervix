@@ -128,6 +128,13 @@ impl CaptureWireCase {
             path: self.path(),
         }
     }
+
+    fn release(&self) -> ReleaseCapturedSections {
+        ReleaseCapturedSections {
+            coordination: self.coordination(),
+            domain: self.domain(),
+        }
+    }
 }
 
 const SECTION_KINDS: [CapturedStateSectionKind; 14] = [
@@ -252,6 +259,7 @@ fn bolero_backup_capture_messages_round_trip() {
                     .await;
                 }
                 assert_round_trip(&executor, FetchCapturedSection::CLASS, case.fetch()).await;
+                assert_round_trip(&executor, ReleaseCapturedSections::CLASS, case.release()).await;
             });
         });
 }

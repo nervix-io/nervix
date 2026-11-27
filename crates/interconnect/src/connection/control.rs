@@ -15,11 +15,8 @@
     )
 )]
 
-use std::time::Duration;
-
 use error_stack::Report;
 use nervix_models::ClusterNodeName;
-use nervix_primitives::time::Instant;
 
 use super::{CONTROL_PATH, RawRequest, StreamLease, TransportState};
 use crate::{ControlEnvelope, PoolClass, RequestSubquota, TransportError, wire};
@@ -43,7 +40,8 @@ impl PeerProcessFence for u64 {
 }
 
 impl TransportState {
-    /// Leases a stream of `class` and `subquota` toward `node_id` by `deadline`, and refuses a
+    /// Leases a stream of `class` and `subquota` toward `node_id`, waiting while liveness keeps the
+    /// peer and its connection and until `deadline` when the caller names one, and refuses a
     /// replacement process when `fence` names the one the request is meant for.
     ///
     /// A request of a reserved kind leases its stream before it encodes its payload and keeps it
@@ -57,7 +55,7 @@ impl TransportState {
         node_id: &ClusterNodeName,
         class: PoolClass,
         subquota: RequestSubquota,
-        deadline: Instant,
+        deadline: Option<crate::ExchangeDeadline>,
         fence: F,
     ) -> Result<StreamLease, Report<TransportError>> {
         let lease = self.lease(node_id, class, subquota, deadline).await?;
@@ -74,12 +72,13 @@ impl TransportState {
         Ok(lease)
     }
 
-    /// Sends `control` on `lease` and reads its answer, both by `deadline`.
+    /// Sends `control` on `lease` and reads its answer, for as long as the lease's connection
+    /// lives and until `deadline` when the caller names one.
     pub(crate) async fn exchange_control(
         &self,
         lease: &StreamLease,
         control: ControlEnvelope,
-        deadline: Instant,
+        deadline: Option<crate::ExchangeDeadline>,
     ) -> Result<wire::Decoded<ControlEnvelope>, Report<TransportError>> {
         let class = control.pool_class();
         let bytes = wire::encode_rkyv(
@@ -98,14 +97,14 @@ impl TransportState {
                     body: Some(bytes),
                     response_class: class,
                     response_limit: class.control_body_limit(&self.executor),
-                    timeout: deadline.saturating_duration_since(Instant::now()),
+                    deadline,
                     headers: &[],
                 },
             )
             .await?;
-        // The response carries work the peer already did, so a full class holds it back until the
-        // request's own deadline rather than discarding it. It was read with the room its decoding
-        // takes, so the decoding waits for nothing behind it.
+        // The response carries work the peer already did, so a full class holds it back rather
+        // than discarding it. It was read with the room its decoding takes, so the decoding waits
+        // for nothing behind it.
         wire::decode_rkyv_within::<ControlEnvelope>(
             &self.executor,
             class.cpu_class(),
@@ -113,17 +112,5 @@ impl TransportState {
             response.decoding,
         )
         .await
-    }
-
-    /// The instant a request given `timeout` stops waiting.
-    pub(crate) fn request_deadline(
-        &self,
-        timeout: Duration,
-    ) -> Result<Instant, Report<TransportError>> {
-        Instant::now().checked_add(timeout).ok_or_else(|| {
-            Report::new(TransportError::InvalidOptions {
-                reason: "request deadline exceeds the monotonic clock range".to_string(),
-            })
-        })
     }
 }

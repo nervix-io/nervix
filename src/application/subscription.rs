@@ -81,6 +81,7 @@ use nervix_primitives::{
 };
 use nervix_recovery::Discarded as _;
 use sorted_vec::SortedSet;
+use tracing::debug;
 
 use self::delivery::SubscriptionDelivery;
 pub(in crate::application) use self::interest::SubscriptionInterests;
@@ -1132,6 +1133,12 @@ impl SessionServiceImpl {
         )
     }
 
+    /// Waits until `target_node_id` sees the subscriber's interest at `minimum_version`.
+    ///
+    /// A request that fails in transport, because liveness or a planned change closed the
+    /// connection it was sent on, is asked again at the membership cadence for as long as
+    /// membership keeps the node: only the node leaving, this node stopping, or a failure no
+    /// later request avoids, ends the wait unanswered.
     async fn wait_for_subscription_interest_visibility_on_node(
         &self,
         target_node_id: &ClusterNodeName,
@@ -1140,30 +1147,66 @@ impl SessionServiceImpl {
         relay: &RelayName,
         minimum_version: u64,
     ) -> error_stack::Result<(), SubscriptionError> {
-        let response = self
-            .inner
-            .interconnect
-            .request(
-                target_node_id,
-                RemoteSubscriptionInterestVisibilityRequest {
-                    subscriber: subscriber.clone(),
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let response = self
+                .inner
+                .interconnect
+                .request(
+                    target_node_id,
+                    RemoteSubscriptionInterestVisibilityRequest {
+                        subscriber: subscriber.clone(),
+                        domain: domain.clone(),
+                        relay: relay.clone(),
+                        minimum_version,
+                    },
+                )
+                .await;
+            let error = match response {
+                Ok(response) => {
+                    return response.result.map_err(|failure| {
+                        Report::new(SubscriptionError::InterestRemoteFailure {
+                            node: target_node_id.clone(),
+                            failure,
+                        })
+                    });
+                }
+                Err(error) => error,
+            };
+            let transient = error
+                .downcast_ref::<nervix_interconnect::TransportError>()
+                .is_some_and(nervix_interconnect::TransportError::is_transient);
+            if !transient || !self.inner.interconnect.target_is_live(target_node_id) {
+                return Err(error.change_context(SubscriptionError::InterestRequest {
                     domain: domain.clone(),
                     relay: relay.clone(),
-                    minimum_version,
-                },
-            )
-            .await
-            .change_context(SubscriptionError::InterestRequest {
-                domain: domain.clone(),
-                relay: relay.clone(),
-                node: target_node_id.clone(),
-            })?;
-        response.result.map_err(|failure| {
-            Report::new(SubscriptionError::InterestRemoteFailure {
-                node: target_node_id.clone(),
-                failure,
-            })
-        })
+                    node: target_node_id.clone(),
+                }));
+            }
+            debug!(
+                domain = domain.as_str(),
+                relay = relay.as_str(),
+                target_node = %target_node_id,
+                error = %format_args!("{error:#}"),
+                "a subscription interest check is asked again while its node stays live"
+            );
+            nervix_primitives::select! {
+                biased;
+                () = self.inner.interconnect.target_left(target_node_id) => {}
+                // A stopping node no longer follows membership, so its stop ends the wait as the
+                // node leaving would.
+                () = self.inner.drain_support_shutdown.cancelled() => {
+                    return Err(error.change_context(SubscriptionError::InterestRequest {
+                        domain: domain.clone(),
+                        relay: relay.clone(),
+                        node: target_node_id.clone(),
+                    }));
+                }
+                () = nervix_primitives::time::sleep(
+                    self.inner.operational.control_plane.membership_interval(),
+                ) => {}
+            }
+        }
     }
 
     /// The node the committed schedule places the owner of `unit` of `relay` on, if it places one.
@@ -2206,7 +2249,8 @@ mod tests {
         let domain: DomainName = named("accounts");
         let relay: RelayName = named("events");
         let subscriber = service.inner.cluster.local_node_identity().await;
-        let peer = named("unavailable_peer");
+        let peer = named("departed_peer");
+        super::super::test_fixtures::publish_membership_of_this_node_alone(&service);
         let error = service
             .wait_for_subscription_interest_visibility_on_node(
                 &peer,
@@ -2216,7 +2260,7 @@ mod tests {
                 1,
             )
             .await
-            .expect_err("the peer has no transport route");
+            .expect_err("membership no longer lists the peer");
         assert!(
             matches!(error.current_context(), SubscriptionError::InterestRequest { node, .. } if node == &peer)
         );

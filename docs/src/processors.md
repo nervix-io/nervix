@@ -298,8 +298,9 @@ is redacted. Keys are listed oldest first within each branch. Expired keys are e
 domain-clock reading, including when no new input has caused the branch task to prune them.
 
 The ordered `FOR`, `LIMIT ... AFTER` and `FORMAT` clauses, owner routing and typed refusals are
-shared with materialized-state inspection. A continuation is refused as `stale_continuation` when
-its publication or visible expiry prefix changes. Reading state does not refresh a key's expiry.
+shared with materialized-state inspection. A page also ends before a key whose columns the owner's
+bulk memory cannot hold, as a [window page](#inspect-retained-window-state) does. A continuation is
+refused as `stale_continuation` when its publication or visible expiry prefix changes. Reading state does not refresh a key's expiry.
 During a [partition transition](relay.md#changing-the-partition-count), each concrete branch is read from its holder
 until installation and from its claimant afterwards. Retained transfer copies add no duplicate
 rows or counts; a branch-catalog change racing the read produces `not_ready`.
@@ -408,7 +409,12 @@ it handled, so a page resumed after any branch took another batch, released rows
 refused as `stale_continuation`. A branch that is stopping refuses the read as `owner_unavailable`.
 A unit that has not yet installed every branch its node held, while it restores them after its
 task starts or takes the unit over, refuses the read as `not_ready` instead of reporting the
-branches it has not restored as empty.
+branches it has not restored as empty. Gathering the copied rows' columns charges the owner's bulk
+memory the rows' bytes, and a page read through another node also sets each row's body aside, so a
+page ends before a row the bulk memory left cannot hold, with complete counts and a continuation,
+as a [window page](#inspect-retained-window-state) does. A page always returns its first row: when
+the owner's bulk memory cannot hold even that row now, the read waits for room for it rather than
+being refused.
 
 `DESCRIBE REORDERER` reports, for each execution unit, the concrete branches the reorderer runs and
 the rows and bytes they hold, after its placement lines:
@@ -527,9 +533,16 @@ Two additional typed sections describe each selected branch, including an empty 
 
 `LIMIT`, continuation offsets and complete row counts count only retained input rows. Headers and
 accumulator facts do not advance the row position; they do consume the reply's byte bound and are
-repeated on each page. Metadata that cannot fit is refused as `reply_too_large`. Every section uses
-the same captured publication, and a changed publication or branch lifetime invalidates its
-continuation. Branch selectors, formats and owner routing use the shared inspection contract.
+repeated on each page. Metadata that cannot fit is refused as `reply_too_large`. Gathering a row's
+columns charges the owner's bulk memory twice the row's bytes, after every selected branch's
+metadata is charged. A page read through another node also sets the row's bytes aside once more for
+the Arrow body that carries it, so it holds fewer rows than one its owner presents. A page therefore
+also ends before a row the bulk memory left cannot hold, with complete counts and a continuation,
+and it always returns its first row: when the owner's bulk memory cannot hold even that row now,
+the read waits for room for it rather than being refused. Read through
+another node, a single row whose encoded columns exceed the owner's snapshot section bound, 8 MiB,
+refuses the page as `reply_too_large`. Every section uses the same captured publication, and a changed publication
+or branch lifetime invalidates its continuation. Branch selectors, formats and owner routing use the shared inspection contract.
 During a [partition transition](relay.md#changing-the-partition-count), the selected partition contributes the branch's
 rows, header, accumulator facts and byte charge once, including while its holder retains the
 transfer checkpoint. A branch-catalog change racing the read produces `not_ready`.
@@ -805,7 +818,13 @@ preserved. If any input or branch-key field is sensitive, the entire `values` ce
 port names, shape and lifecycle metadata remain visible. There is no implicit leakage exception.
 
 Complete row counts, `LIMIT` and continuation offsets count tensor rows. Header rows consume
-the reply's section and byte bounds separately. A continuation names the complete selected
+the reply's section and byte bounds separately. A page retains the publication of each branch it
+returns tensors from only while it copies them, charging the owner's bulk memory the publication's
+footprint, and building a tensor row takes four times its bytes; a page read through another node
+also sets each row's bytes aside for the body that carries it. A page therefore ends before a row
+the bulk memory left cannot hold, with complete counts and a continuation, and it always returns its
+first row: when the owner's bulk memory cannot hold even that row now, the read waits for room for
+it rather than being refused. A continuation names the complete selected
 publication cut, owner incarnations, committed revision and selector. Changed tensors, branch
 membership, ownership or configuration make it stale. Start a new read after
 `stale_continuation`; do not combine rows from different cuts. During repartitioning, the

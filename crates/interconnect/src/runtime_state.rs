@@ -236,14 +236,12 @@ impl InterconnectRequest for DescribeKafkaOffsets {
     type Response = Result<KafkaOffsetRevision, RemoteOperationFailure>;
     const NAME: &'static str = "describe_kafka_offsets";
     const CLASS: PoolClass = PoolClass::Commands;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 impl InterconnectStreamRequest for SyncKafkaOffsets {
     const NAME: &'static str = "sync_kafka_offsets";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Snapshot;
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
@@ -346,7 +344,6 @@ impl InterconnectRequest for BranchCheckpointListingRequest {
 
     const NAME: &'static str = "branch_checkpoint_listing";
     const CLASS: PoolClass = PoolClass::Replication;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 impl InterconnectRequest for StateSyncRequest {
@@ -354,14 +351,12 @@ impl InterconnectRequest for StateSyncRequest {
 
     const NAME: &'static str = "state_sync";
     const CLASS: PoolClass = PoolClass::Replication;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
 }
 
 impl InterconnectStreamRequest for FetchStateCheckpoint {
     const NAME: &'static str = "fetch_state_checkpoint";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 }
 
 #[cfg(all(

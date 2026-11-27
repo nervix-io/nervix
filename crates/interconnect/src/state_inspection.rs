@@ -51,7 +51,6 @@ impl InterconnectRequest for ReadMaterializedKeyCatalog {
     const NAME: &'static str = "read_materialized_key_catalog";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
@@ -64,7 +63,6 @@ impl InterconnectStreamRequest for ReadPartitionedMaterializedStatePage {
     const NAME: &'static str = "read_partitioned_materialized_state_page";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
@@ -85,7 +83,6 @@ impl InterconnectStreamRequest for ReadMaterializedStatePage {
     const NAME: &'static str = "read_materialized_state_page";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
@@ -101,7 +98,26 @@ pub struct MaterializedStatePageDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 pub struct MaterializedStatePageTransfer {
     pub page: MaterializedStatePageDescriptor,
-    pub body: Option<StatePageBody>,
+    pub body: Option<MaterializedStatePageBody>,
+}
+
+/// The native snapshot container a materialized page stream carries after its descriptor: its
+/// identity, and the layout its reader admits memory for before it reads any of the container.
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub struct MaterializedStatePageBody {
+    pub identity: StatePageBody,
+    /// How many records the container carries.
+    pub records: u64,
+    /// The exact lengths of each group's sections, in container order.
+    pub groups: Vec<MaterializedStatePageGroup>,
+}
+
+/// The exact lengths of one group's two sections in a materialized page's container: its record
+/// identities, then its Arrow columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub struct MaterializedStatePageGroup {
+    pub identities: u64,
+    pub columns: u64,
 }
 
 /// The identity of one native Arrow body a page stream carries after its descriptor: its exact
@@ -146,7 +162,6 @@ impl InterconnectStreamRequest for ReadProcessorStatePage {
     const NAME: &'static str = "read_processor_state_page";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
 }
 
 /// What one unit's processor page holds: the read origin, the complete counts, where the page
@@ -175,13 +190,14 @@ pub struct ProcessorStateRunTransfer {
 }
 
 /// One section of a processor page: every row of it the unit holds, its complete fields, and the
-/// identity of the Arrow body holding its returned rows, absent when the page returns none.
+/// identities of the Arrow bodies holding its returned rows, in row order, each within the owner's
+/// snapshot section bound; empty when the page returns none.
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub struct ProcessorStateSectionTransfer {
     pub section: ProcessorStateSection,
     pub rows: u64,
     pub fields: Vec<SchemaField>,
-    pub body: Option<StatePageBody>,
+    pub bodies: Vec<StatePageBody>,
 }
 
 pub type ProcessorStatePageReply = Result<ProcessorStatePageDescriptor, StateInspectionRejection>;
@@ -351,15 +367,18 @@ mod tests {
                     }
                     let mut transfers = Vec::new();
                     for section in sections {
-                        let body = arbitrary.entropy().flag().then(|| StatePageBody {
-                            bytes: arbitrary.positive_u64().get(),
-                            digest: std::array::from_fn(|_| arbitrary.entropy().byte()),
-                        });
+                        let mut bodies = Vec::new();
+                        for _ in 0..arbitrary.entropy().byte() % 4 {
+                            bodies.push(StatePageBody {
+                                bytes: arbitrary.positive_u64().get(),
+                                digest: std::array::from_fn(|_| arbitrary.entropy().byte()),
+                            });
+                        }
                         transfers.push(ProcessorStateSectionTransfer {
                             section,
                             rows: arbitrary.positive_u64().get(),
                             fields: arbitrary.schema_fields(1),
-                            body,
+                            bodies,
                         });
                     }
                     let last_branch = arbitrary.entropy().flag().then_some(branch);
@@ -483,9 +502,23 @@ mod tests {
                             last_branch: Some(branch),
                             more: remaining != 0,
                         },
-                        body: (returned != 0).then(|| StatePageBody {
-                            bytes: request.max_bytes,
-                            digest: std::array::from_fn(|_| arbitrary.entropy().byte()),
+                        body: (returned != 0).then(|| {
+                            let identity = StatePageBody {
+                                bytes: request.max_bytes,
+                                digest: std::array::from_fn(|_| arbitrary.entropy().byte()),
+                            };
+                            let mut groups = Vec::new();
+                            for _ in 0..=arbitrary.entropy().byte() % 4 {
+                                groups.push(MaterializedStatePageGroup {
+                                    identities: arbitrary.positive_u64().get(),
+                                    columns: arbitrary.positive_u64().get(),
+                                });
+                            }
+                            MaterializedStatePageBody {
+                                identity,
+                                records: returned,
+                                groups,
+                            }
                         }),
                     })
                 };

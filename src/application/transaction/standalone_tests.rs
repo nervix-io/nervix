@@ -85,6 +85,118 @@ async fn a_refusal_against_an_absent_transaction_keeps_its_failure() {
     std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
 }
 
+/// A command whose commit planning refuses its statement answers that refusal even when an allowed
+/// planning change, here a committed cluster parameter, moves the transaction's preview between
+/// its statement's preflight and its commit: no one was shown that preview, so the command plans
+/// its refusal again against the planning inputs that now stand rather than answer a stale
+/// preview.
+#[cfg(feature = "testing")]
+#[nervix_primitives::test]
+async fn a_refused_command_answers_its_refusal_after_a_planning_change_moves_its_preview() {
+    use crate::fault_injection::StandaloneTransactionBoundary;
+
+    let fault_injection = crate::FaultInjection::default();
+    let TestService {
+        service,
+        registry,
+        path,
+    } = crate::application::test_fixtures::build_test_service_with_fault_injection(
+        true,
+        fault_injection.clone(),
+    )
+    .await;
+    let node = service.inner.consensus.local_node_id().clone();
+    let domain =
+        DomainName::parse("default").assured("the fixture domain name is an accepted literal");
+    let mut subscriptions = SessionSubscriptions::new();
+    for statement in [
+        "CREATE SCHEMA reading (value I64);",
+        "CREATE SCHEMA history (values VEC<I64>);",
+        "CREATE RELAY readings SCHEMA reading UNBRANCHED;",
+        "CREATE RELAY histories SCHEMA history UNBRANCHED;",
+    ] {
+        let created = service
+            .test_command(
+                test_command_request(statement, "default"),
+                &mut subscriptions,
+            )
+            .await;
+        assert!(created.succeeded(), "{statement}: {created:?}");
+    }
+
+    fault_injection.pause_standalone_transaction(
+        node.clone(),
+        domain.clone(),
+        StandaloneTransactionBoundary::Preflight,
+    );
+    let refused = {
+        let service = service.clone();
+        let request = CommandRequest {
+            execution_reference: test_execution_reference(),
+            ..test_command_request(
+                "CREATE WINDOW PROCESSOR invalid_collection FROM readings WIDTH 1s DURATION STEP \
+                 1s DURATION UNBRANCHED TO histories SET values = COLLECT_VEC(input.value) ON \
+                 MESSAGE ERROR LOG;",
+                "default",
+            )
+        };
+        nervix_primitives::task::spawn(async move {
+            let mut subscriptions = SessionSubscriptions::new();
+            let result = service.test_command(request, &mut subscriptions).await;
+            subscriptions.stop_all().await;
+            result
+        })
+    };
+    fault_injection
+        .wait_for_standalone_transaction_pause(
+            &node,
+            &domain,
+            StandaloneTransactionBoundary::Preflight,
+        )
+        .await;
+    let altered = service
+        .test_command(
+            CommandRequest {
+                execution_reference: test_execution_reference(),
+                ..test_command_request(
+                    "ALTER CLUSTER SET COMMAND_EXECUTION_CAPACITY = 64;",
+                    "default",
+                )
+            },
+            &mut subscriptions,
+        )
+        .await;
+    assert!(
+        altered.succeeded(),
+        "the parameter change commits beside the held command: {altered:?}"
+    );
+    fault_injection.release_standalone_transaction_pause(
+        &node,
+        &domain,
+        StandaloneTransactionBoundary::Preflight,
+    );
+    let result = refused
+        .await
+        .assured("the refused command's task runs to its end");
+
+    assert!(
+        matches!(result.disposition, CommandDisposition::Failed),
+        "the invalid statement fails the command: {result:?}"
+    );
+    assert!(
+        result
+            .message
+            .contains("COLLECT_VEC requires a message WIDTH or MAX STATE SIZE"),
+        "the command answers its own refusal, not a stale preview: {}",
+        result.message
+    );
+
+    subscriptions.stop_all().await;
+    drop(service);
+    drop(registry);
+    std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+}
+
 /// Another coordinator completes the same command while its original coordinator is held, either
 /// after looking its transaction up or after a failed commit attempt. The first coordinator must
 /// recover the recorded completion rather than accept its stale preflight or commit refusal.

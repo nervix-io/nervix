@@ -47,16 +47,10 @@ pub struct ClusterParameterArgs {
     pub entity_gate_deadline: Option<HumanDuration>,
     #[arg(long = nervix_models::RemoteAckAliveInterval::NAME, env = "NERVIX_REMOTE_ACK_ALIVE_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckAliveInterval, "How often a receiver reports on a remote delivery it retains, and held local work reports the acknowledgements it holds alive"))]
     pub remote_ack_alive_interval: Option<HumanDuration>,
-    #[arg(long = nervix_models::RemoteAckDispatchTimeout::NAME, env = "NERVIX_REMOTE_ACK_DISPATCH_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckDispatchTimeout, "How long a remote admission attempt may make no progress"))]
-    pub remote_ack_dispatch_timeout: Option<HumanDuration>,
-    #[arg(long = nervix_models::RemoteAckSilenceTimeout::NAME, env = "NERVIX_REMOTE_ACK_SILENCE_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckSilenceTimeout, "How long a sender waits without a report after admission"))]
-    pub remote_ack_silence_timeout: Option<HumanDuration>,
-    #[arg(long = nervix_models::RemoteAckSweepInterval::NAME, env = "NERVIX_REMOTE_ACK_SWEEP_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckSweepInterval, "How often a sender counts silence and admission time"))]
+    #[arg(long = nervix_models::RemoteAckSweepInterval::NAME, env = "NERVIX_REMOTE_ACK_SWEEP_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckSweepInterval, "How often a sender applies membership and the admission bound to the remote deliveries and acknowledgements it waits for"))]
     pub remote_ack_sweep_interval: Option<HumanDuration>,
     #[arg(long = nervix_models::RemoteRelayTotalTimeout::NAME, env = "NERVIX_REMOTE_RELAY_TOTAL_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteRelayTotalTimeout, "The whole budget of one remote admission"))]
     pub remote_relay_total_timeout: Option<HumanDuration>,
-    #[arg(long = nervix_models::RemoteRelayInstantiationWait::NAME, env = "NERVIX_REMOTE_RELAY_INSTANTIATION_WAIT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteRelayInstantiationWait, "How long a delivery waits for its route to become available"))]
-    pub remote_relay_instantiation_wait: Option<HumanDuration>,
 
     #[arg(long = nervix_models::MaxBatchMessages::NAME, env = "NERVIX_MAX_BATCH_MESSAGES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::MaxBatchMessages, "The most records one declared emitter batch may contain"))]
     pub max_batch_messages: Option<u64>,
@@ -88,13 +82,8 @@ impl ClusterParameterArgs {
         Self {
             payload_unfold_limit: seeds.payload_unfold_limit,
             remote_ack_alive_interval: seeds.remote_ack_alive_interval.map(HumanDuration),
-            remote_ack_dispatch_timeout: seeds.remote_ack_dispatch_timeout.map(HumanDuration),
-            remote_ack_silence_timeout: seeds.remote_ack_silence_timeout.map(HumanDuration),
             remote_ack_sweep_interval: seeds.remote_ack_sweep_interval.map(HumanDuration),
             remote_relay_total_timeout: seeds.remote_relay_total_timeout.map(HumanDuration),
-            remote_relay_instantiation_wait: seeds
-                .remote_relay_instantiation_wait
-                .map(HumanDuration),
             forced_recovery_budget: seeds.forced_recovery_budget.map(HumanDuration),
             ownership_handoff_poll_interval: seeds
                 .ownership_handoff_poll_interval
@@ -182,24 +171,12 @@ impl ClusterParameterArgs {
             self.remote_ack_alive_interval,
         );
         command_line.optional(
-            nervix_models::RemoteAckDispatchTimeout::NAME,
-            self.remote_ack_dispatch_timeout,
-        );
-        command_line.optional(
-            nervix_models::RemoteAckSilenceTimeout::NAME,
-            self.remote_ack_silence_timeout,
-        );
-        command_line.optional(
             nervix_models::RemoteAckSweepInterval::NAME,
             self.remote_ack_sweep_interval,
         );
         command_line.optional(
             nervix_models::RemoteRelayTotalTimeout::NAME,
             self.remote_relay_total_timeout,
-        );
-        command_line.optional(
-            nervix_models::RemoteRelayInstantiationWait::NAME,
-            self.remote_relay_instantiation_wait,
         );
 
         command_line.optional(nervix_models::TlsCipherSuites::NAME, self.tls_cipher_suites);

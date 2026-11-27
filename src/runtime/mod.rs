@@ -513,7 +513,7 @@ use endpoint_route_table::{EndpointBinding, EndpointIntakeRoute, EndpointIntakeR
 use entity_gate::{
     ActiveDomainAlter, BranchQuiesceGauges, DomainActivityGuard, EntityGateOperation,
     EntityGateTasks, NodeQuiesceCounters, NodeQuiesceWorkGuard, OutputBufferQuiesceGauge,
-    OwnershipHandoffFreezeState, OwnershipHandoffFreezeWatch,
+    OwnershipHandoffFreezeState, OwnershipHandoffFreezeWatch, TaskStopWait,
 };
 pub(crate) use entrypoint_routes::EntrypointBindingError;
 use entrypoint_routes::{
@@ -573,7 +573,8 @@ pub(crate) use materialized_snapshot::{
     materialized_container_header, materialized_identity_section,
 };
 use materialized_snapshot::{
-    RestoredMaterializedSnapshot, SealedSource, empty_sealed_container, inspect_sealed_container,
+    RelayContainerSource, RestoredMaterializedSnapshot, SealedContainerLayout, SealedGroupLayout,
+    SealedSource, empty_sealed_container, inspect_sealed_container,
 };
 use materialized_state::{
     MaterializedRelaySnapshotInstaller, MaterializedRelayStateAssignment,
@@ -622,9 +623,9 @@ use processor_state_inspection::{
     SelectedStateBranches, answer_branch_state, held_row_bytes,
 };
 pub(crate) use processor_state_inspection::{
-    BranchStateReadError, ProcessorStatePageBounds, ProcessorStatePageError,
+    BranchStateReadError, PageReply, ProcessorStatePageBounds, ProcessorStatePageError,
     ProcessorStatePageMemory, ProcessorStatePageRead, ProcessorStateSectionColumns,
-    ProcessorStateSelection,
+    ProcessorStateSelection, ReplyMemory,
 };
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, ProcessorTemplateError,
@@ -667,7 +668,6 @@ use relay_interaction::{
     RelayInteraction, RelayInteractionCommand, RelayInteractionEvent, RelayInteractionInput,
 };
 use relay_processor_node::RelayProcessorError;
-use relay_send_attempts::GrantCapacityRefusals;
 use relay_state_task::{RelayStateTask, RelayStateTaskSpec};
 use relay_transit::{
     RelayAdmissions, RelayOwnerAdmission, RelayOwnerBatchCompletion, RelayRoutedAdmission,
@@ -1082,7 +1082,7 @@ pub use runtime_settings::{RestoreStagingMaxBytes, RuntimeSettings, StateSnapsho
 use state_assignment::{CheckpointOwners, ScheduledStateAssignment, SharedStateAssignment};
 pub(crate) use state_inspection_read::{
     MaterializedInspectionPage, MaterializedPageBounds, MaterializedPageQuery,
-    MaterializedStateCapture, StatePageReadError,
+    MaterializedPageReply, MaterializedStateCapture, StatePageReadError,
 };
 pub(crate) use state_replication::StateSyncAck;
 pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};

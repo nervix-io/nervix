@@ -14,7 +14,7 @@
     )
 )]
 
-use std::{num::NonZeroUsize, time::Duration};
+use std::num::NonZeroUsize;
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
@@ -25,7 +25,6 @@ use nervix_execution::{
 use nervix_models::{
     ClusterNodeName, NodePrerequisites, PrerequisiteMismatch, WireContractFingerprint,
 };
-use nervix_primitives::time::Instant;
 use rkyv::{
     Archive, Deserialize, Serialize,
     api::{access_with_context, deserialize_using, high::HighSerializer},
@@ -61,8 +60,8 @@ const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
     )
 )]
 pub const WIRE_CONTRACT: WireContractFingerprint = WireContractFingerprint::from_digest([
-    0x3c, 0x47, 0xcb, 0xc0, 0x46, 0xb5, 0xcc, 0xcb, 0xa6, 0x91, 0xe3, 0x94, 0xff, 0xa6, 0x83, 0x3a,
-    0x55, 0xfc, 0x3c, 0x68, 0x49, 0xc1, 0xf9, 0xa4, 0xf3, 0x58, 0x50, 0x51, 0x43, 0xfd, 0x33, 0x3b,
+    0xfd, 0xe8, 0x0c, 0x01, 0xd3, 0x06, 0x7e, 0x76, 0x21, 0x35, 0x28, 0xd9, 0xdf, 0x28, 0xd2, 0x23,
+    0x30, 0x6f, 0x9e, 0xce, 0x45, 0x34, 0x48, 0xcf, 0x21, 0x72, 0x51, 0x29, 0x49, 0x1e, 0x52, 0xd5,
 ]);
 
 /// The first message of every connection: who dials, for which pool, and everything the dialing
@@ -316,6 +315,40 @@ where
         .map_err(|error| TransportError::with_cause(error, TransportError::Encode))?
 }
 
+/// Serialize one typed value into `reservation`, memory its caller already holds, on `cpu`. The
+/// writer grows past `reservation` only while the class can back it at once: an output that
+/// outgrows both fails with its class's [`nervix_execution::AdmissionError::BudgetExhausted`]
+/// rather than waiting for room while its caller holds memory.
+async fn encode_rkyv_buffer_within<T>(
+    executor: &Executor,
+    cpu: CpuClass,
+    limit: u64,
+    value: T,
+    reservation: Reservation,
+) -> Result<BudgetedBuffer, Report<TransportError>>
+where
+    T: Send + 'static + for<'a, 'b> Serialize<MessageSerializer<'a, 'b>>,
+{
+    let class = reservation.class();
+    let encoding = RkyvEncoding { value };
+    let attempt = executor
+        .run_cpu(cpu, reservation, move |charge, cancellation| {
+            encoding.encode(charge, limit, cancellation)
+        })
+        .await
+        .map_err(|error| TransportError::with_cause(error, TransportError::Encode))?;
+    match attempt {
+        Attempt::Finished(encoded) => encoded,
+        Attempt::Short { needed, .. } => Err(TransportError::with_cause(
+            Report::new(nervix_execution::AdmissionError::BudgetExhausted {
+                class: class.as_str(),
+                requested: needed,
+            }),
+            TransportError::Encode,
+        )),
+    }
+}
+
 /// Encode a stream request's envelope, which copies the payload it nests. The caller gives the
 /// payload's own charge back first, so the encoding never waits for room while holding it. The
 /// request's place in the incoming queue bounds the nested payload until the encoding's charge
@@ -407,46 +440,6 @@ where
     }
 }
 
-/// When the request whose answer [`decode_answer`] decodes stops waiting for it.
-pub(crate) struct AnswerDeadline<'a> {
-    /// The node that answered.
-    pub(crate) peer: &'a ClusterNodeName,
-    /// The request's own deadline.
-    pub(crate) at: Instant,
-    /// The whole time the request was given, which a timeout reports.
-    pub(crate) timeout: Duration,
-}
-
-/// Validate and deserialize the answer to a request this node sent, within `decoding`, the room it
-/// was read with (see [`decode_rkyv_within`]).
-///
-/// The answer carries work its peer already did, so a class whose queue is full holds the decoding
-/// back until a place frees rather than throwing that work away, but no longer than the request's
-/// own deadline. Once the deadline passes the decoding is dropped with its place and its charge,
-/// and the request fails with [`TransportError::RequestTimeout`], as it would had the answer
-/// arrived late.
-pub(crate) async fn decode_answer<T>(
-    executor: &Executor,
-    cpu: CpuClass,
-    bytes: ChargedBytes,
-    decoding: Reservation,
-    deadline: AnswerDeadline<'_>,
-) -> Result<Decoded<T>, Report<TransportError>>
-where
-    T: Archive + Send + 'static,
-    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
-        + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
-{
-    let decoding = decode_rkyv_within(executor, cpu, bytes, decoding);
-    match nervix_primitives::time::timeout_at(deadline.at, decoding).await {
-        Ok(decoded) => decoded,
-        Err(_) => Err(Report::new(TransportError::RequestTimeout {
-            peer: deadline.peer.clone(),
-            timeout: deadline.timeout,
-        })),
-    }
-}
-
 /// Serialize a nested typed-request value while retaining its charge beside the resulting Vec.
 pub(crate) async fn encode_rkyv_payload<T>(
     executor: &Executor,
@@ -459,6 +452,23 @@ where
     T: Send + 'static + for<'a, 'b> Serialize<MessageSerializer<'a, 'b>>,
 {
     let buffer = encode_rkyv_buffer(executor, class, cpu, limit, value).await?;
+    let (bytes, reservation) = buffer.into_parts();
+    Ok(EncodedPayload { bytes, reservation })
+}
+
+/// Serialize a typed value as [`encode_rkyv_payload`] does, into `reservation`, memory its caller
+/// already holds for it, instead of first waiting for room in the class.
+pub(crate) async fn encode_rkyv_payload_within<T>(
+    executor: &Executor,
+    cpu: CpuClass,
+    limit: u64,
+    value: T,
+    reservation: Reservation,
+) -> Result<EncodedPayload, Report<TransportError>>
+where
+    T: Send + 'static + for<'a, 'b> Serialize<MessageSerializer<'a, 'b>>,
+{
+    let buffer = encode_rkyv_buffer_within(executor, cpu, limit, value, reservation).await?;
     let (bytes, reservation) = buffer.into_parts();
     Ok(EncodedPayload { bytes, reservation })
 }

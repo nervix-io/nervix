@@ -49,7 +49,8 @@ async fn forced_recovery_never_selects_a_checkpoint_of_a_replaced_generation() {
 
     let recovered = runtime
         .forced_recovery_checkpoint(&current, &[], deadline)
-        .await;
+        .await
+        .expect("a recovery without live sources to wait for prepares within its budget");
     assert!(recovered.snapshot.is_none());
     assert_eq!(
         recovered.reset_cause,
@@ -57,7 +58,8 @@ async fn forced_recovery_never_selects_a_checkpoint_of_a_replaced_generation() {
     );
     let stale = runtime
         .forced_recovery_checkpoint(&replaced, &[], deadline)
-        .await;
+        .await
+        .expect("a recovery without live sources to wait for prepares within its budget");
     assert_eq!(stale.snapshot.map(|snapshot| snapshot.lsm), Some(9));
 }
 

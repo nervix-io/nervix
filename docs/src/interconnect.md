@@ -66,8 +66,8 @@ one production behavior, which is what every node uses:
   supplies its deterministic callback through the same seam.
 - **Deadlines.** Every transport deadline is an instant of the boundary's clock,
   `nervix_primitives::time`, whose timers are Tokio's, so it follows the clock of the runtime it
-  runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
-  lifetimes, and the drain deadline derived from certificate expiry.
+  runs on: connection setup, the liveness pings and probes, a caller's exchange deadline, reconnect
+  backoff, relay grant lifetimes, and certificate expiry.
 - **CPU work.** Encoding and decoding run through `nervix-execution`. A class worker drains its
   admitted FIFO through the boundary's CPU mechanism without dispatching a new blocking task for
   each successor. In the Turmoil build the worker yields on the simulated scheduler between
@@ -389,10 +389,12 @@ Ownership-handoff engagement answers after admission is fenced and its force flu
 The coordinator then queries the exact operation's drain status. A participant publishes its capture
 freeze before returning a drained status, and capture requires that coordination identity's freeze
 in addition to its held gate. Pending status retains the work counts used by timeout diagnostics.
-Each engagement request keeps the two-second reply bound; a typed timeout retries the same identity
-and complete scope within the original preparation deadline. A transport failure, such as a stream
-that broke, leaves delivery as uncertain as a lost reply, so it retries the same identity and scope
-too, after a 100-millisecond pause that gives the connection time to be replaced. A retry observes
+Each engagement request, like each drain-status query, waits for its participant's answer until
+the gate's own deadline, `ENTITY_GATE_DEADLINE`: a participant that is slow while it lives, as one
+whose force flush waits for a full relay does, costs the engagement latency and never fails it. A
+transport failure, such as a stream that broke, leaves delivery uncertain, so it retries the same
+identity and complete scope within the original preparation deadline, after a 100-millisecond pause
+that gives the connection time to be replaced. A retry observes
 the existing receiver-owned operation and lease. An engagement of the same identity and scope whose
 deadline is later than the lease's end renews the lease to it: a coordinator keeps a committed
 handoff's hold that way while a participant has not applied the move. A lease that already ended
@@ -432,7 +434,8 @@ from the leader that committed it, `entity_drop_report`, carrying the coordinato
 a node answers only while its sender leads. It names the domain and the runtime revision that
 published the drop. The answer is what the node discarded for that domain from that revision on,
 entity by entity and by kind; that the node has not applied the revision yet, which the coordinator
-asks again until the domain drain timeout passes; or that the node holds no report for it because
+asks again until the domain drain timeout passes, the ceiling that bounds each request too; or that
+the node holds no report for it because
 an earlier run of the node applied it. The coordinator names every node that did not report, has
 left or restarted in the statement's answer.
 
@@ -454,9 +457,10 @@ leader that loses its leadership while it writes a release also answers not the 
 clearing a cordon again through the next leader is harmless. The leader runs the action in a service
 task of its own,
 so a drain that has begun finishes, and releases what it holds, even when the sender's deadline
-abandons the request first. Each request waits at most the commands pool's transfer deadline, and the
-sender asks again of the leader it observes next when a request goes unanswered; what remains of the
-sender's shutdown timeout bounds every drain request it sends. The leader also uses the budget carried by the drain action to bound each unit's gate,
+abandons the request first. A request waits for its answer for as long as the leader it asked and
+the connection to it live; the sender asks again of the leader it observes next when that leader
+answers that it does not lead or liveness ends the request, and what remains of the sender's
+shutdown timeout bounds the whole drain it requests. The leader also uses the budget carried by the drain action to bound each unit's gate,
 state preparation, and activation waits, leaving a window for later units and the sender's in-place
 drain. For a release it is the bound
 [Releasing The Drain Cordon](./shutdown.md#releasing-the-drain-cordon) states.
@@ -477,7 +481,8 @@ identity and before it registers the connection in a pool. It answers either wit
 which binds the connection, or with a refusal that names the first prerequisite the two records
 disagree on and both values, seen from the accepting node. A refusal reaches the dialing node
 before the connection closes: the accepting node starts the connection's graceful shutdown and
-keeps it polled for at most the progress timeout while the answer leaves. The dialing node judges
+keeps it polled while the answer leaves, for at most the connection-setup budget the refusal is
+part of. The dialing node judges
 an accepted answer's record the same way, so a connection binds only when both nodes accept the
 other's record. The judgment is symmetric: reversing two records reverses the mismatch and never
 removes it, so both nodes name the same prerequisite. A certificate whose identity URI names another
@@ -586,8 +591,9 @@ catalog pages, fetches and acknowledgements retain that exact identity. The nati
 the revision, branch incarnation, tensor shapes and float bits. The interconnect moves the opaque
 bounded frame through the existing snapshot bulk quota; the inferencer codec validates its shape.
 The current fingerprint also covers materialized inspection page requests and their typed
-descriptors, so checkpoint identity and inspection operations advance as one wire contract.
-It also covers the drop report request and its answers with the kinds of discarded work.
+descriptors, so checkpoint identity and inspection operations advance as one wire contract. It also
+covers processor state pages whose sections name every one of their bounded bodies, and the drop
+report request and its answers with the kinds of discarded work.
 
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
@@ -645,8 +651,7 @@ A refused byte-stream opening carries the same four operation classes in the fix
 `RemoteOperationFailure`; the requester binds it to the subject of its typed request. The full
 diagnostic remains the bounded error body. Request decoding, execution admission, I/O and encoding
 failures carry no operation class, so their status or display text cannot turn them into ordinary
-state absence. Successful stream framing, content length, quotas and progress deadlines are
-unchanged. This response-header contract is part of the current wire fingerprint. A changed snapshot
+state absence. Successful stream framing, content length and quotas are unchanged. This response-header contract is part of the current wire fingerprint. A changed snapshot
 precondition retains its distinct `412` refusal and the original opening deadline. If a fresh
 description has not published a replacement revision, the materialized dependency remains not ready
 and follows its declared wait, skip or default policy; a newly published revision is fetched within
@@ -774,10 +779,10 @@ owner, even at the same endpoint, and survives a predecessor's withdrawal. The f
 retains round-robin selection and each class's existing capacities.
 
 An operation that finds every stream of its class and subquota to a peer leased waits for one to be
-released, within its request deadline. Each peer keeps one wakeup for each class and subquota, and
-a released stream wakes a waiter of exactly its own class and subquota. A single wakeup shared by
-every waiter could reach one that cannot use the released slot, while the waiter that can use it
-slept on until its deadline. The waiter registers for that wakeup, and for any change of the peer's
+released, for as long as the peer lives or until the deadline its caller named. Each peer keeps one
+wakeup for each class and subquota, and a released stream wakes a waiter of exactly its own class
+and subquota. A single wakeup shared by every waiter could reach one that cannot use the released
+slot, while the waiter that can use it slept on. The waiter registers for that wakeup, and for any change of the peer's
 connections, before it checks the pools a second time, so a release between its two checks still
 wakes it. The wakeups belong to the endpoint's pool, which a new dial of the same endpoint keeps, so
 a waiter of a target replaced that way still hears a release of the replacement. An endpoint or
@@ -838,12 +843,14 @@ the input was malformed. A full class answers nothing, because every opening wai
 Stream slots are isolated per connection, and therefore per peer. Memory budgets and CPU wait
 queues are isolated per class, and they and the shared admission queue serve every peer of the node. A slow or stalled
 peer therefore holds at most the stream slots of its own connections. Once it holds the 32 shared
-management streams of a connection, a further shared operation to that peer waits for a slot
-until its own deadline, while liveness, cancellation, and discovery still use the reserved streams
-of the same connection. Every connection to another peer keeps all of its slots. A stream whose
-reader stops reading holds one receive window of response bytes, which on a bulk stream is its
-backed bulk receive window. Flow control stops the producer once that window is spent, and five
-seconds without progress resets the stream and returns its admission and memory. A relay batch the
+management streams of a connection, a further shared operation to that peer waits for a slot for
+as long as the peer lives, or until the deadline its caller named, while liveness, cancellation,
+and discovery still use the reserved streams of the same connection. Every connection to another
+peer keeps all of its slots. A stream whose reader stops reading holds one receive window of
+response bytes, which on a bulk stream is its backed bulk receive window. Flow control stops the
+producer once that window is spent, which is backpressure, not failure: the stream waits for its
+reader for as long as the connection lives, and its reset, the connection's end, or the caller's
+own deadline returns its admission and memory. A relay batch the
 receiving application holds without admitting keeps the reservation of its exact body, the largest
 decoded batch, and decode scratch. Another channel
 still receives grants and admission beside it, and cancelling the held batch returns the whole
@@ -854,24 +861,25 @@ A CPU class admits each job separately: a job runs on a free worker of its class
 behind the jobs that asked before it. A typed request runs several jobs of its class in turn,
 encoding its payload and envelope and later decoding the response. Busy workers hold each of them
 back until one frees, the request's own jobs as well as its answer's: the executor's pools are
-backpressure on the node's resources, never a reason to refuse a frame. The caller's reset and the request's own
-deadline end every wait, and a request that fails at one of its later stages fails with
-`RequestError::Transport`. Every other class keeps admitting independently.
+backpressure on the node's resources, never a reason to refuse a frame. The caller's reset, the
+connection's end and a deadline the caller named end every wait, and a request that fails at one of
+its later stages fails with `RequestError::Transport`. Every other class keeps admitting
+independently.
 
 Every frame between nodes therefore waits for its place and its room, in both directions. What
 differs between protocols is what ends a wait: an answer waits until the exchange it answers ends,
-and its decoding until the request's own deadline. Each protocol's waits end as follows.
+and its decoding for as long as the request lives. Each protocol's waits end as follows.
 
 | Protocol | What its frames wait for | What ends the wait |
 |---|---|---|
-| Typed request | The caller's encoding of the request, the peer's reading and decoding of it, the peer's encoding of the answer and the caller's reading and decoding of it | The caller's reset; the request's own deadline |
+| Typed request | The caller's encoding of the request, the peer's reading and decoding of it, the peer's encoding of the answer and the caller's reading and decoding of it | The caller's reset; the connection's end; the deadline the caller named |
 | Connection handshake | The dialing node's hello and the accepting node's reading of it, then the accepting node's answer, accepted or refused, and the dialing node's reading of it | The dialing node's setup deadline, which closes the connection |
-| Relay admission status and cancellation | The sender's query, the receiver's reading of it, the watermark charge of a cancellation that fences a position the receiver never granted, the receiver's status and the sender's reading of it | The sender's reset; the query's deadline |
-| Relay grant | The sender's grant request, the receiver's reading of it and the whole charge of the operation it grants, then the receiver's disposition and the sender's reading of it | The sender's reset; the wait the sender declared, after which the receiver answers a capacity refusal; the delivery's deadline |
-| Ack resolution | The sender's encoding of the ack and the registrar's reading and decoding of it | The sender's reset; the send's deadline |
-| One-way control frame | The sender's encoding of the frame and the receiver's reading and decoding of it | The sender's reset; the send's deadline |
+| Relay admission status and cancellation | The sender's query, the receiver's reading of it, the watermark charge of a cancellation that fences a position the receiver never granted, the receiver's status and the sender's reading of it | The sender's reset; the connection's end |
+| Relay grant | The sender's grant request, the receiver's reading of it and the whole charge of the operation it grants, then the receiver's disposition and the sender's reading of it | The sender's reset; the connection's end; the wait the sender declared, its delivery's admission bound, after which the receiver answers a capacity refusal |
+| Ack resolution | The sender's encoding of the ack and the registrar's reading and decoding of it | The sender's reset; the connection's end, after which the sender sends the ack again while the registrar stays live |
+| One-way control frame | The sender's encoding of the frame and the receiver's reading and decoding of it | The sender's reset; the connection's end |
 | Duplex stream | The opening and every frame either side submits, encoded and decoded | The stream's reset or end; the leader's answer deadline on a Raft append stream, and either side's heartbeat silence limit on a client consumer stream or producer link |
-| Byte stream | The opening, encoded and decoded, every job of the answer once the handler has done its work, and the caller's reading of it | The caller's reset; the stream's progress timeout; the caller's own deadline |
+| Byte stream | The opening, encoded and decoded, every job of the answer once the handler has done its work, and the caller's reading of it | The caller's reset; the connection's end; the caller's own deadline |
 
 The reasons, protocol by protocol:
 
@@ -945,28 +953,27 @@ operation's domain semantics.
    response after the receiver accepts that event. Cluster events and asynchronous acknowledgements
    use this form.
 2. **Typed request and response.** The request type declares its operation name, response type,
-   traffic class, admission subquota, deadline, and live-target requirement. Remote typed errors are
+   traffic class, admission subquota and live-target requirement. Remote typed errors are
    kept distinct from transport failures. Application health and domain-clock progress use this form
    so their reserved quotas and typed outcomes apply independently of generic events.
 3. **Streamed response.** The receiver declares the exact byte length, then sends a flow-controlled
-   sequence of chunks. The reader rejects early end, extra bytes, and a stalled chunk. Dropping the
+   sequence of chunks. The reader rejects early end and extra bytes. Dropping the
    reader cancels the stream and releases its reservations. The producer's opening callback and
    each chunk carry a local `StreamHandlerError` report; an admission, storage, or encoding cause
    stays beneath that handler context until the response reaches the wire boundary. A chunk the
-   producer wrote may be larger than the reader's window: while it is being written, each nonzero
-   flow-control grant restarts the five-second write progress bound, as it does for a duplex
-   frame, so a chunk has no total transfer deadline while its reader keeps reading. A reader that
-   grants nothing for the bound, and a producer whose next chunk takes longer than it, reset the
-   stream with the typed transport progress timeout.
+   producer wrote may be larger than the reader's window, and it is written as the reader's
+   flow-control grants admit it. A reader that grants nothing is applying backpressure and a
+   producer whose next chunk is slow is busy: the stream waits for either for as long as the
+   connection under it lives, as [Liveness And Deadlines](#liveness-and-deadlines) states.
 4. **Ordered duplex stream.** Each direction sends length-prefixed, validated frames in order and
-   may close independently. Opening the stream is bounded by the operation's declared setup
-   deadline. An idle established stream is valid; the owning protocol sets deadlines for answers it
-   is awaiting. The initiator's sender reports when the peer's flow control last accepted its
+   may close independently. A link bound to dialing, a client producer link or consumer stream,
+   opens within the connection-setup budget; any other stream opens under the liveness of its peer
+   alone. An idle established stream is valid; the owning protocol sets the timers it defines for
+   answers it is awaiting, as Raft does for its append stream. The initiator's sender reports when the peer's flow control last accepted its
    bytes, so that protocol can tell a slow answer from a peer that accepts nothing. Receiving is
-   cancel-safe on both ends. While a frame is being written, each nonzero flow-control grant
-   restarts the five-second write progress bound. A frame has no total transfer deadline while
-   bytes keep advancing; zero-capacity notifications do not restart the bound. Expiry resets that
-   stream with the typed transport progress timeout. A frame is decoded under the pool's memory
+   cancel-safe on both ends. A frame is written as the receiver's flow-control grants admit it, and
+   a receiver that grants nothing holds the frame back for as long as the connection lives. A frame
+   is decoded under the pool's memory
    and CPU admission after it leaves the stream, and a receive its caller abandons, because a timer or command it selects
    against won, leaves that decoding to the next receive, which finishes the frame before it reads
    another. No abandoned receive loses a frame or reorders one. A stream has one codec, fixed by
@@ -1018,18 +1025,46 @@ that set, so a change published between the read and the wait still ends the wai
 publishes its first set, every target counts as live so that bootstrap discovery can reach its
 peers.
 
-Connection setup defaults to five seconds covering TCP, TLS, HTTP/2, and connection binding.
-The default bounded request deadline is ten seconds and includes time waiting for an admission or
-stream slot. A typed request resolves its owning deadline against that active transport budget.
-Gate, drain, revision and clock-progress requests use one fifth of it; relay descriptions use one
-tenth; resource replica publication and metrics/lookup requests use one half. Snapshot, checkpoint
-transfer and recovery requests use three, six and twelve request budgets respectively.
-Application-health probes follow the installed committed liveness policy. Explicit caller-owned
-remaining deadlines still govern bounded operations. Partition-key release uses the same selected
-request budget in its request type and explicitly timed runtime dispatch while the holder drains
-and persists the key. A resource archive open uses the Snapshot class, three transport request
-budgets and thirty seconds by default. Once a streaming body is moving, the configured progress budget, five seconds
-by default, bounds lack of progress. Queueing never extends a declared deadline.
+## Liveness And Deadlines
+
+Whether a peer or its connection is gone is decided once, beneath every exchange. Each connection
+pings its peer at HTTP/2 every half of the committed `NODE_UNAVAILABILITY_TIMEOUT` and closes when a
+ping goes unanswered for a quarter of it, and each node probes every peer's application health on
+the same committed policy, as [Application Health And
+Availability](#application-health-and-availability) describes. A connection that closes fails every
+stream it carried. Membership decides that a peer left: a typed request that requires a live target
+ends as `TargetLeft` when its target leaves the published live set, and a departed or replaced owner
+is replaced by failover, whose route change ends the deliveries and streams that named it.
+Connection setup, the one exchange that runs before a connection exists to watch, keeps its
+five-second budget covering DNS, TCP, TLS, HTTP/2 and connection binding; refusing a connection
+during binding is part of setting it up and uses the same budget.
+
+Nothing above that decides it again. An exchange with a peer whose connection lives, a typed
+request, a streamed response, a duplex frame, a relay grant, body, status or cancellation, an
+acknowledgement or a progress report, waits for its stream slot, its receive window, its encoding,
+the peer's answer and every chunk for as long as that liveness holds. A peer that is slow, busy or
+applying backpressure, by granting no flow-control credit, answering from a full queue or waiting
+for memory, costs the exchange latency and never fails it. A peer that never answers on a live
+connection is a defect to surface, not a timeout to turn into a failure and a retry. The transport
+therefore has no per-stream progress timeout and no per-request deadline class.
+
+An exchange ends at a deadline only when its caller names one, as an `ExchangeDeadline` that says
+which of three kinds it is:
+
+- **Operation ceiling.** The ceiling the operator set for the whole operation the exchange belongs
+  to, such as an entity gate's `ENTITY_GATE_DEADLINE`, a drain's `DOMAIN_DRAIN_TIMEOUT`, the
+  shutdown timeout, a relay delivery's `REMOTE_RELAY_TOTAL_TIMEOUT` or a backup's `TIMEOUT`. The
+  operation fails and keeps the work it held.
+- **Caller.** The deadline of a caller that still holds its input and waits for the answer, such
+  as a client's state read. The caller answers its own caller with a typed retryable refusal.
+- **Protocol.** A timer the protocol itself defines: a Raft RPC's, from OpenRaft's options and the
+  node's Raft settings, and a liveness probe's.
+
+Such a deadline bounds the whole exchange, waiting for a slot or a window included, and an exchange
+that passes it fails as `DeadlinePassed`, naming the kind. A planned change of a connection, a
+certificate rotation or expiry, or a peer's departure, drains the streams the connection carries
+until they end and cuts none of them. Only a node's terminal teardown bounds that drain, by its
+task grace period: the transport closes whatever remains once it passes.
 
 ## Remote Relay Delivery
 
@@ -1101,8 +1136,10 @@ A delivery proceeds as follows:
    typed refusal, never with an HTTP error, and the sender decides from the refusal's class alone:
    a capacity refusal holds the delivery back, and a permanent one fails it, as
    [Held Deliveries](#held-deliveries) describes.
-5. The grant remains valid for five seconds. The sender transmits the exact Arrow IPC body over the
-   relay pool and names the grant and both process epochs.
+5. The grant remains valid until its body arrives, its sender cancels it, its sender's process ends,
+   or the delivery's admission bound, the `REMOTE_RELAY_TOTAL_TIMEOUT` the delivery carries, passes:
+   a sender that is slow to send the body keeps its grant. The sender transmits the exact Arrow IPC
+   body over the relay pool and names the grant and both process epochs.
 6. The receiver reads exactly the granted length under the reservation, records body receipt, and
    places the work in its bounded application queue. The HTTP/2 body response confirms receipt by
    the receiving process only.
@@ -1140,13 +1177,20 @@ These steps expose three intentionally different outcomes:
   completed.
 
 While admission or an attached acknowledgement is unresolved, the receiver sends coalesced progress
-events through the reserved management quota. The sender treats five seconds without progress as a
-stalled exchange, where a capacity refusal of its grant counts as progress, and bounds the whole
-delivery, from storing its records to its admission, at five minutes. Once the delivery is admitted,
-the sender waits for an attached record acknowledgement only while the receiver keeps reporting it,
-and fails one the receiver reports nothing about for fifteen seconds, as
-[Acknowledgement Registrations](#acknowledgement-registrations) describes. Progress keeps a live
-attempt from being mistaken for a disconnected one; it does not change the delivery outcome.
+events through the reserved management quota. Progress is not what keeps a delivery going: no
+timer on the sender declares a receiver that stops reporting gone. A delivery waits for its
+receiver for as long as liveness and membership keep the receiver run that granted it, as
+[Liveness And Deadlines](#liveness-and-deadlines) states, and ends only at the receiver's verdict, a
+permanent refusal, its route changing, its receiver leaving the cluster, the receiver run that
+granted it ending, which a connection binding a newer run of the node shows, or the delivery's
+admission bound, `REMOTE_RELAY_TOTAL_TIMEOUT` (five minutes by default) from storing its records to
+its admission. A delivery whose receiver left before any of its sends reached that receiver is not
+ended by the departure: it waits for the route that replaces the receiver, as [Cancellation And
+Branch Changes](#cancellation-and-branch-changes) describes. Once the delivery is admitted, the
+sender waits for an attached record
+acknowledgement for as long as the receiver run that admitted it lives, as
+[Record Acknowledgements Follow The Receiver Run](#record-acknowledgements-follow-the-receiver-run)
+describes. Progress keeps the records' ingestors informed; it does not change the delivery outcome.
 For an attached acknowledgement, progress also carries a monotonic sequence and whether all of its
 remaining handoff shares are parked, on `REQUIRED WAIT` or in a window that retains their rows. Each upstream node parks or reactivates its
 own attached share in sequence order, so a domain drain excludes a parked chain across relay hops.
@@ -1167,9 +1211,9 @@ consumer on another node. A delivery admitted within its first interval reports 
 reads the interval once it waits and keeps it until it ends, as the receiver keeps the interval the
 delivery carries, so a committed change reaches the next delivery. An ingestor's `ACK TIMEOUT` therefore measures how long its
 records make no progress, not how long their delivery takes to reach the next node. A record still
-on its way when that timeout would have passed is not read again and emitted twice. The bounds
-above still end a delivery: five seconds without progress, or five minutes from storing its records
-to its admission, fails it, and the ingestor's retry takes over.
+on its way when that timeout would have passed is not read again and emitted twice. The endings
+above still end a delivery: when its receiver leaves or its granting run ends, or five minutes
+after it stored its records without being admitted, it fails, and the ingestor's retry takes over.
 
 Progress and terminal acknowledgements share the bounded application receive queue. The application
 keeps consuming progress while terminal delivery waits for queue capacity. The one-slot transport
@@ -1204,11 +1248,11 @@ node. Admission bookkeeping on both ends is keyed by the peer and the whole regi
 terminal outcome addressed to an earlier run neither completes nor retires the admission a later
 run registered under the same number.
 
-### Record Acknowledgements The Receiver Stops Reporting
+### Record Acknowledgements Follow The Receiver Run
 
 The timing examples below use the default remote ACK policy. Each delivery captures the committed
-alive, dispatch, silence, sweep, total-admission and instantiation bounds together; a live update
-does not change retained deliveries. Delivery-position capacity is a local node capability.
+alive interval, sweep interval and total admission bound together; a live update does not change
+retained deliveries. Delivery-position capacity is a local node capability.
 [Node Settings](node-settings.md#data-plane-runtime-policy-and-capacity) owns the options and
 validation. Local progress beats, such as an emitter's and a message-error route's, follow the
 committed alive interval as well: each reads it when its held work waits, so a committed change
@@ -1217,51 +1261,63 @@ reaches its next keepalive without a rebuild, as
 
 A receiver reports every record acknowledgement it holds to the node that registered it. While the
 downstream work the acknowledgement stands for continues, it sends a report 100 milliseconds after
-its previous one was delivered or given up, and when the work completes it sends the terminal
-outcome once. Each report and the outcome is one bounded event that the receiver retries for up to
-five seconds and then gives up. Once the outcome is given up, or the receiver's run ends, nothing
-reports that acknowledgement again.
+its previous one was delivered, and when the work completes it sends the terminal outcome. Each
+report and the outcome is sent until it is delivered: a send that fails in transport is sent again,
+25 milliseconds later and then twice as late each time up to 2.5 seconds, a quarter of the alive
+interval up to twenty-five of them, for as long as membership keeps the registering node. A send
+waits for its connection for as long as that connection lives, so a registering node that applies
+backpressure costs the report latency, never the outcome. A report ends unsent only when the
+registering node leaves the cluster, when this node's runtime stops, or when no later send could
+succeed. A stopping node no longer follows membership, so its runtime's stop ends every envelope
+it still sends again, a replica's acknowledgement of a checkpoint it installed or a relay admission
+outcome as much as a report; a peer that stopped with it would otherwise hold that send, and what
+it retains, for ever.
 
 The receiver reports to the registering node's run as its own live view shows that run. When
 another run of the node has replaced it, the receiver stops at once, because nothing in the new run
 holds the acknowledgement. A run that has not yet appeared in the live view, such as one that has
-only just joined, is reported to for five seconds of discovery. A run the receiver has already seen
-live and that then drops out of its live view, as a run that a failure detector briefly suspects
-under load does, is neither reported to nor given up while it is missing. The receiver keeps the
-acknowledgement, including a terminal outcome reached meanwhile, and reports it as soon as the run
-is back. It stops only when the run has stayed missing for the registering node's fifteen-second
-silence bound and one more sweep, because by then a registering node whose run goes on has failed
-the acknowledgement itself. A shorter gap in the live view therefore costs the ingestor neither the
-acknowledgement nor a resend.
+only just joined, is reported to until the admission bound of the delivery that carried the
+acknowledgement passes. A run the receiver has already seen live and that then drops out of its
+live view, as a run that a failure detector suspects under load does, is still reported to while
+membership keeps its node, since membership, not the live view, decides that a node left. The
+receiver stops only once membership removes the registering node. A gap in the live view therefore
+costs the ingestor neither the acknowledgement nor a resend.
 
-The registering node therefore waits for an acknowledgement only while the receiver keeps reporting
-it. From the moment the delivery that carries the acknowledgement is admitted, a sweep once a second
-counts the passes in which the receiver reported nothing about it, and fails the acknowledgement
-once fifteen seconds of such passes have gone by. The bound outlasts two consecutive reports that
-each exhaust their five-second deadline, so a receiver that is still working on the record is not
-mistaken for one that stopped. Before admission, the delivery guard resolves cancelled work and
-the sweep bounds an abandoned registration at the five-minute total admission wait. The sweep counts its own passes rather
-than elapsed time, so a registering node whose own execution stalled, such as a paused container,
-does not fail acknowledgements whose reports it could not receive meanwhile.
+The registering node waits for an admitted acknowledgement for as long as the receiver run that
+admitted it lives. The delivery's grant exchange names that run by its process epoch: a grant or a
+status that another run of the node answers is indeterminate, so an admitted delivery was always
+admitted by the run it addressed, and each acknowledgement it carries is pinned to that run when
+the delivery is admitted. A sweep every committed `REMOTE_ACK_SWEEP_INTERVAL`, one second by
+default, reads what membership and the transport's connections decide about each pinned run, and
+fails the acknowledgement only when membership no longer lists the receiver's node, or when a
+connection has bound a newer run of it, which holds none of the earlier run's acknowledgements. A
+live run that reports nothing about a record for as long as its downstream work takes, as a record
+held on `REQUIRED WAIT` or by a slow emitter does, keeps the acknowledgement. Before admission, the
+delivery guard resolves cancelled work and the sweep bounds an abandoned registration at the
+five-minute total admission bound. The sweep counts its own passes toward that bound rather than
+elapsed time, so a registering node whose own execution stalled, such as a paused container, does
+not fail registrations whose admission it could not hear about meanwhile.
 
 An idle correlation registry waits for a new registration; it schedules the next scan from the
 earliest retained cohort deadline. A late scan counts once and skips missed ticks.
 
 A failed acknowledgement resolves negatively exactly once. The sweep and report transitions use
-the exact delivery generation's guard, so a report that arrives first keeps the acknowledgement
-pending, and a terminal outcome or the delivery's own failure that resolves it first leaves the
-sweep nothing to fail. The ingestor attempt fails with it and redelivers the record along the current
-routes, so an emitter that already completed the record can receive it again. A report or outcome that
-arrives after its acknowledgement failed finds no entry and is rejected at `debug`.
+the exact delivery generation's guard, so a terminal outcome or the delivery's own failure that
+resolves it first leaves the sweep nothing to fail, and a sweep that gives it up first leaves a
+later report or outcome nothing to resolve. The ingestor attempt fails with it and redelivers the
+record along the current routes, so an emitter that already completed the record can receive it
+again. A report or outcome that arrives after its acknowledgement failed finds no entry and is
+rejected at `debug`. The failure names its cause: `node '<node>' left the cluster before it
+acknowledged the forwarded record`, or `the run of node '<node>' that admitted the forwarded record
+ended before it acknowledged the record`.
 
-Every node on a record's path applies the same bound. A relay owner that routed a record to the
-node of an attached consumer reports the record alive to the ingestor's node for as long as the
-record's acknowledgement tree is unresolved. Without the bound, a terminal outcome lost between the
-consumer's node and the relay owner would keep the ingestor's acknowledgement alive, and its
-`ACK TIMEOUT` from ever passing, for the rest of the relay owner's run. With it, the relay owner
-fails the acknowledgement fifteen seconds after the consumer's node fell silent, stops reporting
-the record, and the ingestor's retry takes over. Each sweep that failed acknowledgements logs, at
-`warn`, one line per receiver with the number it failed.
+Every node on a record's path applies the same rule. A relay owner that routed a record to the node
+of an attached consumer reports the record alive to the ingestor's node for as long as the record's
+acknowledgement tree is unresolved. The consumer's node sends its outcome until the relay owner
+receives it, so no outcome is lost between them while both live. When the consumer's node leaves
+the cluster or its run ends, the relay owner fails the acknowledgement at its next sweep, stops
+reporting the record, and the ingestor's retry takes over. Each sweep that failed acknowledgements
+logs, at `warn`, one line per receiver with the number it failed.
 
 ### Bounded Correlation And Peer Owners
 
@@ -1273,16 +1329,15 @@ identity. An exhausted generation is sealed permanently. A delayed report, termi
 cleanup cannot change a replacement occupying the same position.
 Unused positions are claimed on demand; only retired positions enter the bounded free queues.
 Shutdown seals fresh claims before scanning positions that were ever claimed, so a concurrent
-registrar either occupies a position shutdown visits or finds it closed. The once-a-second silence
-sweep scans the same claimed positions and no others: a share whose first claim races a sweep is
-counted from that sweep or from the first one after its registration, and a node that has forwarded
-nothing sweeps nothing.
+registrar either occupies a position shutdown visits or finds it closed. The once-a-second
+acknowledgement sweep scans the same claimed positions and no others: a share whose first claim
+races a sweep is seen by that sweep or by the first one after its registration, and a node that has
+forwarded nothing sweeps nothing.
 
 Record storage and receiver ACK watches are charged to the relay memory budget. One task per
 admitted batch multiplexes its row watches, with a fixed charge of 1 KiB per row plus 4 KiB for the
 task; a wide frame therefore does not allocate one task per acknowledgement. Pending rows report
-progress every 100 milliseconds, below the registrar's fifteen-second silence bound even when two
-reports each exhaust their dispatch deadline. The same committed interval keeps local emitter and
+progress every 100 milliseconds. The same committed interval keeps local emitter and
 message-error acknowledgements alive while a connector request is pending, giving a one-second
 ingestor `ACK TIMEOUT` multiple chances to observe progress. Record storage waits for room before the
 delivery's body is encoded, as [Held Deliveries](#held-deliveries) describes; refusing it is typed
@@ -1295,9 +1350,9 @@ and its charge.
 The receiver charges a batch's watches before it decodes the batch and before runtime admission.
 While the relay budget has no room for them, typically because the watches of earlier batches are
 still reporting their rows, the receiver holds the batch back instead of refusing it. The batch
-stays unadmitted, so the transport keeps reporting it alive and its sender keeps waiting within the
-five-second progress and five-minute total admission bounds; the sender's channel carries nothing
-else meanwhile, which pushes back on the ingestor that fills it. The held batch keeps the reservation
+stays unadmitted, so the transport keeps reporting it alive and its sender keeps waiting, within the
+five-minute total admission bound; the sender's channel carries nothing else meanwhile, which
+pushes back on the ingestor that fills it. The held batch keeps the reservation
 of its grant. Every 10 milliseconds the receiver reads the budget and takes the charge once it
 fits. It never waits in the budget's queue, because a place there takes every byte the class
 releases until it is satisfied, which would keep the node's other relay work, including forwarding
@@ -1305,14 +1360,15 @@ the rows whose acknowledgements end the watches it waits for, behind it. A held 
 refusal. The hold ends as soon as the sender cancels the delivery, its peer ends, or the runtime
 stops. Only watches larger than the whole budget, or a hold still without room when the
 five-minute bound has passed, are refused, with the typed admission cause beneath the runtime's
-`RemoteAckAdmission`. Each watch returns its row's share as soon as it reports the row's terminal
-outcome, gives that outcome up, or ends because the registrar run changed or stayed missing from
-the live view past its silence bound, so room returns at the rate rows are reported rather than a
-whole batch at a time; the task's share returns when the batch's last watch ends or the runtime
-shuts down. The membership writer publishes immutable process identities; a watcher gives initial
-discovery five seconds, holds its reports while a previously observed registrar is missing, and
-stops once that registrar has stayed missing for its fifteen-second silence bound and one sweep. Terminal delivery retains the five-second event
-deadline described above; this does not promise suppression of replay duplicates after lost outcomes.
+`RemoteAckAdmission`. Each watch returns its row's share as soon as it delivers the row's terminal
+outcome, or ends because a newer run replaced the registering one or membership removed the
+registering node, so room returns at the rate rows are reported rather than a whole batch at a
+time; the task's share returns when the batch's last watch ends or the runtime shuts down. The
+membership writer publishes immutable process identities; a watcher reports to a registering run
+not yet discovered until its delivery's admission bound, keeps reporting to a discovered one while
+membership keeps its node, and stops once membership removes that node or a newer run replaces it.
+A terminal outcome is sent until it is delivered. This does not suppress duplicates after a run
+ends: the ingestor's redelivery can repeat a record an emitter already completed.
 
 An authenticated connection retains its peer's protocol owner. That owner alone mutates ordinary
 grant, attempt, channel, admission and outbound-correlation collections. Each synchronous guard
@@ -1425,18 +1481,27 @@ the wire as a typed `RelayGrantRefusal`, never as an HTTP status or text, and th
 from its class alone. A permanent refusal fails that grant at once; only a definitely unadmitted
 `channel_unopened` continuation can open a fresh channel as described above.
 
-A capacity refusal holds a routed or owner-ingress delivery back. The receiver answered, so the
-refusal does not count toward the five-second stall bound: the sender asks for a grant again after
-a wait that starts at 25 milliseconds and doubles after each further capacity refusal, up to 2.5
-seconds, half the stall bound, and the stall bound starts again when it asks, so each ask has the
-whole bound for its grant and its body, as the delivery's first ask has. Each ask leases the
-delivery's streams again, encodes the grant's row metadata again, and has the receiver read and
-decode that metadata again; after its first few seconds a held delivery therefore asks at most once
-every 2.5 seconds, and each ask holds one of the four admission streams the management connection
-reserves for one round trip. A held sender keeps its encoded body and its channel, and holds no
-grant and no memory on the receiver. Subscription fan-out is not held: a capacity refusal of its
-grant is retried within the five-second dispatch bound like any failed send, so a session
-subscription never holds the relay owner's fan-out longer than that.
+A capacity refusal holds every delivery back, a routed, owner-ingress or subscription fan-out one
+alike, and so does a send that fails in transport while its receiver stays live: neither has a
+timer of its own. The sender asks for a grant again after a wait that starts at 25 milliseconds,
+a quarter of the committed `REMOTE_ACK_ALIVE_INTERVAL`, and doubles after each further failure up
+to 2.5 seconds, twenty-five alive intervals, so a held delivery notices that room returned at most
+that late. Each ask leases the delivery's streams again, encodes the grant's row metadata again,
+and has the receiver read and decode that metadata again; after its first few seconds a held
+delivery therefore asks at most once every 2.5 seconds, and each ask holds one of the four admission
+streams the management connection reserves for one round trip. A held sender keeps its encoded body
+and its channel, and holds no grant and no memory on the receiver. The hold ends when the receiver
+grants the delivery, refuses it permanently, leaves the cluster, or the delivery's route changes or
+its admission bound passes. A subscriber node that holds a subscription fan-out back therefore holds
+the relay owner's fan-out back with it, as a `BLOCKING` session's full queue does. A held
+subscription fan-out also ends once the subscription interest the owner sees published no longer
+lists that node for the relay, as when the node's last subscription to the relay is deleted: nothing
+there takes the batch any more. The owner gives that delivery up where it stands, without waiting
+for room on the node, the transport asks the node to cancel whatever the delivery started there,
+and the fan-out goes on to the next interested node. The publication puts each index in place
+before it announces it, and the owner marks the announcements it saw before it reads the index, so
+no withdrawal is missed; the production-owner Shuttle check
+`shuttle_a_withdrawal_racing_a_relay_owners_wait_is_never_missed` races a withdrawal with that wait.
 
 Storing a delivery's record acknowledgements waits for room in the sender's own relay budget the
 way a receiver's watch charge does: it reads the budget every 10 milliseconds, registers for no
@@ -1451,9 +1516,10 @@ undecided, as [Cancellation And Branch Changes](#cancellation-and-branch-changes
 charge larger than the whole budget, or one still without room when the delivery's bound passes, is
 refused, as `CorrelationMemory` with the budget's typed `AdmissionError` beneath it.
 
-One five-minute bound covers the whole delivery: storing its records, holding its grant, and
-waiting for its admission. A delivery still held when the bound passes fails as before: an ingestor in
-`MODE NO ACK` loses its rows and an acknowledged ingestor delivers them again.
+One five-minute bound, the committed `REMOTE_RELAY_TOTAL_TIMEOUT`, covers the whole delivery:
+storing its records, holding its grant, and waiting for its admission. It is the operator's ceiling
+for the delivery, not a liveness timer. A delivery still held when the bound passes fails: an
+ingestor in `MODE NO ACK` loses its rows and an acknowledged ingestor delivers them again.
 [Ingestor loops while a delivery is held](./connector-contract.md#ingestor-loops-while-a-delivery-is-held)
 describes what a held delivery means for the ingestor that produced it.
 
@@ -1464,9 +1530,8 @@ on a fan-out delivery the other node holds back, while the deliveries filling th
 relay memory wait on that node's own full buffer. A received batch therefore returns the decode
 room of its grant as soon as it is decoded, keeping only its body and its decoded columns charged.
 Such a cycle then needs the decoded data of the deliveries waiting on full buffers, together with
-the encoded bodies of held senders, to fill the relay budgets of both nodes. The five-minute bound
-ends it, failing the held deliveries as the five-second dispatch bound did before deliveries were
-held.
+the encoded bodies of held senders, to fill the relay budgets of both nodes. The five-minute
+admission bound ends it, failing the held deliveries.
 
 A batch routed to another node's consumers counts as held relay work there before the receiver
 acknowledges runtime admission. That count spans the admission response, local subscription fan-out
@@ -1506,9 +1571,12 @@ A delivery has something to reconcile only once one of its sends started an exch
 records that start immediately before it registers the delivery's outbound attempt and sends the
 grant request, the first step a receiver can act on. A send that ends or is abandoned earlier, while
 it still waits for a connection to the receiver, leaves no attempt there. The sender keeps that
-record across every send of one delivery (`RelaySendProgress`). When a delivery ends without any of
-its sends having started an exchange, the sender asks the receiver nothing: the delivery fails as
-never having reached that node, and the channel's next delivery takes its unused position.
+record across every send of one delivery (`RelaySendProgress`), with the process epoch of the
+receiver run its latest exchange addressed: that run holds the delivery's attempt and admits it if
+anything does. Only the sender's task touches the record, so it takes no lock. When a delivery
+ends without any of its sends having started an exchange, the sender asks the receiver nothing: the
+delivery fails as never having reached that node, and the channel's next delivery takes its unused
+position.
 
 The [relay reconciliation and receiver-restart simulations](./interconnect-simulation.md#relay-reconciliation-and-cancellation)
 check this boundary through the production authenticated connection. They lose the reply after an
@@ -1567,10 +1635,24 @@ typically because each was still waiting for a connection to a node that stopped
 that owner. It ends at once, releasing its channel position and dispatch permits without a
 cancellation request, and its producer delivers the rows again to the unit's owner on the route the
 installer publishes, so they arrive there exactly once. A producer whose own branch ended meanwhile
-fails those rows instead, as it fails its other work still waiting for admission. A delivery that
-may have reached the former owner uses the same cancellation operation and five-second
-reconciliation budget. It need not wait
-for the fenced former owner to resume. An admitted result keeps the receiver's record-ACK
+fails those rows instead, as it fails its other work still waiting for admission. Membership can
+also remove the former owner before this node installs the forced change, so that such a delivery
+learns its receiver left while the route that names it is still in force. Nothing of the delivery
+reached that owner then either, so it is not failed: it releases its channel position, its channel
+and its dispatch permits, which the installer and any other change take without waiting for it, and
+waits until the installation retires its channel, until membership lists the former owner live
+again, as a voter that returns within the failover grace keeps its work, or until its admission
+bound passes. Its producer then delivers the rows to the unit's owner on the current route, which is
+the returned owner when the route never changed, and only the admission bound or this node's own stop
+fails them. A node that stops awaits no such route: when every node stops, failover publishes none,
+and the node's save holds its installation turn, so none would reach it while it saves. Once the
+node's intake closes, a delivery that finds its owner gone, or already waits because of that, fails
+its rows at once, as work that reaches a peer after that peer saved is negatively acknowledged; see
+[Saving What The Node Holds](shutdown.md#saving-what-the-node-holds). A delivery that
+may have reached the former owner uses the same cancellation operation, asked again until the
+former owner answers, membership removes it, or the delivery's admission bound passes. The forced
+change follows membership's verdict on that owner, so the delivery need not wait for the fenced
+former owner to resume. An admitted result keeps the receiver's record-ACK
 obligation; an unconfirmed or cancelled delivery fails its held record ACKs for ingestor retry, with
 possible replay duplicates. No transport message or automatic replay contract changes. The installer
 publishes successor routes only after completing the local swap, so another dispatch cannot open a
@@ -1598,8 +1680,8 @@ can leave the node after the owner routed the batch: a forced recovery moves eve
 a node that application health or gossip judged unavailable, including one that is still running,
 and the node stops the moved consumer when it applies the published schedule. The gap between
 admission and dispatch can be long: the receiver sends the terminal admission outcome to the owner
-before it dispatches the batch, and that send can take up to its five-second deadline while the
-owner is unreachable.
+before it dispatches the batch, and that send waits, and is sent again, until it reaches the owner
+or membership removes the owner.
 
 A routed batch that carries record acknowledgements and finds no attached consumer of its relay on
 the receiving node fails those acknowledgements. Its admission stands, so the transport does not
@@ -1636,17 +1718,18 @@ error of a reply it cannot send and builds the same reply again on the next roun
 cannot take an exchange answers with a typed refusal rather than text: the message exceeds the
 gossip bound, the sending node could not be registered as an outbound peer, or its gossip receiver
 has shut down. Chitchat hands each outgoing datagram to a four-message queue for that destination.
-One worker per destination drives its interconnect requests in order, under the one-second request
-deadline; an unreachable peer therefore cannot hold the gossip loop while it receives from or sends
-to healthy peers. A full destination queue drops its newest datagram, and the next gossip round
-retries. Closing the transport cancels queued work and exchanges in flight.
+One worker per destination drives its interconnect requests in order, each waiting for its peer
+while liveness keeps the peer and its connection; a slow or unreachable peer therefore holds only its
+own destination's queue, never the gossip loop or its exchanges with healthy peers. A full
+destination queue drops its newest datagram, and the next gossip round retries. Closing the
+transport cancels queued work and exchanges in flight.
 
 Incoming exchanges take one bounded queue between the interconnect handler and Chitchat, which
 reads it as its socket. The node capability `--gossip-receive-queue-capacity` sets how many
 datagrams it holds, 1,024 by default. Each holds at most the 65,510-byte gossip bound, so the
 queue retains at most its capacity times that bound. A full queue holds an exchange's answer until
-Chitchat takes a datagram; an exchange that waits beyond its request deadline fails at its sender,
-and the next gossip round retries.
+Chitchat takes a datagram; the sender's worker for this node waits for that answer, its destination
+queue drops what it cannot hold meanwhile, and the next gossip round retries.
 
 A key a node deletes from its gossip state, such as a withdrawn subscription interest, admission
 verdicts or licensing connectivity, stays a tombstone for the node capability
@@ -1766,9 +1849,11 @@ at the checked prefix; the original data request retains its complete contents. 
 incompletely matched prefix returns its result without opening replication. The beginning of the
 log needs no preceding-entry check. After confirmation, the first data request is submitted once
 after the follower accepts the stream headers. Empty commit updates following that data remain
-ordered on the same duplex stream. The data request's one five-second setup bound starts after
-the caller gate and covers both its prefix check and stream admission. Caller-supplied leading
-empty probes retain their heartbeat-derived deadline; that soft TTL does not constrain data setup.
+ordered on the same duplex stream. The data request's one setup bound, the stream's own
+`--raft-append-idle-bound` (five seconds by default), starts after the caller gate and covers both
+its prefix check and stream admission; it is a Raft replication timer, not a transport deadline.
+Caller-supplied leading empty probes retain their heartbeat-derived deadline; that soft TTL does not
+constrain data setup.
 
 Elections begin with a pre-vote exchange. A voter asks whether a quorum would accept its next term
 before it persists that term or becomes a candidate. A restarted voter whose log is stale, or whose
@@ -1783,11 +1868,11 @@ reaches the bound stops reading frames, so the leader's flow-control window clos
 sending rather than growing the follower's memory. Decoded batches belonging to a stream the leader
 has already torn down are released with that stream instead of staying queued behind it.
 
-The append stream opens under its five-second setup deadline. A follower answers a batch only after
-appending it durably, so the leader does not time out individual answers. While a batch is
-outstanding, it ends the stream only after five seconds in which no answer arrived and the
-follower's flow control accepted none of the leader's bytes. That bound is independent of the
-heartbeat interval, which still sets the deadline of each heartbeat.
+The append stream opens within that same bound. A follower answers a batch only after appending it
+durably, so the leader does not time out individual answers. While a batch is outstanding, it ends
+the stream only after `--raft-append-idle-bound`, five seconds by default, in which no answer
+arrived and the follower's flow control accepted none of the leader's bytes. That bound is
+independent of the heartbeat interval, which still sets the deadline of each heartbeat.
 
 A process restart does not admit ownership-sensitive runtime execution from its recovered local
 state. The restarting node sends `raft_runtime_admission_read` to the leader through the reserved
@@ -1829,16 +1914,24 @@ before it sends a request when the cluster does not report one of those nodes li
 schedule places an entity whose state the archive captures on no node, so a scheduled owner is
 never silently left out of an archive. A capture request's deadline is the remaining
 budget of the domain's cut rather than a fixed request deadline, because an owner stages its share of
-the domain's state before it answers; a `WITHOUT PAUSE` capture takes the default cut budget. A receiver waits up to five seconds for its
-state machine to apply that revision, installs its current runtime plan, and rechecks the sending
-leader before it captures. A closed applied-state authority or a catch-up deadline refuses the
-capture; a follower that is still applying the cut does not produce an archive from earlier state.
+the domain's state before it answers; a `WITHOUT PAUSE` capture takes the default cut budget. A
+receiver waits for its state machine to apply that revision, with no bound of its own because the
+cut's budget bounds the whole capture, installs its current runtime plan, and rechecks the sending
+leader before it captures. A closed applied-state authority refuses the capture; a follower that
+is still applying the cut does not produce an archive from earlier state.
 A captured section is fetched over a
 bulk response on the pool's shared stream and admission: the inventory declares its path, length,
 content kind and digest, and the leader stages and verifies the stream before adding it to the
-archive. The owner keeps a
-staged section only for the coordinator process that requested it, serves it once in 1 MiB reads,
-and releases a stage nobody fetched 600 seconds after staging it. One owner's inventory of a
+archive. The owner keeps a staged section only for the coordinator process that requested it and
+serves it once in 1 MiB reads. When the coordinator's fetch of a domain's sections ends, whether or
+not it completed, the coordinator asks each owner whose inventory it read to release whatever its
+coordination still has staged there with `backup_release_captured_sections`, a Management-class
+request that waits for the owner for as long as the owner lives. A stage that request does not
+reach, such as one an owner staged before another owner's capture failed, is released by the
+owner's sweep once
+the coordinator's run ends, as membership and the interconnect decide, or once the full
+`COMMAND_RETRY_VALIDITY` has passed since staging, after which no retry of the command could fetch
+it. One owner's inventory of a
 domain's capture is one management reply, at most 68 KiB.
 The fetch stream authenticates that process identity before its handler can consume the stage; a
 partitioned or cancelled fetch leaves any unconsumed stage available until expiry.
@@ -1979,10 +2072,18 @@ committed schedule before runtime installation and carries it in the complete ty
 revision used for activation and reconciliation; a node does not reconstruct it from a second
 schedule view.
 Before forced-recovery checkpoint selection, the destination waits for its local execution schedule
-to finish installing within the existing preparation deadline. It still validates the request's
-base fingerprint and entity against that installed revision. A startup installation wait does not
+to finish installing within the recovery's budget. It still validates the request's base
+fingerprint and entity against that installed revision. A startup installation wait does not
 classify the replica's checkpoints as absent; expiry is an installation deadline failure carrying
-the domain and entity. The required request carries the coordinator's captured `forced-recovery-budget`; the destination validates it and uses that budget while waiting for installation, without requiring its local policy to be ready first. The coordinator supplies that captured budget as the RPC timeout and also bounds the entire preparation by its captured deadline. The process-incarnation fence and response envelope retain their existing ownership.
+the domain and entity. The required request carries the coordinator's captured
+`forced-recovery-budget`; the destination validates it and uses that budget while waiting for
+installation and for the checkpoints of the other live nodes the unit is assigned to, without
+requiring its local policy to be ready first. The coordinator sends the preparation with that
+budget as its operation ceiling and bounds the entire preparation by the same captured deadline.
+Every expiry of the budget, on either side, is the typed `BudgetPassed` rejection rather than a
+failed preparation: the coordinator publishes nothing, every replica keeps its checkpoints, and the
+next scheduling pass prepares the recovery again. The process-incarnation fence and response
+envelope retain their existing ownership.
 
 WASM handoff and forced-recovery preparation on a passive revision validate and retain the complete
 checkpoint inventory without running guest callbacks or reading the stopped domain clock. The
@@ -2016,8 +2117,9 @@ lost in transit is replaced by the next announcement instead of stranding the ow
 stable storage acknowledges nothing. The owner of a WASM processor branch releases the ingestor
 acknowledgements a guest checkpoint covers only once every replica the committed schedule assigns
 has acknowledged that checkpoint's revision; a replica that is unreachable, lagging, or failing to
-install stops those acknowledgements from being released rather than letting them through, and the
-checkpoint fails after its ninety-second deadline. The owner announces a WASM processor's new branch to
+install stops those acknowledgements from being released rather than letting them through, until it
+acknowledges or the committed schedule replaces it. The checkpoint has no deadline of its own. The
+owner announces a WASM processor's new branch to
 its replicas as soon as the branch appears. Every catch-up round of a replica synchronizes the
 owner's branch lifecycle before it installs any branch checkpoint, and the replica refuses a
 checkpoint of a branch that lifecycle does not name, as for a branch the owner has evicted.
@@ -2046,7 +2148,8 @@ An ingestor layout handoff captures each preceding unit once. Later projection r
 that frozen cut's descriptors; the source verifies their scope, revision, length and digest before
 describing the target slice. Receivers fetch the slice through the same bounded bulk path.
 
-Kafka start coordination uses a Commands request bounded to sixty seconds. It carries the
+Kafka start coordination uses a Commands request that waits for the coordinator's answer for as
+long as the coordinator lives. It carries the
 source's node incarnation, lifecycle generation and complete ownership fingerprint, with a
 descriptor for a retained candidate. The handler binds the source node to the authenticated
 connection before admitting any read, proposal or acknowledgement; runtime admission separately
@@ -2081,15 +2184,16 @@ round synchronizes the lifecycle, reads the catalog's changes, and requests only
 the branches that changed or were announced, so a round in which no branch changed sends two
 requests however many branches the entity has.
 
-Checkpoint descriptions and catalog listings each use their operation's five-second deadline,
-including admission, connection capacity, the answer and decoding. A selected checkpoint's bulk
-stream has a sixty-second progress deadline. The one-second replication poll
-interval schedules the next idle round; it does not shorten an in-flight request's deadline. A
-branch-aggregated replica uses the same checkpoint operation deadline. Polls and announcements retry
-a failed exchange, while the owner's checkpoint completion deadline remains independent and may
-fail if a replica cannot confirm in time. Replica request diagnostics retain the typed transport
-cause beneath the target and placement context, so a timeout can be distinguished from capacity,
-connection and framing failures without inspecting checkpoint bytes.
+Checkpoint descriptions and catalog listings wait for their owner, admission, connection capacity,
+the answer and decoding included, for as long as the owner and its connection live: an owner that
+reads, admits and hashes a large state before it answers costs the replica latency, never the
+round. A selected checkpoint's bulk stream waits for its chunks the same way. The one-second
+replication poll interval schedules the next idle round; it never cuts a request in flight. A
+branch-aggregated replica uses the same checkpoint operation. Polls and announcements retry a
+failed exchange, and a guest checkpoint waits for its replicas' confirmations for as long as they
+live, as [WASM State And Recovery](./wasm-state.md) describes. Replica request diagnostics retain
+the typed transport cause beneath the target and placement context, so a departed owner can be
+distinguished from capacity, connection and framing failures without inspecting checkpoint bytes.
 
 The owner of a placement offers its newest checkpoint to the replicas the committed schedule
 assigns, and repeats the offer every 100 milliseconds to each replica that has not acknowledged
@@ -2104,7 +2208,8 @@ periodic synchronization supplies a hint cancelled during shutdown. The owner re
 the highest revision each
 replica acknowledged, so an acknowledgement delivered after a newer one never lowers it, and a
 Kafka offset commit waiting for its replica quorum, like a WASM checkpoint waiting for its replicas,
-completes on the acknowledgement that satisfies it rather than at its deadline. Only a node that
+completes on the acknowledgement that satisfies it and has no deadline of its own: a replica that
+is slow while it lives costs the commit latency, never failure. Only a node that
 holds a placement's state announces it: an ownership handoff announces the final checkpoints it
 captured from live state, and the placements it fills from its storage or with an empty checkpoint
 reach replicas through their own synchronization. A replica acts on an announcement by waking the
@@ -2142,7 +2247,8 @@ Kafka offset replica catch-up first asks `describe_kafka_offsets` on the Command
 the owner's revision advanced. Its typed answer distinguishes an unchanged revision, a newer
 revision, and the shared remote-operation refusal classes. An unchanged checkpoint is neither
 encoded nor transferred. A newer checkpoint uses `sync_kafka_offsets` on Bulk with the Snapshot
-subquota and a thirty-second progress deadline, independently of the replica polling cadence.
+subquota, and waits for its chunks for as long as the owner and its connection live,
+independently of the replica polling cadence.
 Its native checkpoint retains the optional applied-start generation beside every offset and topic
 schedule, so promotion does not reapply an explicit start.
 The owner retains the admitted offset topology and reads its conservative revision before the
@@ -2420,9 +2526,9 @@ unbounded tick queue. The node-wide progress quota bounds attempts across every 
 Liveness, relay admission, cancellation, and terminal outcomes retain their independent capacity.
 
 The receiver opens delivery with `domain_clock_attach`, a management request in the same progress
-subquota with the same two-second attempt deadline. The attachment request derives that deadline
-from the progress request: their equality is a fixed protocol invariant, not a second timeout policy.
-It names its full process identity, domain,
+subquota. Like a progress request, it waits for its answer for as long as its authority and the
+connection to it live, and only the authority's answer, liveness, a replacement or shutdown ends
+it. It names its full process identity, domain,
 installed runtime revision, lifecycle generation and addressed authority fence. It attaches once
 its local installed-clock phase reaches that revision, ahead of graph readiness, and replaces the
 attachment after a newer installation or authority reassignment. A receiver whose graph preparation
@@ -2467,7 +2573,9 @@ superseded report cannot replace the mapping or move logical time backward. See
 Every node's HTTPS listener presents the TLS VHOST certificates of the runtime revision that node
 applied, and it installs them before it reports that revision prepared. A command that creates,
 changes, or drops a VHOST confirms the installation with the typed management request
-`https_listener_installation`, which uses the reserved progress subquota and a two-second deadline.
+`https_listener_installation`, which uses the reserved progress subquota and waits for its answer
+for as long as the asked incarnation lives; the command's completion deadline bounds the whole
+confirmation.
 The leader answers for itself in process and asks every other live process incarnation for its
 latest installation at or after the command's runtime revision. The answer names the answering
 incarnation and reports the installed revision, a failure with that node's own description, or that
@@ -2492,7 +2600,11 @@ endpoint. A target with no usable endpoint is neither probed nor dialled, and it
 unknown until discovery publishes one. A previously established target remains eligible for probes
 and outbound connections through a Chitchat liveness loss while application health still has an
 observation of it from the node-unavailability interval, as described below. A different
-incarnation or advertised endpoint must establish a new target.
+incarnation or advertised endpoint must establish a new target. Only a node's newest incarnation
+says where it is dialled. A restarted node stays live in gossip under its earlier run until that
+run is declared dead, and Chitchat keeps probing the address the earlier run advertised for a while
+after that. Neither moves the node's target back to that run: a probe restores a target only for a
+node that has none, and otherwise reaches the node where it runs now.
 
 Each health round probes every peer together, with one probe for each peer: a peer's management
 connection reserves liveness streams of its own, so a probe never waits behind another peer's. A
@@ -2555,8 +2667,8 @@ probe is healthy, rather than merely that a transport pool exists.
 
 ## Application Progress
 
-The progress operations share reserved management progress capacity and two-second physical
-request deadlines:
+The progress operations share reserved management progress capacity, and each waits for its answer
+for as long as its peer and the connection to it live:
 
 | Request | Direction | Result |
 | --- | --- | --- |
@@ -2566,8 +2678,9 @@ request deadlines:
 | `domain_clock_attach` | Installed clock receiver to its authority | A typed attachment outcome for the addressed authority fence |
 
 The last operation establishes [clock delivery](#domain-clock-progress). The first three carry the
-observations the [command barrier](./command-completion.md#all-live-node-barriers) uses. Request
-deadlines bound transport attempts; the barrier keeps its existing command deadline.
+observations the [command barrier](./command-completion.md#all-live-node-barriers) uses. The barrier
+keeps its command deadline, which bounds its whole wait: a slow live peer costs the barrier
+latency, and liveness ends a request to a peer that is gone.
 
 Command completion reads the leader's effective availability view through the
 `application_completion_peers` management progress request. The response names the leader's
@@ -2645,18 +2758,20 @@ change retires the old target and cancels work tied to its slots. New operations
 target generation. A new DNS answer for the same advertised endpoint is not a target change: it
 leaves established connections in place and is used by the next connection attempt.
 
-Each established HTTP/2 connection sends a protocol ping every 15 seconds and waits at most ten
-seconds for its acknowledgement. The outbound and inbound ends both close a session that cannot
-answer, independently of the operating system's TCP retransmission timeout. Closing the outbound
-end starts its pool slot's bounded reconnect; closing the inbound end releases the per-peer class
-slot so that reconnect can be accepted. Ordinary request deadlines still apply to individual
-operations during the detection window.
+Each established HTTP/2 connection sends a protocol ping every half of the committed
+`NODE_UNAVAILABILITY_TIMEOUT`, five seconds at the default ten, and waits at most a quarter of it
+for its acknowledgement. The outbound and inbound ends both close a session that cannot answer,
+independently of the operating system's TCP retransmission timeout. Closing the outbound end starts
+its pool slot's bounded reconnect; closing the inbound end releases the per-peer class slot so that
+reconnect can be accepted. An exchange waits through the detection window and ends with the
+connection, unless the deadline its caller named passes first.
 
 Packet loss on a link that stays up is left to TCP. The host kernel retransmits lost packets under
 its own retransmission timeout, which grows exponentially while losses continue, and the
 interconnect does not tune it. An exchange over a lossy link therefore takes as long as its
-retransmissions, and one whose deadline passes first fails with a timeout that its owner may retry.
-Nervix sets no bound on how long such loss delays the traffic the link carries.
+retransmissions, unless the connection's liveness ping goes unanswered meanwhile, which closes the
+connection, or the deadline its caller named passes first, which fails the exchange as
+`DeadlinePassed`. Nervix sets no bound on how long such loss delays the traffic the link carries.
 [A Quorum Over A Lossy Link](./consensus-storage-and-replication.md#a-quorum-over-a-lossy-link)
 describes what it means for commits.
 
@@ -2714,9 +2829,9 @@ Only once the moves have ended does terminal teardown call transport shutdown. T
 and retires every pool connection the node opened: each stops leasing and closes once its leased
 streams return. Connections that peers opened to the node close at once, together with the handlers
 still serving their streams, so a peer's request the node has not answered fails instead of
-completing. Whatever remains after the transport's request timeout is then closed. Connection
-setup, including the name resolution it performs, and incomplete TLS handshakes remain inside this
-bound. A repeated `SIGINT` or `SIGTERM` ends the process without running the rest of its shutdown,
+completing. Whatever remains when the node's task grace period, `--task-grace-period`, passes is
+then closed. Connection setup, including the name resolution it performs, and incomplete TLS
+handshakes remain inside this bound. A repeated `SIGINT` or `SIGTERM` ends the process without running the rest of its shutdown,
 so its peers observe its connections ending exactly as they do when the process crashes.
 
 See [Shutdown And Recovery](./shutdown.md) for the complete phase contract, the shutdown timeout
@@ -2882,22 +2997,42 @@ subquota. It names domain, relay, execution unit, committed control revision, sc
 resolved branch selector, optional branch/offset position, row/byte limits and exact owner process.
 The handler verifies the current control cut, schema, unit owner and target incarnation before
 capturing shared Arrow views. Selection and row/byte bounds run on the bounded Bulk executor before
-transport; source metadata and stored-column lifetimes retain their memory admission.
+transport; source metadata and stored-column lifetimes retain their memory admission. The owner
+captures the page and encodes its stream as one attempt within allowances of the state-read,
+restore metadata and bulk classes, starting the bulk share from the room the class has free, up to
+the most the page can take: a charge the page requires and its share has no room for runs the
+attempt again within the share it needed, waited for while it holds nothing. It admits what
+capturing and selecting the page takes before it captures anything, and sets aside, as it selects
+each row, what encoding the row into the page's container adds. The first row is required; every
+later row joins only while the share has room for it now, so the page ends where the share's room
+ends, and its container, digest, descriptor and length are encoded from memory it already holds.
 
 The stream has an eight-byte little-endian descriptor length, a bounded typed rkyv descriptor and
 an optional native Arrow snapshot container. A zero-row/count-only page has no body. A body declares
-its exact byte count and SHA-256 digest. The receiver bounds all buffering, verifies the digest
-before decoding, and checks schema, fence, generation/revision, row count, returned offset and last
-branch against the descriptor. A typed refusal carries no body. Chunks share charged backing bytes
+its exact byte count and SHA-256 digest, how many records its container carries, and the exact
+length of each group's record identity and Arrow column sections. The receiver takes its memory one
+step ahead of what spends it, as it does for a processor page: it reads the descriptor's length,
+admits what the descriptor's bytes and decoded value take, and, once the descriptor is decoded and
+checked, admits the container's exact length and what opening a relay container of the declared
+layout takes, before it reads any of the container. Opening takes the most it holds at once, step
+by step in its own order: the row views, uniqueness table and decoded identities and columns it
+keeps, and what decoding the header, each group's identities and each group's columns borrows for
+that step alone. Each admission holds nothing charged while it waits for room until the read
+deadline; a page the receiver's whole bulk class could never hold is refused at once as
+`reply_too_large`, and one that finds no room before the deadline as `deadline`. The stream copies
+the container straight into the admitted memory, and verifying the digest, which precedes any
+decoding, and opening the container draw only on it. A container that differs from its declared
+layout is refused. The receiver checks schema, fence, generation/revision, row count, returned
+offset and last branch against the descriptor, and the opened rows keep their share of the
+admitted memory until they are presented. A typed refusal carries no body. Chunks share charged backing bytes
 and obey the ordinary Bulk chunk bound. No operator payload crosses the interconnect as Row frames
 or row maps; the coordinator uses the shared Arrow-to-Row writer at the session reporting boundary.
 
-The configured inspection deadline controls stream admission/setup via
-`request_stream_with_timeout`; ordinary `request_stream` resolves its request type's
-`InterconnectStreamRequest::DEADLINE` against the local transport request budget. Inspection uses
-the ordinary request ratio, ten seconds at the declared default. Configured inspection callers
-retain their explicit elapsed-time override, while other typed RPCs preserve their declared
-relative budgets.
+The coordinator opens the page's stream under the read's own deadline, `--inspection-read-timeout`
+(ten seconds by default) from when the read began, which the exchange carries as its caller's
+deadline: it bounds stream admission, setup and the owner's answer, and an opening that does not
+complete within it, or that liveness ends, is refused as `owner_unavailable`. Other typed requests
+carry no deadline of their own, as [Liveness And Deadlines](#liveness-and-deadlines) states.
 The complete frontend inspection also has that elapsed-time bound. Failed or cancelled reads retain
 no historical cursor or page cache. The existing materialized dependency/generator snapshot request
 and its grouping, confirmation, integrity and admission behavior remain unchanged.
@@ -2928,10 +3063,10 @@ Liveness uses the running committed unavailability policy. Existing connections 
 update through the primitive watch channel; an outstanding ping stays outstanding while its
 remaining deadline changes. Relay retention derives from the total admission budget each delivery
 captured, and from the installed committed `REMOTE_RELAY_TOTAL_TIMEOUT` for an owner still awaiting
-membership and for the sweep's cadence; installing a revision wakes the sweep. Grant and
-progress-send budgets derive from the configured request/progress budgets, and a sender asks a
-receiver to cancel an abandoned delivery for at most the smaller of three request budgets and that
-delivery's retention. Admission lifetime, row acknowledgements, cancellation choice and watermark
+membership and for the sweep's cadence; installing a revision wakes the sweep. A grant lives for its
+delivery's admission bound, a progress report waits for its connection like any other send, and a
+sender asks a receiver to cancel an abandoned delivery again, after the transport's reconnect
+backoff, until the receiver answers or that delivery's retention passes. Admission lifetime, row acknowledgements, cancellation choice and watermark
 ordering retain their existing owners and guarantees.
 ## Processor State Page Operation
 
@@ -2960,33 +3095,59 @@ and the filtered branch count before accepting a page. Catalog metadata stays in
 bounded descriptor, with no new stream framing or checkpoint-transfer operation.
 
 The stream frames an eight-byte little-endian descriptor length, a bounded typed rkyv descriptor and
-one native Arrow snapshot section per returned section. The descriptor carries the read origin, the
-complete counts, the returned offset and last branch, the returned rows as runs of one section and
-one branch with the branch's typed key fields, and each section's complete field list, held row
-count and body identity: exact byte length and SHA-256 digest. A descriptor names the sections of
+each returned section's rows as one or more native Arrow snapshot sections, in row order, each
+within the owner's snapshot section bound. The descriptor carries the read origin, the complete
+counts, the returned offset and last branch, the returned rows as runs of one section and one
+branch with the branch's typed key fields, and each section's complete field list, held row count
+and the identity of each of its bodies, in order: exact byte length and SHA-256 digest. Rows whose
+body would pass the bound travel in halves until each part fits; a single row whose own body passes
+it refuses the page as `reply_too_large`. A descriptor names the sections of
 its committed processor layout: reorderer `pending`; correlator `left` and `right`; deduplicator
 `keys`; window `rows`, `header` and `accumulators`; or inferencer `header` and one typed tensor-index
 section per declared state entry. Tensor indices address the declared order directly and are
 checked before body access. The existing section, descriptor and reply-byte bounds govern every
 kind. Window and inferencer metadata runs count toward section
-bodies and bytes, while only retained-row runs advance the row offset or consume its limit. The receiver bounds all buffering, verifies every digest before decoding,
-checks each section's payload fields against its own committed schema, decodes each section with
-exactly the declared field list, and checks the run rows, the returned offset and the row counts
-against the descriptor before any row reaches a Row frame. A typed refusal carries no body. No operator payload crosses as Row frames or row maps; the
+bodies and bytes, while only retained-row runs advance the row offset or consume its limit. The
+receiver takes its memory one step ahead of what spends it. It reads the descriptor's length and
+admits what the descriptor's bytes and decoded value take. Once the descriptor is decoded and
+checked, it admits everything the bodies take on its node, each body's exact length and its
+decoder's charge, before it reads any body. Each admission holds nothing charged while it waits for
+room until the read deadline; a page the receiver's whole bulk class could never hold is refused at
+once as `reply_too_large`, and one that finds no room before the deadline as `deadline`. Receiving
+and decoding then draw only on that memory: the stream copies its bytes straight into it in exact
+lengths, taking no charge per chunk, and the decoded rows keep it until they are presented.
+The receiver bounds all buffering, verifies every digest before decoding,
+checks each section's payload fields against its own committed schema, decodes each body with
+exactly its section's declared field list, requires every body to hold at least one row and a
+section's bodies to hold exactly its returned rows, and checks the run rows, the returned offset and
+the row counts against the descriptor before any row reaches a Row frame. A typed refusal carries no body. No operator payload crosses as Row frames or row maps; the
 coordinator writes Row frames at the session reporting boundary, as for materialized pages.
-The inspection deadline controls stream admission and setup through
-`request_stream_with_timeout`, and the request type's `DEADLINE` projects from the configured request budget, like the materialized page operation. The caller's explicit remaining inspection deadline remains authoritative.
+The read's own deadline is the caller's deadline of the stream's opening, as for the materialized
+page operation.
 
-Duplex setup selects its budget through `DuplexSetupDeadline`. Client producer and consumer
-links select the active transport connection-setup budget. Engine operations retain their
-request-relative class; consensus prefix confirmation and ordered-stream setup resolve the
-same selected value. The selection bounds opening, never the stream's lifetime.
+An owner that serves a processor page to another node reads the page and encodes its stream as one
+attempt within allowances of the state-read, restore metadata and bulk classes, as for a
+materialized page. It sets aside, before it admits any row, what encoding the descriptor, the
+eight-byte length that frames it on the stream, the job that computes each body's digest and each
+section body's Arrow framing take, and every row it admits sets aside the bytes of the body that
+carries it. The first row is required; every later row joins only while the share has room for its
+working memory and its body together, so the page ends where the share's room ends, with complete
+counts and a continuation. The owner encodes the bodies and the descriptor from that memory and
+never waits for memory while the reply holds a body: what the set-aside memory falls short of, and
+the descriptor of a reply that holds bodies but set nothing aside, is a charge the reply requires,
+and a share without room for it runs the attempt again within a larger one. The memory that held
+the rows goes back to the pool as soon as the bodies carry them.
 
-Relay metadata carries one captured acknowledgement timing group per delivery. Admission progress
-reports use its alive interval and dispatch budget. Each send is also capped by the host's existing
-progress-control allowance: one tenth of its request budget, no longer than its body-progress
-budget. This keeps management capacity from lingering after short control work ends. The captured
-group adds 96 bytes to serialized relay metadata, included in its exact reservation. A status or
+Duplex setup selects its bound through `DuplexSetupDeadline`. Client producer and consumer links
+select the active transport connection-setup budget; every other duplex stream, the consensus
+append stream included, opens under its peer's liveness alone, and consensus bounds its prefix
+confirmation and ordered-stream setup by its own `--raft-append-idle-bound`. The selection bounds
+opening, never the stream's lifetime.
+
+Relay metadata carries one captured acknowledgement timing group per delivery: its alive interval,
+sweep interval and total admission bound. Admission progress reports use its alive interval, and
+each waits for its connection like any other send. The captured group adds 48 bytes to serialized
+relay metadata, included in its exact reservation. A status or
 cancellation request carries the same group for the delivery it names, so a cancellation that
 fences a position the receiver never granted keeps that delivery's retention, and every grant,
 status or cancellation meets only the retired-channel floors of retentions at least as long as the
@@ -3016,7 +3177,7 @@ whether entries remain after the last one. A refusal carries the envelope's type
 caps the entries at what one Commands payload holds: every archived entry fits 512 bytes, and room
 for two entries is left for the unit's own facts. A coordinator refuses a page that returned no
 entry while entries remained and it allowed some, instead of issuing a continuation that cannot
-advance. The request runs under the caller's remaining inspection deadline through
-`request_with_timeout`, and its `DEADLINE` projects from the configured request budget, like the
-other state inspection page operations. Branches cross the interconnect only as fingerprints, and
+advance. The request runs under the read's deadline, `--inspection-read-timeout` from when the
+page was requested, which it carries as its caller's deadline, like the other state inspection page
+operations. Branches cross the interconnect only as fingerprints, and
 no guest state bytes travel with the facts.

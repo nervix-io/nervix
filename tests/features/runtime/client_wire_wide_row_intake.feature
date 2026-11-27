@@ -1,7 +1,7 @@
 @client_wire_wide_row_intake @slots_2
-Feature: Establishing a wide subscription row after a refused input handoff
+Feature: Establishing a wide subscription row through a slow input handoff
 
-  Scenario: A native client receives its wide row after the first input handoff cannot finish
+  Scenario: A native client receives its wide row through the handoff to a slow relay owner
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     When node "node-3" is stopped
@@ -37,15 +37,14 @@ Feature: Establishing a wide subscription row after a refused input handoff
       """
       CREATE SUBSCRIPTION wide_seen TO wide_records;
       """
-    And http payload is acknowledged within "30s" by node "node-1" with host "wide-rows-{{test_id}}.example.com" path "/records" after releasing paced node "node-3" on server error "failed to forward output to relay 'wide_records'"
+    # The relay's owner takes the row at its paced 262,144 bytes per second, about twelve
+    # seconds. An owner that is slow while it lives costs the handoff latency, so the first
+    # handoff delivers the row.
+    And http payload is acknowledged within "30s" by node "node-1" with host "wide-rows-{{test_id}}.example.com" path "/records"
       """
       {"sequence":1,"note":"{{wide_note}}"}
       """
-    Then the last server error contains
-      """
-      failed to forward output to relay 'wide_records'
-      """
-    And within "30s" client "subscriber" receives a subscription payload
+    Then within "30s" client "subscriber" receives a subscription payload
       """
       {"note":"{{wide_note}}","sequence":1}
       """

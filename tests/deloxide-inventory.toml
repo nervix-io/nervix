@@ -1533,12 +1533,12 @@ selections = [
 test = "runtime::materialized_read::reuse_tests::diagnostic_replaced_materialized_snapshot_cache"
 
 [[workload]]
-coverage = "Captured timing cohorts retain their own silence bounds, late sweeps skip missed ticks, and the earliest wake deadline coalesces registrations under its tracked guard without retaining that guard during position scans. Runtime teardown cancels already-due scans before the registry resolves retained acknowledgements. Timers, Notify and scheduling are untracked."
-id = "owner.remote-ack-silence-sweeps"
-invariant = "One fresh diagnostic process ends overrunning silence sweeps through runtime teardown after the sweep in progress, lets the registry resolve the acknowledgement that sweep kept, and records no finding."
+coverage = "Captured timing cohorts retain their own admission bounds, late sweeps skip missed ticks, and the earliest wake deadline coalesces registrations under its tracked guard without retaining that guard during position scans. Runtime teardown cancels already-due scans before the registry resolves retained acknowledgements. Timers, Notify and scheduling are untracked."
+id = "owner.remote-ack-sweeps"
+invariant = "One fresh diagnostic process ends overrunning acknowledgement sweeps through runtime teardown after the sweep in progress, lets the registry resolve the acknowledgement that sweep kept, and records no finding."
 invocation = "owner-tests"
 selections = ["deloxide", "deloxide-order", "deloxide-stress"]
-test = "runtime::remote_dispatch::tests::deloxide_remote_ack_silence_sweeps"
+test = "runtime::remote_dispatch::tests::deloxide_remote_ack_sweeps"
 
 [[workload]]
 coverage = "Bulk queue recovery, charged sequential image preparation, cancellation and memory admission through the production metadata owner. Native and filesystem waits remain untracked."
@@ -1847,13 +1847,13 @@ scenario = "A Kafka ingestor keeps committing its domain offsets after their rep
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "A lost remote acknowledgement, source redelivery and bounded correlation retirement."
+coverage = "A record acknowledgement whose return fails once in transport, its resend until delivered and the source's single commit."
 examples = 1
 feature = "tests/features/cluster/lost_remote_acknowledgements.feature"
 id = "scenario.remote-ack-loss"
-invariant = "Losing an acknowledgement on the return path redelivers the record instead of stalling its source and leaves no diagnostic lock finding."
+invariant = "A failed return of an acknowledgement is sent again until delivered, commits the record once without a redelivery, and leaves no diagnostic lock finding."
 invocation = "scenarios"
-scenario = "A record acknowledgement lost on its way back to the relay owner is redelivered instead of stalling its source"
+scenario = "A record acknowledgement whose return fails in transport is sent again and commits its source once"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -2717,9 +2717,9 @@ coverage = "Under scheduling stress: a lost remote acknowledgement, source redel
 examples = 1
 feature = "tests/features/cluster/lost_remote_acknowledgements.feature"
 id = "stress.remote-ack-loss"
-invariant = "Losing an acknowledgement on the return path redelivers the record instead of stalling its source and leaves no diagnostic lock finding."
+invariant = "A failed return of an acknowledgement is sent again until delivered, commits the record once without a redelivery, and leaves no diagnostic lock finding."
 invocation = "stress-scenarios"
-scenario = "A record acknowledgement lost on its way back to the relay owner is redelivered instead of stalling its source"
+scenario = "A record acknowledgement whose return fails in transport is sent again and commits its source once"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -5353,9 +5353,7 @@ workloads = [
 [[owner]]
 path = "src/runtime/remote_ack_owner.rs"
 workloads = [
-  "scenario.runtime-settings-lost-ack",
-  "stress.runtime-settings-lost-ack",
-  "owner.remote-ack-silence-sweeps",
+  "owner.remote-ack-sweeps",
   "scenario.remote-ack-branches",
   "scenario.remote-ack-loss",
   "scenario.remote-ack-restart",
@@ -7316,26 +7314,6 @@ scenario = "A domain drain cannot exceed a live node's shutdown budget on <clust
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Remote correlation and root lifecycle use tracked locks; network loss, elapsed timing, Kafka confirmation and async wake ordering are untracked."
-examples = 1
-feature = "tests/features/cluster/runtime_settings.feature"
-id = "scenario.runtime-settings-lost-ack"
-invariant = "A lost terminal ACK expires under the captured short policy and sequential Kafka ingestion resumes within the measured bound."
-invocation = "scenarios"
-scenario = "A committed silence policy expires a lost forwarded acknowledgement sooner"
-selections = ["deloxide", "deloxide-order"]
-
-[[workload]]
-coverage = "Under scheduling stress: Remote correlation and root lifecycle use tracked locks; network loss, elapsed timing, Kafka confirmation and async wake ordering are untracked."
-examples = 1
-feature = "tests/features/cluster/runtime_settings.feature"
-id = "stress.runtime-settings-lost-ack"
-invariant = "A lost terminal ACK expires under the captured short policy and sequential Kafka ingestion resumes within the measured bound."
-invocation = "stress-scenarios"
-scenario = "A committed silence policy expires a lost forwarded acknowledgement sooner"
-selections = ["deloxide-stress"]
-
-[[workload]]
 coverage = "A held consumer runs its assignment callback on a connector control worker and acquires the rejection-floor lock. Broker execution, async wakes and the connector's native control turn are outside detector evidence."
 examples = 2
 feature = "tests/features/runtime/ingestor_rate_limit.feature"
@@ -7553,6 +7531,26 @@ id = "stress.inferencer-inspection"
 invariant = "Stateful inference publishes typed tensor inspection pages with complete branch headers, exact values or whole-value redaction, bounded paging and stale-cut refusal."
 invocation = "stress-scenarios"
 scenario = "Stateful inference publishes typed tensor inspection pages"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Inference inspection pages through held bulk memory on the capture path scenario.inferencer-inspection takes, claiming only the tracked locks that path acquires. Tensor publication, Arrow copying, async memory admission and transport are outside Deloxide."
+examples = 2
+feature = "tests/features/runtime/inferencer_state_inspection.feature"
+id = "scenario.inferencer-inspection-paging"
+invariant = "An inferencer read whose pages the held bulk memory cannot hold whole ends each page before the tensor that no longer fits and returns every tensor across its pages, without a tracked deadlock."
+invocation = "scenarios"
+scenario = "An inferencer read the bulk memory cannot hold in one page pages through every tensor"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: inference inspection pages through held bulk memory on the capture path stress.inferencer-inspection takes. Tensor publication, Arrow copying, async memory admission and transport are outside Deloxide."
+examples = 2
+feature = "tests/features/runtime/inferencer_state_inspection.feature"
+id = "stress.inferencer-inspection-paging"
+invariant = "An inferencer read whose pages the held bulk memory cannot hold whole ends each page before the tensor that no longer fits and returns every tensor across its pages, without a tracked deadlock."
+invocation = "stress-scenarios"
+scenario = "An inferencer read the bulk memory cannot hold in one page pages through every tensor"
 selections = ["deloxide-stress"]
 
 [[owner]]

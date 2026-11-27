@@ -255,7 +255,7 @@ impl ConfiguredFaultInjection {
     ) {
     }
 
-    pub(in crate::runtime) fn loses_remote_acknowledgement(
+    pub(in crate::runtime) fn fails_remote_acknowledgement_send(
         &self,
         _resolver: &ClusterNodeName,
         _registrar: &ClusterNodeName,

@@ -44,7 +44,7 @@ use nervix_primitives::{
 use rkyv::{Archive, Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use super::{ClusterHandle, GossipExchange, cluster_node_identity};
+use super::{ClusterHandle, cluster_node_identity};
 
 /// Everything the node brings to the cluster, as its prerequisite record's gossip text.
 const KEY_PREREQUISITES: &str = "prerequisites";
@@ -181,10 +181,7 @@ impl InterconnectRequest for PeerClockProbe {
     const NAME: &'static str = "peer_clock";
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Discovery;
-    // A probe is answered from the node's clock alone, as a gossip exchange is from its memory, so
-    // it takes the same discovery deadline.
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        <GossipExchange as InterconnectRequest>::DEADLINE;
+    // A probe is answered from the node's clock alone, as a gossip exchange is from its memory.
     const REQUIRES_LIVE_TARGET: bool = false;
 }
 

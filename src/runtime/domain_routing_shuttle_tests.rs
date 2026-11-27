@@ -1,8 +1,11 @@
-//! Atomic typed processor-plan publication, explored under Shuttle.
+//! Atomic typed processor-plan publication and the wait for a domain's routing, explored under
+//! Shuttle.
 //!
 //! Layer: test harness.
-//! - **Owns.** The invariant that readers observe one complete domain routing revision.
-//! - **Depends on.** The production routing publisher, cache and typed processor plan.
+//! - **Owns.** The invariants that readers observe one complete domain routing revision and that a
+//!   wait for a domain's routing is woken by its publication.
+//! - **Depends on.** The production routing publisher, cache, domain routing table and typed
+//!   processor plan.
 //! - **Must not know.** Schedule application, processor execution or graph Models.
 
 #![cfg_attr(
@@ -23,6 +26,8 @@ use crate::registry::{
 
 const MODEL_THREAD_JOINS: &str =
     "Shuttle fails the execution when a model thread panics, so no join observes one";
+const MODEL_TASK_JOINS: &str =
+    "Shuttle fails the execution when a model task panics, so no join observes one";
 
 fn named<N>(raw: &str) -> N
 where
@@ -131,4 +136,49 @@ fn a_reader_observes_one_complete_typed_routing_revision() {
 #[test]
 fn shuttle_a_reader_observes_one_complete_typed_routing_revision() {
     check_interleavings(a_reader_observes_one_complete_typed_routing_revision);
+}
+
+/// A routing for installation to publish, holding no processor plan.
+fn unpublished_routing() -> SharedDomainRouting {
+    StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default()))
+}
+
+/// A held delivery waits for its domain's routing while installation publishes another domain's
+/// routing and then its own. A publication that lands between the waiter's check and its wait must
+/// still end the wait: lost, the waiter would wait forever and Shuttle would report the deadlock.
+/// The wait ends with exactly its own domain's routing, never another domain's.
+fn a_routing_published_between_a_waiters_check_and_its_wait_ends_it() {
+    shuttle::future::block_on(async {
+        let routings = Arc::new(DomainRoutings::default());
+        let waited = DomainName::parse("orders")
+            .assured("the fixture domain name follows the public name grammar");
+        let routing = unpublished_routing();
+
+        let waiter = nervix_primitives::task::spawn({
+            let routings = Arc::clone(&routings);
+            let waited = waited.clone();
+            let expected = StdArc::clone(&routing);
+            async move {
+                let published = routings.published(&waited).await;
+                assert!(
+                    StdArc::ptr_eq(&published, &expected),
+                    "a wait for a domain's routing ended with another routing"
+                );
+            }
+        });
+        let installer = nervix_primitives::task::spawn(async move {
+            let other = DomainName::parse("audit")
+                .assured("the fixture domain name follows the public name grammar");
+            routings.insert(other, unpublished_routing());
+            routings.insert(waited, routing);
+        });
+
+        installer.await.assured(MODEL_TASK_JOINS);
+        waiter.await.assured(MODEL_TASK_JOINS);
+    });
+}
+
+#[test]
+fn shuttle_a_routing_published_between_a_waiters_check_and_its_wait_is_never_missed() {
+    check_interleavings(a_routing_published_between_a_waiters_check_and_its_wait_ends_it);
 }

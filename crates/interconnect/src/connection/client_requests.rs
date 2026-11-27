@@ -31,7 +31,7 @@ impl ClientConnection {
             body,
             response_class,
             response_limit,
-            timeout: timeout_duration,
+            deadline,
             headers,
         } = request;
         let operation = async {
@@ -86,7 +86,6 @@ impl ClientConnection {
                     &state.executor,
                     response_class,
                     response_limit,
-                    state.options.progress_timeout,
                     response,
                 )
                 .await);
@@ -109,7 +108,7 @@ impl ClientConnection {
                 })?;
             Ok((response.into_body(), content_length))
         };
-        match timeout(timeout_duration, operation).await {
+        match crate::settings::within(deadline, operation).await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(error)) => {
                 state.observations.stream_reset(
@@ -118,13 +117,13 @@ impl ClientConnection {
                 );
                 Err(error)
             }
-            Err(_) => {
+            Err(deadline) => {
                 state
                     .observations
                     .stream_reset(self.key.class, StreamResetReason::Deadline);
-                Err(Report::new(TransportError::RequestTimeout {
+                Err(Report::new(TransportError::DeadlinePassed {
                     peer: self.key.node_id.clone(),
-                    timeout: timeout_duration,
+                    deadline,
                 }))
             }
         }
@@ -153,7 +152,7 @@ impl ClientConnection {
             body,
             response_class,
             response_limit,
-            timeout: timeout_duration,
+            deadline,
             headers,
         } = request;
         let operation = async {
@@ -209,7 +208,6 @@ impl ClientConnection {
                     &state.executor,
                     response_class.memory_class(),
                     declared,
-                    state.options.progress_timeout,
                     response.into_body(),
                 )
                 .await?;
@@ -224,12 +222,11 @@ impl ClientConnection {
                 &state.executor,
                 response_class.memory_class(),
                 declared,
-                state.options.progress_timeout,
                 response.into_body(),
             )
             .await
         };
-        match timeout(timeout_duration, operation).await {
+        match crate::settings::within(deadline, operation).await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(error)) => {
                 state.observations.stream_reset(
@@ -238,13 +235,13 @@ impl ClientConnection {
                 );
                 Err(error)
             }
-            Err(_) => {
+            Err(deadline) => {
                 state
                     .observations
                     .stream_reset(self.key.class, StreamResetReason::Deadline);
-                Err(Report::new(TransportError::RequestTimeout {
+                Err(Report::new(TransportError::DeadlinePassed {
                     peer: self.key.node_id.clone(),
-                    timeout: timeout_duration,
+                    deadline,
                 }))
             }
         }

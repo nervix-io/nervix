@@ -208,7 +208,9 @@ async fn the_console_lists_the_concrete_branches_the_relay_owner_holds() {
             .is_empty()
     );
     owner_task
-        .stop(Duration::from_secs(1))
+        .stop(crate::runtime::TaskStopWait::Teardown {
+            grace: Duration::from_secs(1),
+        })
         .await
         .expect("relay owner should stop");
 }

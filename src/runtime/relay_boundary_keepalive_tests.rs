@@ -81,7 +81,10 @@ async fn a_delivery_to_a_remote_consumer_reports_its_records_alive_while_it_wait
         .remote_dispatcher
         .load_full()
         .assured("the loopback cluster installs its dispatcher");
-    dispatcher.interconnect.shutdown().await;
+    dispatcher
+        .interconnect
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+        .await;
     let consumer = named::<ClusterNodeName>("node-2");
     let relay = named::<RelayName>("orders");
     let services = RelayBoundaryServices::new(
@@ -157,7 +160,10 @@ async fn a_held_delivery_reports_its_records_alive_at_the_committed_alive_interv
         .remote_dispatcher
         .load_full()
         .assured("the loopback cluster installs its dispatcher");
-    dispatcher.interconnect.shutdown().await;
+    dispatcher
+        .interconnect
+        .shutdown(crate::application::test_fixtures::test_teardown_ceiling())
+        .await;
     let consumer = named::<ClusterNodeName>("node-2");
     let relay = named::<RelayName>("orders");
     let services = RelayBoundaryServices::new(

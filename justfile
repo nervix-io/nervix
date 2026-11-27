@@ -1372,6 +1372,13 @@ bench-materialized-state: build-web-console wasm-processor-guests download-onnxr
 bench-materialized-state-bodies:
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib materialized_owner_cost -- --ignored --nocapture
 
+# Measure the owner's record application and the window's publication while state inspection
+# reads them near the session reply bound, with and without the concurrent pages.
+bench-state-inspection: build-web-console wasm-processor-guests download-onnxruntime bench-state-inspection-bodies
+
+bench-state-inspection-bodies:
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib state_inspection_cost -- --ignored --nocapture
+
 # Measure the endpoint's actual request routing and per-thread allocations on the same host.
 bench-endpoint-routing: build-web-console download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing,benchmarks --lib endpoint_routing_cost -- --ignored --nocapture
@@ -2339,7 +2346,7 @@ test-crypto-scenarios *args: build-deps build-plexus-format build-test-cli build
 test-interconnect *args:
     cargo test --package nervix-interconnect --lib -- {{ args }}
 
-# Verify the current stream-deadline API and its compile-time Duration contract.
+# Run the interconnect's API examples, optionally matching one API.
 test-interconnect-docs filter="":
     cargo test --package nervix-interconnect --doc {{ quote(filter) }}
 
@@ -4019,6 +4026,7 @@ bench-smoke-bodies:
     just bench-retained-channels-bodies
     just bench-remote-owners-bodies
     just bench-materialized-state-bodies
+    just bench-state-inspection-bodies
 
 # Measure the data-plane work a node admits through its bounded executor, as the runtime submits it:
 # one branched input prepared into its branch batches, and an emitter batch encoded through a JAQ
@@ -5598,6 +5606,11 @@ verify-chaos-clock *args:
 test-chaos-stateful-verifiers:
     exec bash scripts/chaos/tests/stateful-self-test.sh
 
+# Run the stateful scenario's state inspection option checks, observation reader and verifier
+# controls without the other external harness checks.
+test-chaos-inspection-verifiers:
+    exec bash scripts/chaos/tests/state-inspection-self-test.sh
+
 # Validate suite selection, budgets and the controller against its deterministic stand-ins.
 test-chaos-suites:
     exec bash scripts/chaos/tests/suite-self-test.sh
@@ -5914,8 +5927,8 @@ generate-dev-tls:
     set -euo pipefail
     bash scripts/generate_dev_tls.sh
 
-generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" alternate_output="tests/fixtures/onnx/alternate_score.onnx" batch_output="tests/fixtures/onnx/batch_score.onnx" f64_output="tests/fixtures/onnx/f64_score.onnx" matrix_output="tests/fixtures/onnx/matrix_identity.onnx" dynamic_batch_output="tests/fixtures/onnx/dynamic_batch_score.onnx" scalar_output="tests/fixtures/onnx/scalar_identity.onnx" running_sum_output="tests/fixtures/onnx/running_sum.onnx" checked_running_sum_output="tests/fixtures/onnx/checked_running_sum.onnx":
-    python3 scripts/train_simple_onnx.py --output {{ output }} --alternate-output {{ alternate_output }} --batch-output {{ batch_output }} --f64-output {{ f64_output }} --matrix-output {{ matrix_output }} --dynamic-batch-output {{ dynamic_batch_output }} --scalar-output {{ scalar_output }} --running-sum-output {{ running_sum_output }} --checked-running-sum-output {{ checked_running_sum_output }}
+generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" alternate_output="tests/fixtures/onnx/alternate_score.onnx" batch_output="tests/fixtures/onnx/batch_score.onnx" f64_output="tests/fixtures/onnx/f64_score.onnx" matrix_output="tests/fixtures/onnx/matrix_identity.onnx" dynamic_batch_output="tests/fixtures/onnx/dynamic_batch_score.onnx" scalar_output="tests/fixtures/onnx/scalar_identity.onnx" running_sum_output="tests/fixtures/onnx/running_sum.onnx" checked_running_sum_output="tests/fixtures/onnx/checked_running_sum.onnx" wide_running_sum_output="tests/fixtures/onnx/wide_running_sum.onnx":
+    python3 scripts/train_simple_onnx.py --output {{ output }} --alternate-output {{ alternate_output }} --batch-output {{ batch_output }} --f64-output {{ f64_output }} --matrix-output {{ matrix_output }} --dynamic-batch-output {{ dynamic_batch_output }} --scalar-output {{ scalar_output }} --running-sum-output {{ running_sum_output }} --checked-running-sum-output {{ checked_running_sum_output }} --wide-running-sum-output {{ wide_running_sum_output }}
 
 # Install a CPU or CUDA 13 runtime. The `host` platform selects the current machine.
 download-onnxruntime flavor="cpu" platform="host":

@@ -19,7 +19,9 @@ use nervix_models::{ClusterNodeIncarnation, ClusterNodeName, DomainSchedule};
 use tracing::{info, warn};
 
 use super::{
-    ownership_handoff::{ForcedOwnershipRecoveryCoordinator, ForcedRecoveryPreparations},
+    ownership_handoff::{
+        ForcedOwnershipRecoveryCoordinator, ForcedRecoveryPreparations, ForcedRecoveryReadiness,
+    },
     schedule_planning::DomainSchedulePlanningSnapshot,
     session_service::SessionServiceImpl,
 };
@@ -42,6 +44,7 @@ impl SessionServiceImpl {
         let domain = schedule.domain.clone();
         let fence = inputs.committed.fence();
         let mut preparations = None;
+        let mut readiness = ForcedRecoveryReadiness::Ready;
         if let Some(current) = current {
             let coordination = self
                 .inner
@@ -53,7 +56,7 @@ impl SessionServiceImpl {
                 coordination,
             };
             let attempts = preparations.insert(ForcedRecoveryPreparations::new(self, round));
-            ForcedOwnershipRecoveryCoordinator {
+            readiness = ForcedOwnershipRecoveryCoordinator {
                 recovery_budget: inputs
                     .committed
                     .runtime_state()
@@ -70,7 +73,9 @@ impl SessionServiceImpl {
             .await;
         }
 
-        let unpublished_reason = if self.inner.consensus.current_leader_tenure().as_ref()
+        let unpublished_reason = if readiness == ForcedRecoveryReadiness::BudgetPassed {
+            Some("a forced recovery reached its budget while the replicas it waited for lived")
+        } else if self.inner.consensus.current_leader_tenure().as_ref()
             != Some(fence.leader_tenure())
         {
             Some("the automatic decision's leader tenure changed")

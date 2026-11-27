@@ -55,8 +55,6 @@ impl InterconnectStreamRequest for FetchResourceArchive {
     const NAME: &'static str = "fetch_resource_archive";
     const CLASS: PoolClass = PoolClass::Bulk;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Resource;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Snapshot;
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,6 +67,4 @@ impl InterconnectRequest for PublishResourceReplica {
 
     const NAME: &'static str = "publish_resource_replica";
     const CLASS: PoolClass = PoolClass::Commands;
-    const DEADLINE: nervix_interconnect::RequestDeadline =
-        nervix_interconnect::RequestDeadline::Setup;
 }

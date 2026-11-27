@@ -2,7 +2,7 @@
   "ci_reserve_minutes": 21,
   "suites": {
     "smoke": {
-      "description": "Three-node baseline, a leader crash with its restart, connector counters across ingestor and emitter owner crashes, the recovery from an isolated follower's partition, endpoint intake on one node and through a three-node owner crash, the lifetimes workloads through a three-node owner crash, the Python binding through graceful stop, crash and restart, and the rolling node-settings changes: a relay receive bound rolled across every node, a parameter change a returning node adopts and one applied live under load, and a node refused over a prerequisite",
+      "description": "Three-node baseline, a leader crash with its restart, connector counters across ingestor and emitter owner crashes, the recovery from an isolated follower's partition, endpoint intake on one node and through a three-node owner crash, the lifetimes workloads through a three-node owner crash, every state inspection family read through a partitioned three-node owner crash, the Python binding through graceful stop, crash and restart, and the rolling node-settings changes: a relay receive bound rolled across every node, a parameter change a returning node adopts and one applied live under load, and a node refused over a prerequisite",
       "entries": [
         {
           "id": "stateful-partitions-3-owner-crash",
@@ -83,6 +83,13 @@
           "run": ["emitter-owner-crash", "--connector-metrics", "--nodes", "3"]
         },
         {
+          "id": "inspection-partitions-3-owner-crash",
+          "shard": 6,
+          "budget_minutes": 30,
+          "note": "every state inspection family read before, during and after the state owner's crash",
+          "run": ["stateful", "--nodes", "3", "--state-partitions", "4", "--fault", "owner-crash", "--inspect-state"]
+        },
+        {
           "id": "capability-roll",
           "shard": 7,
           "budget_minutes": 10,
@@ -137,6 +144,13 @@
           "shard": 15,
           "budget_minutes": 25,
           "run": ["stateful", "--nodes", "3", "--state-partitions", "4", "--fault", "owner-crash"]
+        },
+        {
+          "id": "inspection-partitions-3-owner-crash",
+          "shard": 15,
+          "budget_minutes": 30,
+          "note": "every state inspection family read before, during and after the state owner's crash",
+          "run": ["stateful", "--nodes", "3", "--state-partitions", "4", "--fault", "owner-crash", "--inspect-state"]
         },
         {
           "id": "alteration-handover",
@@ -623,6 +637,13 @@
           "budget_minutes": 12,
           "note": "the chaos reproduction of Graceful Lifecycle 01",
           "run": ["graceful-stop"]
+        },
+        {
+          "id": "inspection-3-owner-crash",
+          "shard": 17,
+          "budget_minutes": 30,
+          "note": "every state inspection family read before, during and after the state owner's crash",
+          "run": ["stateful", "--nodes", "3", "--fault", "owner-crash", "--inspect-state"]
         },
         {
           "id": "capability-roll",

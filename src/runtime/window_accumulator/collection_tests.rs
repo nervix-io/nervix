@@ -256,7 +256,10 @@ async fn collection_refuses_decoded_and_encoded_outputs_before_publication() {
                 .downcast_ref::<crate::runtime_schema::ArrowBodyError>()
                 .verified("the typed IPC encoding cause survives window qualification");
             assert!(
-                matches!(cause, crate::runtime_schema::ArrowBodyError::Encode { .. }),
+                matches!(
+                    cause,
+                    crate::runtime_schema::ArrowBodyError::EncodedPastLimit { limit: 64, .. }
+                ),
                 "{error:?}"
             );
         }

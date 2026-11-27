@@ -11,12 +11,12 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
 
 use ahash::HashMap;
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::ResultExt as _;
 use nervix_checkpoint_replication::{CheckpointReplication, ReplicaProgress};
 use nervix_connector::DomainOffsetPosition;
 use nervix_models::ClusterNodeName;
@@ -26,7 +26,6 @@ use nervix_primitives::{
         Arc, StdArc,
         atomic::{AtomicI64, AtomicU64, Ordering},
     },
-    time::{Instant, timeout_at},
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
@@ -543,13 +542,6 @@ impl KafkaOffsetStateRead {
         &self.state.replication
     }
 
-    /// Whether enough of the assigned replicas reported holding revision `lsm`.
-    pub(super) fn replica_quorum_holds(&self, lsm: u64) -> bool {
-        self.state
-            .replication
-            .with_progress(|progress| self.quorum_holds(progress, lsm))
-    }
-
     /// Whether `progress` has at least the required number of the replicas assigned now holding
     /// revision `lsm`.
     fn quorum_holds(&self, progress: &ReplicaProgress, lsm: u64) -> bool {
@@ -557,32 +549,18 @@ impl KafkaOffsetStateRead {
         progress.holding(&roles.replica_nodes, lsm) >= roles.required_replica_acks
     }
 
-    /// Wait until enough assigned replicas report holding revision `lsm`, within the caller's
-    /// checkpoint-operation budget.
+    /// Wait until enough assigned replicas report holding revision `lsm`.
     ///
-    /// The wait registers for the next replica report before it reads what the replicas hold, so a
-    /// report that lands in between wakes it instead of leaving the commit to its deadline. The
-    /// replicas are the ones assigned when each report arrives.
-    pub(super) async fn wait_for_replica_quorum(
-        &self,
-        lsm: u64,
-        wait: Duration,
-    ) -> error_stack::Result<(), StateReplicationError> {
-        let deadline = Instant::now()
-            .checked_add(wait)
-            .assured("the bounded checkpoint operation fits a monotonic deadline");
-        let quorum = self
-            .state
+    /// A replica that is slow to report costs the commit latency, never failure: the commit waits
+    /// for as long as its replicas live, and a replica that leaves is replaced by one that catches
+    /// up and reports. The wait registers for the next replica report before it reads what the
+    /// replicas hold, so a report that lands in between wakes it. The replicas are the ones
+    /// assigned when each report arrives.
+    pub(super) async fn wait_for_replica_quorum(&self, lsm: u64) {
+        self.state
             .replication
-            .wait_until(|progress| self.quorum_holds(progress, lsm));
-        if timeout_at(deadline, quorum).await.is_ok() || self.replica_quorum_holds(lsm) {
-            return Ok(());
-        }
-        Err(Report::new(StateReplicationError::ReplicaQuorum {
-            placement: self.placement().clone(),
-            lsm,
-            required_acks: self.required_replica_acks(),
-        }))
+            .wait_until(|progress| self.quorum_holds(progress, lsm))
+            .await;
     }
 }
 
@@ -1419,6 +1397,8 @@ pub(in crate::runtime) fn assert_offset_payload_decodes_typed(payload: &[u8]) {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use futures_util::FutureExt as _;
+    use meticulous::OptionExt as _;
     use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName};
     use nervix_primitives::sync::{Arc, oneshot};
@@ -1589,7 +1569,13 @@ mod tests {
         assert_eq!(first_report, revision);
         // The first report is lost before the primary receives it. A later poll asks for only
         // changes, so the primary has no checkpoint to send back.
-        assert!(!originator.read().replica_quorum_holds(revision));
+        assert!(
+            originator
+                .read()
+                .wait_for_replica_quorum(revision)
+                .now_or_never()
+                .is_none()
+        );
         assert!(
             originator
                 .read()
@@ -1603,7 +1589,13 @@ mod tests {
             .read()
             .replication()
             .record(&replica, repeated_report);
-        assert!(originator.read().replica_quorum_holds(revision));
+        assert!(
+            originator
+                .read()
+                .wait_for_replica_quorum(revision)
+                .now_or_never()
+                .is_some()
+        );
         assert_eq!(installer.read().next_offset("events", 0), Some(9));
     }
 
@@ -2647,9 +2639,9 @@ mod tests {
             });
         }
 
-        /// The owner commits a recorded partition's offset and checks its replica quorum while
+        /// The owner commits a recorded partition's offset and waits for its replica quorum while
         /// another thread holds the assignment barrier, which that thread releases only after both
-        /// have returned.
+        /// have returned. The replica reports holding the committed revision meanwhile.
         fn commit_under_a_held_barrier() {
             let node_1 = ClusterNodeName::parse("node-1")
                 .assured("the test node name satisfies the cluster-node grammar");
@@ -2661,7 +2653,7 @@ mod tests {
             );
             let mut assignment = ReplicatedKafkaOffsetState::bind(
                 &state,
-                StateReplicationRoles::new(Some(node_1.clone()), vec![node_2], 1),
+                StateReplicationRoles::new(Some(node_1.clone()), vec![node_2.clone()], 1),
                 Some(&node_1),
                 2,
             );
@@ -2688,7 +2680,7 @@ mod tests {
                             .send(())
                             .assured("the model keeps the receiver until the barrier is held");
                         release_rx.recv().assured(
-                            "the model releases the barrier once the commit and its quorum check \
+                            "the model releases the barrier once the commit and its quorum wait \
                              returned",
                         );
                     });
@@ -2698,14 +2690,28 @@ mod tests {
                 .recv()
                 .assured("the barrier thread reports once it holds the barrier");
 
-            // The barrier stays held until the commit and its quorum check return, so either one
+            // The barrier stays held until the commit and its quorum wait return, so either one
             // waiting for it would leave every thread blocked, which Shuttle reports as a deadlock.
             let committed = originator.apply_committed_offset(&DomainOffsetPosition {
                 topic: "events".to_string(),
                 partition: 0,
                 offset: 2,
             });
-            let quorum_satisfied = originator.read().replica_quorum_holds(1);
+            let Ok(lsm) = committed else {
+                panic!("the commit was refused while the assignment barrier was held");
+            };
+            // The replica reports holding the committed revision while the barrier is still held,
+            // and the commit's quorum wait learns of it without queueing behind the barrier.
+            shuttle::future::block_on(async {
+                let reporting = nervix_primitives::task::spawn({
+                    let state = state.clone();
+                    async move {
+                        state.replication().record(&node_2, lsm);
+                    }
+                });
+                originator.read().wait_for_replica_quorum(lsm).await;
+                reporting.await.assured(MODEL_TASK_JOINS);
+            });
             release_tx
                 .send(())
                 .assured("the barrier thread waits for its release");
@@ -2713,18 +2719,9 @@ mod tests {
                 "Shuttle fails the whole execution when a model thread panics, so no join \
                  observes one",
             );
-
-            assert!(
-                committed.is_ok(),
-                "the commit was refused while the assignment barrier was held"
-            );
-            assert!(
-                !quorum_satisfied,
-                "no replica has acknowledged the committed revision"
-            );
         }
 
-        /// Encoding a snapshot holds the assignment barrier. A commit, or the replica quorum check
+        /// Encoding a snapshot holds the assignment barrier. A commit, or the replica quorum wait
         /// that follows it, that queued behind the barrier would hold the acknowledged partition
         /// for the whole encode.
         #[test]
@@ -2736,10 +2733,10 @@ mod tests {
             "Shuttle fails the whole execution when a model task panics, so no join observes one";
 
         /// The owner waits for its one replica to hold a committed revision while that replica
-        /// reports holding it. Shuttle never lets the wait's deadline pass unless a check triggers
-        /// it, so the wait completes only by learning of the report: a report that lands between
-        /// the wait's read of the replicas' progress and its registration for the next report
-        /// leaves every task blocked, which Shuttle reports as a deadlock.
+        /// reports holding it. The wait has no deadline, so it completes only by learning of the
+        /// report: a report that lands between the wait's read of the replicas' progress and its
+        /// registration for the next report would leave every task blocked, which Shuttle reports
+        /// as a deadlock.
         fn quorum_wait_racing_its_replica_acknowledgement() {
             shuttle::future::block_on(async {
                 let node_1 = ClusterNodeName::parse("node-1")
@@ -2769,19 +2766,13 @@ mod tests {
                     .assured("the owner assignment is current");
                 let read = originator.read().clone();
                 let waiting = nervix_primitives::task::spawn(async move {
-                    read.wait_for_replica_quorum(lsm, Duration::from_secs(30))
-                        .await
+                    read.wait_for_replica_quorum(lsm).await;
                 });
                 let reporting = nervix_primitives::task::spawn(async move {
                     state.replication().record(&node_2, lsm);
                 });
                 reporting.await.assured(MODEL_TASK_JOINS);
-                let waited = waiting.await.assured(MODEL_TASK_JOINS);
-                assert!(
-                    waited.is_ok(),
-                    "the quorum wait ended at its deadline although its replica reported holding \
-                     the revision"
-                );
+                waiting.await.assured(MODEL_TASK_JOINS);
             });
         }
 

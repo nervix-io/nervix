@@ -202,15 +202,6 @@ macro_rules! setting_name {
     (snapshot_bytes) => {
         "runtime-snapshot-bytes"
     };
-    (snapshot_describe_timeout) => {
-        "runtime-snapshot-describe-timeout"
-    };
-    (snapshot_fetch_timeout) => {
-        "runtime-snapshot-fetch-timeout"
-    };
-    (wasm_checkpoint_timeout) => {
-        "runtime-wasm-checkpoint-timeout"
-    };
     (event_capacity) => {
         "runtime-event-capacity"
     };
@@ -266,12 +257,6 @@ runtime_capabilities! {
     snapshot_staging_bytes: RuntimeSnapshotStagingBytes(u64) = 128 * 1024 * 1024 * 1024 => bytes,
     /// Largest snapshot staged by one transfer.
     snapshot_bytes: RuntimeSnapshotBytes(u64) = 64 * 1024 * 1024 * 1024 => bytes,
-    /// Deadline of describing a sealed state snapshot.
-    snapshot_describe_timeout: RuntimeSnapshotDescribeTimeout(Duration) = Duration::from_secs(30) => duration,
-    /// Deadline of fetching a sealed state snapshot.
-    snapshot_fetch_timeout: RuntimeSnapshotFetchTimeout(Duration) = Duration::from_secs(30) => duration,
-    /// Deadline until every guest checkpoint replica confirms.
-    wasm_checkpoint_timeout: RuntimeWasmCheckpointTimeout(Duration) = Duration::from_secs(90) => duration,
     /// Runtime events retained for a lagging observer.
     event_capacity: RuntimeEventCapacity(u64) = 256 => count,
     /// Guest-state recovery requests awaiting a decision.

@@ -132,14 +132,32 @@ fn ended_within(started: Instant, deadline: Duration) -> bool {
     started.elapsed() <= deadline + deadline / 4
 }
 
-/// Whether `outcome` is the failure a request meets when its peer cannot answer in time.
-fn unanswered<T: std::fmt::Debug>(outcome: &Result<T, error_stack::Report<RequestError>>) -> bool {
+/// How long the claimant waits for the answer to a release whose reply the holder holds back.
+const HELD_REPLY_WAIT: Duration = Duration::from_secs(5);
+
+/// Whether `outcome` is the failure a request meets when its caller stopped waiting for it.
+fn caller_gave_up<T: std::fmt::Debug>(
+    outcome: &Result<T, error_stack::Report<RequestError>>,
+) -> bool {
     match outcome {
         Ok(_) => false,
         Err(error) => matches!(
             error.current_context(),
-            RequestError::Timeout { .. } | RequestError::Transport { .. }
+            RequestError::DeadlinePassed {
+                deadline: nervix_interconnect::ExchangeDeadlineKind::Caller,
+                ..
+            }
         ),
+    }
+}
+
+/// Whether `outcome` is the failure a request meets when liveness ends its connection.
+fn connection_lost<T: std::fmt::Debug>(
+    outcome: &Result<T, error_stack::Report<RequestError>>,
+) -> bool {
+    match outcome {
+        Ok(_) => false,
+        Err(error) => matches!(error.current_context(), RequestError::Transport { .. }),
     }
 }
 
@@ -155,9 +173,9 @@ fn claim_config(seed: u64) -> SimulationConfig {
 fn a_partition_claim_keeps_the_released_row_until_its_forget_arrives_through_loss_and_repair() {
     Scenario {
         name: "a partition claim keeps the released row until its forget arrives",
-        fault_plan: "hold the holder's reply to the first release until it reaches its deadline, \
-                     release again and take the same row; partition the claimant from the holder \
-                     so its forget fails within its deadline while the holder keeps the row; \
+        fault_plan: "hold the holder's reply to the first release until the claimant's own \
+                     deadline passes, release again and take the same row; partition the claimant \
+                     from the holder so liveness ends its forget while the holder keeps the row; \
                      repair, forget again, and read the holder's holdings",
         seeds: &[211, 213],
     }
@@ -192,8 +210,8 @@ fn claim_through_hold_and_partition(run: ScenarioRun) -> Result<(), SimulationEr
                         kept: true,
                         ..Holding::default()
                     });
-                    // The first release's reply is held until the claimant's request has met its
-                    // deadline; the holder has released the row by then and keeps it.
+                    // The first release's reply is held until the claimant stopped waiting for it
+                    // at its own deadline; the holder has released the row by then and keeps it.
                     let (first_reply_held, first_reply_held_rx) = watch::channel(true);
                     let handled = holding.clone();
                     transport
@@ -305,7 +323,7 @@ fn claim_through_hold_and_partition(run: ScenarioRun) -> Result<(), SimulationEr
                     );
                     assert!(observed.forgets >= 1, "no forget reached the holder");
                     trace.record(HOLDER, "forgot the row once its forget arrived");
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;
@@ -333,20 +351,26 @@ fn claim_through_hold_and_partition(run: ScenarioRun) -> Result<(), SimulationEr
 
                     let started = Instant::now();
                     let outcome = transport
-                        .request(&holder, claim(PartitionClaimStep::Release))
+                        .request_by(
+                            &holder,
+                            claim(PartitionClaimStep::Release),
+                            nervix_interconnect::ExchangeDeadline::Caller(
+                                started + HELD_REPLY_WAIT,
+                            ),
+                        )
                         .await;
-                    assert!(unanswered(&outcome), "held release outcome: {outcome:?}");
                     assert!(
-                        ended_within(
-                            started,
-                            transport.request_deadline::<PartitionTransitionRequest>()
-                        ),
+                        caller_gave_up(&outcome),
+                        "held release outcome: {outcome:?}"
+                    );
+                    assert!(
+                        ended_within(started, HELD_REPLY_WAIT),
                         "the held release ended after {:?}",
                         started.elapsed()
                     );
                     trace.record(
                         CLAIMANT,
-                        "release with a held reply fails within its deadline",
+                        "release with a held reply ends at the claimant's own deadline",
                     );
                     stage.send_replace(Stage::ReleaseUnanswered);
 
@@ -371,24 +395,30 @@ fn claim_through_hold_and_partition(run: ScenarioRun) -> Result<(), SimulationEr
 
                     turmoil::partition(CLAIMANT, HOLDER);
                     let started = Instant::now();
+                    // The forget rides the connection the releases used, which liveness ends
+                    // across the partition; the caller's own deadline only keeps a regression from
+                    // holding the run.
                     let outcome = transport
-                        .request(&holder, claim(PartitionClaimStep::Forget))
+                        .request_by(
+                            &holder,
+                            claim(PartitionClaimStep::Forget),
+                            nervix_interconnect::ExchangeDeadline::Caller(
+                                started + super::liveness_bound(&transport) * 2,
+                            ),
+                        )
                         .await;
                     assert!(
-                        unanswered(&outcome),
+                        connection_lost(&outcome),
                         "partitioned forget outcome: {outcome:?}"
                     );
                     assert!(
-                        ended_within(
-                            started,
-                            transport.request_deadline::<PartitionTransitionRequest>()
-                        ),
+                        ended_within(started, super::liveness_bound(&transport)),
                         "the partitioned forget ended after {:?}",
                         started.elapsed()
                     );
                     trace.record(
                         CLAIMANT,
-                        "forget across the partition fails within its deadline",
+                        "forget across the partition fails once liveness ends the connection",
                     );
                     stage.send_replace(Stage::Partitioned);
 
@@ -424,7 +454,7 @@ fn claim_through_hold_and_partition(run: ScenarioRun) -> Result<(), SimulationEr
                     assert_eq!(pending, 0, "the holder still reports the forgotten key");
                     trace.record(CLAIMANT, "forget after the repair empties the holder");
                     stage.send_replace(Stage::Forgotten);
-                    transport.shutdown().await;
+                    transport.shutdown(super::teardown_ceiling()).await;
                     Ok::<(), io::Error>(())
                 })
                 .await;

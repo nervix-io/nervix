@@ -10,7 +10,7 @@ use super::*;
 impl ReadPlan {
     fn prepare(
         operation: &RelayProcessorOperationTemplate,
-        memory: &mut GrowingCharge,
+        memory: &mut Reservation,
         cancellation: &Cancellation,
     ) -> ReadResult<Self> {
         let plan = match operation {
@@ -103,7 +103,7 @@ struct CaptureSelection {
 struct CapturedPage {
     branches: Vec<CapturedBranch>,
     plan: ReadPlan,
-    memory: GrowingCharge,
+    memory: Reservation,
     partition_catalog: nervix_models::StateInspectionKeyCatalog,
 }
 
@@ -111,7 +111,7 @@ impl CapturedPage {
     fn new(
         mut branches: Vec<CapturedBranch>,
         plan: ReadPlan,
-        mut memory: GrowingCharge,
+        mut memory: Reservation,
         excluded: Option<&BTreeSet<nervix_models::BranchKeyFingerprint>>,
         cancellation: &Cancellation,
     ) -> ReadResult<Self> {
@@ -164,9 +164,9 @@ impl CaptureSelection {
 }
 
 impl Runtime {
-    /// Read one page of a deduplicator's or window processor's published state, taking every
-    /// charge through `executor`. The page holds what it captured while it opens window layouts
-    /// and builds its rows, so its caller runs it within allowances of the classes it draws from.
+    /// Reads one page of a deduplicator's or window processor's published state, drawing every
+    /// charge through `executor`, the allowance its caller runs the read within: the page holds
+    /// what it captured while it opens window layouts and builds its rows.
     pub(crate) async fn local_published_processor_state_page(
         &self,
         executor: &Executor,
@@ -217,8 +217,7 @@ impl Runtime {
             selection,
         };
         let captured = executor
-            .run_cpu(CpuClass::Bulk, memory, move |memory, cancellation| {
-                let mut memory = GrowingCharge::new(memory);
+            .run_cpu(CpuClass::Bulk, memory, move |mut memory, cancellation| {
                 let installed = routing
                     .processor_plans
                     .get(&NodeUnitRef::new(processor.clone(), unit))
@@ -341,23 +340,12 @@ impl Runtime {
             });
         }
         executor
-            .run_cpu(
-                CpuClass::Bulk,
-                executor.charge_nothing(MemoryClass::Bulk),
-                move |_charge, cancellation| {
-                    let mut page = PublishedPage::build(
-                        opened,
-                        plan,
-                        now,
-                        after,
-                        bounds,
-                        memory,
-                        cancellation,
-                    )?;
-                    page.partition_catalog = partition_catalog;
-                    Ok::<_, Report<ProcessorStatePageError>>(page)
-                },
-            )
+            .run_cpu(CpuClass::Bulk, memory, move |memory, cancellation| {
+                let mut page =
+                    PublishedPage::build(opened, plan, now, after, bounds, memory, cancellation)?;
+                page.partition_catalog = partition_catalog;
+                Ok::<_, Report<ProcessorStatePageError>>(page)
+            })
             .await
             .change_context(ProcessorStatePageError::Admission)?
     }
@@ -432,7 +420,7 @@ mod tests {
                         ))],
                         max_time: std::time::Duration::from_secs(3600),
                     },
-                    GrowingCharge::new(memory),
+                    memory,
                     Some(&excluded),
                     cancellation,
                 )

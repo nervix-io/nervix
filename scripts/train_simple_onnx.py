@@ -254,6 +254,35 @@ def running_sum_graph(*, score_shape_from_features: bool = False) -> bytes:
     return bytes(out)
 
 
+# 256 KiB of F32 state per branch: wide enough that a few branches outgrow a few MiB of memory,
+# well within the one 8 MiB snapshot section a declaration must fit.
+WIDE_STATE_ELEMENTS = 64 * 1024
+
+
+def wide_running_sum_graph() -> bytes:
+    """Carry a wide state, adding one feature to every value by broadcasting it."""
+    out = bytearray()
+    out += message_field(
+        1, node("Add", ["state_in", "features"], ["state_out"], "advance_state")
+    )
+    out += message_field(
+        1,
+        node(
+            "ReduceSum",
+            ["state_out"],
+            ["score"],
+            "score",
+            [attribute_int("keepdims", 1)],
+        ),
+    )
+    out += field_string(2, "nervix_wide_running_sum")
+    out += message_field(11, value_info("features", [1]))
+    out += message_field(11, value_info("state_in", [WIDE_STATE_ELEMENTS]))
+    out += message_field(12, value_info("score", [1]))
+    out += message_field(12, value_info("state_out", [WIDE_STATE_ELEMENTS]))
+    return bytes(out)
+
+
 def model_proto(graph: bytes) -> bytes:
     opset_import = field_string(1, "") + field_varint(2, 13)
     return (
@@ -311,6 +340,11 @@ def main() -> None:
         default="tests/fixtures/onnx/checked_running_sum.onnx",
         help="path to write the running-sum model that can refuse one row's score shape",
     )
+    parser.add_argument(
+        "--wide-running-sum-output",
+        default="tests/fixtures/onnx/wide_running_sum.onnx",
+        help="path to write the running-sum model whose state is 256 KiB wide",
+    )
     args = parser.parse_args()
 
     weights, bias = train_linear_regressor()
@@ -349,6 +383,9 @@ def main() -> None:
     checked_running_sum_output = Path(args.checked_running_sum_output)
     checked_running_sum_output.parent.mkdir(parents=True, exist_ok=True)
     checked_running_sum_output.write_bytes(model_proto(running_sum_graph(score_shape_from_features=True)))
+    wide_running_sum_output = Path(args.wide_running_sum_output)
+    wide_running_sum_output.parent.mkdir(parents=True, exist_ok=True)
+    wide_running_sum_output.write_bytes(model_proto(wide_running_sum_graph()))
     print(f"wrote {output} weights={weights!r} bias={bias!r}")
     print(
         f"wrote {alternate_output} weights={ALTERNATE_WEIGHTS!r} bias={ALTERNATE_BIAS!r}"
@@ -360,6 +397,7 @@ def main() -> None:
     print(f"wrote {scalar_output}")
     print(f"wrote {running_sum_output}")
     print(f"wrote {checked_running_sum_output}")
+    print(f"wrote {wide_running_sum_output}")
 
 
 if __name__ == "__main__":

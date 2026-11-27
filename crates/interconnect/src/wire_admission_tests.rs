@@ -567,92 +567,38 @@ async fn an_answer_waiting_for_a_place_on_a_full_class_takes_the_first_place_tha
     an_answer_takes_the_first_place_that_frees().await;
 }
 
-/// An answer's decoding on a full class waits for a place, but only until its request's own
-/// deadline: then the request fails as timed out, naming the peer and the time it was given, with
-/// every charge of the decoding returned and nothing refused. An answer whose place frees before
-/// the deadline is decoded whole.
+/// An answer's decoding on a full class waits for a place for as long as it takes, holding nothing
+/// back from the class and refusing nothing: the answer carries work its peer already did. Once a
+/// place frees, the answer is decoded whole.
 #[cfg(not(feature = "shuttle"))]
 #[nervix_primitives::test]
-async fn an_answers_decoding_waits_for_a_place_until_its_requests_deadline() {
-    use std::time::Duration;
-
-    use nervix_models::ClusterNodeName;
-    use nervix_primitives::time::Instant;
-
-    use crate::TransportError;
-
+async fn an_answers_decoding_waits_for_a_place_and_is_decoded_whole() {
     let executor = one_place_executor();
-    let peer = ClusterNodeName::parse("node-b").assured("the fixture node name is valid");
-    // Each answer is read together with the room its decoding takes.
-    let encoded = || {
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&answer())
-            .assured("the current fixture envelope serializes")
-            .to_vec();
-        let length = u64::try_from(bytes.len()).assured("the fixture envelope's length fits u64");
-        let read = executor
-            .try_reserve(
-                MemoryClass::Bulk,
-                length
-                    .checked_mul(2)
-                    .assured("the fixture and its decoding fit u64"),
-            )
-            .assured("the encoded answer and its decoding fit");
-        let (input, decoding) = read
-            .split(length)
-            .assured("a charge splits at a size it holds");
-        (ChargedBytes::from_owned(bytes, input), decoding)
-    };
+    // The answer is read together with the room its decoding takes.
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&answer())
+        .assured("the current fixture envelope serializes")
+        .to_vec();
+    let length = u64::try_from(bytes.len()).assured("the fixture envelope's length fits u64");
+    let read = executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            length
+                .checked_mul(2)
+                .assured("the fixture and its decoding fit u64"),
+        )
+        .assured("the encoded answer and its decoding fit");
+    let (input, room) = read
+        .split(length)
+        .assured("a charge splits at a size it holds");
     let full = FullBulkClass::fill(&executor).await;
-    let held = executor.memory(MemoryClass::Bulk).reserved_bytes;
-    let timeout = Duration::from_millis(50);
-    let (input, decoding) = encoded();
-    let timed_out = super::decode_answer::<crate::request::ResponseEnvelope>(
-        &executor,
-        CpuClass::Bulk,
-        input,
-        decoding,
-        super::AnswerDeadline {
-            peer: &peer,
-            at: Instant::now()
-                .checked_add(timeout)
-                .assured("a fifty-millisecond deadline fits the monotonic clock"),
-            timeout,
-        },
-    )
-    .await;
-    let error = timed_out
-        .err()
-        .assured("the class stays full past the request's deadline");
-    match error.current_context() {
-        TransportError::RequestTimeout {
-            peer: timed_out_peer,
-            timeout: reported,
-        } => {
-            assert_eq!(timed_out_peer, &peer);
-            assert_eq!(*reported, timeout);
-        }
-        other => panic!("a decoding that outlives its deadline times out: {other:?}"),
-    }
-    assert_eq!(
-        executor.memory(MemoryClass::Bulk).reserved_bytes,
-        held,
-        "a timed-out decoding returns its input and output charges"
+    let mut decoding = std::pin::pin!(
+        super::decode_rkyv_within::<crate::request::ResponseEnvelope>(
+            &executor,
+            CpuClass::Bulk,
+            ChargedBytes::from_owned(bytes, input),
+            room,
+        )
     );
-
-    let (input, room) = encoded();
-    let mut decoding = std::pin::pin!(super::decode_answer::<crate::request::ResponseEnvelope>(
-        &executor,
-        CpuClass::Bulk,
-        input,
-        room,
-        super::AnswerDeadline {
-            peer: &peer,
-            at: Instant::now()
-                .checked_add(Duration::from_secs(600))
-                .assured("a ten-minute deadline fits the monotonic clock"),
-            timeout: Duration::from_secs(600),
-        },
-    ));
     assert!(
         decoding.as_mut().now_or_never().is_none(),
         "a full class holds an answer's decoding back"

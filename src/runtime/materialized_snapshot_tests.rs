@@ -94,12 +94,12 @@ async fn a_stored_open_whose_record_identities_outgrow_its_first_share_runs_once
     let restored = RestoredMaterializedSnapshot::open_relay(
         &executor,
         &schema,
-        SealedSource::stored(
+        RelayContainerSource::Sealed(SealedSource::stored(
             executor.clone(),
             crate::runtime::state_store::checkpoint_reader::CheckpointReader::Inline(
                 std::io::Cursor::new(payload),
             ),
-        ),
+        )),
     )
     .await
     .assured("the snapshot opens within a larger share");
@@ -128,7 +128,7 @@ async fn an_open_of_a_container_in_memory_takes_exactly_its_share_once() {
     let restored = RestoredMaterializedSnapshot::open_relay(
         &executor,
         &schema,
-        SealedSource::borrowed(&executor, &payload),
+        RelayContainerSource::Sealed(SealedSource::borrowed(&executor, &payload)),
     )
     .await
     .assured("the snapshot opens");
@@ -190,7 +190,7 @@ async fn an_open_waits_for_state_read_room_while_it_holds_no_bulk_charge() {
         RestoredMaterializedSnapshot::open_relay(
             &reporting,
             &schema,
-            SealedSource::borrowed(&reporting, &payload),
+            RelayContainerSource::Sealed(SealedSource::borrowed(&reporting, &payload)),
         )
         .await
     });
@@ -238,7 +238,7 @@ async fn an_open_waits_for_bulk_room_while_it_holds_none_of_the_class() {
         RestoredMaterializedSnapshot::open_relay(
             &reporting,
             &schema,
-            SealedSource::borrowed(&reporting, &payload),
+            RelayContainerSource::Sealed(SealedSource::borrowed(&reporting, &payload)),
         )
         .await
     });
@@ -295,10 +295,10 @@ async fn an_owned_container_decodes_within_the_scratch_charged_with_it() {
         RestoredMaterializedSnapshot::open_relay(
             &executor,
             &schema,
-            SealedSource::memory_with_working(
+            RelayContainerSource::Sealed(SealedSource::memory_with_working(
                 ChargedBytes::from_owned(payload, container),
                 working,
-            ),
+            )),
         ),
     )
     .await
@@ -321,7 +321,11 @@ async fn snapshot_decoder_refuses_bulk_wait_while_retaining_its_metadata_input()
         records: 0,
         groups: 0,
     };
-    let input = encode_rkyv(&executor, expected.clone(), limit)
+    let charge = executor
+        .reserve(MemoryClass::Bulk, limit)
+        .await
+        .assured("an idle pool admits the header's encoding");
+    let input = encode_rkyv_within(&executor, expected.clone(), limit, charge)
         .await
         .assured("the current snapshot header encodes");
     let input_bytes: u64 = input.len().arch_into();
@@ -354,7 +358,11 @@ async fn snapshot_decoder_refuses_bulk_wait_while_retaining_its_metadata_input()
     );
     drop(occupied);
 
-    let input = encode_rkyv(&executor, expected.clone(), limit)
+    let charge = executor
+        .reserve(MemoryClass::Bulk, limit)
+        .await
+        .assured("an idle pool admits the header's encoding");
+    let input = encode_rkyv_within(&executor, expected.clone(), limit, charge)
         .await
         .assured("the current snapshot header encodes after contention ends");
     let decoded = decode_rkyv::<SealedSnapshotHeader>(&executor, input, limit)
@@ -761,10 +769,10 @@ fn bolero_materialized_archive_columns_preserve_the_exact_schema_and_rows() {
                 let restored = RestoredMaterializedSnapshot::open_relay(
                     &executor,
                     &batch.schema(),
-                    SealedSource::memory_with_working(
+                    RelayContainerSource::Sealed(SealedSource::memory_with_working(
                         ChargedBytes::from_owned(bytes, container),
                         working,
-                    ),
+                    )),
                 )
                 .await
                 .assured("native generation opens");
@@ -803,6 +811,113 @@ fn bolero_materialized_archive_columns_preserve_the_exact_schema_and_rows() {
                 }
             });
         });
+}
+
+/// Memory a reader admitted for a relay container's layout opens it on its own: exactly the need
+/// the layout names suffices while every other byte of the bulk and state-read pools is taken, one
+/// byte less runs short, and the opened snapshot keeps only its rows' share.
+#[nervix_primitives::test]
+async fn a_relay_container_opens_within_exactly_the_need_its_layout_names() {
+    let executor = narrow_executor();
+    let records = (0..3)
+        .map(|index| MaterializedGenerationRecord {
+            branch: Some(tenant_branch(&format!("tenant-{index}"))),
+            row: test_runtime_row([
+                ("index".to_string(), RuntimeValue::I64(test_index(index))),
+                (
+                    "payload".to_string(),
+                    RuntimeValue::String("p".repeat(4096)),
+                ),
+            ]),
+        })
+        .collect::<Vec<_>>();
+    let schema = records[0].row.arrow_schema();
+    let generation = MaterializedGeneration::new(7, 3, 5, schema.clone(), records);
+    let container = generation
+        .encode_resident_container(&executor)
+        .await
+        .assured("a bounded generation encodes");
+    let container_bytes: u64 = container.bytes.len().arch_into();
+    let need = container
+        .layout
+        .relay_opening(&executor, container_bytes)
+        .assured("the layout is within the node's bounds")
+        .need()
+        .assured("the opening's parts add up within u64");
+
+    let short = executor
+        .try_reserve(MemoryClass::Bulk, need - 1)
+        .assured("an idle pool admits the short opening");
+    let error = RestoredMaterializedSnapshot::open_relay(
+        &executor,
+        &schema,
+        RelayContainerSource::Received {
+            sealed: container.bytes.clone(),
+            layout: &container.layout,
+            memory: short,
+        },
+    )
+    .await
+    .expect_err("one byte less than the need runs short at the opening's peak");
+    assert!(
+        matches!(
+            error.current_context(),
+            MaterializedSnapshotError::Admission
+        ),
+        "{error:?}"
+    );
+
+    let memory = executor
+        .try_reserve(MemoryClass::Bulk, need)
+        .assured("an idle pool admits the opening");
+    let bulk = executor.memory(MemoryClass::Bulk);
+    let bulk_left = bulk.capacity_bytes - bulk.reserved_bytes;
+    let held_bulk = executor
+        .try_reserve(MemoryClass::Bulk, bulk_left)
+        .assured("the rest of the bulk pool is free");
+    let state_read = executor.memory(MemoryClass::StateRead).capacity_bytes;
+    let held_state_read = executor
+        .try_reserve(MemoryClass::StateRead, state_read)
+        .assured("the state-read pool is free");
+    let restored = nervix_primitives::time::timeout(
+        std::time::Duration::from_secs(30),
+        RestoredMaterializedSnapshot::open_relay(
+            &executor,
+            &schema,
+            RelayContainerSource::Received {
+                sealed: container.bytes,
+                layout: &container.layout,
+                memory,
+            },
+        ),
+    )
+    .await
+    .assured("opening never waits on the pools")
+    .assured("the container opens within its need");
+    assert_eq!(restored.records.len(), 3);
+    for (index, record) in restored.records.iter().enumerate() {
+        assert_eq!(
+            record.branch,
+            Some(tenant_branch(&format!("tenant-{index}")))
+        );
+        assert_eq!(
+            record.row.value_at(0).assured("the index loads"),
+            Some(RuntimeValue::I64(test_index(index)))
+        );
+    }
+    let kept = executor.memory(MemoryClass::Bulk).reserved_bytes - held_bulk.bytes();
+    assert!(
+        kept > 0 && kept < need,
+        "the snapshot keeps its rows' share of the {need} admitted bytes and the received \
+         {container_bytes}-byte container went back, found {kept}"
+    );
+    drop(restored);
+    assert_eq!(
+        executor.memory(MemoryClass::Bulk).reserved_bytes,
+        held_bulk.bytes(),
+        "closing the snapshot gives back everything it kept"
+    );
+    drop(held_state_read);
 }
 
 /// A node whose snapshot sections are far smaller than the snapshot under test, so a snapshot
@@ -913,7 +1028,7 @@ async fn admitted_handoff_preserves_the_generation_and_validates_its_frames() {
     let restored = RestoredMaterializedSnapshot::open_relay(
         &executor,
         &schema,
-        SealedSource::borrowed(&executor, &entry.payload),
+        RelayContainerSource::Sealed(SealedSource::borrowed(&executor, &entry.payload)),
     )
     .await
     .assured("the handoff opens against the installed schema");
@@ -1039,7 +1154,7 @@ async fn current_materialized_containers_validate_counts_keys_and_full_consumpti
         let error = RestoredMaterializedSnapshot::open_relay(
             &executor,
             &schema,
-            SealedSource::borrowed(&executor, &bytes),
+            RelayContainerSource::Sealed(SealedSource::borrowed(&executor, &bytes)),
         )
         .await
         .expect_err("invalid current snapshot must fail before installation");
@@ -1050,7 +1165,7 @@ async fn current_materialized_containers_validate_counts_keys_and_full_consumpti
     let restored = RestoredMaterializedSnapshot::open_relay(
         &executor,
         &schema,
-        SealedSource::borrowed(&executor, &empty),
+        RelayContainerSource::Sealed(SealedSource::borrowed(&executor, &empty)),
     )
     .await
     .assured("an empty current generation consumes its complete container");
@@ -1123,10 +1238,13 @@ async fn a_snapshot_larger_than_the_transfer_budget_moves_through_bounded_chunks
         .await
         .assured("a complete transfer matches the length and digest it declared");
 
-    let restored =
-        RestoredMaterializedSnapshot::open_relay(&executor, &schema, SealedSource::staged(staged))
-            .await
-            .assured("a staged snapshot opens one bounded section at a time");
+    let restored = RestoredMaterializedSnapshot::open_relay(
+        &executor,
+        &schema,
+        RelayContainerSource::Sealed(SealedSource::staged(staged)),
+    )
+    .await
+    .assured("a staged snapshot opens one bounded section at a time");
 
     assert_eq!(restored.revision, 7);
     assert_eq!(restored.fence, 3);

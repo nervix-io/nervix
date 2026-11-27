@@ -19,7 +19,10 @@ use nervix_models::{
 
 use super::*;
 use crate::{
-    runtime::{RetainedStateOpening, RuntimeState, materialized_snapshot::SealedSource},
+    runtime::{
+        RetainedStateOpening, RuntimeState,
+        materialized_snapshot::{RelayContainerSource, SealedSource},
+    },
     runtime_schema::{RuntimeRecordMetadata, RuntimeValue, compile_schema},
 };
 
@@ -572,9 +575,11 @@ fn bolero_materialized_sequences_preserve_selection_lifetimes_and_complete_snaps
                         RestoredMaterializedSnapshot::open_relay(
                             &executor,
                             &first.arrow_schema(),
-                            SealedSource::artifact(sealed.artifact)
-                                .await
-                                .assured("the retained sealed artifact opens"),
+                            RelayContainerSource::Sealed(
+                                SealedSource::artifact(sealed.artifact)
+                                    .await
+                                    .assured("the retained sealed artifact opens"),
+                            ),
                         )
                         .await
                     })
@@ -870,15 +875,20 @@ fn inspection_and_backup_capture_share_carriers_within_the_resolved_metadata_bud
             .assured("each branch is new");
     }
     let read = ReplicatedMaterializedRelayState::read(&state);
-    let mut memory = nervix_execution::GrowingCharge::new(
-        executor
-            .try_reserve(MemoryClass::Bulk, 0)
-            .assured("no bytes always fit"),
-    );
+    // Inspection admits the row views it counted before it captures them.
+    let views = executor
+        .try_reserve(
+            nervix_execution::MemoryClass::Bulk,
+            u64::try_from(
+                read.inspection_records() * std::mem::size_of::<MaterializedGenerationRecord>(),
+            )
+            .assured("a bounded fixture's views fit u64"),
+        )
+        .assured("the bulk budget admits the counted row views");
     let captured = read
-        .capture_for_inspection(&mut memory)
+        .capture_for_inspection(views)
         .assured("inspection admits row views independently of backup grouping metadata");
-    let generation = &captured.generation;
+    let generation = &captured.0;
     assert_eq!(generation.records().len(), count);
     assert!(
         generation

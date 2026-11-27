@@ -2,8 +2,8 @@
 //!
 //! Layer: test harness.
 //!
-//! - **Owns.** The publication invariants of the handler table and the lost-wakeup invariant of a
-//!   membership wait.
+//! - **Owns.** The publication invariants of the handler table and the lost-wakeup invariant of the
+//!   membership waits, for a target that leaves and for one that returns.
 //! - **Depends on.** The production request state and the interconnect Shuttle runner.
 //! - **Must not know.** Sockets, peers, or what a registered handler answers.
 
@@ -33,7 +33,6 @@ impl InterconnectRequest for Ping {
     type Response = ();
 
     const NAME: &'static str = "test_ping";
-    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Control;
 }
 
 const DISTINCT_NAMES: [&str; 6] = [
@@ -178,4 +177,50 @@ fn membership_change_before_the_wait_ends_it() {
 #[test]
 fn a_membership_change_between_a_callers_check_and_its_wait_is_never_lost() {
     check_random_and_pct(membership_change_before_the_wait_ends_it);
+}
+
+/// A caller checks that its target is gone and then waits for it to return, while discovery
+/// publishes a membership that still leaves the target out and then one that lists it again. A
+/// publication that lands between the caller's check and its wait must still end the wait: if it
+/// were lost, the caller would wait forever and Shuttle would report the deadlock.
+fn membership_return_before_the_wait_ends_it() {
+    shuttle::future::block_on(async {
+        let requests = request_state();
+        let peer = node("node-a");
+        let target = node("node-b");
+        requests.replace_live_nodes(&BTreeSet::from([peer.clone()]));
+
+        let caller = nervix_primitives::task::spawn({
+            let requests = Arc::clone(&requests);
+            let target = target.clone();
+            async move {
+                if !requests.target_is_live(&target) {
+                    requests.target_returned(&target).await;
+                }
+                assert!(
+                    requests.target_is_live(&target),
+                    "a wait for a return ended while its target was still gone"
+                );
+            }
+        });
+        let discovery = nervix_primitives::task::spawn({
+            let requests = Arc::clone(&requests);
+            async move {
+                requests.replace_live_nodes(&BTreeSet::from([peer.clone()]));
+                requests.replace_live_nodes(&BTreeSet::from([peer, target]));
+            }
+        });
+
+        discovery
+            .await
+            .assured("publishing membership never panics");
+        caller
+            .await
+            .assured("the caller panics only on a violated invariant, which fails the check");
+    });
+}
+
+#[test]
+fn a_return_between_a_callers_check_and_its_wait_is_never_lost() {
+    check_random_and_pct(membership_return_before_the_wait_ends_it);
 }

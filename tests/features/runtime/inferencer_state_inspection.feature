@@ -123,3 +123,81 @@ Feature: Bounded typed inferencer state inspection
       | 3            | 1             | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> | SENSITIVE         |                    | acme         | beta          | "<masked>"   | "<masked>"     |
       | 1            | 0             | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |                   | SENSITIVE          | <masked>     | <masked>      | "<masked>"   | "<masked>"     |
       | 3            | 1             | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |                   | SENSITIVE          | <masked>     | <masked>      | "<masked>"   | "<masked>"     |
+
+  @inferencer_state_inspection @deloxide_stress
+  Scenario Outline: An inferencer read the bulk memory cannot hold in one page pages through every tensor
+    Given runtime replication is configured with replica count 0 and snapshot interval "1h"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has ONNX fixture resource directory "onnx_model"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE inference;
+      UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
+      CREATE SCHEMA features ( tenant STRING, vector <vector_type> );
+      CREATE SCHEMA scored ( score <vector_type> );
+      CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( tenant string, vector array );
+      CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
+      CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
+      CREATE VHOST edge paged-inferencer-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/features';
+      CREATE HTTP ENDPOINT INGESTOR feature_ingestor
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING features_codec
+        TO features INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE INFERENCER wide FROM features
+        USING RESOURCE inference VERSION 1 FILE 'models/wide_running_sum.onnx' WORKING MEMORY RELEASED
+        INPUTS { 'features' <tensor_type>[1] = input.vector }
+        STATE { 'state_in' FROM 'state_out' <tensor_type>[65536] INITIAL ZEROS }
+        OUTPUT SCHEMA { 'score' <tensor_type>[1] }
+        BRANCHED BY by_tenant
+        TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      START;
+      """
+    And http payload is posted to node "node-1" with host "paged-inferencer-{{test_id}}.example.com" path "/features"
+      """
+      {"tenant":"tenant-1","vector":[1.0]}
+      """
+    And http payload is posted to node "node-1" with host "paged-inferencer-{{test_id}}.example.com" path "/features"
+      """
+      {"tenant":"tenant-2","vector":[2.0]}
+      """
+    And http payload is posted to node "node-1" with host "paged-inferencer-{{test_id}}.example.com" path "/features"
+      """
+      {"tenant":"tenant-3","vector":[3.0]}
+      """
+    And http payload is posted to node "node-1" with host "paged-inferencer-{{test_id}}.example.com" path "/features"
+      """
+      {"tenant":"tenant-4","vector":[4.0]}
+      """
+    And http payload is posted to node "node-1" with host "paged-inferencer-{{test_id}}.example.com" path "/features"
+      """
+      {"tenant":"tenant-5","vector":[5.0]}
+      """
+    And http payload is posted to node "node-1" with host "paged-inferencer-{{test_id}}.example.com" path "/features"
+      """
+      {"tenant":"tenant-6","vector":[6.0]}
+      """
+    Then within "30s" a client of every node sees inferencer "wide" hold 6 rows
+    # Each branch carries one 256 KiB state tensor. A page retains the publication of every branch
+    # it returns a tensor from and takes four times the tensor's bytes to build its row; a page read
+    # through another node also sets the tensor's bytes aside for the body that carries it. With
+    # 3 MiB left on every node, every page ends where the next tensor no longer fits, and the rest
+    # follow on the next pages.
+    When bulk memory on every node keeps only "3145728" bytes free
+    Then a client of every node reads inferencer "wide" state at the default limit in more than one page with unchanged complete counts
+    When bulk memory on every node is released
+    Then within "30s" every node reserves only the bulk memory the scenario holds
+
+    Examples:
+      | cluster_size | vector_type   | tensor_type       |
+      | 1            | ARRAY<F32, 1> | DENSE TENSOR<F32> |
+      | 3            | ARRAY<F32, 1> | DENSE TENSOR<F32> |

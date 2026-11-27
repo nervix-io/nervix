@@ -9,270 +9,130 @@ fn run(incarnation: u64) -> ClusterNodeIncarnation {
 fn after(start: Instant, elapsed: Duration) -> Instant {
     start
         .checked_add(elapsed)
-        .assured("a fixture instant a few seconds ahead fits the monotonic clock")
+        .assured("a fixture instant minutes ahead fits the monotonic clock")
+}
+
+fn admission_bound() -> Duration {
+    nervix_models::RemoteAckTiming::default().remote_relay_total_timeout
 }
 
 /// A registrar whose run the watch has seen live, and when it saw it.
 fn seen_live(registrar: ClusterNodeIncarnation) -> (RegistrarPresence, Instant) {
     let start = Instant::now();
-    let mut presence = RegistrarPresence::undiscovered(
-        start,
-        nervix_models::RemoteAckTiming::default().remote_relay_instantiation_wait,
-    );
+    let mut presence = RegistrarPresence::undiscovered(start, admission_bound());
     assert_eq!(
-        presence.look(
-            registrar,
-            Some(registrar),
-            start,
-            RegistrarPresence::missing_grace(),
-        ),
+        presence.look(registrar, Some(registrar), true, start),
         RegistrarLook::Report
     );
-    assert_eq!(presence, RegistrarPresence::Present);
+    assert_eq!(presence, RegistrarPresence::Seen);
     (presence, start)
 }
 
 #[test]
-fn a_registrar_missing_from_one_look_is_held_for_and_reported_to_again_when_it_is_back() {
+fn a_registrar_the_live_view_misses_while_membership_keeps_its_node_is_reported_to() {
+    // A failure detector that suspects a slow node drops its run from the live view while the
+    // run goes on. Membership decides that a node left, so the watch keeps reporting, however
+    // long the gap lasts.
     let registrar = run(7);
     let (mut presence, start) = seen_live(registrar);
-    let gap = after(start, Duration::from_millis(100));
-    assert_eq!(
-        presence.look(registrar, None, gap, RegistrarPresence::missing_grace(),),
-        RegistrarLook::Hold
-    );
-    assert_eq!(presence, RegistrarPresence::Missing { since: gap });
-    let back = after(start, Duration::from_millis(200));
+    for elapsed in [100, 15_000, 3_600_000].map(Duration::from_millis) {
+        assert_eq!(
+            presence.look(registrar, None, true, after(start, elapsed)),
+            RegistrarLook::Report,
+            "missing for {elapsed:?}"
+        );
+    }
     assert_eq!(
         presence.look(
             registrar,
             Some(registrar),
-            back,
-            RegistrarPresence::missing_grace(),
+            true,
+            after(start, Duration::from_secs(3601))
         ),
         RegistrarLook::Report
     );
-    assert_eq!(presence, RegistrarPresence::Present);
 }
 
 #[test]
-fn a_registrar_missing_for_its_silence_bound_and_one_sweep_ends_the_watch() {
-    let registrar = run(7);
-    let (mut presence, start) = seen_live(registrar);
-    assert_eq!(
-        presence.look(registrar, None, start, RegistrarPresence::missing_grace(),),
-        RegistrarLook::Hold
-    );
-    let grace = RegistrarPresence::missing_grace();
-    assert!(
-        grace > REMOTE_ACK_SILENCE_TIMEOUT,
-        "the watch holds until after the registrar's last silent sweep could have failed it"
-    );
-    let just_inside = grace
-        .checked_sub(Duration::from_millis(1))
-        .assured("the grace is seconds long");
-    assert_eq!(
-        presence.look(
-            registrar,
-            None,
-            after(start, just_inside),
-            RegistrarPresence::missing_grace(),
-        ),
-        RegistrarLook::Hold
-    );
-    assert_eq!(
-        presence.look(
-            registrar,
-            None,
-            after(start, grace),
-            RegistrarPresence::missing_grace(),
-        ),
-        RegistrarLook::Release
-    );
-}
-
-#[test]
-fn a_registrar_back_from_a_gap_starts_a_later_gap_afresh() {
-    let registrar = run(7);
-    let (mut presence, start) = seen_live(registrar);
-    assert_eq!(
-        presence.look(registrar, None, start, RegistrarPresence::missing_grace(),),
-        RegistrarLook::Hold
-    );
-    let back = after(start, Duration::from_secs(10));
-    assert_eq!(
-        presence.look(
-            registrar,
-            Some(registrar),
-            back,
-            RegistrarPresence::missing_grace(),
-        ),
-        RegistrarLook::Report
-    );
-    let second_gap = after(start, Duration::from_secs(12));
-    assert_eq!(
-        presence.look(
-            registrar,
-            None,
-            second_gap,
-            RegistrarPresence::missing_grace(),
-        ),
-        RegistrarLook::Hold
-    );
-    let grace = RegistrarPresence::missing_grace();
-    let within_second_grace = grace
-        .checked_sub(Duration::from_millis(1))
-        .assured("the grace is seconds long");
-    assert_eq!(
-        presence.look(
-            registrar,
-            None,
-            after(second_gap, within_second_grace),
-            RegistrarPresence::missing_grace(),
-        ),
-        RegistrarLook::Hold
-    );
-    assert_eq!(
-        presence.look(
-            registrar,
-            None,
-            after(second_gap, grace),
-            RegistrarPresence::missing_grace(),
-        ),
-        RegistrarLook::Release
-    );
-}
-
-#[test]
-fn another_run_of_the_registrar_node_ends_the_watch_at_once() {
+fn a_registrar_whose_node_membership_removed_ends_the_watch() {
     let registrar = run(7);
     let (mut presence, start) = seen_live(registrar);
     assert_eq!(
         presence.look(
             registrar,
-            Some(run(8)),
-            start,
-            RegistrarPresence::missing_grace(),
-        ),
-        RegistrarLook::Release
-    );
-
-    let (mut missing, start) = seen_live(registrar);
-    assert_eq!(
-        missing.look(registrar, None, start, RegistrarPresence::missing_grace(),),
-        RegistrarLook::Hold
-    );
-    assert_eq!(
-        missing.look(
-            registrar,
-            Some(run(8)),
-            after(start, Duration::from_millis(100)),
-            RegistrarPresence::missing_grace(),
+            None,
+            false,
+            after(start, Duration::from_millis(1))
         ),
         RegistrarLook::Release
     );
 }
 
 #[test]
-fn an_undiscovered_registrar_is_reported_to_until_its_discovery_deadline() {
+fn a_newer_run_of_the_registrar_ends_the_watch_at_once() {
+    let registrar = run(7);
+    let (mut presence, start) = seen_live(registrar);
+    assert_eq!(
+        presence.look(registrar, Some(run(8)), true, start),
+        RegistrarLook::Release
+    );
+    let mut undiscovered = RegistrarPresence::undiscovered(start, admission_bound());
+    assert_eq!(
+        undiscovered.look(registrar, Some(run(8)), true, start),
+        RegistrarLook::Release
+    );
+}
+
+#[test]
+fn an_earlier_run_in_the_live_view_is_the_registrar_not_yet_learned() {
+    // Transport admission can precede gossip learning the registering run, so a live view that
+    // still lists the node's earlier run does not end the watch.
     let registrar = run(7);
     let start = Instant::now();
-    let mut presence = RegistrarPresence::undiscovered(
-        start,
-        nervix_models::RemoteAckTiming::default().remote_relay_instantiation_wait,
-    );
+    let mut presence = RegistrarPresence::undiscovered(start, admission_bound());
     assert_eq!(
-        presence.look(registrar, None, start, RegistrarPresence::missing_grace(),),
+        presence.look(registrar, Some(run(6)), true, start),
         RegistrarLook::Report
     );
-    let just_inside = REMOTE_RELAY_INSTANTIATION_WAIT
+    assert!(matches!(presence, RegistrarPresence::Undiscovered { .. }));
+}
+
+#[test]
+fn an_undiscovered_registrar_is_reported_to_until_the_delivery_admission_bound() {
+    let registrar = run(7);
+    let start = Instant::now();
+    let mut presence = RegistrarPresence::undiscovered(start, admission_bound());
+    let just_inside = admission_bound()
         .checked_sub(Duration::from_millis(1))
-        .assured("the discovery grace is seconds long");
+        .assured("the admission bound is minutes long");
     assert_eq!(
-        presence.look(
-            registrar,
-            None,
-            after(start, just_inside),
-            RegistrarPresence::missing_grace(),
-        ),
+        presence.look(registrar, None, false, after(start, just_inside)),
         RegistrarLook::Report
     );
     assert_eq!(
-        presence.look(
-            registrar,
-            None,
-            after(start, REMOTE_RELAY_INSTANTIATION_WAIT),
-            RegistrarPresence::missing_grace(),
-        ),
+        presence.look(registrar, None, false, after(start, admission_bound())),
         RegistrarLook::Release
     );
 }
 
 #[test]
-fn an_earlier_live_view_keeps_the_new_registrars_existing_discovery_and_missing_bounds() {
+fn an_undiscovered_registrar_that_appears_is_seen_and_then_follows_membership() {
     let registrar = run(7);
     let start = Instant::now();
-    let mut discovering = RegistrarPresence::undiscovered(
-        start,
-        nervix_models::RemoteAckTiming::default().remote_relay_instantiation_wait,
-    );
+    let mut presence = RegistrarPresence::undiscovered(start, admission_bound());
     assert_eq!(
-        discovering.look(
-            registrar,
-            Some(run(6)),
-            start,
-            RegistrarPresence::missing_grace(),
-        ),
+        presence.look(registrar, Some(registrar), true, start),
+        RegistrarLook::Report
+    );
+    assert_eq!(presence, RegistrarPresence::Seen);
+    // Once seen, the admission bound no longer ends the watch: only membership and a newer run do.
+    let later = after(start, admission_bound().saturating_mul(2));
+    assert_eq!(
+        presence.look(registrar, None, true, later),
         RegistrarLook::Report
     );
     assert_eq!(
-        discovering.look(
-            registrar,
-            Some(run(6)),
-            after(start, REMOTE_RELAY_INSTANTIATION_WAIT),
-            RegistrarPresence::missing_grace(),
-        ),
-        RegistrarLook::Release
-    );
-    let (mut present, start) = seen_live(registrar);
-    assert_eq!(
-        present.look(
-            registrar,
-            Some(run(6)),
-            start,
-            RegistrarPresence::missing_grace(),
-        ),
-        RegistrarLook::Hold
-    );
-    assert_eq!(
-        present.look(
-            registrar,
-            Some(registrar),
-            after(start, Duration::from_millis(1)),
-            RegistrarPresence::missing_grace(),
-        ),
-        RegistrarLook::Report
-    );
-    assert_eq!(
-        present.look(
-            registrar,
-            Some(run(6)),
-            after(start, Duration::from_millis(2)),
-            RegistrarPresence::missing_grace(),
-        ),
-        RegistrarLook::Hold
-    );
-    let deadline = after(
-        after(start, Duration::from_millis(2)),
-        RegistrarPresence::missing_grace(),
-    );
-    assert_eq!(
-        present.look(
-            registrar,
-            Some(run(6)),
-            deadline,
-            RegistrarPresence::missing_grace(),
-        ),
+        presence.look(registrar, None, false, later),
         RegistrarLook::Release
     );
 }

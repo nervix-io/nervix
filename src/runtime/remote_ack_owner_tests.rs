@@ -15,6 +15,9 @@ use futures_util::FutureExt as _;
 use super::*;
 use crate::runtime::relay_memory_hold::RECHECK_INTERVAL;
 
+/// The process epoch of the receiver run that admits the fixtures' records.
+const RECEIVER_RUN: u64 = 11;
+
 fn receiver() -> ClusterNodeName {
     ClusterNodeName::parse("node-2").assured("the fixture node is valid")
 }
@@ -237,7 +240,7 @@ fn remote_ack_owner_cost() {
                     .assured("completed deliveries return their routing positions");
                 peak_bytes = peak_bytes.max(owners.executor.snapshot().relay_memory.reserved_bytes);
                 for id in registrations.into_iter().flatten() {
-                    owners.admit_ack(id);
+                    owners.admit_ack(id, RECEIVER_RUN);
                     assert!(owners.report_ack(id));
                     assert!(owners.progress_ack(id, 1, true));
                     assert!(owners.progress_ack(id, 2, false));
@@ -265,9 +268,10 @@ fn remote_ack_owner_cost() {
             );
         }
     }
+    let membership = TestMembership::default();
     let start = Instant::now();
     for _ in 0..100 {
-        assert!(owners.fail_silent_acks().is_empty());
+        assert!(owners.sweep_pending_acks_once(&membership).is_empty());
     }
     println!(
         "remote-ack-owner positions={} swept_positions={} empty_sweep_ns={}",
@@ -278,7 +282,7 @@ fn remote_ack_owner_cost() {
 }
 
 #[test]
-fn a_silence_sweep_visits_only_the_positions_a_side_has_claimed() {
+fn a_sweep_visits_only_the_positions_a_side_has_claimed() {
     let owners = RemoteDispatchRegistry::with_capacity(4);
     let swept = |owners: &RemoteDispatchRegistry| owners.swept_positions().collect::<Vec<_>>();
     assert_eq!(
@@ -314,13 +318,19 @@ fn a_silence_sweep_visits_only_the_positions_a_side_has_claimed() {
     assert_eq!(owners.position(third), owners.position(first));
     assert_eq!(swept(&owners), vec![0, 1, 4]);
 
-    // Every claimed position is still swept: silence fails both pending deliveries.
-    owners.admit_ack(second);
-    owners.admit_ack(third);
-    for _ in 0..REMOTE_ACK_SILENT_SWEEPS {
-        assert!(owners.fail_silent_acks().is_empty());
+    // Every claimed position is still swept: a record whose receiver run lives is never given up,
+    // however often it is swept, and the end of that run fails both pending deliveries.
+    owners.admit_ack(second, RECEIVER_RUN);
+    owners.admit_ack(third, RECEIVER_RUN);
+    let membership = TestMembership::default();
+    for _ in 0..ADMISSION_SWEEPS {
+        assert!(owners.sweep_pending_acks_once(&membership).is_empty());
     }
-    assert_eq!(owners.fail_silent_acks().get(&receiver()), Some(&2));
+    membership.replace_run(&receiver(), RECEIVER_RUN);
+    assert_eq!(
+        owners.sweep_pending_acks_once(&membership).get(&receiver()),
+        Some(&2)
+    );
     assert!(matches!(
         second_completion.wait().now_or_never(),
         Some(AckOutcome::NoAck(_))
@@ -412,7 +422,7 @@ fn a_registration_kind_and_ordered_progress_are_validated_by_the_exact_owner() {
     assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
     assert!(owners.progress_ack(id, 3, false));
     assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
-    owners.admit_ack(id);
+    owners.admit_ack(id, RECEIVER_RUN);
     assert!(owners.resolve_ack(id, AckOutcome::Ack));
     assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
     assert_eq!(completion.wait().now_or_never(), Some(AckOutcome::Ack));
@@ -434,8 +444,8 @@ fn an_outcome_that_overtakes_the_unparked_report_resolves_an_active_share() {
         .assured("the fixture delivery fits");
     let first = ids[0].assured("the first row carries a record acknowledgement");
     let second = ids[1].assured("the second row carries a record acknowledgement");
-    owners.admit_ack(first);
-    owners.admit_ack(second);
+    owners.admit_ack(first, RECEIVER_RUN);
+    owners.admit_ack(second, RECEIVER_RUN);
     assert!(owners.progress_ack(first, 1, true));
     assert!(owners.progress_ack(second, 1, true));
     assert_eq!(
@@ -508,10 +518,14 @@ fn ended_admissions_and_unadmitted_deliveries_return_their_capacity() {
     let id = owners
         .register_ack(receiver(), acks)
         .assured("the fixture has delivery room");
+    let membership = TestMembership::default();
     for _ in 0..ADMISSION_SWEEPS {
-        assert!(owners.fail_silent_acks().is_empty());
+        assert!(owners.sweep_pending_acks_once(&membership).is_empty());
     }
-    assert_eq!(owners.fail_silent_acks().get(&receiver()), Some(&1));
+    assert_eq!(
+        owners.sweep_pending_acks_once(&membership).get(&receiver()),
+        Some(&1)
+    );
     assert!(
         matches!(completion.wait().now_or_never(), Some(AckOutcome::NoAck(reason)) if reason.contains("did not admit"))
     );

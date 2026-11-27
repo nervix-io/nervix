@@ -523,9 +523,11 @@ recovery starts a new generation for every branch of the processor in the same s
 publication that names the new owner. The checkpoint the recovery selects for a branch continues in
 that generation; a branch with no surviving checkpoint of the generation being replaced starts
 fresh, and `SHOW CLUSTER STATUS` reports it as a `wasm_processor` reset. A recovery whose
-preparation fails, including one whose new owner cannot restore a staged checkpoint and one that
-runs past its five-second budget, starts every branch fresh the same way, whatever
-`ON REJECTED STATE` declares; see [Forced Recovery](./wasm-state.md#forced-recovery). Applying the
+preparation fails, including one whose new owner cannot restore a staged checkpoint, starts every
+branch fresh the same way, whatever `ON REJECTED STATE` declares. One that runs past its budget,
+`FORCED_RECOVERY_BUDGET`, resets nothing: the recovery is not published, every checkpoint stays
+where it was, and the next scheduling pass prepares it again; see
+[Forced Recovery](./wasm-state.md#forced-recovery). Applying the
 same committed schedule again, after a restart or a rebuild, publishes nothing new.
 
 A generation also belongs to the module binding it was published for. A model change that binds
@@ -793,9 +795,9 @@ without acknowledgements delivers nothing again, and the input is lost in the fi
 [Failure At Each Boundary](./wasm-state.md#failure-at-each-boundary) extends this account to the
 control plane's authority boundaries.
 
-A branch holds back the acknowledgements of one callback at a time, for no longer than the
-checkpoint deadline. Stopping a node ends a branch still waiting for its checkpoint after the
-branch's stop grace, and whatever it held is negatively acknowledged when the node's drain ends.
+A branch holds back the acknowledgements of one callback at a time, until that callback's
+checkpoint commits, however long its replicas take to confirm it. A node's save at shutdown waits
+for that checkpoint as work in motion; see [Shutdown And Restart](./wasm-state.md#shutdown-and-restart).
 
 ## State Description
 

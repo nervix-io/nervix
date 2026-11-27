@@ -146,12 +146,15 @@ type RoutingPublications =
 /// select a domain from this immutable table; an executing task retains the selected publication.
 pub(super) struct DomainRoutings {
     published: ArcSwap<RoutingPublications>,
+    /// Wakes whoever waits for a domain's routing when a publication is inserted or removed.
+    changed: Notify,
 }
 
 impl Default for DomainRoutings {
     fn default() -> Self {
         Self {
             published: ArcSwap::from_pointee(RoutingPublications::default()),
+            changed: Notify::new(),
         }
     }
 }
@@ -174,11 +177,13 @@ impl DomainRoutings {
             next.remove(domain);
             next
         });
+        self.changed.notify_waiters();
     }
 
     pub(super) fn clear(&self) {
         self.published
             .store(StdArc::new(RoutingPublications::default()));
+        self.changed.notify_waiters();
     }
 
     pub(super) fn insert(&self, domain: DomainName, routing: SharedDomainRouting) {
@@ -187,6 +192,22 @@ impl DomainRoutings {
             next.insert(domain.clone(), routing.clone());
             next
         });
+        self.changed.notify_waiters();
+    }
+
+    /// Resolves once `domain`'s routing is published, with the publication. A waiter registers
+    /// for the next change before it looks, so a publication that lands in between wakes it.
+    pub(super) async fn published(&self, domain: &DomainName) -> SharedDomainRouting {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(routing) = self.get(domain) {
+                return routing;
+            }
+            changed.await;
+        }
     }
 }
 

@@ -4,8 +4,10 @@
 //!
 //! - **Owns.** Focused tests that a delivery a route change retires before it reached the owner it
 //!   named follows the unit to its new owner, from the ingest path and from a relay producer, that
-//!   a producer whose own branch ended fails such a delivery instead, and that a delivery that ends
-//!   otherwise fails without asking an owner that is gone.
+//!   a producer whose own branch ended fails such a delivery instead, and that a delivery whose
+//!   owner left before the delivery reached it waits, holding no dispatch gate, for the route that
+//!   replaces that owner or for the owner's return, and fails only when its admission bound
+//!   passes or its node is stopping.
 //! - **Depends on.** The runtime relay boundary, a loopback cluster and the runtime test fixtures.
 //! - **Must not know.** Production control-plane orchestration or external connector behavior.
 
@@ -168,7 +170,9 @@ impl NewOwner {
 
     async fn stop(self) {
         self.task
-            .stop(Duration::from_secs(1))
+            .stop(crate::runtime::TaskStopWait::Teardown {
+                grace: Duration::from_secs(1),
+            })
             .await
             .expect("the relay owner stops");
     }
@@ -297,40 +301,250 @@ async fn a_producer_that_ends_during_the_failover_fails_its_forwarded_rows() {
     new_owner.stop().await;
 }
 
-/// A delivery that cannot reach its owner, and whose route does not change, ends at its
-/// no-progress bound. Nothing of it reached the owner, so it fails at once there, without first
-/// waiting to ask an owner that is gone to cancel it.
+/// Publishes, as discovery does, a membership that lists `live` alone.
+fn publish_membership(runtime: &Runtime, live: &[&str]) {
+    let live = live
+        .iter()
+        .map(|name| named::<ClusterNodeName>(name))
+        .collect::<std::collections::BTreeSet<_>>();
+    runtime
+        .inner
+        .remote_dispatcher
+        .load_full()
+        .assured("attaching the loopback cluster attaches the dispatcher")
+        .interconnect
+        .replace_live_nodes(&live);
+}
+
+/// Forwards `batch` to the owner of relay `orders` from the ingest path, in its own task.
+fn spawn_forward(
+    runtime: &Runtime,
+    services: &Arc<RelayBoundaryServices>,
+    batch: RelayRecordBatch,
+) -> nervix_primitives::task::JoinHandle<RelayDispatchResult> {
+    let runtime = runtime.clone();
+    let services = services.clone();
+    nervix_primitives::task::spawn(async move {
+        runtime
+            .ingest_stream_boundary_message(&domain("default"), &named("orders"), &services, &batch)
+            .await
+    })
+}
+
+/// Membership can remove a stopped owner before this node installs the failover that replaces it,
+/// so a delivery learns that its owner left while the route naming that owner is still in force.
+/// Nothing of the delivery reached the owner, so it waits for the route that replaces the owner
+/// instead of failing, and gives its dispatch gates back meanwhile: another change engaging them
+/// finds no delivery to wait for. The batch then goes exactly once to the owner the new route
+/// names, here this node.
 #[nervix_primitives::test(start_paused = true)]
-async fn a_delivery_that_never_reached_its_owner_fails_without_asking_that_owner() {
+async fn a_delivery_whose_owner_left_waits_for_the_route_that_replaces_it_holding_no_gate() {
+    let (runtime, services) = runtime_forwarding_to_a_departed_owner().await;
+    publish_membership(&runtime, &["node-1"]);
+    let (batch, acks, completion) = acknowledged_batch();
+    let forward = spawn_forward(&runtime, &services, batch);
+    sleep(Duration::from_millis(100)).await;
+    assert!(
+        !forward.is_finished(),
+        "a delivery whose owner left before it reached that owner waits for the route that \
+         replaces the owner"
+    );
+
+    let mut other_change = RelayDispatchGateLease::engage_producers(
+        services.fanout.dispatch_gate(),
+        Instant::now() + Duration::from_secs(30),
+        "another change of the domain holds the relay's producers",
+    );
+    let quiescent = timeout(Duration::from_secs(1), other_change.wait_quiescent())
+        .await
+        .expect("the waiting delivery holds no dispatch permit for another change to wait for");
+    assert!(quiescent, "the other change's gate becomes quiescent");
+    drop(other_change);
+    sleep(Duration::from_millis(100)).await;
+    assert!(
+        !forward.is_finished(),
+        "a change that leaves the route in force does not end the wait"
+    );
+
+    let mut installation = FailoverInstallation::begin(&services);
+    installation
+        .wait_quiescent("the waiting delivery holds no dispatch permit")
+        .await;
+    let mut new_owner = installation.complete(&runtime, &services);
+
+    timeout(Duration::from_secs(5), forward)
+        .await
+        .expect("the delivery ends once the new route is in force")
+        .expect("the delivery task joins")
+        .expect("the unit's new owner admits the batch");
+    new_owner.assert_delivers_once(acks, completion).await;
+    new_owner.stop().await;
+}
+
+/// A delivery that waits for the route that replaces an owner that left goes to that owner again
+/// when membership lists it again before any route change, as a voter that returns within the
+/// failover grace keeps its work. It asks for its grant there once more, and when the owner leaves
+/// again it waits again, until the failover's route takes the batch to the unit's new owner exactly
+/// once.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_delivery_whose_owner_left_goes_to_that_owner_when_it_returns() {
     let (runtime, services) = runtime_forwarding_to_a_departed_owner().await;
     let domain = domain("default");
-    let relay = named::<RelayName>("orders");
+    let faults = &runtime.inner.fault_injection;
+    faults.pause_relay_before_grant(domain.as_str().to_string());
+    let (batch, acks, completion) = acknowledged_batch();
+    let forward = spawn_forward(&runtime, &services, batch);
+    timeout(
+        Duration::from_secs(5),
+        faults.wait_for_relay_before_grant_pause(domain.as_str()),
+    )
+    .await
+    .expect("the delivery reaches its grant boundary");
+    publish_membership(&runtime, &["node-1"]);
+    faults.release_relay_before_grant_pause(domain.as_str());
+    sleep(Duration::from_millis(100)).await;
+    assert!(
+        !forward.is_finished(),
+        "the delivery waits once it finds its owner gone"
+    );
+
+    faults.pause_relay_before_grant(domain.as_str().to_string());
+    publish_membership(&runtime, &["node-1", "node-2"]);
+    timeout(
+        Duration::from_secs(5),
+        faults.wait_for_relay_before_grant_pause(domain.as_str()),
+    )
+    .await
+    .expect("the delivery asks the returned owner for its grant on the unchanged route");
+
+    publish_membership(&runtime, &["node-1"]);
+    faults.release_relay_before_grant_pause(domain.as_str());
+    sleep(Duration::from_millis(100)).await;
+    assert!(
+        !forward.is_finished(),
+        "the delivery waits again once its owner leaves again"
+    );
+    let mut installation = FailoverInstallation::begin(&services);
+    installation
+        .wait_quiescent("the waiting delivery holds no dispatch permit")
+        .await;
+    let mut new_owner = installation.complete(&runtime, &services);
+
+    timeout(Duration::from_secs(5), forward)
+        .await
+        .expect("the delivery ends once the new route is in force")
+        .expect("the delivery task joins")
+        .expect("the unit's new owner admits the batch");
+    new_owner.assert_delivers_once(acks, completion).await;
+    new_owner.stop().await;
+}
+
+/// A delivery whose owner left and that no route change or return of that owner ever lets carry
+/// on fails when its admission bound, `REMOTE_RELAY_TOTAL_TIMEOUT`, passes, and not before. It
+/// never asks the owner it never reached to cancel it, and the failure names both the bound and
+/// that owner.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_delivery_whose_owner_left_fails_only_when_its_admission_bound_passes() {
+    let (runtime, services) = runtime_forwarding_to_a_departed_owner().await;
+    let bound = runtime
+        .inner
+        .remote_dispatcher
+        .load_full()
+        .assured("attaching the loopback cluster attaches the dispatcher")
+        .registry
+        .timing()
+        .remote_relay_total_timeout;
+    publish_membership(&runtime, &["node-1"]);
     let (batch, _acks, completion) = acknowledged_batch();
     let started = Instant::now();
 
-    let unadmitted = runtime
-        .ingest_stream_boundary_message(&domain, &relay, &services, &batch)
+    let after_the_bound = bound
+        .checked_add(Duration::from_secs(60))
+        .assured("the five-minute admission bound and a minute fit a duration");
+    let unadmitted = timeout(after_the_bound, spawn_forward(&runtime, &services, batch))
         .await
-        .expect_err("nothing routes to the owner");
+        .expect("the delivery ends by its admission bound")
+        .expect("the delivery task joins")
+        .expect_err("no route ever replaces the owner that left");
     let waited = started.elapsed();
 
     assert_eq!(unadmitted.batch.batch().num_rows(), 1);
     assert!(
-        waited < RemoteDispatcher::DISPATCH_TIMEOUT + Duration::from_secs(1),
-        "the delivery ended at its no-progress bound, after {waited:?}, with no cancellation \
-         request to the owner it never reached"
+        waited >= bound,
+        "the delivery waited for the route that replaces its owner for its whole admission bound \
+         of {bound:?}, not {waited:?}"
     );
     let AckOutcome::NoAck(reason) = completion.wait().await else {
-        panic!("a delivery that never reached its owner fails its record");
+        panic!("a delivery whose admission bound passed fails its record");
     };
     assert!(
-        reason.contains("never reached node 'node-2'"),
-        "the failure names the owner the delivery never reached: {reason}"
+        reason.contains("waiting for relay admission from node 'node-2'")
+            && reason.contains("never reached node 'node-2'"),
+        "the failure names the bound and the owner the delivery never reached: {reason}"
     );
 }
 
-/// The same failover, when the route change retires the delivery's channel while the delivery is
-/// held before its first grant request: it has sent nothing, so it follows the new route as well.
+/// A stopping node awaits no route that replaces an owner that left. Its save holds its
+/// installation turn, so no such route reaches it before it stops, and when every node stops, none
+/// is published at all. A delivery that finds its owner gone on a stopping node therefore fails at
+/// once, as work that reaches a peer after that peer saved does, and the failure says why.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_stopping_node_fails_a_delivery_whose_owner_left_at_once() {
+    let (runtime, services) = runtime_forwarding_to_a_departed_owner().await;
+    runtime.close_local_intake();
+    publish_membership(&runtime, &["node-1"]);
+    let (batch, _acks, completion) = acknowledged_batch();
+
+    let unadmitted = timeout(
+        Duration::from_secs(5),
+        spawn_forward(&runtime, &services, batch),
+    )
+    .await
+    .expect("a stopping node awaits no route that replaces the owner that left")
+    .expect("the delivery task joins")
+    .expect_err("nothing replaces the owner that left on a stopping node");
+
+    assert_eq!(unadmitted.batch.batch().num_rows(), 1);
+    let AckOutcome::NoAck(reason) = completion.wait().await else {
+        panic!("a delivery a stopping node gives up fails its record");
+    };
+    assert!(
+        reason.contains("this node is stopping") && reason.contains("never reached node 'node-2'"),
+        "the failure names the stop and the owner the delivery never reached: {reason}"
+    );
+}
+
+/// A delivery that already waits for the route that replaces an owner that left ends as its node
+/// begins stopping, instead of holding the node's stop until its admission bound passes.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_delivery_waiting_for_its_departed_owner_fails_once_its_node_begins_stopping() {
+    let (runtime, services) = runtime_forwarding_to_a_departed_owner().await;
+    publish_membership(&runtime, &["node-1"]);
+    let (batch, _acks, completion) = acknowledged_batch();
+    let forward = spawn_forward(&runtime, &services, batch);
+    sleep(Duration::from_millis(100)).await;
+    assert!(
+        !forward.is_finished(),
+        "a serving node's delivery waits for the route that replaces the owner that left"
+    );
+
+    runtime.close_local_intake();
+    let unadmitted = timeout(Duration::from_secs(5), forward)
+        .await
+        .expect("the wait ends as its node begins stopping")
+        .expect("the delivery task joins")
+        .expect_err("nothing replaces the owner that left on a stopping node");
+
+    assert_eq!(unadmitted.batch.batch().num_rows(), 1);
+    let AckOutcome::NoAck(reason) = completion.wait().await else {
+        panic!("a delivery a stopping node gives up fails its record");
+    };
+    assert!(
+        reason.contains("this node is stopping") && reason.contains("never reached node 'node-2'"),
+        "the failure names the stop and the owner the delivery never reached: {reason}"
+    );
+}
+
 #[nervix_primitives::test(start_paused = true)]
 async fn a_batch_held_before_its_grant_follows_the_route_that_replaces_its_departed_owner() {
     let (runtime, services) = runtime_forwarding_to_a_departed_owner().await;

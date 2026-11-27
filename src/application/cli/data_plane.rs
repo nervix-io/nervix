@@ -44,12 +44,6 @@ pub struct DataPlaneArgs {
     pub snapshot_staging_bytes: Option<HumanBytes>,
     #[arg(id = nervix_models::RuntimeSnapshotBytes::NAME, long = nervix_models::RuntimeSnapshotBytes::NAME, env = "NERVIX_RUNTIME_SNAPSHOT_BYTES", help = super::settings::capability_help::<nervix_models::RuntimeSnapshotBytes>("Largest snapshot staged by one transfer", HumanBytes(ubyte::ByteUnit::Byte(<nervix_models::RuntimeSnapshotBytes as nervix_models::SettingDefinition>::default_value(&())))))]
     pub snapshot_bytes: Option<HumanBytes>,
-    #[arg(id = nervix_models::RuntimeSnapshotDescribeTimeout::NAME, long = nervix_models::RuntimeSnapshotDescribeTimeout::NAME, env = "NERVIX_RUNTIME_SNAPSHOT_DESCRIBE_TIMEOUT", help = super::settings::capability_help::<nervix_models::RuntimeSnapshotDescribeTimeout>("Deadline of describing a sealed state snapshot", HumanDuration(<nervix_models::RuntimeSnapshotDescribeTimeout as nervix_models::SettingDefinition>::default_value(&()))))]
-    pub snapshot_describe_timeout: Option<HumanDuration>,
-    #[arg(id = nervix_models::RuntimeSnapshotFetchTimeout::NAME, long = nervix_models::RuntimeSnapshotFetchTimeout::NAME, env = "NERVIX_RUNTIME_SNAPSHOT_FETCH_TIMEOUT", help = super::settings::capability_help::<nervix_models::RuntimeSnapshotFetchTimeout>("Deadline of fetching a sealed state snapshot", HumanDuration(<nervix_models::RuntimeSnapshotFetchTimeout as nervix_models::SettingDefinition>::default_value(&()))))]
-    pub snapshot_fetch_timeout: Option<HumanDuration>,
-    #[arg(id = nervix_models::RuntimeWasmCheckpointTimeout::NAME, long = nervix_models::RuntimeWasmCheckpointTimeout::NAME, env = "NERVIX_RUNTIME_WASM_CHECKPOINT_TIMEOUT", help = super::settings::capability_help::<nervix_models::RuntimeWasmCheckpointTimeout>("Deadline until every guest checkpoint replica confirms", HumanDuration(<nervix_models::RuntimeWasmCheckpointTimeout as nervix_models::SettingDefinition>::default_value(&()))))]
-    pub wasm_checkpoint_timeout: Option<HumanDuration>,
     #[arg(id = nervix_models::RuntimeEventCapacity::NAME, long = nervix_models::RuntimeEventCapacity::NAME, env = "NERVIX_RUNTIME_EVENT_CAPACITY", help = super::settings::capability_help::<nervix_models::RuntimeEventCapacity>("Runtime events retained for a lagging observer", <nervix_models::RuntimeEventCapacity as nervix_models::SettingDefinition>::default_value(&())))]
     pub event_capacity: Option<u64>,
     #[arg(id = nervix_models::RuntimeWasmRecoveryCapacity::NAME, long = nervix_models::RuntimeWasmRecoveryCapacity::NAME, env = "NERVIX_RUNTIME_WASM_RECOVERY_CAPACITY", help = super::settings::capability_help::<nervix_models::RuntimeWasmRecoveryCapacity>("Guest-state recovery requests awaiting a decision", <nervix_models::RuntimeWasmRecoveryCapacity as nervix_models::SettingDefinition>::default_value(&())))]
@@ -89,9 +83,6 @@ impl DataPlaneArgs {
             retained_removals: self.retained_removals,
             snapshot_staging_bytes: self.snapshot_staging_bytes.map(|value| value.0.as_u64()),
             snapshot_bytes: self.snapshot_bytes.map(|value| value.0.as_u64()),
-            snapshot_describe_timeout: self.snapshot_describe_timeout.map(|value| value.0),
-            snapshot_fetch_timeout: self.snapshot_fetch_timeout.map(|value| value.0),
-            wasm_checkpoint_timeout: self.wasm_checkpoint_timeout.map(|value| value.0),
             event_capacity: self.event_capacity,
             wasm_recovery_capacity: self.wasm_recovery_capacity,
             immediate_flush_minimum: self.immediate_flush_minimum.map(|value| value.0),
@@ -125,9 +116,6 @@ impl DataPlaneArgs {
             snapshot_bytes: settings
                 .requested_snapshot_bytes()
                 .map(|value| HumanBytes(ubyte::ByteUnit::Byte(value))),
-            snapshot_describe_timeout: Some(HumanDuration(settings.snapshot_describe_timeout())),
-            snapshot_fetch_timeout: Some(HumanDuration(settings.snapshot_fetch_timeout())),
-            wasm_checkpoint_timeout: Some(HumanDuration(settings.wasm_checkpoint_timeout())),
             event_capacity: Some(settings.event_capacity()),
             wasm_recovery_capacity: Some(settings.wasm_recovery_capacity()),
             immediate_flush_minimum: Some(HumanDuration(settings.immediate_flush_minimum())),
@@ -203,18 +191,6 @@ impl DataPlaneArgs {
         command_line.optional(
             nervix_models::RuntimeSnapshotBytes::NAME,
             self.snapshot_bytes,
-        );
-        command_line.optional(
-            nervix_models::RuntimeSnapshotDescribeTimeout::NAME,
-            self.snapshot_describe_timeout,
-        );
-        command_line.optional(
-            nervix_models::RuntimeSnapshotFetchTimeout::NAME,
-            self.snapshot_fetch_timeout,
-        );
-        command_line.optional(
-            nervix_models::RuntimeWasmCheckpointTimeout::NAME,
-            self.wasm_checkpoint_timeout,
         );
         command_line.optional(
             nervix_models::RuntimeEventCapacity::NAME,

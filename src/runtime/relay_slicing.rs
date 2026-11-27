@@ -18,7 +18,6 @@ use nervix_primitives::time::Instant;
 
 use super::{
     relay_boundary::{RelayDeliveryChannel, UnusedRelayPosition},
-    relay_send_attempts::GrantCapacityRefusals,
     remote_dispatch::{PendingRemoteAckDelivery, RemoteDispatchError, RemoteDispatcher},
 };
 use crate::runtime_schema::{RuntimeRecordBatch, batch_payload_bytes};
@@ -26,11 +25,6 @@ use crate::runtime_schema::{RuntimeRecordBatch, batch_payload_bytes};
 impl RemoteDispatcher {
     /// The ordinary path sends the original shared body once. A refusal creates no receiver
     /// attempt, so its sequence can carry a smaller prefix; accepted prefixes keep their ACKs.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the encoded payload, borrowed rows, channel gate and ACK registrations retain \
-                  independent owners; the caller supplies its deadline and capacity-refusal policy"
-    )]
     pub(super) async fn dispatch_sliced_relay_payload(
         &self,
         node: &ClusterNodeName,
@@ -38,7 +32,6 @@ impl RemoteDispatcher {
         batch: &RuntimeRecordBatch,
         channel: RelayDeliveryChannel<'_>,
         deadline: Instant,
-        capacity: GrantCapacityRefusals,
         mut acknowledgements: Option<&mut PendingRemoteAckDelivery>,
     ) -> Result<(), Report<RemoteDispatchError>> {
         let mut unused_position = UnusedRelayPosition::new(channel.slot, payload.delivery);
@@ -54,10 +47,10 @@ impl RemoteDispatcher {
         }
         unused_position.disarm();
         match self
-            .dispatch_admitted_relay_payload(node, &mut payload, channel, deadline, capacity)
+            .dispatch_admitted_relay_payload(node, &mut payload, channel, deadline)
             .await
         {
-            Ok(()) => {
+            Ok(admitted) => {
                 #[cfg(feature = "testing")]
                 self.fault_injection.observe_capability_relay_admission(
                     &payload.domain,
@@ -66,7 +59,7 @@ impl RemoteDispatcher {
                     payload.batch_ipc.len(),
                 );
                 if let Some(owner) = acknowledgements {
-                    owner.admit();
+                    owner.admit(admitted.receiver_run);
                 }
                 Ok(())
             }
@@ -164,12 +157,10 @@ impl RemoteDispatcher {
                     };
                     unused_position.disarm();
                     match self
-                        .dispatch_admitted_relay_payload(
-                            node, &mut part, channel, deadline, capacity,
-                        )
+                        .dispatch_admitted_relay_payload(node, &mut part, channel, deadline)
                         .await
                     {
-                        Ok(()) => {
+                        Ok(admitted) => {
                             #[cfg(feature = "testing")]
                             self.fault_injection.observe_capability_relay_admission(
                                 &payload.domain,
@@ -179,7 +170,7 @@ impl RemoteDispatcher {
                             );
                             cursor.admit();
                             if let Some(owner) = acknowledgements.as_mut() {
-                                owner.admit_prefix(cursor.admitted_rows());
+                                owner.admit_prefix(cursor.admitted_rows(), admitted.receiver_run);
                             }
                             if cursor.admitted_rows() < cursor.total_rows() {
                                 delivery =
@@ -226,6 +217,9 @@ mod tests {
         runtime_ack::{AckOutcome, AckSet},
     };
 
+    /// The process epoch of the receiver run that admits the fixture's rows.
+    const RECEIVER_RUN: u64 = 7;
+
     #[nervix_primitives::test]
     async fn cancelling_after_a_prefix_admission_fails_only_the_unadmitted_rows() {
         let runtime = Runtime::default();
@@ -254,8 +248,8 @@ mod tests {
             panic!("the uncancelled delivery stores every row");
         };
         let registrations = delivery.registrations().to_vec();
-        delivery.admit_prefix(1);
-        delivery.admit_prefix(1);
+        delivery.admit_prefix(1, RECEIVER_RUN);
+        delivery.admit_prefix(1, RECEIVER_RUN);
         assert_eq!(delivery.admitted_rows(), 1);
         drop(delivery);
         let admitted = registrations[0].as_ref().expect("first row registration");

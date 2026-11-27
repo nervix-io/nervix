@@ -27,11 +27,11 @@ use std::num::NonZeroUsize;
 use arch_into::ArchInto as _;
 use arrow_array::{RecordBatch, RecordBatchOptions, new_empty_array};
 use arrow_ipc::writer::StreamWriter;
-use arrow_schema::Schema as ArrowSchema;
+use arrow_schema::{ArrowError, Schema as ArrowSchema};
 use error_stack::{Report, ResultExt as _};
 use nervix_execution::{
-    Attempt, BudgetedBuffer, ChargedBytes, CpuClass, ExecutionError, ExecutionFailure, Executor,
-    MemoryClass, Reservation,
+    Attempt, BudgetedBuffer, BufferLimitExceeded, ChargedBytes, CpuClass, ExecutionError,
+    ExecutionFailure, Executor, MemoryClass, Reservation,
 };
 use nervix_primitives::sync::StdArc;
 use thiserror::Error;
@@ -52,6 +52,9 @@ pub enum ArrowBodyError {
     Cancelled,
     #[error("a relay body of {size} bytes exceeds the {limit} byte limit")]
     BodyTooLarge { size: u64, limit: u64 },
+    /// The writer's output outgrew the carriage's encoded limit before the body was complete.
+    #[error("the encoded body reached {reached} bytes, past the {limit} byte limit")]
+    EncodedPastLimit { reached: u64, limit: u64 },
     #[error("a decoded relay batch of {size} bytes exceeds the {limit} byte limit")]
     DecodedTooLarge { size: u64, limit: u64 },
     #[error("a relay body of {sections} Arrow sections exceeds the {limit} this operation accepts")]
@@ -75,6 +78,22 @@ impl ArrowBodyError {
             ExecutionFailure::Execution => Self::Execution,
         };
         failure.change_context(context)
+    }
+
+    /// A failure of the Arrow writer. It is past the carriage's limit exactly when the budgeted
+    /// buffer it writes into refused to grow beyond that limit; anything else fails the encoding.
+    fn writing(error: ArrowError) -> Report<Self> {
+        if let ArrowError::IoError(_, source) = &error
+            && let Some(cause) = source.get_ref()
+            && let Some(exceeded) = cause.downcast_ref::<BufferLimitExceeded>()
+        {
+            let context = Self::EncodedPastLimit {
+                reached: exceeded.required,
+                limit: exceeded.limit,
+            };
+            return Report::new(error).change_context(context);
+        }
+        Self::encoding(error)
     }
 
     #[cfg_attr(
@@ -195,6 +214,33 @@ impl RuntimeRecordBatch {
             .await
     }
 
+    /// Encode this batch as one Arrow section of a sealed runtime snapshot, as
+    /// [`Self::encode_arrow_snapshot_section`] does, into `charge`, bulk memory its caller already
+    /// holds for it, instead of waiting for room in the bulk class. The body grows past `charge`
+    /// only while the class can back it at once; otherwise the encoding ends with
+    /// [`ArrowBodyError::Admission`] rather than waiting for room while its caller holds memory.
+    pub(crate) async fn encode_arrow_snapshot_section_within(
+        &self,
+        executor: &Executor,
+        charge: Reservation,
+    ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
+        let carriage = ArrowBodyCarriage::SnapshotSection;
+        let limit = carriage.encoded_limit(executor);
+        let batch = self.batch.clone();
+        executor
+            .run_cpu(carriage.cpu_class(), charge, move |charge, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(ArrowBodyError::Cancelled)?;
+                match write_admitted_body(&batch, charge, limit) {
+                    BodyWrite::Written(body) => body,
+                    BodyWrite::Short { .. } => Err(Report::new(ArrowBodyError::Admission)),
+                }
+            })
+            .await
+            .change_context(ArrowBodyError::Execution)?
+    }
+
     /// Admit projection and its encoded result together, so neither allocation waits for a
     /// second grant while retaining the first. The projection and IPC writer run as one bounded
     /// CPU job; only the encoded allocation survives that job. When the encoded section outgrows
@@ -240,6 +286,51 @@ impl RuntimeRecordBatch {
             )
             .await
             .map_err(ArrowBodyError::from_growing)?
+    }
+
+    /// Projects and encodes one Arrow snapshot section as
+    /// [`Self::encode_arrow_snapshot_projection`] does, on memory its caller already holds:
+    /// `projection` for the projected columns while they exist, which comes back with the section,
+    /// and `encoded` for the section's bytes, which the section keeps. The section grows past
+    /// `encoded` only while the bulk class can back it at once; otherwise the encoding ends with
+    /// [`ArrowBodyError::Admission`] rather than waiting for room while its caller holds memory.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the admitted bounded row projection")
+    )]
+    pub(crate) async fn encode_arrow_snapshot_projection_within<E: error_stack::Context>(
+        executor: &Executor,
+        projection: Reservation,
+        encoded: Reservation,
+        project: impl FnOnce() -> error_stack::Result<Self, E> + Send + 'static,
+    ) -> Result<(ChargedBytes, Reservation), Report<ArrowBodyError>> {
+        let limit = executor.limits().snapshot_section_bytes.as_u64();
+        let projection_bytes = projection.bytes();
+        let charge = projection
+            .merge(encoded)
+            .change_context(ArrowBodyError::Admission)?;
+        executor
+            .run_cpu(CpuClass::Bulk, charge, move |charge, cancellation| {
+                let (projection, encoded) = charge
+                    .split(projection_bytes)
+                    .change_context(ArrowBodyError::Admission)?;
+                cancellation
+                    .check()
+                    .change_context(ArrowBodyError::Cancelled)?;
+                let batch = project().map_err(ArrowBodyError::encoding)?;
+                cancellation
+                    .check()
+                    .change_context(ArrowBodyError::Cancelled)?;
+                let written = write_admitted_body(&batch.batch, encoded, limit);
+                // The projection's columns end before their charge goes back with the section.
+                drop(batch);
+                match written {
+                    BodyWrite::Written(body) => Ok((body?, projection)),
+                    BodyWrite::Short { .. } => Err(Report::new(ArrowBodyError::Admission)),
+                }
+            })
+            .await
+            .change_context(ArrowBodyError::Execution)?
     }
 
     async fn encode_body(
@@ -404,9 +495,9 @@ fn write_ipc_stream(
     batch: &RecordBatch,
 ) -> Result<(), Report<ArrowBodyError>> {
     let mut writer =
-        StreamWriter::try_new(buffer, batch.schema_ref()).map_err(ArrowBodyError::encoding)?;
-    writer.write(batch).map_err(ArrowBodyError::encoding)?;
-    writer.finish().map_err(ArrowBodyError::encoding)?;
+        StreamWriter::try_new(buffer, batch.schema_ref()).map_err(ArrowBodyError::writing)?;
+    writer.write(batch).map_err(ArrowBodyError::writing)?;
+    writer.finish().map_err(ArrowBodyError::writing)?;
     Ok(())
 }
 

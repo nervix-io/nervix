@@ -106,6 +106,36 @@ impl TransportState {
         self.ensure_preconnected_slots(&outbound);
     }
 
+    /// Make `endpoint` the endpoint `node_id` is reached at only when the node has none, and
+    /// return the endpoint it is reached at afterwards. A registered endpoint, whichever it is,
+    /// keeps its slots and connections, so a probe of an address one of the node's earlier runs
+    /// advertised never moves the node away from where it runs now.
+    pub(crate) fn restore_outbound_target(
+        &self,
+        node_id: ClusterNodeName,
+        endpoint: NodeEndpoint,
+    ) -> NodeEndpoint {
+        loop {
+            let current = self.targets.load_full();
+            if let Some(registered) = current.get(&node_id) {
+                return registered.endpoint.clone();
+            }
+            let outbound = Arc::new(OutboundTarget::new(
+                &node_id,
+                endpoint.clone(),
+                OutboundDial::Advertised,
+            ));
+            let mut next = (*current).clone();
+            next.insert(node_id.clone(), outbound.clone());
+            let observed = self.targets.compare_and_swap(&current, StdArc::new(next));
+            if StdArc::ptr_eq(&current, &observed) {
+                self.connection_changed.notify_waiters();
+                self.ensure_preconnected_slots(&outbound);
+                return endpoint;
+            }
+        }
+    }
+
     /// Install the address a bootstrap exchange authenticated as `node_id`. An endpoint the node
     /// already has keeps how it is dialled, so a later bootstrap never narrows an advertised
     /// endpoint down to one of its addresses.

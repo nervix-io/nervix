@@ -30,15 +30,15 @@ use nervix_models::{
 use nervix_primitives::time::timeout;
 
 use super::inspection_pages::{
-    add_counts, distinct_field, inspection_owner, inspection_refusal, rendered_inspection,
-    resume_position,
+    add_counts, distinct_field, inspection_owner, inspection_refusal, owner_page_refusal,
+    rendered_inspection, resume_position, within_owner_page_shares,
 };
 use crate::{
     application::{AppError, command_result::CommandResult, session_service::SessionServiceImpl},
     client_row::{ArrowRowBatch, write_runtime_value},
     runtime::{
-        MaterializedGenerationRecord, MaterializedInspectionPage, MaterializedStateCapture,
-        StatePageReadError,
+        MaterializedGenerationRecord, MaterializedInspectionPage, MaterializedPageReply,
+        MaterializedStateCapture, StatePageReadError,
         state_inspection_exchange::{receive_materialized_page, stream_materialized_page},
     },
     state_inspection_cursor::StateInspectionCursor,
@@ -570,13 +570,21 @@ impl SessionServiceImpl {
             let (descriptor, page) = match filter {
                 Some(filter) => {
                     let capture = self
-                        .native_materialized_capture(request.clone(), true, Some(filter))
+                        .native_materialized_capture(
+                            request.clone(),
+                            true,
+                            Some(filter),
+                            MaterializedPageReply::Local,
+                        )
                         .await?;
                     (capture.descriptor, capture.state.page)
                 }
                 None => {
-                    self.native_materialized_inspection_page(request.clone())
-                        .await?
+                    self.native_materialized_inspection_page(
+                        request.clone(),
+                        MaterializedPageReply::Local,
+                    )
+                    .await?
                 }
             };
             return Ok((descriptor, InspectionUnitRows::Local(page)));
@@ -587,27 +595,30 @@ impl SessionServiceImpl {
             .state_inspection_settings()
             .read_timeout
             .value();
+        let read_deadline = nervix_primitives::time::Instant::now()
+            .checked_add(deadline)
+            .assured("the inspection read deadline is a bounded setting");
         let stream = match match filter {
             Some(filter) => {
                 self.inner
                     .interconnect
-                    .request_stream_with_timeout(
+                    .request_stream_by(
                         request.target.node_id(),
                         nervix_interconnect::ReadPartitionedMaterializedStatePage {
                             read: request.clone(),
                             filter,
                         },
-                        deadline,
+                        nervix_interconnect::ExchangeDeadline::Caller(read_deadline),
                     )
                     .await
             }
             None => {
                 self.inner
                     .interconnect
-                    .request_stream_with_timeout(
+                    .request_stream_by(
                         request.target.node_id(),
                         request.clone(),
-                        deadline,
+                        nervix_interconnect::ExchangeDeadline::Caller(read_deadline),
                     )
                     .await
             }
@@ -631,6 +642,7 @@ impl SessionServiceImpl {
             stream,
             &schema,
             request,
+            read_deadline,
         )
         .await
         {
@@ -651,70 +663,49 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn native_materialized_inspection_page(
         &self,
         request: ReadMaterializedStatePage,
+        reply: MaterializedPageReply,
     ) -> Result<
         (MaterializedStatePageDescriptor, MaterializedInspectionPage),
         StateInspectionRejection,
     > {
-        self.native_materialized_capture(request, false, None)
+        self.native_materialized_capture(request, false, None, reply)
             .await
             .map(|capture| (capture.descriptor, capture.state.page))
     }
 
-    /// Capture this node's page of a materialized relay's state, within allowances of the
-    /// state-read and bulk classes the capture draws every charge from. A capture that runs short
-    /// of its shares, however it answered, is captured again within the shares it needed.
+    /// Captures this node's page of a materialized relay's state within the allowances it draws
+    /// every charge from ([`within_owner_page_shares`]).
     async fn native_materialized_capture(
         &self,
         request: ReadMaterializedStatePage,
         catalog: bool,
         filter: Option<nervix_interconnect::MaterializedPartitionFilter>,
+        reply: MaterializedPageReply,
     ) -> Result<NativeMaterializedCapture, StateInspectionRejection> {
         let request = &request;
         let filter = &filter;
         let executor = self.inner.runtime.inspection_executor();
-        let outcome = executor
-            .within_allowance(
-                nervix_execution::MemoryClass::StateRead,
-                0,
-                |state_read| async move {
-                    state_read
-                        .within_allowance(
-                            nervix_execution::MemoryClass::Bulk,
-                            1,
-                            |bulk| async move {
-                                Ok::<_, Report<StatePageReadError>>(
-                                    self.native_materialized_capture_with(
-                                        &bulk, request, catalog, filter,
-                                    )
-                                    .await,
-                                )
-                            },
-                        )
-                        .await
-                        .change_context(StatePageReadError::Admission)?
-                },
-            )
-            .await;
-        match outcome {
-            Ok(Ok(captured)) => captured,
-            Ok(Err(failure)) => Err(inspection_refusal(
-                failure,
-                StateInspectionRejection::NotReady,
-            )),
-            Err(refusal) => Err(inspection_refusal(
-                refusal,
-                StateInspectionRejection::NotReady,
-            )),
+        let share = reply.initial_share(executor, request.max_rows, request.max_bytes);
+        let captured = within_owner_page_shares(executor, share, |page_executor| async move {
+            self.native_materialized_capture_with(&page_executor, request, catalog, filter, reply)
+                .await
+        })
+        .await;
+        match captured {
+            Ok(captured) => captured,
+            Err(refusal) => Err(owner_page_refusal(refusal)),
         }
     }
 
-    /// One capture of this node's page, drawing every charge through `executor`.
+    /// One attempt at this node's page of a materialized relay's state, every charge drawn through
+    /// `executor`, the page's allowance.
     async fn native_materialized_capture_with(
         &self,
         executor: &nervix_execution::Executor,
         request: &ReadMaterializedStatePage,
         catalog: bool,
         filter: &Option<nervix_interconnect::MaterializedPartitionFilter>,
+        reply: MaterializedPageReply,
     ) -> Result<NativeMaterializedCapture, StateInspectionRejection> {
         let local = ClusterNodeIdentity::new(
             self.inner.consensus.local_node_id().clone(),
@@ -767,6 +758,7 @@ impl SessionServiceImpl {
                     },
                     catalog_requested: catalog,
                     filter: filter.clone(),
+                    reply,
                 },
             )
             .await
@@ -775,7 +767,9 @@ impl SessionServiceImpl {
             Err(error) => {
                 let reason = match error.current_context() {
                     StatePageReadError::Position => StateInspectionRejection::StaleContinuation,
-                    StatePageReadError::RowTooLarge => StateInspectionRejection::ReplyTooLarge,
+                    StatePageReadError::RowTooLarge | StatePageReadError::CaptureTooLarge => {
+                        StateInspectionRejection::ReplyTooLarge
+                    }
                     _ => StateInspectionRejection::NotReady,
                 };
                 return Err(inspection_refusal(error, reason));
@@ -847,7 +841,7 @@ impl SessionServiceImpl {
         request: nervix_interconnect::ReadMaterializedKeyCatalog,
     ) -> nervix_interconnect::MaterializedKeyCatalogResponse {
         let result = self
-            .native_materialized_capture(request.read, true, None)
+            .native_materialized_capture(request.read, true, None, MaterializedPageReply::Local)
             .await
             .map(|capture| capture.state.catalog);
         nervix_interconnect::MaterializedKeyCatalogResponse { result }
@@ -885,55 +879,38 @@ impl SessionServiceImpl {
             .read_timeout
             .value();
         let executor = self.inner.runtime.inspection_executor();
-        // The capture and its stream are one attempt within allowances of the state-read and bulk
-        // classes: the stream encodes while the captured page holds its charges, so both draw from
-        // the shares, and an attempt that runs short is made again within the shares it needed.
+        // The page travels to another node, so selecting its rows sets their reply aside. The
+        // capture and its stream are one attempt within the page's allowances: the stream encodes
+        // while the captured page holds its charges, so both draw from the shares.
+        let reply = MaterializedPageReply::Remote {
+            descriptor: crate::runtime::PageReply::descriptor_share(executor),
+        };
+        let share = reply.initial_share(executor, request.max_rows, max_bytes);
         let request = &request;
         let filter = &filter;
         let answered = timeout(
             deadline,
-            executor.within_allowance(
-                nervix_execution::MemoryClass::StateRead,
-                0,
-                |state_read| async move {
-                    state_read
-                        .within_allowance(
-                            nervix_execution::MemoryClass::Bulk,
-                            1,
-                            |bulk| async move {
-                                let result = self
-                                    .native_materialized_capture_with(
-                                        &bulk,
-                                        request,
-                                        filter.is_some(),
-                                        filter,
-                                    )
-                                    .await
-                                    .map(|capture| (capture.descriptor, capture.state.page));
-                                stream_materialized_page(&bulk, result, max_bytes).await
-                            },
-                        )
-                        .await
-                        .map_err(StreamHandlerError::with_cause)?
-                },
-            ),
+            within_owner_page_shares(executor, share, |page_executor| async move {
+                let result = self
+                    .native_materialized_capture_with(
+                        &page_executor,
+                        request,
+                        filter.is_some(),
+                        filter,
+                        reply,
+                    )
+                    .await
+                    .map(|capture| (capture.descriptor, capture.state.page));
+                stream_materialized_page(&page_executor, result, max_bytes).await
+            }),
         )
         .await;
-        match answered {
-            Ok(Ok(result)) => result,
-            Ok(Err(refusal)) => {
-                let rejection = inspection_refusal(refusal, StateInspectionRejection::NotReady);
-                stream_materialized_page(executor, Err(rejection), max_bytes).await
-            }
-            Err(_) => {
-                stream_materialized_page(
-                    executor,
-                    Err(StateInspectionRejection::Deadline),
-                    max_bytes,
-                )
-                .await
-            }
-        }
+        let refusal = match answered {
+            Ok(Ok(streamed)) => return streamed,
+            Ok(Err(refusal)) => owner_page_refusal(refusal),
+            Err(_) => StateInspectionRejection::Deadline,
+        };
+        stream_materialized_page(executor, Err(refusal), max_bytes).await
     }
 }
 

@@ -87,13 +87,6 @@ impl MaterializedBranchRecord {
     }
 }
 
-/// A generation captured for an inspection, and what its row views were counted in the
-/// inspection's charge, which the inspection releases once the generation is gone.
-pub(super) struct InspectionCapture {
-    pub(super) generation: MaterializedGeneration,
-    pub(super) counted: u64,
-}
-
 #[derive(Debug)]
 pub(super) struct ReplicatedMaterializedRelayState {
     inspection_instance: u64,
@@ -391,7 +384,23 @@ impl MaterializedRelayStateRead {
             .serialize_with(|binding| self.capture_generation(binding.fence()))
     }
 
-    /// Capture the shared row views an operator inspects under memory admission.
+    /// How many records this state holds now: the row views capturing it copies.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            observer,
+            reason = "operator inspection counts the row views it is about to admit"
+        )
+    )]
+    pub(super) fn inspection_records(&self) -> usize {
+        self.state.entries.load().len()
+    }
+
+    /// Capture the shared row views an operator inspects into `charge`, memory the inspection
+    /// admitted for [`Self::inspection_records`] of them, and give that charge back with them.
+    /// Records added since they were counted grow the charge as the inspection requires: drawn
+    /// from the inspection's allowance, a share without room for them runs it again within a
+    /// larger one.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -399,14 +408,10 @@ impl MaterializedRelayStateRead {
             reason = "operator inspection captures admitted shared row views"
         )
     )]
-    ///
-    /// The row views are counted in the inspection's `memory` before they are captured. A class
-    /// without room for them now fails with the [`nervix_execution::Shortfall`] the inspection
-    /// needs.
     pub(super) fn capture_for_inspection(
         &self,
-        memory: &mut nervix_execution::GrowingCharge,
-    ) -> Result<InspectionCapture, Report<MaterializedSnapshotError>> {
+        charge: Reservation,
+    ) -> Result<(MaterializedGeneration, Reservation), Report<MaterializedSnapshotError>> {
         self.state.assignment.serialize_with(|binding| {
             let records = self.state.entries.load().len();
             let bytes = records
@@ -417,13 +422,11 @@ impl MaterializedRelayStateRead {
             let bytes = u64::try_from(bytes).map_err(|_| {
                 Report::new(MaterializedSnapshotError::MetadataAddressability { records })
             })?;
-            memory
-                .grow_by(bytes)
+            let mut charge = charge;
+            charge
+                .grow_to(bytes.max(1))
                 .change_context(MaterializedSnapshotError::Admission)?;
-            Ok(InspectionCapture {
-                generation: self.capture_generation(binding.fence()),
-                counted: bytes,
-            })
+            Ok((self.capture_generation(binding.fence()), charge))
         })
     }
 
@@ -944,7 +947,10 @@ mod tests {
     use nervix_models::{DomainName, ModelKind, ModelName, RelayName};
 
     use super::{
-        super::{Runtime, materialized_snapshot::SealedSource},
+        super::{
+            Runtime,
+            materialized_snapshot::{RelayContainerSource, SealedSource},
+        },
         *,
     };
     use crate::runtime_schema::{RuntimeValue, test_runtime_row};
@@ -1243,9 +1249,11 @@ mod tests {
         let restored = RestoredMaterializedSnapshot::open_relay(
             &executor,
             &schema,
-            SealedSource::artifact(sealed.artifact)
-                .await
-                .assured("the artifact opens"),
+            RelayContainerSource::Sealed(
+                SealedSource::artifact(sealed.artifact)
+                    .await
+                    .assured("the artifact opens"),
+            ),
         )
         .await
         .assured("the sealed generation should open");
@@ -1485,9 +1493,11 @@ mod tests {
         let restored = RestoredMaterializedSnapshot::open_relay(
             &executor,
             &schema,
-            SealedSource::artifact(earlier.artifact)
-                .await
-                .assured("the artifact opens"),
+            RelayContainerSource::Sealed(
+                SealedSource::artifact(earlier.artifact)
+                    .await
+                    .assured("the artifact opens"),
+            ),
         )
         .await
         .assured("the sealed generation should open");

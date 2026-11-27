@@ -139,7 +139,9 @@ async fn a_retired_transition_applies_the_batch_its_materialized_unit_parked() {
         held().is_empty(),
         "a retired unit withdraws the holdings it published"
     );
-    task.stop(Duration::from_secs(1))
-        .await
-        .expect("relay state task should stop");
+    task.stop(crate::runtime::TaskStopWait::Teardown {
+        grace: Duration::from_secs(1),
+    })
+    .await
+    .expect("relay state task should stop");
 }
