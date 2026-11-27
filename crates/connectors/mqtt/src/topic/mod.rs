@@ -357,6 +357,13 @@ fn notice_code(error: &PublishNoticeError) -> Option<ExternalErrorCode> {
 ///
 /// rumqttc decodes that byte into its typed reason and keeps no public way back to it, so the byte
 /// is found among the 256 values one byte holds, through rumqttc's own decoding of each.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "decodes a byte through the external MQTT driver's reason type and compares the \
+                  decoded reasons; neither waits nor owns runtime state"
+    )
+)]
 fn reason_code<R>(reason: R) -> Option<ExternalErrorCode>
 where
     R: TryFrom<u8> + PartialEq,

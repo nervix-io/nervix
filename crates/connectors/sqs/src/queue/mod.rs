@@ -286,6 +286,11 @@ impl PreparedSqsRecord {
 
 /// The error code a queue service named a failed request with, as `error.external_code` holds it,
 /// such as `InvalidMessageContents`.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "reads the code the external AWS SDK parsed from the queue \
+                               service's error answer; no internal runtime ownership is inferred")
+)]
 fn service_code(error: &impl ProvideErrorMetadata) -> Option<ExternalErrorCode> {
     let code = error.code()?;
     ExternalErrorCode::new(code)
