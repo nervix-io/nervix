@@ -14527,6 +14527,22 @@ async fn when_accepted_work_class_released(world: &mut ScenarioWorld) {
     });
 }
 
+/// Keeps every node's held CPU class full for `duration` longer, then releases it as
+/// [`when_accepted_work_class_released`] does.
+///
+/// The duration is the length of the shortage the scenario imposes, not a wait for anything to
+/// happen. Work that waits for worker room keeps its place for as long as the shortage lasts, so a
+/// shortage several times longer than any retry wait of the work it holds back tells work that
+/// waited apart from work given up while it waited.
+#[when(
+    expr = "accepted-work CPU classes stay full on every node for {string} and are then released"
+)]
+async fn when_accepted_work_classes_stay_full(world: &mut ScenarioWorld, duration: String) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    nervix_primitives::time::sleep(duration).await;
+    when_accepted_work_class_released(world).await;
+}
+
 /// The junction's first read of a message's dependency is slowed too, so a payload that reached
 /// the junction's input may still be read rather than parked. This waits until the junction, whose
 /// reads the scenario slowed, has parked a message on `REQUIRED WAIT`.
