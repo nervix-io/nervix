@@ -4,6 +4,9 @@ Feature: Inferencer state in backup archives
   Scenario Outline: A <cut> backup and <resume_mode> restore <state_mode> both inferencer branch sums on <cluster_size> nodes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
+    And node-1 starts with execution-restore-metadata-memory-bytes = 512KiB
+    And node-2 starts with execution-restore-metadata-memory-bytes = 512KiB
+    And node-3 starts with execution-restore-metadata-memory-bytes = 512KiB
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And node "node-1" has ONNX fixture resource directory "onnx_model"

@@ -13,11 +13,9 @@
 
 use std::io::{BufReader, Read, Seek, SeekFrom};
 
-use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
 use nervix_backup::{BranchLifecycleRecord, DescribedSection, InferencerStateDescriptor};
-use nervix_execution::{Executor, MemoryClass, Reservation};
+use nervix_execution::{Cancellation, Executor, MemoryClass, Reservation};
 use nervix_models::{DomainSchedule, ModelKind, NodeRef};
 
 use super::{prepare::VerifiedArchive, steps::remote_branch_key};
@@ -122,6 +120,12 @@ pub(super) async fn prepare_inferencer_checkpoint(
     }
     let offset = values.offset;
     let length = values.length;
+    crate::inferencer_state_snapshot::check_bound(length, maximum)
+        .change_context(InferencerRestoreError::Shapes)?;
+    let chunk_bytes = usize::try_from(
+        StagedSnapshotWriter::encoding_buffer_bytes(runtime.executor()).min(length),
+    )
+    .change_context(InferencerRestoreError::Admission)?;
     let charge = VerifiedArchive::reserve_inferencer_encoding(runtime.executor(), maximum).await?;
     let writer = runtime
         .try_stage_artifact(maximum)
@@ -138,14 +142,9 @@ pub(super) async fn prepare_inferencer_checkpoint(
                 std::fs::File::open(input.path()).change_context(SnapshotStagingError::Read)?;
             file.seek(SeekFrom::Start(offset))
                 .change_context(SnapshotStagingError::Read)?;
-            let checked = TensorSectionReader {
-                input: file.take(length),
-                cancellation,
-            };
-            let mut reader = BufReader::with_capacity(TENSOR_READ_BLOCK_BYTES, checked);
             let decoded = nervix_backup::read_tensor_values(
                 &path,
-                &mut reader,
+                &mut TensorSectionReader::buffered(file.take(length), chunk_bytes, cancellation),
                 &descriptor,
                 descriptor.byte_length,
             );
@@ -179,31 +178,17 @@ pub(super) async fn prepare_inferencer_checkpoint(
         .change_context(InferencerRestoreError::Staging)
 }
 
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "a storage read block bounds buffering and the interval between cancellation \
-                  checks"
-    )
-)]
-const TENSOR_READ_BLOCK_BYTES: usize = 64 * 1024;
-
 impl VerifiedArchive {
     async fn reserve_inferencer_encoding(
         executor: &Executor,
         snapshot_bytes: u64,
     ) -> error_stack::Result<Reservation, InferencerRestoreError> {
-        let tensors_working = snapshot_bytes
-            .checked_mul(2)
-            .ok_or_else(|| Report::new(InferencerRestoreError::Admission))?;
-        let read_bytes: u64 = TENSOR_READ_BLOCK_BYTES.arch_into();
-        let output_bytes = StagedSnapshotWriter::encoding_buffer_bytes(executor).max(read_bytes);
-        let buffers = read_bytes
-            .checked_add(output_bytes)
-            .verified("the fixed reader and the validated u32 bulk chunk fit in u64");
+        // The decoded tensors overlap either the bounded read buffer or the native frame.
+        // Both fit within the snapshot footprint, and the staging writer has its own buffer.
+        let tensors_working = crate::inferencer_state_snapshot::working_bytes(snapshot_bytes)
+            .change_context(InferencerRestoreError::Admission)?;
         let working = tensors_working
-            .checked_add(buffers)
+            .checked_add(StagedSnapshotWriter::encoding_buffer_bytes(executor))
             .ok_or_else(|| Report::new(InferencerRestoreError::Admission))?;
         executor
             .reserve(MemoryClass::Bulk, working)
@@ -212,16 +197,32 @@ impl VerifiedArchive {
     }
 }
 
-/// Buffer fills check cancellation between fixed-size storage reads, including during a large tensor.
-struct TensorSectionReader<'a> {
-    input: std::io::Take<std::fs::File>,
-    cancellation: &'a nervix_execution::Cancellation,
+/// Checks cancellation before each bounded read, including when the buffered reader bypasses its
+/// buffer to read a single F32 directly.
+struct TensorSectionReader<'a, R> {
+    input: R,
+    chunk_bytes: usize,
+    cancellation: &'a Cancellation,
 }
 
-impl Read for TensorSectionReader<'_> {
+impl<'a, R: Read> TensorSectionReader<'a, R> {
+    fn buffered(input: R, chunk_bytes: usize, cancellation: &'a Cancellation) -> BufReader<Self> {
+        BufReader::with_capacity(
+            chunk_bytes,
+            Self {
+                input,
+                chunk_bytes,
+                cancellation,
+            },
+        )
+    }
+}
+
+impl<R: Read> Read for TensorSectionReader<'_, R> {
     fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
         self.cancellation.check().map_err(std::io::Error::other)?;
-        self.input.read(output)
+        let length = output.len().min(self.chunk_bytes);
+        self.input.read(&mut output[..length])
     }
 }
 
@@ -232,13 +233,64 @@ impl Read for TensorSectionReader<'_> {
 )]
 mod tests {
     use meticulous::ResultExt as _;
+    use nervix_execution::StorageClass;
     use ubyte::ByteUnit;
 
     use super::*;
 
+    struct Reads<'a> {
+        input: &'a [u8],
+        requested: Vec<usize>,
+    }
+
+    impl Read for Reads<'_> {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            self.requested.push(output.len());
+            self.input.read(output)
+        }
+    }
+
     #[rstest::rstest]
-    #[case::large_chunk(ByteUnit::Mebibyte(4), 4 * 1024 * 1024 + 66 * 1024)]
-    #[case::small_chunk(ByteUnit::Kibibyte(32), 130 * 1024)]
+    #[case::smaller_than_one_value(3)]
+    #[case::several_values_with_trailing_bytes(9)]
+    #[case::one_complete_tensor(20)]
+    #[nervix_primitives::test]
+    async fn inferencer_restore_keeps_every_read_within_the_bulk_chunk(#[case] chunk_bytes: usize) {
+        let executor = StagedSnapshotWriter::encoding_test_executor(ByteUnit::Byte(
+            u64::try_from(chunk_bytes).assured("the test's chunk fits"),
+        ));
+        let chunk_bytes = usize::try_from(StagedSnapshotWriter::encoding_buffer_bytes(&executor))
+            .assured("the test's chunk fits");
+        let bytes = *b"0123456789abcdefghij";
+        let requested = executor
+            .run_storage(
+                StorageClass::Filesystem,
+                executor.charge_nothing(MemoryClass::Bulk),
+                move |_, cancellation| {
+                    let mut reader = TensorSectionReader::buffered(
+                        Reads {
+                            input: &bytes,
+                            requested: Vec::new(),
+                        },
+                        chunk_bytes,
+                        cancellation,
+                    );
+                    let mut output = [0; 20];
+                    for value in output.as_chunks_mut::<{ size_of::<f32>() }>().0 {
+                        reader.read_exact(value).assured("the next F32 fits");
+                    }
+                    assert_eq!(output, bytes);
+                    reader.into_inner().input.requested
+                },
+            )
+            .await
+            .assured("the storage job ran");
+        assert_eq!(requested.iter().copied().max(), Some(chunk_bytes));
+    }
+
+    #[rstest::rstest]
+    #[case::large_chunk(ByteUnit::Mebibyte(4), 4 * 1024 * 1024 + 2 * 1024)]
+    #[case::small_chunk(ByteUnit::Kibibyte(32), 34 * 1024)]
     #[nervix_primitives::test]
     async fn inferencer_restore_charges_staging_buffer_beside_the_reader(
         #[case] chunk: ByteUnit,

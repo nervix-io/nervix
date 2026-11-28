@@ -368,14 +368,18 @@ Capture then runs as one storage job:
 
 The cut keeps what it captured while it stages it, and staging takes more of the same memory
 classes, so the cut and its staging are one attempt within an owner's shares of `restore_metadata`
-and then `bulk`, which the owner waits for while it holds nothing of either. The bulk share starts
-from the fresh materialized generations the cut would capture now, beside the staging working set;
-the restore metadata share starts at 1 MiB. Every charge of the attempt, the stored views it maps
-and the readers it opens included, is drawn from those shares, so the attempt never waits for room.
-An attempt that needs more gives everything back, the sections it staged included, and the owner
-cuts again within shares at least twice as large. A full class therefore holds a capture back and
-never refuses it. The lifecycle checkpoints a quiesced cut asks its entities for run before the
-owner takes its shares: they run on the entities' own tasks, which take charges of their own.
+and then `bulk`. The owner starts with the largest known conversion charge for its scheduled
+primary units' stored branch lifecycle and Kafka offset checkpoints. It reads their sizes without
+opening their bodies. Each of these checkpoints converts on its own, so their charges do not add
+together. The bulk share starts from the fresh materialized generations the cut would capture now,
+beside the staging working set. Every charge of the attempt, the stored views it maps and the
+readers it opens included, is drawn from these shares.
+
+A changed checkpoint or a later reader can reveal a larger working set. The attempt releases its
+charges and staged sections before retrying within a larger share. The owner waits for room in the
+class whose share it needs to grow after releasing that share. The lifecycle checkpoints a quiesced
+cut asks its entities for run before the owner takes its shares, on tasks that take charges of
+their own.
 
 | State | How it becomes sections |
 | --- | --- |
