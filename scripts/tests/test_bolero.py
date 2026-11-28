@@ -621,7 +621,7 @@ class InventoryTests(unittest.TestCase):
             "wasm-stored-checkpoints-malformed": 6,
             "backup-partition-topology": 2,
             "benchmark-metrics-report": 1,
-            "ingestor-describe-envelope": 28,
+            "ingestor-describe-envelope": 29,
             "plexus-model": 82,
             "plexus-archive-model": 86,
             "plexus-statement": 94,
