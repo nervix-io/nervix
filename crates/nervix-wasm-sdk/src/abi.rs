@@ -283,14 +283,6 @@ fn abi_pointer<T>(ptr: *const T) -> i32 {
     }
 }
 
-pub fn buffer_len() -> i32 {
-    CORE.with(|core| abi_size(core.buffer.len()))
-}
-
-pub fn buffer_capacity() -> i32 {
-    CORE.with(|core| abi_size(core.buffer.capacity()))
-}
-
 pub fn alloc(size: i32) -> i32 {
     let Ok(size) = usize::try_from(size) else {
         return ERR_INVALID_SIZE;
