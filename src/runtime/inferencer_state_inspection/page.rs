@@ -358,48 +358,20 @@ impl Page {
             headers.append(&retained, plan.bytes_per_branch)?;
             last = fingerprint;
         }
-        // Header runs precede all tensor runs. Append the headers for the copied prefix and move
-        // them to the front in place, using the one admitted run allocation.
-        let tensor_runs = runs.len();
-        let mut tensors_left = filled;
-        for (branch, planned) in branches.iter().zip(&self.planned) {
-            if tensors_left == 0 {
-                break;
-            }
-            if !planned.is_empty() {
-                extend_runs(&mut runs, ProcessorStateSection::Header, &branch.key);
-                let copied =
-                    u64::try_from(planned.len()).assured("a branch's tensor count fits u64");
-                tensors_left = tensors_left
-                    .checked_sub(copied)
-                    .assured("each copied branch supplied its whole planned range");
-            }
-        }
+        self.order_header_runs(&branches, filled, &mut runs);
         assert_eq!(
             runs.capacity(),
             run_capacity,
             "the declared run allocation did not grow"
         );
-        runs.rotate_left(tensor_runs);
         // Every returned branch's tensors are copied, so the page retains no publication any more.
         let (publications_charge, memory) = self
             .memory
             .split(self.retained)
             .change_context(ProcessorStatePageError::Admission)?;
         drop(publications_charge);
-        let total = u64::try_from(branches.len()).assured("an admitted branch count fits u64");
-        let capacity = tensors
-            .len()
-            .checked_add(1)
-            .assured("a resident state declaration and its header fit usize");
-        let mut sections = Vec::with_capacity(capacity);
-        sections.push(headers.finish(total, self.headers)?);
-        for (tensor, capacity) in tensors {
-            cancellation
-                .check()
-                .change_context(ProcessorStatePageError::Admission)?;
-            sections.push(tensor.finish(total, &capacity)?);
-        }
+        let sections =
+            finish_columns(headers, self.headers, tensors, branches.len(), cancellation)?;
         let offset = checked_add(self.start, filled)?;
         let (reservation, reply) = match self.reply {
             PageReply::Local => (memory, None),
@@ -439,4 +411,53 @@ impl Page {
             }),
         })
     }
+
+    /// Header runs precede the tensor runs. Append the headers for the copied prefix and move
+    /// them to the front in place, using the one admitted run allocation.
+    fn order_header_runs(
+        &self,
+        branches: &[CapturedBranch],
+        mut tensors_left: u64,
+        runs: &mut Vec<ProcessorStateRun>,
+    ) {
+        let tensor_runs = runs.len();
+        for (branch, planned) in branches.iter().zip(&self.planned) {
+            if tensors_left == 0 {
+                break;
+            }
+            if !planned.is_empty() {
+                extend_runs(runs, ProcessorStateSection::Header, &branch.key);
+                let copied =
+                    u64::try_from(planned.len()).assured("a branch's tensor count fits u64");
+                tensors_left = tensors_left
+                    .checked_sub(copied)
+                    .assured("each copied branch supplied its whole planned range");
+            }
+        }
+        runs.rotate_left(tensor_runs);
+    }
+}
+
+/// Finish one header and each declared tensor section in page order.
+fn finish_columns(
+    headers: columns::Headers,
+    header_capacity: HeaderCapacity,
+    tensors: Vec<(columns::Tensors, TensorCapacity)>,
+    branches: usize,
+    cancellation: &Cancellation,
+) -> ReadResult<Vec<ProcessorStateSectionColumns>> {
+    let total = u64::try_from(branches).assured("an admitted branch count fits u64");
+    let capacity = tensors
+        .len()
+        .checked_add(1)
+        .assured("a resident state declaration and its header fit usize");
+    let mut sections = Vec::with_capacity(capacity);
+    sections.push(headers.finish(total, header_capacity)?);
+    for (tensor, capacity) in tensors {
+        cancellation
+            .check()
+            .change_context(ProcessorStatePageError::Admission)?;
+        sections.push(tensor.finish(total, &capacity)?);
+    }
+    Ok(sections)
 }

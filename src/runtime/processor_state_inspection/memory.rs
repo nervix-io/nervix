@@ -199,7 +199,6 @@ impl ColumnGather {
         // A source can have nulls outside this selection. MutableArrayData can also allocate the
         // validity bitmap of a child when a parent is nullable.
         let validity = Self::buffer(slots::<u8>(span.div_ceil(8))?, first, grows)?;
-        let mut output = validity;
         let mut scratch = Self::source_slots(first)?;
         if mutable.is_some() {
             scratch = add(
@@ -213,68 +212,108 @@ impl ColumnGather {
                 )?;
             }
         }
-        match data_type {
+        let values = Self::values(array, data_type, rows, span, first, mutable)?;
+        Ok(Self {
+            buffers: add(validity, values.buffers)?,
+            scratch: add(scratch, values.scratch)?,
+        })
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "identifies the value layout of immutable Arrow arrays")
+    )]
+    fn values(
+        array: &dyn Array,
+        data_type: &DataType,
+        rows: Range<usize>,
+        span: usize,
+        first: bool,
+        mutable: Option<MutableCapacity>,
+    ) -> ReadResult<Self> {
+        let grows = mutable.is_some_and(|capacity| capacity.may_grow);
+        let buffers = match data_type {
             DataType::Utf8 => {
                 let offsets = array.as_string::<i32>().value_offsets();
-                output = add(output, Self::text(offsets, rows, span, first, mutable)?)?;
+                Self::text(offsets, rows, span, first, mutable)?
             }
             DataType::Binary => {
                 let offsets = array.as_binary::<i32>().value_offsets();
-                output = add(output, Self::text(offsets, rows, span, first, mutable)?)?;
+                Self::text(offsets, rows, span, first, mutable)?
             }
             DataType::List(_) => {
-                let list = array.as_list::<i32>();
-                let child = Self::span(list.value_offsets(), rows)?;
-                let offsets = offset_slots(span, first)?;
-                let offsets = match mutable {
-                    Some(_) => Self::buffer(offsets, first, grows)?,
-                    None => offsets,
-                };
-                if mutable.is_none() {
-                    scratch = add(scratch, slots::<(usize, usize)>(child.len())?)?;
-                }
-                let child_capacity = mutable.map(|parent| MutableCapacity {
-                    initial: parent.initial,
-                    may_grow: true,
-                });
-                let nested = Self::measure(list.values().as_ref(), child, first, child_capacity)?;
-                output = add(add(output, nested.buffers)?, offsets)?;
-                scratch = add(scratch, nested.scratch)?;
+                return Self::list(array.as_list::<i32>(), rows, span, first, mutable);
             }
             DataType::FixedSizeList(_, width) => {
-                let width =
-                    usize::try_from(*width).change_context(ProcessorStatePageError::Columns)?;
-                let start = rows.start.checked_mul(width).ok_or_else(overflow)?;
-                let end = rows.end.checked_mul(width).ok_or_else(overflow)?;
                 let capacity = mutable.assured("fixed-size lists use MutableArrayData");
-                let child = array.as_fixed_size_list().values().as_ref();
-                let nested =
-                    Self::measure(child, start..end, first, Some(capacity.for_child(width)?))?;
-                output = add(output, nested.buffers)?;
-                scratch = add(scratch, nested.scratch)?;
+                let child = array.as_fixed_size_list().values();
+                return Self::fixed_list(child, *width, rows, first, capacity);
             }
-            DataType::Boolean => {
-                let values = Self::buffer(slots::<u8>(span.div_ceil(8))?, first, grows)?;
-                output = add(output, values)?;
-            }
-            DataType::Null => {}
+            DataType::Boolean => Self::buffer(slots::<u8>(span.div_ceil(8))?, first, grows)?,
+            DataType::Null => 0,
             scalar => {
                 let width = scalar
                     .primitive_width()
                     .ok_or_else(|| Report::new(ProcessorStatePageError::Columns))?;
                 let raw = span.checked_mul(width).ok_or_else(overflow)?;
                 let bytes = slots::<u8>(raw)?;
-                let bytes = match mutable {
+                match mutable {
                     Some(_) => Self::buffer(bytes, first, grows)?,
                     None => bytes,
-                };
-                output = add(output, bytes)?;
+                }
             }
-        }
+        };
         Ok(Self {
-            buffers: output,
-            scratch,
+            buffers,
+            scratch: 0,
         })
+    }
+
+    /// A variable list gathers its offsets and the selected elements of its child column.
+    fn list(
+        list: &arrow_array::ListArray,
+        rows: Range<usize>,
+        span: usize,
+        first: bool,
+        mutable: Option<MutableCapacity>,
+    ) -> ReadResult<Self> {
+        let child = Self::span(list.value_offsets(), rows)?;
+        let offsets = offset_slots(span, first)?;
+        let (offsets, indices, child_capacity) = match mutable {
+            Some(parent) => (
+                Self::buffer(offsets, first, parent.may_grow)?,
+                0,
+                Some(MutableCapacity {
+                    initial: parent.initial,
+                    may_grow: true,
+                }),
+            ),
+            None => (offsets, slots::<(usize, usize)>(child.len())?, None),
+        };
+        let nested = Self::measure(list.values().as_ref(), child, first, child_capacity)?;
+        Ok(Self {
+            buffers: add(nested.buffers, offsets)?,
+            scratch: add(indices, nested.scratch)?,
+        })
+    }
+
+    /// A fixed list addresses its child directly, with no offset or index allocation of its own.
+    fn fixed_list(
+        child: &ArrayRef,
+        width: i32,
+        rows: Range<usize>,
+        first: bool,
+        parent: MutableCapacity,
+    ) -> ReadResult<Self> {
+        let width = usize::try_from(width).change_context(ProcessorStatePageError::Columns)?;
+        let start = rows.start.checked_mul(width).ok_or_else(overflow)?;
+        let end = rows.end.checked_mul(width).ok_or_else(overflow)?;
+        Self::measure(
+            child.as_ref(),
+            start..end,
+            first,
+            Some(parent.for_child(width)?),
+        )
     }
 
     /// MutableBuffer grows to the larger of the aligned length and twice its prior capacity.

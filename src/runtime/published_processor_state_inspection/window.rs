@@ -18,21 +18,53 @@ impl WindowBranch<'_> {
             key: branch,
             revision,
             snapshot,
-            plan,
             width,
+            ..
         } = self;
         let rows = u64::try_from(snapshot.entries.len()).assured("a retained row count fits u64");
-        let mut due = match (snapshot.entries.first(), width) {
+        let due = match (snapshot.entries.first(), width) {
             (Some(first), Some(width)) => {
                 Some(checked_add_duration_to_timestamp(first.timestamp, width))
             }
             _ => None,
         };
+        let due = self.append_accumulators(page, due, cancellation)?;
+        let first = page.headers.is_empty();
+        let values = page_memory::slots::<u64>(7)?;
+        let nulls = page_memory::bitmap(1, first)?
+            .checked_mul(3)
+            .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
+        let columns = add_bytes(page_memory::fixed_columns(values, 7, first)?, nulls)?;
+        // Three nullable counters carry their validity bits along with their values.
+        let validity = page_memory::slots::<u8>(3)?;
+        page.reserve_metadata(columns, add_bytes(values, validity)?, first)?;
+        page.reserve_run(ProcessorStateSection::Header, branch)?;
+        page_memory::VecGrowth::reserve(&mut page.memory, &mut page.headers)?;
+        page.headers.push(HeaderRow {
+            revision,
+            rows,
+            first: snapshot.entries.first().map(|entry| entry.sequence),
+            next: snapshot.next_sequence,
+            incarnation: snapshot.incarnation,
+            due,
+            bytes,
+        });
+        Ok(())
+    }
+
+    /// Admit each accumulator's facts and find the earliest pending removal for the header.
+    fn append_accumulators(
+        &self,
+        page: &mut PublishedPage,
+        mut due: Option<Timestamp>,
+        cancellation: &Cancellation,
+    ) -> ReadResult<Option<Timestamp>> {
         let mut slot = 0_usize;
-        for (index, (demand, state)) in plan
+        for (index, (demand, state)) in self
+            .plan
             .demands()
             .iter()
-            .zip(&snapshot.accumulators)
+            .zip(&self.snapshot.accumulators)
             .enumerate()
         {
             cancellation
@@ -43,30 +75,7 @@ impl WindowBranch<'_> {
             } else {
                 1
             };
-            let mut count = 0_u64;
-            for entry in &snapshot.entries {
-                cancellation
-                    .check()
-                    .change_context(ProcessorStatePageError::Admission)?;
-                let batch = entry.arguments.batch().batch();
-                let row = entry.arguments.row_index();
-                let mut present = true;
-                for offset in 0..arity {
-                    let position = slot
-                        .checked_add(offset)
-                        .ok_or_else(|| Report::new(ProcessorStatePageError::Columns))?;
-                    let column = batch
-                        .columns()
-                        .get(position)
-                        .ok_or_else(|| Report::new(ProcessorStatePageError::Columns))?;
-                    present &= column.is_valid(row);
-                }
-                if present || demand.storage == super::WindowAggregateStorageKind::Counter {
-                    count = count
-                        .checked_add(1)
-                        .assured("contributing rows do not exceed retained rows");
-                }
-            }
+            let mut count = self.count_contributions(slot, arity, demand.storage, cancellation)?;
             if let WindowAccumulatorSnapshot::LinearHistogram { delayed_removals } = state {
                 count = count
                     .checked_add(
@@ -90,7 +99,7 @@ impl WindowBranch<'_> {
             let body = add_bytes(fixed, text)?;
             let columns = add_bytes(page_memory::fixed_columns(fixed, 2, first)?, text)?;
             page.reserve_metadata(columns, body, first)?;
-            page.reserve_run(ProcessorStateSection::Accumulators, branch)?;
+            page.reserve_run(ProcessorStateSection::Accumulators, self.key)?;
             page_memory::VecGrowth::reserve(&mut page.memory, &mut page.structures)?;
             page.structures.push(StructureRow {
                 index: u32::try_from(index)
@@ -102,27 +111,42 @@ impl WindowBranch<'_> {
                 .checked_add(arity)
                 .ok_or_else(|| Report::new(ProcessorStatePageError::Columns))?;
         }
-        let first = page.headers.is_empty();
-        let values = page_memory::slots::<u64>(7)?;
-        let nulls = page_memory::bitmap(1, first)?
-            .checked_mul(3)
-            .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
-        let columns = add_bytes(page_memory::fixed_columns(values, 7, first)?, nulls)?;
-        // Three nullable counters carry their validity bits along with their values.
-        let validity = page_memory::slots::<u8>(3)?;
-        page.reserve_metadata(columns, add_bytes(values, validity)?, first)?;
-        page.reserve_run(ProcessorStateSection::Header, branch)?;
-        page_memory::VecGrowth::reserve(&mut page.memory, &mut page.headers)?;
-        page.headers.push(HeaderRow {
-            revision,
-            rows,
-            first: snapshot.entries.first().map(|entry| entry.sequence),
-            next: snapshot.next_sequence,
-            incarnation: snapshot.incarnation,
-            due,
-            bytes,
-        });
-        Ok(())
+        Ok(due)
+    }
+
+    /// Count retained rows with present arguments, including every row for a counter.
+    fn count_contributions(
+        &self,
+        slot: usize,
+        arity: usize,
+        storage: WindowAggregateStorageKind,
+        cancellation: &Cancellation,
+    ) -> ReadResult<u64> {
+        let mut count = 0_u64;
+        for entry in &self.snapshot.entries {
+            cancellation
+                .check()
+                .change_context(ProcessorStatePageError::Admission)?;
+            let batch = entry.arguments.batch().batch();
+            let row = entry.arguments.row_index();
+            let mut present = true;
+            for offset in 0..arity {
+                let position = slot
+                    .checked_add(offset)
+                    .ok_or_else(|| Report::new(ProcessorStatePageError::Columns))?;
+                let column = batch
+                    .columns()
+                    .get(position)
+                    .ok_or_else(|| Report::new(ProcessorStatePageError::Columns))?;
+                present &= column.is_valid(row);
+            }
+            if present || storage == WindowAggregateStorageKind::Counter {
+                count = count
+                    .checked_add(1)
+                    .assured("contributing rows do not exceed retained rows");
+            }
+        }
+        Ok(count)
     }
 }
 
