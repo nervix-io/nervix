@@ -985,8 +985,12 @@ impl Runtime {
         domain: &DomainName,
         primaries: &ahash::HashSet<NodeUnitRef>,
     ) -> error_stack::Result<u64, BackupStateCaptureError> {
-        let placements = self.backup_native_metadata_placements(domain, primaries);
-        if placements.is_empty() {
+        let metadata_units = primaries
+            .iter()
+            .filter(|primary| Self::node_has_branch_lifecycle(primary.node.kind))
+            .cloned()
+            .collect::<Vec<_>>();
+        if metadata_units.is_empty() {
             return Ok(0);
         }
         let store = self
@@ -994,12 +998,15 @@ impl Runtime {
             .state_store
             .clone()
             .ok_or_else(|| Report::new(BackupStateCaptureError::Unavailable))?;
+        let runtime = self.clone();
         let domain = domain.clone();
         let executor = self.executor();
         let charge = executor.charge_nothing(MemoryClass::RestoreMetadata);
         let estimate = executor
             .run_storage(StorageClass::Filesystem, charge, move |_, cancellation| {
-                store.largest_backup_checkpoint_bytes(&domain, &placements, cancellation)
+                let placements =
+                    runtime.backup_native_metadata_placements(&domain, &metadata_units);
+                store.largest_backup_checkpoint_bytes(&domain, placements, cancellation)
             })
             .await
             .change_context(BackupStateCaptureError::Storage)?;
@@ -1011,44 +1018,47 @@ impl Runtime {
                 None
             }
         };
+        let Some(stored_bytes) = largest else {
+            return Ok(0);
+        };
         let capacity = executor.memory(MemoryClass::RestoreMetadata).capacity_bytes;
-        Ok(largest
-            .and_then(native_conversion_bytes)
-            .filter(|bytes| *bytes <= capacity)
-            .unwrap_or(0))
+        let bytes = match native_conversion_bytes(stored_bytes) {
+            Some(bytes) if bytes <= capacity => bytes,
+            _ => 0,
+        };
+        Ok(bytes)
     }
 
-    fn backup_native_metadata_placements(
-        &self,
-        domain: &DomainName,
-        primaries: &ahash::HashSet<NodeUnitRef>,
-    ) -> Vec<RuntimeStatePlacement> {
-        let mut placements = Vec::new();
-        for primary in primaries {
+    fn backup_native_metadata_placements<'a>(
+        &'a self,
+        domain: &'a DomainName,
+        metadata_units: &'a [NodeUnitRef],
+    ) -> impl Iterator<Item = RuntimeStatePlacement> + 'a {
+        metadata_units.iter().flat_map(move |primary| {
             let kind = primary.node.kind;
-            if !Self::node_has_branch_lifecycle(kind) {
-                continue;
-            }
             let metadata_kinds: &[RuntimeStateKind] = if kind == ModelKind::Ingestor {
                 &[RuntimeStateKind::BranchLru, RuntimeStateKind::KafkaOffset]
             } else {
                 &[RuntimeStateKind::BranchLru]
             };
-            for state in metadata_kinds {
-                if let Ok(placement) = self.state_placement_for_unit(
+            metadata_kinds.iter().filter_map(move |state| {
+                let Ok(placement) = self.state_placement_for_unit(
                     domain,
                     *state,
                     kind,
                     primary.node.identifier.clone(),
                     primary.unit,
                     None,
-                ) && self.runtime_state_placement_is_current(&placement)
-                {
-                    placements.push(placement);
+                ) else {
+                    return None;
+                };
+                if self.runtime_state_placement_is_current(&placement) {
+                    Some(placement)
+                } else {
+                    None
                 }
-            }
-        }
-        placements
+            })
+        })
     }
 
     /// The bulk share a backup capture of `domain` starts from: the live materialized generations

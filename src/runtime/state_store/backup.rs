@@ -436,10 +436,15 @@ impl RuntimeStateStore {
 
     /// Read size descriptors for known placements from one view without walking a domain's branch
     /// checkpoints. A segmented value contributes its declared body length.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the backup owner supplies at most two unbranched metadata \
+                                   placements per scheduled primary unit")
+    )]
     pub(in crate::runtime) fn largest_backup_checkpoint_bytes(
         &self,
         domain: &DomainName,
-        placements: &[RuntimeStatePlacement],
+        placements: impl Iterator<Item = RuntimeStatePlacement>,
         cancellation: &nervix_execution::Cancellation,
     ) -> error_stack::Result<Option<u64>, RuntimePersistenceError> {
         let view = self.db.snapshot();
@@ -449,7 +454,7 @@ impl RuntimeStateStore {
             cancellation
                 .check()
                 .change_context(RuntimePersistenceError::Cancelled)?;
-            let key = namespace.key(placement)?;
+            let key = namespace.key(&placement)?;
             let Some(item) = view
                 .range(&self.latest, key.as_slice()..=key.as_slice())
                 .next()
