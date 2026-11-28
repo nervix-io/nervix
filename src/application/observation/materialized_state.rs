@@ -10,6 +10,8 @@
     nervix::layer(control_plane, reason = "owns the boundary declared above")
 )]
 
+use std::collections::BTreeMap;
+
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
@@ -17,24 +19,35 @@ use nervix_client_wire::{
     StateInspectionResult, StateInspectionSection, StateInspectionUnit, StateRowsEncoder,
     StateWatermarkColumns,
 };
+use nervix_consensus::ConsensusRuntimeState;
 use nervix_interconnect::{
     MaterializedStatePageDescriptor, ReadMaterializedStatePage, StreamHandlerError,
     StreamingResponse,
 };
 use nervix_models::{
-    ClusterNodeIdentity, CreateRelay, CreateSchema, DomainName, DomainNodeRef, ModelKind, NodeRef,
-    ParseAsType, RelayName, ResolvedBranching, ResolvedStateBranchSelection, ScheduledNode,
-    ShowRelayMaterializedState, StateInspectionBranchSelection, StateInspectionCounts,
-    StateInspectionOrigin, StateInspectionPosition, StateInspectionRejection,
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CreateRelay, CreateSchema,
+    DomainName, DomainNodeRef, ModelKind, NodeRef, ParseAsType, RelayName, ResolvedBranching,
+    ResolvedStateBranchSelection, ScheduledNode, ShowRelayMaterializedState, StateBranchSelection,
+    StateInspectionBranchSelection, StateInspectionCounts, StateInspectionOrigin,
+    StateInspectionPageRequest, StateInspectionPosition, StateInspectionRejection, Unit, UnitKind,
 };
-use nervix_primitives::time::timeout;
+use nervix_primitives::time::{Instant, timeout, timeout_at};
 
-use super::inspection_pages::{
-    add_counts, distinct_field, inspection_owner, inspection_refusal, owner_page_refusal,
-    rendered_inspection, resume_position, within_owner_page_shares,
+use super::{
+    inspection_pages::{
+        add_counts, distinct_field, inspection_owner, inspection_refusal, owner_page_refusal,
+        rendered_inspection, resume_position, within_owner_page_shares,
+    },
+    processor_state::partition::PartitionInspection,
 };
 use crate::{
-    application::{AppError, command_result::CommandResult, session_service::SessionServiceImpl},
+    application::{
+        AppError,
+        command_result::CommandResult,
+        describe_output::{append_metrics_lines, format_relay_describe_output},
+        model_mutation::command_ok,
+        session_service::SessionServiceImpl,
+    },
     client_row::{ArrowRowBatch, write_runtime_value},
     runtime::{
         MaterializedGenerationRecord, MaterializedInspectionPage, MaterializedPageReply,
@@ -63,6 +76,28 @@ struct InspectionPlan {
     cursor: Option<StateInspectionCursor>,
     limits: SessionLimits,
     moving_partitions: Option<nervix_models::ResolvedParametrizerPartitions>,
+}
+
+impl InspectionPlan {
+    fn zero_row_read(
+        &self,
+        unit: Unit,
+        target: ClusterNodeIdentity,
+        max_bytes: u64,
+    ) -> ReadMaterializedStatePage {
+        ReadMaterializedStatePage {
+            domain: self.domain.clone(),
+            relay: self.relay.clone(),
+            unit,
+            control_revision: self.control_revision,
+            schema: self.node.schema_fingerprint,
+            selection: self.selection,
+            after: None,
+            max_rows: 0,
+            max_bytes,
+            target,
+        }
+    }
 }
 
 struct NativeMaterializedCapture {
@@ -116,14 +151,8 @@ impl SessionServiceImpl {
     async fn capture_materialized_partition_inspection(
         &self,
         plan: &InspectionPlan,
-        incarnations: &std::collections::BTreeMap<
-            nervix_models::ClusterNodeName,
-            nervix_models::ClusterNodeIncarnation,
-        >,
-    ) -> Result<
-        Option<super::processor_state::partition::PartitionInspection>,
-        StateInspectionRejection,
-    > {
+        incarnations: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+    ) -> Result<Option<PartitionInspection>, StateInspectionRejection> {
         let Some(partitions) = plan.moving_partitions else {
             return Ok(None);
         };
@@ -139,9 +168,7 @@ impl SessionServiceImpl {
                 .reserve(nervix_execution::MemoryClass::Bulk, charge)
                 .await
                 .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
-            let mut inspection = super::processor_state::partition::PartitionInspection::new(
-                partitions, memory, maximum,
-            );
+            let mut inspection = PartitionInspection::new(partitions, memory, maximum);
             for unit in plan.node.units.keys() {
                 nervix_primitives::task::consume_budget().await;
                 let owner =
@@ -151,18 +178,11 @@ impl SessionServiceImpl {
                     .copied()
                     .ok_or(StateInspectionRejection::OwnerUnavailable)?;
                 let request = nervix_interconnect::ReadMaterializedKeyCatalog {
-                    read: ReadMaterializedStatePage {
-                        domain: plan.domain.clone(),
-                        relay: plan.relay.clone(),
-                        unit: *unit,
-                        control_revision: plan.control_revision,
-                        schema: plan.node.schema_fingerprint,
-                        selection: plan.selection,
-                        after: None,
-                        max_rows: 0,
-                        max_bytes: maximum,
-                        target: ClusterNodeIdentity::new(owner.clone(), incarnation),
-                    },
+                    read: plan.zero_row_read(
+                        *unit,
+                        ClusterNodeIdentity::new(owner.clone(), incarnation),
+                        maximum,
+                    ),
                 };
                 let response = if &owner == self.inner.consensus.local_node_id() {
                     self.handle_materialized_key_catalog(request).await
@@ -230,18 +250,165 @@ impl SessionServiceImpl {
         rendered_inspection(state, show.format)
     }
 
-    async fn inspection_plan(
+    pub(super) async fn describe_materialized_relay(
         &self,
         domain: &DomainName,
-        show: &ShowRelayMaterializedState,
-    ) -> Result<InspectionPlan, StateInspectionRejection> {
+        relay: &CreateRelay,
+        branching: &ResolvedBranching,
+    ) -> CommandResult {
         let state = self.inner.consensus.current_runtime_state().await;
+        let scheduled = state.schedule.domain(domain).and_then(|domain| {
+            domain
+                .nodes
+                .get(&NodeRef::new(ModelKind::Relay, relay.name.clone()))
+        });
+        let settings = self.inner.runtime.state_inspection_settings();
+        let deadline = Instant::now()
+            .checked_add(*settings.read_timeout.value())
+            .assured("the inspection read deadline is a bounded setting");
+        let counts = async {
+            match scheduled {
+                Some(node) => {
+                    self.materialized_state_count_lines(&state, domain, &relay.name, node, deadline)
+                        .await
+                }
+                None => Vec::new(),
+            }
+        };
+        let metrics = timeout_at(
+            deadline,
+            self.describe_metrics_for_scheduled_node(
+                domain,
+                ModelKind::Relay,
+                &relay.name,
+                scheduled,
+            ),
+        );
+        let (mut lines, metrics) = futures_util::future::join(counts, metrics).await;
+        match metrics {
+            Ok(Ok(metrics)) => lines.extend(metrics),
+            failure => {
+                tracing::debug!(?failure, "materialized relay buffer metrics unavailable");
+                lines.push("buffer metrics: unavailable".to_string());
+            }
+        }
+        command_ok(append_metrics_lines(
+            format_relay_describe_output(relay, branching, scheduled),
+            lines,
+        ))
+    }
+
+    /// Reads each unit's count descriptor with a zero-row limit. During a repartition, the
+    /// existing owner census keeps counts from including both copies of a moving branch.
+    async fn materialized_state_count_lines(
+        &self,
+        state: &ConsensusRuntimeState,
+        domain: &DomainName,
+        relay: &RelayName,
+        node: &ScheduledNode,
+        deadline: Instant,
+    ) -> Vec<String> {
+        struct CountRead {
+            plan: InspectionPlan,
+            incarnations: BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+            census: Option<PartitionInspection>,
+        }
+
+        let inspection = timeout_at(deadline, async {
+            let plan = self.inspection_plan(state, domain, relay, None, None)?;
+            let incarnations = self.live_node_incarnations().await;
+            let census = self
+                .capture_materialized_partition_inspection(&plan, &incarnations)
+                .await?;
+            Ok(CountRead {
+                plan,
+                incarnations,
+                census,
+            })
+        })
+        .await
+        .unwrap_or(Err(StateInspectionRejection::Deadline));
+        let mut units = node.units.keys().copied().collect::<Vec<_>>();
+        units.sort_unstable();
+        let mut lines = Vec::new();
+        for unit in units {
+            nervix_primitives::task::consume_budget().await;
+            let prefix = match unit.kind() {
+                UnitKind::Partition(partition) => format!("partition {partition}: "),
+                UnitKind::Single | UnitKind::Instance(_) => String::new(),
+            };
+            let counts = match &inspection {
+                Ok(read) => timeout_at(
+                    deadline,
+                    self.materialized_unit_counts(
+                        &read.plan,
+                        &read.incarnations,
+                        read.census.as_ref(),
+                        unit,
+                    ),
+                )
+                .await
+                .unwrap_or(Err(StateInspectionRejection::Deadline)),
+                Err(reason) => Err(*reason),
+            };
+            match counts {
+                Ok(counts) => lines.extend([
+                    format!("{prefix}branches: {}", counts.branches),
+                    format!("{prefix}rows: {}", counts.rows),
+                    format!("{prefix}state bytes: {}", counts.bytes),
+                ]),
+                Err(reason) => lines
+                    .extend(["branches", "rows", "state bytes"].map(|label| {
+                        format!("{prefix}{label}: unavailable ({})", reason.as_ref())
+                    })),
+            }
+        }
+        lines
+    }
+
+    async fn materialized_unit_counts(
+        &self,
+        plan: &InspectionPlan,
+        incarnations: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+        census: Option<&PartitionInspection>,
+        unit: Unit,
+    ) -> Result<StateInspectionCounts, StateInspectionRejection> {
+        let owner = inspection_owner(&plan.node, unit, self.inner.consensus.local_node_id())?;
+        let Some(&incarnation) = incarnations.get(&owner) else {
+            return Err(StateInspectionRejection::OwnerUnavailable);
+        };
+        let (filter, max_bytes) = match census {
+            Some(census) => {
+                // The owner rebuilds its key catalog to check the filter against the census.
+                let max_bytes = u64::try_from(plan.limits.transfer_bytes())
+                    .assured("the session byte limit fits u64");
+                (Some(census.filter(unit)?), max_bytes)
+            }
+            None => (None, 0),
+        };
+        let request = plan.zero_row_read(
+            unit,
+            ClusterNodeIdentity::new(owner, incarnation),
+            max_bytes,
+        );
+        let (descriptor, _) = self.inspection_unit_page(&request, plan, filter).await?;
+        Ok(descriptor.counts)
+    }
+
+    fn inspection_plan(
+        &self,
+        state: &ConsensusRuntimeState,
+        domain: &DomainName,
+        name: &RelayName,
+        selection: Option<&StateBranchSelection>,
+        page: Option<&StateInspectionPageRequest>,
+    ) -> Result<InspectionPlan, StateInspectionRejection> {
         let domain_schedule = state
             .schedule
             .domain(domain)
             .ok_or(StateInspectionRejection::UnknownEntity)?;
         let relay = domain_schedule
-            .scheduled::<CreateRelay>(&show.relay)
+            .scheduled::<CreateRelay>(name)
             .ok_or(StateInspectionRejection::UnknownEntity)?;
         if relay.config.materialized_state.is_none() {
             return Err(StateInspectionRejection::NotMaterialized);
@@ -254,7 +421,7 @@ impl SessionServiceImpl {
             .resolved_branching
             .as_ref()
             .ok_or(StateInspectionRejection::NotReady)?;
-        let selection = match &show.selection {
+        let selection = match selection {
             None => StateInspectionBranchSelection::All,
             Some(selection) => match selection.resolve(branching).map_err(|error| {
                 inspection_refusal(error, StateInspectionRejection::InvalidSelection)
@@ -286,7 +453,7 @@ impl SessionServiceImpl {
         };
         let limits = self.inner.session_limits;
         let settings = self.inner.runtime.state_inspection_settings();
-        let rows = match &show.page {
+        let rows = match page {
             Some(page) => usize::try_from(page.limit.get()).map_err(|error| {
                 inspection_refusal(error, StateInspectionRejection::InvalidLimit)
             })?,
@@ -299,7 +466,7 @@ impl SessionServiceImpl {
         if rows > settings.max_rows.value().get() || rows > limits.collection_entries() {
             return Err(StateInspectionRejection::InvalidLimit);
         }
-        let token = show.page.as_ref().and_then(|page| page.after.as_deref());
+        let token = page.and_then(|page| page.after.as_deref());
         let cursor = match token {
             Some(token) => Some(
                 StateInspectionCursor::decode(token, limits.string_bytes()).map_err(|error| {
@@ -310,7 +477,7 @@ impl SessionServiceImpl {
         };
         if cursor.as_ref().is_some_and(|cursor| {
             cursor.domain != *domain
-                || cursor.entity != NodeRef::new(ModelKind::Relay, show.relay.clone())
+                || cursor.entity != NodeRef::new(ModelKind::Relay, name.clone())
                 || cursor.schema != relay.node.schema_fingerprint
                 || cursor.control_revision != state.revision
                 || cursor.selection != selection
@@ -335,7 +502,7 @@ impl SessionServiceImpl {
         };
         Ok(InspectionPlan {
             domain: domain.clone(),
-            relay: show.relay.clone(),
+            relay: name.clone(),
             node: relay.node.clone(),
             control_revision: state.revision,
             schema: RowSchema {
@@ -360,7 +527,14 @@ impl SessionServiceImpl {
         domain: &DomainName,
         show: &ShowRelayMaterializedState,
     ) -> Result<StateInspectionPage, StateInspectionRejection> {
-        let plan = self.inspection_plan(domain, show).await?;
+        let state = self.inner.consensus.current_runtime_state().await;
+        let plan = self.inspection_plan(
+            &state,
+            domain,
+            &show.relay,
+            show.selection.as_ref(),
+            show.page.as_ref(),
+        )?;
         let incarnations = self.live_node_incarnations().await;
         let partition_inspection = self
             .capture_materialized_partition_inspection(&plan, &incarnations)

@@ -325,14 +325,15 @@ and its validation; [Rust WASM Guest SDK](./wasm-guest-sdk.md#describing-state) 
 
 ## Summaries In DESCRIBE
 
-A summary never needs a full read. `DESCRIBE DEDUPLICATOR`, `DESCRIBE REORDERER`,
-`DESCRIBE CORRELATOR` and `DESCRIBE WINDOW PROCESSOR` report each execution unit's `branches:`, row
-or key count and `state bytes:` through the same owner routing with a page that asks for no row,
-and a unit whose owner cannot answer reports the typed refusal in place of each count, as in
+A summary asks the owner for counts with a zero-row page. `DESCRIBE RELAY` for a materialized relay,
+`DESCRIBE DEDUPLICATOR`, `DESCRIBE REORDERER`, `DESCRIBE CORRELATOR` and `DESCRIBE WINDOW PROCESSOR`
+report each execution unit's `branches:`, row or key count and `state bytes:`. A unit whose owner
+cannot answer reports the typed refusal in place of each count, as in
 `rows: unavailable (owner_unavailable)`. `DESCRIBE INFERENCER` reports each unit's published
 branches, bytes and persistence progress, and `DESCRIBE WASM PROCESSOR` the default generation, the
 latest reset and the counts of checkpoint stages and recoveries. These summaries read no row,
-tensor, key or guest value.
+tensor, key or guest value. The materialized relay summary uses the owner's stored state when the
+domain is stopped.
 
 ## Concurrency
 

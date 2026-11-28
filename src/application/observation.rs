@@ -217,6 +217,11 @@ impl SessionServiceImpl {
             }
         };
 
+        if describe.bindings.is_empty() && ack_model.materialized_state.is_some() {
+            return self
+                .describe_materialized_relay(domain, &ack_model, &branching)
+                .await;
+        }
         let schedule = self.inner.consensus.current_schedule().await;
         let scheduled_relay = if let Some(domain_schedule) = schedule.domain(domain) {
             domain_schedule.nodes.get(&NodeRef::new(

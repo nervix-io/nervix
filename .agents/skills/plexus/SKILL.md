@@ -198,6 +198,7 @@ Creation Coverage section for which form creates each statement.
 
 For materialized relay inspection, read [Relay → Inspect Materialized State](../../../docs/src/relay.md#inspect-materialized-state)
 for selector, LIMIT/AFTER and FORMAT clause order, typed rows, sensitivity and stale continuations.
+Use `DESCRIBE RELAY <relay>` for per-unit branch, row and byte counts.
 Before explaining a refusal, a count or a continuation of any `SHOW ... STATE` read, read
 [State Inspection](../../../docs/src/state-inspection.md) for how the read is answered.
 For the rows a reorderer holds or a correlator's pending records, read

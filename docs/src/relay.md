@@ -488,6 +488,14 @@ partition 2: owner=node-3 replicas=-
 partition 3: owner=node-2 replicas=-
 ```
 
+For a materialized relay, this command also reports `branches:`, `rows:` and `state bytes:` for each
+execution unit. For example, `partition 2: rows: 4` means partition 2 holds four materialized rows.
+The counts come from the same owner read as `SHOW RELAY ... MATERIALIZED STATE`, including stored
+state when the domain is stopped. The count request has a row limit of zero. An owner that cannot
+answer produces a refusal for each count, such as `partition 2: rows: unavailable (owner_unavailable)`.
+If the buffer-metrics request fails, the description still shows the state summary and marks buffer
+metrics as unavailable.
+
 `DESCRIBE RELAY <relay> WHERE (...)` is answered only by the current owner of the key's partition
 and reports owner-authoritative concrete-branch existence and buffer metrics. A partitioned relay
 also reports the key's partition and the node that owns it, as `partition: <p>` and `owner: <node>`
