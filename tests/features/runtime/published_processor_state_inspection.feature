@@ -292,11 +292,11 @@ Feature: Typed inspection of published deduplicator keys and window state
     Given client "reader" is connected to node "node-1"
     Then within "30s" client "reader" sees window "retained" hold 6 rows
     And the last processor state counts 6 rows in 2 branches
-    # Each retained row carries its 512 KiB message as input and as the COUNT argument, 1 MiB, and
-    # gathering its columns takes twice that. A page read through another node also sets the row's
-    # bytes aside for the body that carries it. With 5 MiB left on every node, the owner's reads of
-    # its own state return two rows a page and every other node's reads one, each page ending
-    # where the next row no longer fits, and the rest follow on the next pages.
+    # Each retained row carries its 512 KiB message as input and as the COUNT argument, 1 MiB.
+    # Gathering also needs selection indices, metadata columns and run records. A page read
+    # through another node sets aside the body that carries the row. With 5 MiB left on every node,
+    # the owner can fit four rows. A remote read fits one row beside its decoding charge and
+    # continues with the remaining rows on later pages.
     When bulk memory on every node keeps only "5242880" bytes free
     Then a client of every node reads window "retained" state at the default limit in more than one page with unchanged complete counts
     When bulk memory on every node is released

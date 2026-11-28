@@ -29,7 +29,7 @@ use nervix_primitives::time::timeout;
 use super::*;
 use crate::{
     runtime_ack::AckSet,
-    runtime_schema::{RuntimeValue, test_runtime_row},
+    runtime_schema::{RuntimeRecordMetadata, RuntimeValue, test_runtime_row},
 };
 
 /// One batch of `rows` rows whose sequences, and order keys, continue at `first`, each with a note
@@ -238,14 +238,29 @@ fn held_reorderer_branch(key: Option<BranchKey>, sequences: &[u64], held: u64) -
     }
 }
 
+fn gathered_fixture(pending: usize, left: usize, right: usize, runs: usize) -> AdmittedRows {
+    AdmittedRows {
+        rows: HeldSectionRows {
+            pending,
+            left,
+            right,
+        },
+        runs,
+        ..AdmittedRows::default()
+    }
+}
+
 #[test]
 fn reorderer_sections_keep_row_order_in_branch_runs_with_typed_keys_and_deadlines() {
     let east = string_branch_key("region", "east");
     let west = string_branch_key("region", "west");
-    let gathered = reorderer_sections(vec![
-        held_reorderer_branch(east.clone(), &[3, 1], 4),
-        held_reorderer_branch(west.clone(), &[2], 2),
-    ])
+    let gathered = reorderer_sections(
+        vec![
+            held_reorderer_branch(east.clone(), &[3, 1], 4),
+            held_reorderer_branch(west.clone(), &[2], 2),
+        ],
+        &gathered_fixture(3, 0, 0, 2),
+    )
     .assured("the copies hold their order keys in the key program's type");
     let runs = gathered
         .runs
@@ -330,15 +345,18 @@ fn correlator_sections_split_each_side_and_keep_its_timeout() {
             timeout_at: Timestamp::from_unix_nanos(at + 100),
         });
     }
-    let gathered = correlator_sections(vec![CopiedBranch {
-        key: tenant.clone(),
-        held: HeldBranchRows {
-            rows: 5,
-            bytes: 0,
-            copied_bytes: 0,
-            kind: HeldRowsKind::Correlator { left: 3, rows },
-        },
-    }])
+    let gathered = correlator_sections(
+        vec![CopiedBranch {
+            key: tenant.clone(),
+            held: HeldBranchRows {
+                rows: 5,
+                bytes: 0,
+                copied_bytes: 0,
+                kind: HeldRowsKind::Correlator { left: 3, rows },
+            },
+        }],
+        &gathered_fixture(0, 2, 1, 2),
+    )
     .assured("correlator copies gather by side");
     let runs = gathered
         .runs
@@ -748,6 +766,82 @@ fn returned_sequences(page: &ProcessorStatePage) -> Vec<u64> {
     }
 }
 
+#[test]
+fn gathering_nested_columns_charges_selected_values_and_their_offsets() {
+    use arrow_array::builder::{FixedSizeListBuilder, ListBuilder, StringBuilder};
+
+    let mut nested = FixedSizeListBuilder::new(ListBuilder::new(StringBuilder::new()), 2);
+    for text in [
+        "east".repeat(300),
+        "other".repeat(20_000),
+        "west".repeat(300),
+    ] {
+        nested.values().values().append_value(&text);
+        nested.values().append(true);
+        nested.values().append(true);
+        nested.append(true);
+    }
+    let column: ArrayRef = StdArc::new(nested.finish());
+    let schema = StdArc::new(arrow_schema::Schema::new(vec![Field::new(
+        "tags",
+        column.data_type().clone(),
+        false,
+    )]));
+    let batch = arrow_array::RecordBatch::try_new(schema.clone(), vec![column])
+        .assured("the nested column matches its schema");
+    let batch = Arc::new(
+        RuntimeRecordBatch::from_record_batch(schema, batch)
+            .assured("the fixture holds the Arrow batch"),
+    );
+    let first = RuntimeRow::new(batch.clone(), 0, RuntimeRecordMetadata::test())
+        .assured("fixture has an east row");
+    let last =
+        RuntimeRow::new(batch, 2, RuntimeRecordMetadata::test()).assured("fixture has a west row");
+    let admitted = memory::payload_row(&first, true).assured("first row charge")
+        + memory::payload_row(&last, false).assured("second row charge");
+    let columns =
+        payload_columns([&first, &last].into_iter()).assured("gathering copies two nested rows");
+    let section = ProcessorStateSectionColumns {
+        section: ProcessorStateSection::Pending,
+        rows: 2,
+        payload: columns,
+        appended: Vec::new(),
+        key_fields: Vec::new(),
+    };
+    assert_eq!(section.payload[0].len(), 2);
+    memory::assert_buffers(&[section], admitted);
+    assert!(
+        admitted < 100_000,
+        "the unselected string never joins the output charge"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_reorderer_page_charges_its_payload_order_keys_and_timing_columns() {
+    let runtime = Runtime::default();
+    let reorderer = HoldingReorderer::install(&runtime, "charged", wide_buffer(3, 101));
+    let page = reorderer
+        .page(&runtime, None, PageReply::Local)
+        .await
+        .assured("the owner presents the complete page");
+    assert_eq!(returned_sequences(&page), [0, 1, 2]);
+    let section = &page.sections[0];
+    let buffers: usize = section
+        .payload
+        .iter()
+        .chain(&section.appended)
+        .map(|column| column.get_buffer_memory_size())
+        .sum();
+    let runs = page.runs.capacity() * std::mem::size_of::<ProcessorStateRun>();
+    let memory = page.memory.as_ref().assured("the page carries its charge");
+    assert!(
+        memory._reservation.bytes()
+            >= u64::try_from(buffers + runs).assured("the page allocations fit u64")
+    );
+    drop(page);
+    reorderer.end(&runtime).await;
+}
+
 /// A reorderer page whose copied rows the bulk class cannot hold whole ends before the row it can
 /// no longer hold, with complete counts and a continuation, and the pages that follow return every
 /// other held row once, in order. The read is never refused while a row can be returned.
@@ -821,10 +915,11 @@ async fn a_reorderer_page_another_node_reads_sets_aside_its_reply_and_ends_soone
         "a page its owner presents sets nothing aside for a reply"
     );
     drop(local);
-    let reply = PageReply::remote(&runtime.inner.executor);
+    let reply = PageReply::remote(&runtime.inner.executor, u32::MAX);
     let PageReply::Remote {
         descriptor,
         framing,
+        ..
     } = reply
     else {
         panic!("a reply to another node sets memory aside");
@@ -890,7 +985,7 @@ fn a_key_part_outside_its_column_type_fails_the_section() {
         panic!("a reorderer copy");
     };
     rows[0].key = vec![ReorderKeyPart::UInt64(u64::from(u32::MAX) + 1)];
-    let error = reorderer_sections(vec![copy])
+    let error = reorderer_sections(vec![copy], &gathered_fixture(1, 0, 0, 1))
         .err()
         .assured("a part no u32 holds was never this column's part");
     assert!(matches!(

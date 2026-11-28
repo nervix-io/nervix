@@ -32,6 +32,8 @@ use nervix_models::{ProcessorStateSection, StateInspectionBranchSelection, State
 use super::*;
 use crate::runtime_schema::batch_payload_bytes;
 
+pub(super) mod memory;
+
 /// What one branch task copies of the rows it holds: the rows after the first `skip` of them, in
 /// the order the task lists them, at most `max_rows` rows of at most `max_bytes` payload bytes.
 #[derive(Debug, Clone, Copy)]
@@ -101,47 +103,66 @@ impl HeldRowsKind {
         }
     }
 
-    /// What admitting each copied row takes, in the order the rows were copied.
-    fn row_costs(&self) -> Vec<HeldRowCost> {
-        let mut costs = Vec::with_capacity(self.copied());
+    fn row_cost(
+        &self,
+        index: usize,
+        counts: &HeldSectionRows,
+        remote: bool,
+    ) -> error_stack::Result<HeldRowCost, ProcessorStatePageError> {
+        let timing = memory::slots::<i64>(2)?;
         match self {
-            Self::Reorderer { rows, .. } => {
-                // The route the row waits on, and its received and release times.
-                let fixed = std::mem::size_of::<u32>()
-                    .checked_add(std::mem::size_of::<i64>())
-                    .assured("fixed column widths are tiny");
-                let fixed = fixed
-                    .checked_add(std::mem::size_of::<i64>())
-                    .assured("fixed column widths are tiny");
-                let fixed = u64::try_from(fixed).assured("fixed column widths fit u64");
-                let key_part = u64::try_from(std::mem::size_of::<u64>())
-                    .assured("a fixed column width fits u64");
-                for row in rows {
-                    let columns = held_row_bytes(&row.row);
-                    let mut appended = fixed;
-                    for part in &row.key {
-                        appended = appended
-                            .checked_add(key_part)
-                            .assured("a resident row's key is far below u64::MAX bytes");
-                        appended = appended
-                            .checked_add(part.value_bytes())
-                            .assured("a resident row's key is far below u64::MAX bytes");
-                    }
-                    costs.push(HeldRowCost::new(columns, appended));
+            Self::Reorderer { key_fields, rows } => {
+                let row = &rows[index];
+                let first = counts.pending == 0;
+                let metadata = memory::add(timing, memory::slots::<u32>(1)?)?;
+                let mut body = if remote {
+                    memory::add(held_row_bytes(&row.row), metadata)?
+                } else {
+                    0
+                };
+                let mut columns = memory::payload_row(&row.row, first)?;
+                columns = memory::add(columns, memory::fixed_columns(metadata, 3, first)?)?;
+                columns = memory::add(columns, memory::slots::<&HeldReordererRow>(1)?)?;
+                if key_fields.len() != row.key.len() {
+                    return Err(Report::new(ProcessorStatePageError::Columns));
                 }
+                for (field, part) in key_fields.iter().zip(&row.key) {
+                    if remote {
+                        let values = memory::add(memory::slots::<u64>(1)?, part.value_bytes())?;
+                        body = memory::add(body, values)?;
+                    }
+                    columns =
+                        memory::add(columns, memory::key_part(part, field.data_type(), first)?)?;
+                }
+                Ok(HeldRowCost {
+                    section: ProcessorStateSection::Pending,
+                    columns,
+                    body,
+                    first_in_section: first,
+                })
             }
             Self::Correlator { rows, .. } => {
-                // The row's received and timeout times.
-                let appended = std::mem::size_of::<i64>()
-                    .checked_add(std::mem::size_of::<i64>())
-                    .assured("fixed column widths are tiny");
-                let appended = u64::try_from(appended).assured("fixed column widths fit u64");
-                for row in rows {
-                    costs.push(HeldRowCost::new(held_row_bytes(&row.row), appended));
-                }
+                let row = &rows[index];
+                let (section, first) = match row.side {
+                    CorrelatorSide::Left => (ProcessorStateSection::Left, counts.left == 0),
+                    CorrelatorSide::Right => (ProcessorStateSection::Right, counts.right == 0),
+                };
+                let body = if remote {
+                    memory::add(held_row_bytes(&row.row), timing)?
+                } else {
+                    0
+                };
+                let columns = memory::payload_row(&row.row, first)?;
+                let columns = memory::add(columns, memory::fixed_columns(timing, 2, first)?)?;
+                let columns = memory::add(columns, memory::slots::<&HeldCorrelatorRow>(1)?)?;
+                Ok(HeldRowCost {
+                    section,
+                    columns,
+                    body,
+                    first_in_section: first,
+                })
             }
         }
-        costs
     }
 
     /// Keeps only the first `rows` copied rows.
@@ -156,20 +177,10 @@ impl HeldRowsKind {
 /// What admitting one copied row to a page takes: the bytes of its gathered columns, and the bytes
 /// of the body that carries it to another node.
 struct HeldRowCost {
+    section: ProcessorStateSection,
     columns: u64,
     body: u64,
-}
-
-impl HeldRowCost {
-    /// A row whose payload takes `columns` bytes and whose appended columns take `appended`.
-    fn new(columns: u64, appended: u64) -> Self {
-        Self {
-            columns,
-            body: columns
-                .checked_add(appended)
-                .assured("a resident row is far below u64::MAX bytes"),
-        }
-    }
+    first_in_section: bool,
 }
 
 /// One row a reorderer holds back on one output route.
@@ -613,10 +624,13 @@ pub(crate) enum PageReply {
     /// This node presents the page itself and writes its rows as Row frames: nothing is set aside.
     Local,
     /// Another node reads the page, which travels as a descriptor and native Arrow bodies. The
-    /// page sets aside `descriptor` for the descriptor's encoding and, when it can return rows,
-    /// `framing` for each section body's Arrow framing; every row it admits sets the bytes of the
-    /// body that carries it aside as well.
-    Remote { descriptor: u64, framing: u64 },
+    /// page sets aside `descriptor` for the descriptor's encoding. It charges `framing` when it
+    /// admits a section's first row and body bytes for every admitted row.
+    Remote {
+        descriptor: u64,
+        framing: u64,
+        preferred_body_bytes: u32,
+    },
 }
 
 impl PageReply {
@@ -642,10 +656,33 @@ impl PageReply {
 
     /// The reply to another node under `executor`'s bounds: what its descriptor takes and each
     /// body's framing.
-    pub(crate) fn remote(executor: &nervix_execution::Executor) -> Self {
+    pub(crate) fn remote(executor: &Executor, preferred_body_bytes: u32) -> Self {
         Self::Remote {
             descriptor: Self::descriptor_share(executor),
             framing: Self::body_framing(executor),
+            preferred_body_bytes,
+        }
+    }
+
+    /// The reader holds the encoded bodies beside their decoding charge. The decoder's charge
+    /// per byte is highest for bodies below its section ceiling, where its full rate applies.
+    pub(crate) fn preferred_body_bytes(executor: &Executor) -> u32 {
+        let available = executor.memory(MemoryClass::Bulk).available_bytes();
+        let scratch =
+            crate::runtime_schema::RuntimeRecordBatch::snapshot_section_scratch(executor, 1);
+        let per_byte = scratch
+            .checked_add(1)
+            .assured("one encoded byte has a bounded read charge");
+        u32::try_from(available / per_byte).assured("the bulk class bound fits u32")
+    }
+
+    pub(super) fn optional_bodies_fit(self, bytes: u64) -> bool {
+        match self {
+            Self::Local => true,
+            Self::Remote {
+                preferred_body_bytes,
+                ..
+            } => bytes <= u64::from(preferred_body_bytes),
         }
     }
 
@@ -668,40 +705,43 @@ impl PageReply {
         executor.limits().snapshot_header_bytes.as_u64()
     }
 
-    /// The bulk share an owner page of at most `max_rows` rows and `max_bytes` bytes starts its
-    /// read from. A page that returns no row starts from the least share, since everything it
-    /// takes is required. Any other starts from the room the class has free now
-    /// ([`Executor::memory`]), up to the most such a page takes by the charges its rows take: each
-    /// row's columns twice over, the selected views and their gathered buffers, and for a reply to
-    /// another node the body that carries the row, beside what the reply sets aside ahead. A page
-    /// that requires more runs again within a larger share, and one whose optional rows find no
-    /// room in its share ends before them.
+    /// Seed an owner page's bulk allowance with room for its logical payload, row selection
+    /// slots, and any reply. The page measures the selected columns under that allowance. It
+    /// retries a required charge that needs more room, and stops before an optional row that does
+    /// not fit.
     pub(crate) fn initial_share(self, executor: &Executor, max_rows: u64, max_bytes: u64) -> u64 {
         if max_rows == 0 {
             return 1;
         }
         let free = executor.memory(MemoryClass::Bulk).available_bytes();
-        // A page bound past what `u64` counts is past the class, whose free room alone then bounds
-        // the share.
-        let Some(most) = self.most_bytes(max_bytes) else {
+        let Some(seed) = self.seed_bytes(max_rows, max_bytes) else {
             return free.max(1);
         };
-        most.min(free).max(1)
+        seed.min(free).max(1)
     }
 
-    /// The most an owner page of at most `max_bytes` bytes takes by the charges its rows take, or
-    /// `None` past what `u64` counts: its rows' columns twice over and, for a reply to another
-    /// node, the bodies that carry them beside what the reply sets aside ahead.
-    fn most_bytes(self, max_bytes: u64) -> Option<u64> {
-        let columns = max_bytes.checked_mul(2)?;
-        let (bodies, ahead) = match self {
-            Self::Local => (0, 0),
+    fn seed_bytes(self, max_rows: u64, max_bytes: u64) -> Option<u64> {
+        use std::mem::size_of;
+
+        let row_view = size_of::<HeldReordererRow>()
+            .max(size_of::<super::window_state::WindowEntrySnapshot>());
+        let selection = size_of::<&RuntimeRow>().checked_add(size_of::<(usize, usize)>())?;
+        let row_slots = row_view
+            .checked_add(selection)?
+            .checked_add(size_of::<ProcessorStateRun>())?;
+        let row_slots = u64::try_from(row_slots).assured("row metadata sizes fit u64");
+        let working = max_rows.checked_mul(row_slots)?.checked_add(max_bytes)?;
+        match self {
+            Self::Local => Some(working),
             Self::Remote {
                 descriptor,
                 framing,
-            } => (max_bytes, descriptor.checked_add(framing)?),
-        };
-        columns.checked_add(bodies)?.checked_add(ahead)
+                ..
+            } => working
+                .checked_add(max_bytes)?
+                .checked_add(descriptor)?
+                .checked_add(framing),
+        }
     }
 }
 
@@ -795,6 +835,18 @@ pub(crate) struct ProcessorStateRun {
     pub(crate) section: ProcessorStateSection,
     pub(crate) branch: Option<BranchKey>,
     pub(crate) rows: usize,
+}
+
+impl ProcessorStateRun {
+    pub(super) fn continues(
+        &self,
+        section: ProcessorStateSection,
+        branch: &Option<BranchKey>,
+    ) -> bool {
+        self.section == section
+            && self.branch.as_ref().map(BranchKey::fingerprint)
+                == branch.as_ref().map(BranchKey::fingerprint)
+    }
 }
 
 /// The columns of a page, and the runs that order its returned rows.
@@ -954,25 +1006,17 @@ impl Runtime {
             generation,
             digest,
         };
-        self.held_rows_page(
-            executor,
-            processor.kind,
-            bounds.reply,
-            bounds.rows != 0,
-            copied,
-        )
-        .await
+        self.held_rows_page(executor, processor.kind, bounds.reply, copied)
+            .await
     }
 
     /// The page of the rows `copied` holds for a `kind` unit: admitted to the bulk memory the
-    /// page holds, those it keeps gathered into columns, and what it set aside for `reply`. A read
-    /// that `returns_rows` admits rows; a count-only read admits none.
+    /// page holds, those it keeps gathered into columns, and what it set aside for `reply`.
     async fn held_rows_page(
         &self,
         executor: &Executor,
         kind: ModelKind,
         reply: PageReply,
-        returns_rows: bool,
         copied: CopiedPage,
     ) -> error_stack::Result<ProcessorStatePage, ProcessorStatePageError> {
         let CopiedPage {
@@ -982,8 +1026,7 @@ impl Runtime {
             generation,
             digest,
         } = copied;
-        let sections = held_row_sections(kind)?;
-        let memory = HeldRowsMemory::new(executor, reply, sections, returns_rows)?;
+        let memory = HeldRowsMemory::new(executor, reply)?;
         let held = self
             .processor_state_sections(executor, kind, copies, memory)
             .await?;
@@ -1036,10 +1079,12 @@ impl Runtime {
                 };
                 let admitted = memory.admit_copies(&mut copies, cancellation)?;
                 let gathered = match kind {
-                    ModelKind::Reorderer => reorderer_sections(copies)?,
-                    ModelKind::Correlator => correlator_sections(copies)?,
+                    ModelKind::Reorderer => reorderer_sections(copies, &admitted)?,
+                    ModelKind::Correlator => correlator_sections(copies, &admitted)?,
                     _ => return Err(Report::new(ProcessorStatePageError::Columns)),
                 };
+                memory::assert_buffers(&gathered.sections, admitted.columns);
+                assert_eq!(gathered.runs.capacity(), admitted.runs);
                 Ok(HeldSections {
                     gathered,
                     memory,
@@ -1070,17 +1115,6 @@ struct HeldSections {
     admitted: AdmittedRows,
 }
 
-/// How many sections a page of `kind` carries its held rows in: a reorderer's pending rows, or a
-/// correlator's left and right rows.
-fn held_row_sections(kind: ModelKind) -> error_stack::Result<u64, ProcessorStatePageError> {
-    let sections = match kind {
-        ModelKind::Reorderer => [ProcessorStateSection::Pending].len(),
-        ModelKind::Correlator => [ProcessorStateSection::Left, ProcessorStateSection::Right].len(),
-        _ => return Err(Report::new(ProcessorStatePageError::Columns)),
-    };
-    Ok(u64::try_from(sections).assured("a section count fits u64"))
-}
-
 /// The bulk memory of a page of held rows: the bytes of the rows' gathered columns and, for a page
 /// another node reads, what encoding its reply takes, set aside as the rows are admitted.
 struct HeldRowsMemory {
@@ -1091,39 +1125,49 @@ struct HeldRowsMemory {
 }
 
 /// What admitting the copied rows left a page with.
+#[derive(Default)]
 struct AdmittedRows {
     returned: u64,
+    rows: HeldSectionRows,
+    columns: u64,
+    runs: usize,
     last_branch: Option<BranchKeyFingerprint>,
 }
 
+#[derive(Default)]
+struct HeldSectionRows {
+    pending: usize,
+    left: usize,
+    right: usize,
+}
+
+impl HeldSectionRows {
+    fn record(&mut self, section: ProcessorStateSection) {
+        let count = match section {
+            ProcessorStateSection::Pending => &mut self.pending,
+            ProcessorStateSection::Left => &mut self.left,
+            ProcessorStateSection::Right => &mut self.right,
+            _ => unreachable!("held rows only have pending, left and right sections"),
+        };
+        *count = count
+            .checked_add(1)
+            .assured("a page's row limit bounds its sections");
+    }
+}
+
 impl HeldRowsMemory {
-    /// The memory of a page whose rows fall into `sections` sections. A page another node reads
-    /// sets aside, before any row, the bound on its descriptor and, when it can return rows, the
-    /// framing of each section's body.
+    /// A page another node reads sets aside its descriptor before admitting rows.
     fn new(
         executor: &Executor,
         reply: PageReply,
-        sections: u64,
-        returns_rows: bool,
     ) -> error_stack::Result<Self, ProcessorStatePageError> {
         let mut page = Self {
             memory: executor.charge_nothing(MemoryClass::Bulk),
             reply,
             bodies: 0,
         };
-        if let PageReply::Remote {
-            descriptor,
-            framing,
-        } = reply
-        {
+        if let PageReply::Remote { descriptor, .. } = reply {
             page.reserve(descriptor)?;
-            if returns_rows {
-                let framing = framing
-                    .checked_mul(sections)
-                    .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
-                page.reserve(framing)?;
-                page.bodies = framing;
-            }
         }
         Ok(page)
     }
@@ -1150,22 +1194,32 @@ impl HeldRowsMemory {
         copies: &mut [CopiedBranch],
         cancellation: &Cancellation,
     ) -> error_stack::Result<AdmittedRows, ProcessorStatePageError> {
-        let mut admitted = AdmittedRows {
-            returned: 0,
-            last_branch: None,
-        };
+        let mut admitted = AdmittedRows::default();
         let mut full = false;
+        let remote = matches!(self.reply, PageReply::Remote { .. });
         for copy in copies.iter_mut() {
             cancellation
                 .check()
                 .change_context(ProcessorStatePageError::Admission)?;
             let mut kept = 0_usize;
             if !full {
-                for cost in copy.held.kind.row_costs() {
-                    if !self.admit(cost, admitted.returned == 0)? {
+                let mut section = None;
+                for index in 0..copy.held.kind.copied() {
+                    let cost = copy.held.kind.row_cost(index, &admitted.rows, remote)?;
+                    let new_run = section != Some(cost.section);
+                    if !self.admit(&cost, new_run, admitted.returned == 0)? {
                         full = true;
                         break;
                     }
+                    if new_run {
+                        admitted.runs = admitted
+                            .runs
+                            .checked_add(1)
+                            .assured("a page has at most one run per row");
+                        section = Some(cost.section);
+                    }
+                    admitted.rows.record(cost.section);
+                    admitted.columns = memory::add(admitted.columns, cost.columns)?;
                     kept = kept
                         .checked_add(1)
                         .assured("a page keeps no more rows than were copied");
@@ -1187,17 +1241,22 @@ impl HeldRowsMemory {
     /// row is required; every later row joins only while the share has room for it now.
     fn admit(
         &mut self,
-        cost: HeldRowCost,
+        cost: &HeldRowCost,
+        new_run: bool,
         first: bool,
     ) -> error_stack::Result<bool, ProcessorStatePageError> {
-        let body = match self.reply {
-            PageReply::Local => 0,
-            PageReply::Remote { .. } => cost.body,
-        };
-        let charge = cost
-            .columns
-            .checked_add(body)
-            .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
+        let mut body = cost.body;
+        if let PageReply::Remote { framing, .. } = self.reply
+            && cost.first_in_section
+        {
+            body = memory::add(body, framing)?;
+        }
+        let bodies = memory::add(self.bodies, body)?;
+        if !first && !self.reply.optional_bodies_fit(bodies) {
+            return Ok(false);
+        }
+        let run = memory::slots::<ProcessorStateRun>(usize::from(new_run))?;
+        let charge = memory::add(memory::add(cost.columns, body)?, run)?;
         let target = self
             .memory
             .bytes()
@@ -1210,10 +1269,7 @@ impl HeldRowsMemory {
         } else if self.memory.try_grow_to(target).is_err() {
             return Ok(false);
         }
-        self.bodies = self
-            .bodies
-            .checked_add(body)
-            .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
+        self.bodies = bodies;
         Ok(true)
     }
 
@@ -1227,6 +1283,7 @@ impl HeldRowsMemory {
             PageReply::Remote {
                 descriptor,
                 framing,
+                ..
             } => {
                 let (descriptor, rest) = self
                     .memory
@@ -1253,9 +1310,7 @@ pub(super) fn extend_runs(
     branch: &Option<BranchKey>,
 ) {
     if let Some(last) = runs.last_mut()
-        && last.section == section
-        && last.branch.as_ref().map(BranchKey::fingerprint)
-            == branch.as_ref().map(BranchKey::fingerprint)
+        && last.continues(section, branch)
     {
         last.rows = last
             .rows
@@ -1272,11 +1327,12 @@ pub(super) fn extend_runs(
 
 fn reorderer_sections(
     copies: Vec<CopiedBranch>,
+    admitted: &AdmittedRows,
 ) -> error_stack::Result<GatheredSections, ProcessorStatePageError> {
     let mut held_rows = 0_u64;
     let mut key_fields = Vec::new();
-    let mut runs = Vec::new();
-    let mut rows = Vec::<&HeldReordererRow>::new();
+    let mut runs = Vec::with_capacity(admitted.runs);
+    let mut rows = Vec::<&HeldReordererRow>::with_capacity(admitted.rows.pending);
     for copy in &copies {
         held_rows = held_rows
             .checked_add(copy.held.rows)
@@ -1308,17 +1364,13 @@ fn reorderer_sections(
             rows.iter().map(|row| row.output),
         ));
         appended.push(output);
+        if rows.iter().any(|row| row.key.len() != key_fields.len()) {
+            return Err(Report::new(ProcessorStatePageError::Columns));
+        }
         for (index, field) in key_fields.iter().enumerate() {
-            let mut parts = Vec::with_capacity(rows.len());
-            for row in &rows {
-                let Some(part) = row.key.get(index) else {
-                    return Err(Report::new(ProcessorStatePageError::Columns));
-                };
-                parts.push(part);
-            }
-            let column =
-                ReorderKeyPart::typed_column(field.data_type(), parts.into_iter(), rows.len())
-                    .change_context(ProcessorStatePageError::Columns)?;
+            let parts = rows.iter().map(|row| &row.key[index]);
+            let column = ReorderKeyPart::typed_column(field.data_type(), parts, rows.len())
+                .change_context(ProcessorStatePageError::Columns)?;
             appended.push(column);
         }
         appended.push(timestamp_column(rows.iter().map(|row| row.received_at)));
@@ -1338,12 +1390,13 @@ fn reorderer_sections(
 
 fn correlator_sections(
     copies: Vec<CopiedBranch>,
+    admitted: &AdmittedRows,
 ) -> error_stack::Result<GatheredSections, ProcessorStatePageError> {
     let mut left_rows = 0_u64;
     let mut right_rows = 0_u64;
-    let mut runs = Vec::new();
-    let mut left = Vec::<&HeldCorrelatorRow>::new();
-    let mut right = Vec::<&HeldCorrelatorRow>::new();
+    let mut runs = Vec::with_capacity(admitted.runs);
+    let mut left = Vec::<&HeldCorrelatorRow>::with_capacity(admitted.rows.left);
+    let mut right = Vec::<&HeldCorrelatorRow>::with_capacity(admitted.rows.right);
     for copy in &copies {
         let HeldRowsKind::Correlator {
             left: held_left,
@@ -1404,7 +1457,7 @@ fn correlator_sections(
 /// Takes the selected rows' payload values column by column from the shared batches they live in.
 /// Only the selected values are copied; the source batches are read, never rebuilt.
 pub(super) fn payload_columns<'a>(
-    rows: impl Iterator<Item = &'a RuntimeRow>,
+    rows: impl ExactSizeIterator<Item = &'a RuntimeRow>,
 ) -> error_stack::Result<Vec<ArrayRef>, ProcessorStatePageError> {
     let rows = rows.collect::<Vec<_>>();
     let Some(first) = rows.first() else {

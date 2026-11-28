@@ -119,30 +119,34 @@ pub(super) fn reorder_key_part(array: &VmTypedArray, row: usize) -> ReorderKeyPa
     }
 }
 
-/// The text or byte value bytes a key column builder reserves before its parts are appended:
-/// none.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "a text or byte key column learns its parts' lengths only as they arrive, so the \
-                  builder reserves offsets for its rows and no value bytes it cannot know yet"
-    )
-)]
-const RESERVED_VALUE_BYTES: usize = 0;
-
 /// A key part that is not a value of the column type its key expression produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(super) enum ReorderKeyColumnError {
     #[error("a key part does not have the type its key expression produces")]
     PartType,
+    #[error("the selected key values exceed the maximum size of an Arrow text or byte column")]
+    ValuesTooLarge,
 }
 
 impl ReorderKeyPart {
+    fn key_value_bytes<'a>(
+        parts: impl Iterator<Item = &'a Self>,
+    ) -> error_stack::Result<usize, ReorderKeyColumnError> {
+        let too_large = || Report::new(ReorderKeyColumnError::ValuesTooLarge);
+        let mut bytes = 0_u64;
+        for part in parts {
+            bytes = bytes
+                .checked_add(part.value_bytes())
+                .ok_or_else(too_large)?;
+        }
+        let bytes = i32::try_from(bytes).map_err(|_| too_large())?;
+        usize::try_from(bytes).map_err(|_| too_large())
+    }
+
     /// One typed key column of `data_type` holding `parts`, every part the type's own normalization.
     pub(super) fn typed_column<'a>(
         data_type: &DataType,
-        parts: impl Iterator<Item = &'a ReorderKeyPart>,
+        parts: impl Iterator<Item = &'a ReorderKeyPart> + Clone,
         rows: usize,
     ) -> error_stack::Result<ArrayRef, ReorderKeyColumnError> {
         let mismatch = || Report::new(ReorderKeyColumnError::PartType);
@@ -223,7 +227,8 @@ impl ReorderKeyPart {
                 Ok(array)
             }
             DataType::Utf8 => {
-                let mut builder = StringBuilder::with_capacity(rows, RESERVED_VALUE_BYTES);
+                let mut builder =
+                    StringBuilder::with_capacity(rows, Self::key_value_bytes(parts.clone())?);
                 for part in parts {
                     match part {
                         ReorderKeyPart::Null => builder.append_null(),
@@ -235,7 +240,8 @@ impl ReorderKeyPart {
                 Ok(array)
             }
             DataType::Binary => {
-                let mut builder = BinaryBuilder::with_capacity(rows, RESERVED_VALUE_BYTES);
+                let mut builder =
+                    BinaryBuilder::with_capacity(rows, Self::key_value_bytes(parts.clone())?);
                 for part in parts {
                     match part {
                         ReorderKeyPart::Null => builder.append_null(),

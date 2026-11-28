@@ -83,27 +83,36 @@ impl WindowBranch<'_> {
                     });
                 }
             }
-            reserve_item::<StructureRow>(&mut page.memory)?;
-            page.reserve_metadata(256)?;
-            reserve_item::<ProcessorStateRun>(&mut page.memory)?;
+            let first = page.structures.is_empty();
+            let fixed = add_bytes(page_memory::slots::<u32>(1)?, page_memory::slots::<u64>(1)?)?;
+            let text = page_memory::slots::<u8>(demand.storage.as_ref().len())?;
+            let text = add_bytes(text, page_memory::offset_slots(1, first)?)?;
+            let body = add_bytes(fixed, text)?;
+            let columns = add_bytes(page_memory::fixed_columns(fixed, 2, first)?, text)?;
+            page.reserve_metadata(columns, body, first)?;
+            page.reserve_run(ProcessorStateSection::Accumulators, branch)?;
+            page_memory::VecGrowth::reserve(&mut page.memory, &mut page.structures)?;
             page.structures.push(StructureRow {
                 index: u32::try_from(index)
                     .map_err(|_| Report::new(ProcessorStatePageError::Columns))?,
-                kind: demand.storage.as_ref().to_string(),
+                kind: demand.storage,
                 count,
             });
-            extend_runs(
-                &mut page.metadata_runs,
-                ProcessorStateSection::Accumulators,
-                branch,
-            );
             slot = slot
                 .checked_add(arity)
                 .ok_or_else(|| Report::new(ProcessorStatePageError::Columns))?;
         }
-        reserve_item::<HeaderRow>(&mut page.memory)?;
-        page.reserve_metadata(256)?;
-        reserve_item::<ProcessorStateRun>(&mut page.memory)?;
+        let first = page.headers.is_empty();
+        let values = page_memory::slots::<u64>(7)?;
+        let nulls = page_memory::bitmap(1, first)?
+            .checked_mul(3)
+            .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
+        let columns = add_bytes(page_memory::fixed_columns(values, 7, first)?, nulls)?;
+        // Three nullable counters carry their validity bits along with their values.
+        let validity = page_memory::slots::<u8>(3)?;
+        page.reserve_metadata(columns, add_bytes(values, validity)?, first)?;
+        page.reserve_run(ProcessorStateSection::Header, branch)?;
+        page_memory::VecGrowth::reserve(&mut page.memory, &mut page.headers)?;
         page.headers.push(HeaderRow {
             revision,
             rows,
@@ -113,11 +122,6 @@ impl WindowBranch<'_> {
             due,
             bytes,
         });
-        extend_runs(
-            &mut page.metadata_runs,
-            ProcessorStateSection::Header,
-            branch,
-        );
         Ok(())
     }
 }
@@ -140,7 +144,7 @@ pub(super) fn snapshot_charge(
         let columns = match arguments.entry(key) {
             Entry::Occupied(entry) => Arc::clone(entry.get()),
             Entry::Vacant(slot) => {
-                reserve_item::<WindowArgumentColumns>(memory)?;
+                reserve_bytes(memory, page_memory::slots::<WindowArgumentColumns>(1)?)?;
                 let columns = u64::try_from(entry.arguments.batch().batch().num_columns())
                     .assured("an argument column count fits u64");
                 let bytes = columns

@@ -1041,7 +1041,7 @@ pub(crate) async fn receive_processor_page(
     let read = read_descriptor::<ProcessorStatePageReply>(
         executor,
         &mut stream,
-        request.max_bytes,
+        u64::from(request.max_bytes),
         deadline,
     )
     .await?;
@@ -1059,7 +1059,7 @@ pub(crate) async fn receive_processor_page(
     };
     let section_rows = processor_page_rows(&descriptor, request, payload)?;
     let need = page_body_need(executor, &descriptor, &section_rows, payload)?;
-    if need.bytes > request.max_bytes || need.bytes != bodies {
+    if need.bytes > u64::from(request.max_bytes) || need.bytes != bodies {
         return Err(framing());
     }
     if need.bytes == 0 {

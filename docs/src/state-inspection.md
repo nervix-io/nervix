@@ -267,6 +267,12 @@ The first row of a page is required, and the read waits for room for it; every l
 while the share has room for it now, so a page ends where the share's room ends, with complete
 counts and a continuation. A receiving coordinator admits a page's memory one step ahead of what
 spends it: the descriptor's length first, then everything the bodies take, before it reads a body.
+Processor pages charge for the selected column buffers, the views and indices that gather them,
+and the stored run records that name their branches. Inferencer pages size their column builders
+for the accepted tensors and headers. Owner pages add the descriptor and Arrow body charges when
+they send the page to another node. The reader reports what its current bulk memory can hold with
+the bodies' decoding charge. The owner stops before an optional row that would exceed that room.
+The reader can wait for memory to receive the first row.
 Only a size the whole class could never hold is refused, at once, as `reply_too_large`; a receiver
 that finds no room before the read's deadline refuses it as `deadline`. Each step's charge comes from
 the charge rule of the owner that spends it. [Cluster

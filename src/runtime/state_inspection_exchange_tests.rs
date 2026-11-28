@@ -58,6 +58,7 @@ fn read(max_rows: u64) -> ReadProcessorStatePage {
         after: None,
         max_rows,
         max_bytes: 1 << 20,
+        preferred_body_bytes: 1 << 20,
         target: owner(),
     }
 }
@@ -796,7 +797,7 @@ async fn a_body_whose_rows_identity_or_bounds_disagree_with_the_descriptor_or_th
     ));
     // The body exceeds the bytes the read allows.
     let mut bounded = read(10);
-    bounded.max_bytes = identity.bytes - 1;
+    bounded.max_bytes = u32::try_from(identity.bytes - 1).assured("the fixture body fits u32");
     cases.push((
         "a body beyond the read's bytes",
         sent_page(&executor, Ok(full()), &[&body[..]]).await,
@@ -940,7 +941,7 @@ async fn a_section_beyond_one_snapshot_section_reaches_the_coordinator_whole() {
                 batches: vec![rows],
             }],
         )),
-        request.max_bytes,
+        u64::from(request.max_bytes),
         None,
     )
     .await
@@ -999,7 +1000,7 @@ async fn a_row_beyond_one_snapshot_section_is_refused_as_too_large() {
                 batches: vec![rows],
             }],
         )),
-        request.max_bytes,
+        u64::from(request.max_bytes),
         None,
     )
     .await
@@ -1035,7 +1036,8 @@ async fn a_page_holding_most_of_the_pool_is_answered_without_waiting_for_room() 
     let PageReply::Remote {
         descriptor,
         framing,
-    } = PageReply::remote(&executor)
+        ..
+    } = PageReply::remote(&executor, u32::MAX)
     else {
         panic!("a reply to another node sets memory aside");
     };
@@ -1071,7 +1073,7 @@ async fn a_page_holding_most_of_the_pool_is_answered_without_waiting_for_room() 
                     batches: vec![rows],
                 }],
             )),
-            request.max_bytes,
+            u64::from(request.max_bytes),
             Some(memory),
         ),
     )
@@ -1115,7 +1117,7 @@ async fn a_split_section_of_a_page_without_reply_memory_runs_again_within_a_shar
                             batches: vec![rows.clone()],
                         }],
                     )),
-                    request.max_bytes,
+                    u64::from(request.max_bytes),
                     None,
                 )
                 .await
@@ -1200,7 +1202,7 @@ async fn a_page_without_reply_memory_runs_again_within_a_share_that_holds_its_bo
                             },
                         ],
                     )),
-                    request.max_bytes,
+                    u64::from(request.max_bytes),
                     None,
                 )
                 .await
@@ -1509,7 +1511,7 @@ async fn a_received_page_the_reader_could_never_hold_is_refused_at_once_as_too_l
                 batches: vec![rows],
             }],
         )),
-        request.max_bytes,
+        u64::from(request.max_bytes),
         None,
     )
     .await

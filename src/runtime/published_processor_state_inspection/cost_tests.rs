@@ -43,9 +43,8 @@ const PAYLOAD_BYTES: usize = 63 * 1024;
 const PUBLICATIONS: usize = 512;
 /// Samples of each configuration.
 const SAMPLES: usize = 5;
-/// The memory of the node whose executor the measurement uses. A page gathers its rows' columns
-/// beside the views it selects, so it charges twice its bytes; an 8 GiB node's bulk class, a
-/// thirty-second of its memory, holds that charge for a page at the transfer bound.
+/// The node whose executor the measurement uses. Its bulk class, a thirty-second of 8 GiB,
+/// holds the gathered columns, selection views and run records for a page at the transfer bound.
 const NODE_MEMORY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 #[test]

@@ -410,14 +410,22 @@ fn large_window(
 
 #[nervix_primitives::test]
 async fn a_window_page_beyond_the_bulk_class_ends_where_it_runs_out_and_the_rest_follow() {
-    // 300 inputs of 64 KiB are 19 MiB. Gathering their columns charges twice that, more than the
-    // default executor's 32 MiB bulk class, while the page's own bounds admit every row.
+    // 300 inputs of 64 KiB require over 18 MiB of output buffers. Leave 16 MiB in the bulk class
+    // to exercise paging while the page's logical bounds admit every row.
     let (plan, snapshot, input) = large_window(300, 64 * 1024);
     let generation = StdArc::new(Generation {
         revision: 9,
         value: Some(WindowPublishedSnapshot::Live(snapshot)),
     });
     let executor = Executor::default();
+    let room = 16 * 1024 * 1024;
+    let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+    let hold = capacity
+        .checked_sub(room)
+        .assured("the default bulk class holds more");
+    let _hold = executor
+        .try_reserve(MemoryClass::Bulk, hold)
+        .assured("the fixture holds the excess");
     let mut after = None;
     let mut sequences = Vec::new();
     let mut pages = 0_usize;
@@ -482,8 +490,8 @@ async fn a_window_page_beyond_the_bulk_class_ends_where_it_runs_out_and_the_rest
     );
 }
 
-/// A page another node reads sets aside, before any row, what its descriptor and each section
-/// body's framing take, and with each row it admits the bytes of the body that carries the row.
+/// A page another node reads sets aside what its descriptor takes, then charges a section's
+/// framing with its first row and body bytes with each row it admits.
 /// Under the same bulk class it therefore ends before a page its owner presents, and what it set
 /// aside travels with the page to its reply.
 #[nervix_primitives::test]
@@ -493,14 +501,20 @@ async fn a_page_another_node_reads_sets_aside_its_reply_and_ends_sooner() {
     for entry in &snapshot.entries {
         row_bytes.push(held_row_bytes(&entry.record) + held_row_bytes(&entry.arguments) + 16);
     }
-    let metadata_rows = u64::try_from(plan.demands().len()).expect("bounded aggregates") + 1;
+    // Each accumulator carries a u32 index, a u64 count and one string. Their offsets include
+    // the terminating offset. The header has seven counters and three nullable slots.
+    let mut metadata_bytes = 7 * 8 + 3 + 4;
+    for demand in plan.demands() {
+        let kind = u64::try_from(demand.storage.as_ref().len()).assured("a storage name fits u64");
+        metadata_bytes += 4 + 8 + 4 + kind;
+    }
     let generation = StdArc::new(Generation {
         revision: 9,
         value: Some(WindowPublishedSnapshot::Live(snapshot)),
     });
     let executor = Executor::default();
     let mut returned = Vec::new();
-    for reply in [PageReply::Local, PageReply::remote(&executor)] {
+    for reply in [PageReply::Local, PageReply::remote(&executor, u32::MAX)] {
         let branch = OpenBranch {
             key: None,
             registration: [7; 16],
@@ -548,6 +562,7 @@ async fn a_page_another_node_reads_sets_aside_its_reply_and_ends_sooner() {
                 PageReply::Remote {
                     descriptor,
                     framing,
+                    ..
                 },
                 Some(set_aside),
             ) => {
@@ -560,7 +575,7 @@ async fn a_page_another_node_reads_sets_aside_its_reply_and_ends_sooner() {
                 let rows_bytes: u64 = row_bytes[..rows].iter().sum();
                 assert_eq!(
                     set_aside.bodies.bytes(),
-                    3 * framing + rows_bytes + 256 * metadata_rows,
+                    3 * framing + rows_bytes + metadata_bytes,
                     "the bodies' memory is each section's framing and every returned row's bytes"
                 );
             }
@@ -574,6 +589,10 @@ async fn a_page_another_node_reads_sets_aside_its_reply_and_ends_sooner() {
     let [local, remote] = returned.as_slice() else {
         panic!("one page of each kind");
     };
+    assert_eq!(
+        *local, 300,
+        "the gathered columns fit the owner's bulk class"
+    );
     assert!(*remote > 0, "the page another node reads returns rows");
     assert!(
         remote < local,

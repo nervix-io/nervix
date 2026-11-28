@@ -366,12 +366,13 @@ async fn single_tensor_pages_keep_complete_counts_and_refuse_a_foreign_branch_po
 /// The values of every wide fixture tensor: 256 KiB of F32.
 const WIDE_ELEMENTS: usize = 64 * 1024;
 
-/// The bulk memory a wide fixture page may take: room for two of its rows, not for all of them.
-const WIDE_PAGE_ROOM: u64 = 3 * 1024 * 1024;
+/// The eight output tensors alone take 2 MiB. The page also holds one native publication and
+/// the metadata for its selected rows.
+const WIDE_PAGE_ROOM: u64 = 2 * 1024 * 1024;
 
 /// The bulk memory a wide fixture page may take when its owner presents all eight rows in one page
 /// while their bodies as well do not fit.
-const WIDE_WHOLE_PAGE_ROOM: u64 = 23 * 1024 * 1024 / 2;
+const WIDE_WHOLE_PAGE_ROOM: u64 = 4 * 1024 * 1024;
 
 /// The byte bound a session transfer gives every page, as a page read at the default limit has.
 const TRANSFER_BOUND: u64 = 64 * 1024 * 1024;
@@ -577,10 +578,11 @@ async fn an_inferencer_page_another_node_reads_sets_aside_its_reply_and_ends_soo
     let local_rows = returned_fills(&local).len();
     assert_eq!(local_rows, 8, "the owner presents every tensor in one page");
     drop(local);
-    let reply = crate::runtime::PageReply::remote(&executor);
+    let reply = crate::runtime::PageReply::remote(&executor, u32::MAX);
     let crate::runtime::PageReply::Remote {
         descriptor,
         framing,
+        ..
     } = reply
     else {
         panic!("a reply to another node sets memory aside");
@@ -624,5 +626,21 @@ async fn an_inferencer_page_another_node_reads_sets_aside_its_reply_and_ends_soo
     );
     assert_eq!(set_aside.framing, framing);
     drop(remote);
+    let reply = crate::runtime::PageReply::remote(&executor, 0);
+    let first = read_for(
+        &executor,
+        &branches,
+        &plan,
+        None,
+        1024,
+        TRANSFER_BOUND,
+        reply,
+    )
+    .await
+    .assured("the owner offers the first row even when the reader has to wait for memory");
+    assert_eq!(returned_fills(&first).len(), 1);
+    assert!(first.more);
+    assert_eq!(first.counts.rows, 8);
+    drop(first);
     drop(held);
 }

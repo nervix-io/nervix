@@ -21,7 +21,7 @@
 
 use std::collections::BTreeSet;
 
-use arrow_array::{StringArray, TimestampNanosecondArray, UInt32Array};
+use arrow_array::{TimestampNanosecondArray, UInt32Array, builder::StringBuilder};
 use arrow_schema::{FieldRef, Schema as ArrowSchema};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -38,7 +38,7 @@ use super::{
         PageReply, ProcessorStatePage, ProcessorStatePageBounds, ProcessorStatePageError,
         ProcessorStatePageMemory, ProcessorStatePageRead, ProcessorStateRun,
         ProcessorStateSectionColumns, ProcessorStateSelection, ReplyMemory, extend_runs,
-        held_row_bytes, payload_columns, timestamp_column,
+        held_row_bytes, memory as page_memory, payload_columns, timestamp_column,
     },
     published_generation::Generation,
     window_state::{
@@ -74,17 +74,6 @@ enum ReadPlan {
         plan: WindowAccumulatorPlan,
         width: Option<std::time::Duration>,
     },
-}
-
-impl ReadPlan {
-    /// How many sections a page of this plan carries: a deduplicator's keys, or a window's rows,
-    /// headers and accumulators.
-    fn sections(&self) -> u64 {
-        match self {
-            Self::Keys { .. } => 1,
-            Self::Window { .. } => 3,
-        }
-    }
 }
 
 struct CapturedBranch {
@@ -141,20 +130,6 @@ fn selected(selection: StateInspectionBranchSelection, key: &Option<BranchKey>) 
     }
 }
 
-/// What one resident `T` charges: its size, four times over, to cover geometric Vec capacity and
-/// bounded scratch copies before a push allocates them.
-fn item_bytes<T>() -> ReadResult<u64> {
-    let bytes =
-        u64::try_from(std::mem::size_of::<T>()).assured("a resident object's size fits u64");
-    bytes
-        .checked_mul(4)
-        .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))
-}
-
-fn reserve_item<T>(memory: &mut Reservation) -> ReadResult<()> {
-    reserve_bytes(memory, item_bytes::<T>()?)
-}
-
 fn add_bytes(first: u64, second: u64) -> ReadResult<u64> {
     first
         .checked_add(second)
@@ -202,8 +177,17 @@ struct HeaderRow {
 
 struct StructureRow {
     index: u32,
-    kind: String,
+    kind: WindowAggregateStorageKind,
     count: u64,
+}
+
+/// A row's logical page size, the buffers it builds, the row slot that retains its inputs,
+/// and the additional body its owner may send.
+struct PublishedRowCharge {
+    logical: u64,
+    columns: u64,
+    slot: u64,
+    body: u64,
 }
 
 /// One unit's bounded page, counting metadata separately from the retained records it describes.
@@ -222,7 +206,8 @@ struct PublishedPage {
     headers: Vec<HeaderRow>,
     structures: Vec<StructureRow>,
     runs: Vec<ProcessorStateRun>,
-    metadata_runs: Vec<ProcessorStateRun>,
+    /// The bounded Arrow buffers of the selected rows and their metadata.
+    column_bytes: u64,
     memory: Reservation,
     /// How the page reaches its reader, which decides what admitting a row also sets aside.
     reply: PageReply,

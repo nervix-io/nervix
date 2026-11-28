@@ -23,13 +23,7 @@ impl ReadPlan {
                     .key_column_offset
                     .checked_add(program.key_count)
                     .ok_or_else(|| Report::new(ProcessorStatePageError::Columns))?;
-                reserve_bytes(
-                    memory,
-                    u64::try_from(program.key_count)
-                        .assured("a prepared key count fits u64")
-                        .checked_mul(256)
-                        .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?,
-                )?;
+                reserve_bytes(memory, page_memory::slots::<FieldRef>(program.key_count)?)?;
                 let fields = program
                     .program
                     .output_schema
@@ -115,7 +109,8 @@ impl CapturedPage {
         excluded: Option<&BTreeSet<nervix_models::BranchKeyFingerprint>>,
         cancellation: &Cancellation,
     ) -> ReadResult<Self> {
-        branches.sort_by(|left, right| BranchKey::canonical_order(&left.key, &right.key));
+        // The selected unit registers at most one publication per typed branch key.
+        branches.sort_unstable_by(|left, right| BranchKey::canonical_order(&left.key, &right.key));
         let partition_catalog = match excluded {
             Some(excluded) => {
                 let mut catalog = nervix_models::StateInspectionKeyCatalog::requested();
@@ -239,7 +234,7 @@ impl Runtime {
                             if !selection.includes(placement) {
                                 continue;
                             }
-                            reserve_item::<CapturedBranch>(&mut memory)?;
+                            page_memory::VecGrowth::reserve(&mut memory, &mut captured)?;
                             let generation = entry.value().generations.load();
                             captured.push(CapturedBranch {
                                 key: placement.branch_key.clone(),
@@ -260,7 +255,7 @@ impl Runtime {
                             if !selection.includes(placement) {
                                 continue;
                             }
-                            reserve_item::<CapturedBranch>(&mut memory)?;
+                            page_memory::VecGrowth::reserve(&mut memory, &mut captured)?;
                             let generation = entry.value().generations.load();
                             captured.push(CapturedBranch {
                                 key: placement.branch_key.clone(),
@@ -290,9 +285,10 @@ impl Runtime {
             mut memory,
             partition_catalog,
         } = captured;
-        for _ in &captured {
-            reserve_item::<OpenBranch>(&mut memory)?;
-        }
+        reserve_bytes(
+            &mut memory,
+            page_memory::slots::<OpenBranch>(captured.len())?,
+        )?;
         let mut opened = Vec::with_capacity(captured.len());
         for branch in captured {
             nervix_primitives::task::consume_budget().await;
@@ -326,7 +322,10 @@ impl Runtime {
                         .await
                         .change_context(ProcessorStatePageError::Columns)?;
                         decoded.metadata = Some(admitted._memory);
-                        reserve_item::<AdmittedWindowSnapshot>(&mut memory)?;
+                        reserve_bytes(
+                            &mut memory,
+                            page_memory::slots::<AdmittedWindowSnapshot>(1)?,
+                        )?;
                         OpenState::Window(WindowRead::Decoded(Box::new(decoded)))
                     }
                     _ => OpenState::Window(WindowRead::Published(generation)),

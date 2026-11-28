@@ -187,12 +187,15 @@ Feature: Bounded typed inferencer state inspection
       {"tenant":"tenant-6","vector":[6.0]}
       """
     Then within "30s" a client of every node sees inferencer "wide" hold 6 rows
-    # Each branch carries one 256 KiB state tensor. A page retains the publication of every branch
-    # it returns a tensor from and takes four times the tensor's bytes to build its row; a page read
-    # through another node also sets the tensor's bytes aside for the body that carries it. With
-    # 3 MiB left on every node, every page ends where the next tensor no longer fits, and the rest
-    # follow on the next pages.
+    # The owner's six 256 KiB output tensors and one borrowed branch publication fit in 3 MiB
+    # with their shapes, port names, headers and runs. Remote reads also set aside their bodies.
     When bulk memory on every node keeps only "3145728" bytes free
+    Then the owner reads inferencer "wide" state in one page with every row once
+    And a client of every node reads inferencer "wide" state at the default limit with every row once
+    When bulk memory on every node is released
+    # The output tensors alone occupy 1.5 MiB. The owner also needs room for its current
+    # publication and page metadata, so both the local and remote reads have to page.
+    And bulk memory on the owner of the last read processor keeps only "1572864" bytes free
     Then a client of every node reads inferencer "wide" state at the default limit in more than one page with unchanged complete counts
     When bulk memory on every node is released
     Then within "30s" every node reserves only the bulk memory the scenario holds
