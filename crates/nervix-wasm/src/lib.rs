@@ -4536,6 +4536,35 @@ mod tests {
             .compile_processor(&Executor::default(), read_guest(path))
             .await
             .expect("guest module must compile");
+        let mut processor_exports = Vec::new();
+        for export in compiled.instance_pre.module().exports() {
+            if export.name().starts_with("nervix_") {
+                processor_exports.push(export.name());
+            }
+        }
+        processor_exports.sort_unstable();
+        assert_eq!(
+            processor_exports,
+            [
+                "nervix_alloc",
+                "nervix_buffer_ptr",
+                "nervix_clear_global_error",
+                "nervix_current_domain_time_nanos",
+                "nervix_describe_state",
+                "nervix_dump_state",
+                "nervix_flush",
+                "nervix_global_error_len",
+                "nervix_global_error_ptr",
+                "nervix_init",
+                "nervix_load_state",
+                "nervix_on_timeout",
+                "nervix_process_batch",
+                "nervix_read_emit",
+                "nervix_reset_state",
+            ],
+            "{} must export the Nervix guest functions",
+            path.display()
+        );
         let mut branch = compiled
             .instantiate_branch(
                 limits(),
