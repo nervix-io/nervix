@@ -134,12 +134,10 @@ nervix_timeout_after_nanos(delay_nanos: i64) -> i64
 nervix_request_state_reset() -> i32
 ```
 
-The guest must export:
+The guest must export its linear memory as `memory` and provide these functions:
 
 ```text
 nervix_buffer_ptr() -> i32
-nervix_buffer_len() -> i32
-nervix_buffer_capacity() -> i32
 nervix_alloc(size: i32) -> i32
 nervix_init(ptr: i32, size: i32) -> i32
 nervix_current_domain_time_nanos() -> i64
@@ -152,6 +150,8 @@ nervix_load_state(ptr: i32, size: i32) -> i32
 nervix_reset_state() -> i32
 nervix_describe_state() -> i32
 ```
+
+A guest can also expose the three functions of the [optional global-error channel](#batch-envelope).
 
 Return `0` from fallible functions on success. Return a negative code on guest rejection. Nervix treats negative codes as runtime errors and applies the processor error policy. `nervix_dump_state` returns the size of the snapshot it wrote, or a negative code when it cannot serialize its state; Nervix then keeps the state saved last. `nervix_describe_state` returns the size of the [state description](#state-description) it wrote, `0` when it describes no state, or a negative code when it cannot describe its state; Nervix calls it only to answer a state inspection, on a scratch instance it discards afterwards.
 
@@ -188,7 +188,9 @@ The guest owns one reusable byte buffer in linear memory.
 4. Because FlatBuffers builds backwards, the completed message may occupy a suffix of the
    allocation. Host calls `nervix_process_batch(ptr, size)` with that exact range.
 5. Guest writes pending output or state back into the same buffer.
-6. Host calls `nervix_read_emit()`, `nervix_dump_state()` or `nervix_describe_state()` and reads the returned byte length from `nervix_buffer_ptr()`.
+6. On success, `nervix_read_emit()`, `nervix_dump_state()` and `nervix_describe_state()` return the
+   number of bytes written. The host reads that many bytes at the offset returned by
+   `nervix_buffer_ptr()`.
 
 If the capacity estimate is too small, the host finishes the message in temporary spill storage,
 releases its linear-memory borrow, calls `nervix_alloc` again with a larger capacity, and copies the

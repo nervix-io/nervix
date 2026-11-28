@@ -37,8 +37,6 @@ cat <<WAT
   (memory (export "memory") 1)
   (global \$batches (mut i64) (i64.const 0))
   (global \$read_ptr (mut i32) (i32.const 0))
-  (global \$read_len (mut i32) (i32.const 0))
-  (global \$capacity (mut i32) (i32.const 0))
   (func \$grow (param \$pages i32)
     local.get \$pages memory.size i32.gt_u
     if
@@ -47,15 +45,9 @@ cat <<WAT
       if unreachable end
     end)
   (func (export "nervix_buffer_ptr") (result i32) global.get \$read_ptr)
-  (func (export "nervix_buffer_len") (result i32) global.get \$read_len)
-  (func (export "nervix_buffer_capacity") (result i32) global.get \$capacity)
   (func (export "nervix_alloc") (param \$len i32) (result i32)
     local.get \$len i32.const $((heap + page - 1)) i32.add
     i32.const 16 i32.shr_u call \$grow
-    local.get \$len global.get \$capacity i32.gt_u
-    if
-      local.get \$len global.set \$capacity
-    end
     i32.const ${heap})
   (func (export "nervix_init") (param i32 i32) (result i32)
     (local \$address i32) (local \$state i64)
@@ -84,7 +76,6 @@ cat <<WAT
   (func (export "nervix_dump_state") (result i32)
     i32.const ${base} global.get \$batches i64.store
     i32.const ${base} global.set \$read_ptr
-    i32.const ${bytes} global.set \$read_len
     i32.const ${bytes})
   (func (export "nervix_load_state") (param \$ptr i32) (param \$len i32) (result i32)
     local.get \$len i32.const ${bytes} i32.ne

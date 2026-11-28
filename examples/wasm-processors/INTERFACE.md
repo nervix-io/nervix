@@ -3,8 +3,8 @@
 This prototype uses a native core WebAssembly module loaded by Wasmtime. It does
 not use WASI.
 
-All byte payloads move through the guest module's default exported linear
-memory. The guest owns one reusable byte buffer. The host asks the guest to grow
+All byte payloads move through the guest module's linear memory, exported as
+`memory`. The guest owns one reusable byte buffer. The host asks the guest to grow
 that buffer, builds a batch envelope directly in it, then calls the processor
 entrypoint with the exact pointer and number of valid bytes.
 
@@ -23,8 +23,6 @@ The guest imports these functions from the `env` module:
 | Function | Signature | Meaning |
 | --- | --- | --- |
 | `nervix_buffer_ptr` | `() -> i32` | Current guest buffer offset in linear memory. |
-| `nervix_buffer_len` | `() -> i32` | Current logical buffer length. |
-| `nervix_buffer_capacity` | `() -> i32` | Current allocated buffer capacity. |
 | `nervix_alloc` | `(size: i32) -> i32` | Ensures the single reusable buffer can hold `size` bytes, resizes it, and returns `nervix_buffer_ptr()`. |
 | `nervix_init` | `(ptr: i32, size: i32) -> i32` | Reads size-prefixed FlatBuffers init metadata from guest memory. Must be called before processing. |
 | `nervix_current_domain_time_nanos` | `() -> i64` | Returns the current domain-clock time by calling the host import. |
