@@ -846,13 +846,14 @@ async fn a_failure_settles_more_given_answers_than_one_cooperative_budget() {
 }
 
 /// A broker's refusal keeps the code the broker gave it, unchanged, as the rejection's
-/// `error.external_code`, and a refusal without a code leaves it absent.
+/// `error.external_code`, and a refusal without a code leaves it absent. A refusal of a record as
+/// larger than the broker takes is a `destination_limit` rejection, every other one `refused`.
 #[nervix_primitives::test]
 async fn a_broker_refusal_keeps_the_code_the_broker_gave_it() {
     let mut window = ConfirmationWindow::new(EMITTER, settings(2, Duration::from_secs(30)), 2);
     let verdicts = [
-        BrokerVerdict::Rejected {
-            message: "the broker refused the record".to_owned(),
+        BrokerVerdict::OverDestinationLimit {
+            message: "the record is larger than the broker takes".to_owned(),
             external_code: ExternalErrorCode::new("MSG_SIZE_TOO_LARGE"),
         },
         BrokerVerdict::Rejected {
@@ -873,20 +874,31 @@ async fn a_broker_refusal_keeps_the_code_the_broker_gave_it() {
 
     let outcome = window.finish().await.into_parts();
 
-    let mut codes: Vec<(EmitterRecordId, Option<ExternalErrorCode>)> = outcome
+    let mut codes: Vec<(
+        EmitterRecordId,
+        RejectedErrorClass,
+        Option<ExternalErrorCode>,
+    )> = outcome
         .rejected
         .iter()
-        .map(|rejection| (rejection.id, rejection.error.external_code.clone()))
+        .map(|rejection| {
+            (
+                rejection.id,
+                rejection.error.class,
+                rejection.error.external_code.clone(),
+            )
+        })
         .collect();
-    codes.sort_by_key(|(record, _)| *record);
+    codes.sort_by_key(|(record, _, _)| *record);
     assert_eq!(
         codes,
         vec![
             (
                 EmitterRecordId::new(0),
+                RejectedErrorClass::DestinationLimit,
                 ExternalErrorCode::new("MSG_SIZE_TOO_LARGE")
             ),
-            (EmitterRecordId::new(1), None),
+            (EmitterRecordId::new(1), RejectedErrorClass::Refused, None),
         ]
     );
     assert!(outcome.infrastructure_error.is_none());

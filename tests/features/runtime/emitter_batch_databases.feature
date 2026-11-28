@@ -531,7 +531,7 @@ Feature: Database emitter batches
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":2 | "error_code":"refused" | "error_operation":"publish" | 16777216
+      "seq":2 | "error_code":"destination_limit" | "error_operation":"publish" | 16777216
       """
     And within "30s" the "MongoDB" batch table "documents_{{test_id}}" records writes of "2" rows
     And the "MongoDB" batch table "documents_{{test_id}}" eventually holds exactly these rows

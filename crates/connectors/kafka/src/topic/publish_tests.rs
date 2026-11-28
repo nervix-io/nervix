@@ -20,7 +20,7 @@ use nervix_connector::{
     RecordEnvelope,
 };
 use nervix_connector_fake::FakeEmitterHost;
-use nervix_models::{ClientConfigEntry, KafkaTopicName, Timestamp};
+use nervix_models::{ClientConfigEntry, KafkaTopicName, RejectedErrorClass, Timestamp};
 use nervix_primitives::{
     sync::{
         StdArc,
@@ -618,13 +618,20 @@ async fn a_record_its_broker_refuses_for_good_is_rejected() {
     let rejected = parts
         .rejected
         .iter()
-        .map(|rejected| (rejected.id, rejected.error.message.clone()))
+        .map(|rejected| {
+            (
+                rejected.id,
+                rejected.error.class,
+                rejected.error.message.clone(),
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         rejected,
         vec![(
             EmitterRecordId::new(0),
-            format!("kafka rejected record: {refused}")
+            RejectedErrorClass::DestinationLimit,
+            format!("{refused:#}")
         )]
     );
     assert!(
@@ -662,13 +669,20 @@ async fn a_record_the_producer_refuses_for_its_own_size_is_rejected_and_the_publ
     let rejected = parts
         .rejected
         .iter()
-        .map(|rejected| (rejected.id, rejected.error.message.clone()))
+        .map(|rejected| {
+            (
+                rejected.id,
+                rejected.error.class,
+                rejected.error.message.clone(),
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         rejected,
         vec![(
             EmitterRecordId::new(1),
-            format!("kafka rejected record: {refused}")
+            RejectedErrorClass::DestinationLimit,
+            format!("{refused:#}")
         )]
     );
     assert!(

@@ -61,7 +61,7 @@ Feature: HTTP REQUEST emitter response classification
       """
     Then within "20s" the relay subscription receives payloads containing all fragments
       """
-      "event_id":"1" | "code":"refused" | "operation":"publish" | "message":"HTTP endpoint answered with status <status>" | "external_code":"<status>"
+      "event_id":"1" | "code":"<class>" | "operation":"publish" | "message":"HTTP endpoint answered with status <status>" | "external_code":"<status>"
       """
     And HTTP receiver "api" eventually receives at least 2 requests
     And HTTP receiver "api" request 1 is
@@ -75,21 +75,21 @@ Feature: HTTP REQUEST emitter response classification
     And HTTP receiver "api" has captured exactly 2 requests
 
     Examples:
-      | cluster_size | status |
-      | 1            | 101    |
-      | 3            | 101    |
-      | 1            | 301    |
-      | 3            | 301    |
-      | 1            | 304    |
-      | 3            | 304    |
-      | 1            | 400    |
-      | 3            | 400    |
-      | 1            | 404    |
-      | 3            | 404    |
-      | 1            | 409    |
-      | 3            | 409    |
-      | 1            | 413    |
-      | 3            | 413    |
+      | cluster_size | status | class             |
+      | 1            | 101    | refused           |
+      | 3            | 101    | refused           |
+      | 1            | 301    | refused           |
+      | 3            | 301    | refused           |
+      | 1            | 304    | refused           |
+      | 3            | 304    | refused           |
+      | 1            | 400    | refused           |
+      | 3            | 400    | refused           |
+      | 1            | 404    | refused           |
+      | 3            | 404    | refused           |
+      | 1            | 409    | refused           |
+      | 3            | 409    | refused           |
+      | 1            | 413    | destination_limit |
+      | 3            | 413    | destination_limit |
 
   @http_emitter_responses
   Scenario Outline: HTTP retryable response <status> retains the current request and reports it while it is pending

@@ -1288,7 +1288,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/runtime_error_event_properties__bolero_runtime_error_events_round_trip/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "runtime-error-event-wire"
 invariant = "A runtime error event keeps its complete value through the control envelope's production wire codec: its text, and the class and producing node of the error it reports for every class and every node kind, and the absence of an error on an event that reports none."
@@ -1963,7 +1963,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__events__bolero_events_keep_complete_values_and_owned_views/corpus"
-domain_version = 29
+domain_version = 30
 features = ["grpc"]
 id = "client-events"
 invariant = "Every unsolicited event preserves complete values, including every notice's typed error class and node, all five checked opening bounds and the complete pacing, with and without a retry validity, through fixed frames, gRPC metadata and pre-admission offer refusals; borrowed graph views retain exact bytes after their original frame is dropped."
@@ -4363,10 +4363,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/application/__fuzz__/application__describe_output__properties__bolero_ingestor_describe_reports_round_trip/corpus"
-domain_version = 28
+domain_version = 29
 features = []
 id = "ingestor-describe-envelope"
-invariant = "A current runtime ingestor report, with its readiness, quiesce state and counters, transport redeliveries, decode rejection count and last decode rejection with its reference, codec, Kafka or IPv4 and IPv6 syslog position, sorted fields, message and instant, oversized payload count, backpressure, transient error, reconnect state, Kafka domain offsets, client producer gauges, rate-limit hold, hold time, rejection and program rejection counters, ordered source interaction lines and ordered edge metric lines, survives the describe envelope conversion and the production command response codec unchanged."
+invariant = "A current runtime ingestor report, with its readiness, quiesce state and counters, transport redeliveries, decode rejection count and last decode rejection with its reference, the codec or the connector that refused it, Kafka or IPv4 and IPv6 syslog position, sorted fields, message and instant, oversized payload count, backpressure, transient error, reconnect state, Kafka domain offsets, client producer gauges, rate-limit hold, hold time, rejection and program rejection counters, ordered source interaction lines and ordered edge metric lines, survives the describe envelope conversion and the production command response codec unchanged."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-server"

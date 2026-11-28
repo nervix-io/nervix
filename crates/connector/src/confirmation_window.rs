@@ -62,6 +62,12 @@ pub enum BrokerVerdict {
         message: String,
         external_code: Option<ExternalErrorCode>,
     },
+    /// The broker refused the record for good as larger than it takes, such as Kafka's
+    /// `MSG_SIZE_TOO_LARGE`. `message` and `external_code` are as for [`Self::Rejected`].
+    OverDestinationLimit {
+        message: String,
+        external_code: Option<ExternalErrorCode>,
+    },
 }
 
 /// What the answer for one record resolves to: the broker's verdict on it, or the failure that
@@ -177,6 +183,15 @@ where
                 message,
                 external_code,
             } => outcome.reject(RejectedEmitterMember::external(
+                self.record,
+                self.occurred_at,
+                message,
+                external_code,
+            )),
+            BrokerVerdict::OverDestinationLimit {
+                message,
+                external_code,
+            } => outcome.reject(RejectedEmitterMember::over_destination_limit(
                 self.record,
                 self.occurred_at,
                 message,

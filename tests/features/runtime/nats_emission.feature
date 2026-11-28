@@ -127,7 +127,7 @@ Feature: NATS emission
     # No stream answers a subject none captures, so no JetStream error code names the refusal.
     Then within "10s" the relay subscription receives payloads containing all fragments
       """
-      "error_code":"refused" | "operation":"publish" | nats JetStream rejected record | "no_external_code":true
+      "error_code":"refused" | "operation":"publish" | no stream found for given subject | "no_external_code":true
       """
     And within "10s" Kafka consumer group "outside_group_{{test_id}}" next offset for topic "outside_in_{{test_id}}" partition 0 is "at least 1"
     And NATS JetStream stream "captured_{{test_id}}" holds exactly 0 messages

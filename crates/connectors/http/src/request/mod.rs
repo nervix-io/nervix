@@ -163,7 +163,7 @@ impl PacedIngestorConnector for HttpRequestIngestor {
         if response.status() == StatusCode::NO_CONTENT {
             return Ok(IngestorPoll {
                 messages: Vec::new(),
-                failures: Vec::new(),
+                undecodable: Vec::new(),
                 dropped_header_values: 0,
                 observed_at: actual_utc_now(),
             });
@@ -187,7 +187,7 @@ impl PacedIngestorConnector for HttpRequestIngestor {
                 headers,
                 metadata,
             }],
-            failures: Vec::new(),
+            undecodable: Vec::new(),
             dropped_header_values,
             observed_at: actual_utc_now(),
         })

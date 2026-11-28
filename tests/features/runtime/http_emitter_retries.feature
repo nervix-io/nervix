@@ -466,7 +466,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "event_id":"2" | "tenant":"south" | "error_code":"refused" | "error_message":"HTTP endpoint answered with status <status>" | "operation":"publish" | "state_prefix":"/tenants/north" | "attempted_payload":"SECOND"
+      "event_id":"2" | "tenant":"south" | "error_code":"<class>" | "error_message":"HTTP endpoint answered with status <status>" | "operation":"publish" | "state_prefix":"/tenants/north" | "attempted_payload":"SECOND"
       """
     And HTTP receiver "api" eventually receives at least 3 requests
     And HTTP receiver "api" request 2 is
@@ -487,15 +487,15 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
     And HTTP receiver "elsewhere" has captured exactly 0 requests
 
     Examples:
-      | cluster_size | status |
-      | 1            | 404    |
-      | 3            | 404    |
-      | 1            | 409    |
-      | 3            | 409    |
-      | 1            | 413    |
-      | 3            | 413    |
-      | 1            | 308    |
-      | 3            | 308    |
+      | cluster_size | status | class             |
+      | 1            | 404    | refused           |
+      | 3            | 404    | refused           |
+      | 1            | 409    | refused           |
+      | 3            | 409    | refused           |
+      | 1            | 413    | destination_limit |
+      | 3            | 413    | destination_limit |
+      | 1            | 308    | refused           |
+      | 3            | 308    | refused           |
 
   @http_emitter_retries
   Scenario Outline: Terminal responses in interleaved branches route each error in its own branch while the other records are delivered

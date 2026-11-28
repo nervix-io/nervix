@@ -167,3 +167,56 @@ fn a_property_value_states_its_exact_type() {
         assert_eq!(value.ty(), ty, "{value:?}");
     }
 }
+
+/// A record larger than its destination takes is a `destination_limit` rejection of `publish`
+/// that keeps the destination's code, or none where the connector found the limit itself; a value
+/// the destination cannot hold is a `validation` rejection of `publish` that no outside system
+/// answered. Neither names a field, and each keeps the record and the instant it was admitted at.
+#[test]
+fn a_destination_limit_and_an_unrepresentable_value_reject_their_record_with_their_class() {
+    let record = EmitterRecord::new(
+        EmitterRecordId::new(3),
+        None,
+        b"payload".to_vec(),
+        Vec::new(),
+        Timestamp::from_unix_nanos(11),
+    );
+
+    let answered = record.over_destination_limit(
+        "message of 2000 bytes exceeds the 1000 bytes the topic takes".to_string(),
+        ExternalErrorCode::new("MSG_SIZE_TOO_LARGE"),
+    );
+    let measured = record.over_destination_limit("packet too large".to_string(), None);
+    let unrepresentable =
+        record.unrepresentable("timestamp precedes the first millisecond".to_string());
+
+    for (rejection, class, code) in [
+        (
+            &answered,
+            RejectedErrorClass::DestinationLimit,
+            ExternalErrorCode::new("MSG_SIZE_TOO_LARGE"),
+        ),
+        (&measured, RejectedErrorClass::DestinationLimit, None),
+        (&unrepresentable, RejectedErrorClass::Validation, None),
+    ] {
+        assert_eq!(rejection.id, EmitterRecordId::new(3));
+        assert_eq!(rejection.error.class, class);
+        assert_eq!(rejection.error.operation, MessageErrorOperation::Publish);
+        assert_eq!(rejection.error.external_code, code);
+        assert_eq!(rejection.error.occurred_at, Timestamp::from_unix_nanos(11));
+        assert!(rejection.error.fields.is_empty());
+    }
+    assert_eq!(
+        answered.error.message,
+        "message of 2000 bytes exceeds the 1000 bytes the topic takes"
+    );
+    assert_eq!(
+        unrepresentable.error.message,
+        "timestamp precedes the first millisecond"
+    );
+    assert!(
+        nervix_models::MessageErrorClass::from(answered.error.class)
+            .is_within(nervix_models::MessageErrorClass::LIMIT),
+        "a destination's limit is a limit"
+    );
+}

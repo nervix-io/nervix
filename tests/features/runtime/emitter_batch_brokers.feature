@@ -270,8 +270,8 @@ Feature: Batching across broker and message emitters
       | [{"seq":5,"tenant":"beta"},{"seq":6,"tenant":"beta"}] |     | tenant=beta |       |
     And within "10s" the relay subscription receives payloads containing all fragments that share one "error_reference"
       """
-      "seq":3 | "error_code":"refused" | "operation":"publish" | attribute 'tenant' has an empty value
-      "seq":4 | "error_code":"refused" | "operation":"publish" | attribute 'tenant' has an empty value
+      "seq":3 | "error_code":"validation" | "operation":"publish" | attribute 'tenant' has an empty value
+      "seq":4 | "error_code":"validation" | "operation":"publish" | attribute 'tenant' has an empty value
       """
     And the relay subscription does not receive a payload within "1s"
 
@@ -354,9 +354,9 @@ Feature: Batching across broker and message emitters
       """
     Then within "30s" the relay subscription receives payloads containing all fragments that share one "error_reference"
       """
-      "seq":1 | "error_code":"refused" | "operation":"publish" | <limit_message> | <code>
-      "seq":2 | "error_code":"refused" | "operation":"publish" | <limit_message> | <code>
-      "seq":3 | "error_code":"refused" | "operation":"publish" | <limit_message> | <code>
+      "seq":1 | "error_code":"destination_limit" | "operation":"publish" | <limit_message> | <code>
+      "seq":2 | "error_code":"destination_limit" | "operation":"publish" | <limit_message> | <code>
+      "seq":3 | "error_code":"destination_limit" | "operation":"publish" | <limit_message> | <code>
       """
     And within "30s" the observed broker receives exactly these payloads
       """
@@ -446,9 +446,9 @@ Feature: Batching across broker and message emitters
       """
     Then within "30s" the relay subscription receives payloads containing all fragments that share one "error_reference"
       """
-      "seq":1 | "error_code":"refused" | "operation":"publish" | Exceed maximum message size
-      "seq":2 | "error_code":"refused" | "operation":"publish" | Exceed maximum message size
-      "seq":3 | "error_code":"refused" | "operation":"publish" | Exceed maximum message size
+      "seq":1 | "error_code":"destination_limit" | "operation":"publish" | Exceed maximum message size
+      "seq":2 | "error_code":"destination_limit" | "operation":"publish" | Exceed maximum message size
+      "seq":3 | "error_code":"destination_limit" | "operation":"publish" | Exceed maximum message size
       """
     And within "30s" the observed broker receives exactly these payloads
       """
@@ -531,7 +531,7 @@ Feature: Batching across broker and message emitters
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":1 | "error_code":"refused" | "operation":"publish" | SQS message is 1048591 bytes
+      "seq":1 | "error_code":"destination_limit" | "operation":"publish" | SQS message is 1048591 bytes
       """
     And within "30s" the observed broker receives exactly these messages
       | payload               | key | headers    | group |

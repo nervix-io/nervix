@@ -377,6 +377,28 @@ impl EmitterRecord {
     ) -> RejectedEmitterMember<EmitterRecordId> {
         RejectedEmitterMember::external(self.id, self.occurred_at, message, external_code)
     }
+
+    /// The rejection of this record as larger than its destination can take, with the code the
+    /// destination answered with, or `None` where the connector found the limit before sending
+    /// or the answer carries no code.
+    pub fn over_destination_limit(
+        &self,
+        message: String,
+        external_code: Option<ExternalErrorCode>,
+    ) -> RejectedEmitterMember<EmitterRecordId> {
+        RejectedEmitterMember::over_destination_limit(
+            self.id,
+            self.occurred_at,
+            message,
+            external_code,
+        )
+    }
+
+    /// The rejection of this record as carrying a value its destination cannot hold, which the
+    /// connector found while it built the record's message, before sending it.
+    pub fn unrepresentable(&self, message: String) -> RejectedEmitterMember<EmitterRecordId> {
+        RejectedEmitterMember::unrepresentable(self.id, self.occurred_at, message)
+    }
 }
 
 /// One prepared HTTP request ready for a connector to send.
@@ -406,6 +428,21 @@ impl EmitterHttpRequest {
         external_code: Option<ExternalErrorCode>,
     ) -> RejectedEmitterMember<EmitterRecordId> {
         RejectedEmitterMember::external(self.id, self.occurred_at, message, external_code)
+    }
+
+    /// The rejection of this request as larger than its outside system can take, with the code
+    /// that system answered with, or `None` where its answer carries no code.
+    pub fn over_destination_limit(
+        &self,
+        message: String,
+        external_code: Option<ExternalErrorCode>,
+    ) -> RejectedEmitterMember<EmitterRecordId> {
+        RejectedEmitterMember::over_destination_limit(
+            self.id,
+            self.occurred_at,
+            message,
+            external_code,
+        )
     }
 }
 
@@ -491,6 +528,45 @@ impl<Id> RejectedEmitterMember<Id> {
             MessageErrorOperation::Publish,
             std::iter::empty(),
             external_code,
+        )
+    }
+
+    /// A record larger than its destination can take: a message, packet, request or document over
+    /// the destination's own limit, or more parts than the destination carries in one message.
+    /// The destination's answer gives the code in its own spelling, such as Kafka's
+    /// `MSG_SIZE_TOO_LARGE` or the HTTP status `413`, or `None` where the connector found the limit
+    /// before sending, or the answer carries no code. A limit Nervix declares itself, such as
+    /// `MAX SIZE`, is [`Self::oversize`].
+    pub fn over_destination_limit(
+        id: Id,
+        occurred_at: Timestamp,
+        message: String,
+        external_code: Option<ExternalErrorCode>,
+    ) -> Self {
+        Self::rejected(
+            id,
+            RejectedErrorClass::DestinationLimit,
+            occurred_at,
+            message,
+            MessageErrorOperation::Publish,
+            std::iter::empty(),
+            external_code,
+        )
+    }
+
+    /// A record carrying a value its destination cannot hold in the form or type the destination
+    /// gives it, such as a timestamp before the earliest one a Kafka record carries or a property
+    /// longer than an AMQP short string, which the connector found while it built the record's
+    /// message. It never reaches the destination, so no outside system gives it a code.
+    pub fn unrepresentable(id: Id, occurred_at: Timestamp, message: String) -> Self {
+        Self::rejected(
+            id,
+            RejectedErrorClass::Validation,
+            occurred_at,
+            message,
+            MessageErrorOperation::Publish,
+            std::iter::empty(),
+            None,
         )
     }
 

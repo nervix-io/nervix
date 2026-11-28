@@ -701,11 +701,15 @@ impl RecordEmitter for RedisPubSubEmitter {
                     }
                     outcome.deliver(record.id);
                 }
+                // Every reply Redis refuses one record with refuses its size: a payload above
+                // proto-max-bulk-len.
                 Err(error) if Self::is_record_failure(&error) => {
-                    outcome.reject(record.rejected(
-                        format!("Redis rejected emitted record: {error}"),
-                        Self::server_code(&error),
-                    ));
+                    outcome.reject(
+                        record.over_destination_limit(
+                            format!("{error:#}"),
+                            Self::server_code(&error),
+                        ),
+                    );
                 }
                 Err(error) => {
                     // The server's error prefix stays with the failure, so a record the emitter

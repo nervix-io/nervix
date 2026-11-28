@@ -86,9 +86,10 @@ impl RowOversize {
     /// The rejection of the row, which `request` names as the emitter measures it, such as
     /// `Postgres insert`.
     ///
-    /// A row over `MAX SIZE` is a `validation` error of the `encode` operation, as it is for every
-    /// emitter. A row within `MAX SIZE` that its destination could never accept is the destination's
-    /// definitive rejection of it. Neither message quotes a value the row carries.
+    /// A row over `MAX SIZE` is a `limit` error of the `encode` operation, as it is for every
+    /// emitter. A row within `MAX SIZE` that its destination could never accept is a
+    /// `destination_limit` error of the `publish` operation. Neither message quotes a value the row
+    /// carries.
     pub fn rejected<Id>(
         self,
         id: Id,
@@ -104,7 +105,7 @@ impl RowOversize {
             ),
             // The connector measured the row against the limit its destination documents and never
             // sent it, so no outside system answered it with a code.
-            ExceededLimit::Native(limit) => RejectedEmitterMember::external(
+            ExceededLimit::Native(limit) => RejectedEmitterMember::over_destination_limit(
                 id,
                 occurred_at,
                 format!(
@@ -492,7 +493,7 @@ mod tests {
         );
         assert_eq!(
             native.error.class,
-            nervix_models::RejectedErrorClass::Refused
+            nervix_models::RejectedErrorClass::DestinationLimit
         );
         assert_eq!(
             native.error.operation,

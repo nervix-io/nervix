@@ -2536,9 +2536,11 @@ enum NoticeKind : ubyte {
   Licensing
 }
 
-/// One of the ten classes every error has, under the root `ANY` of the class tree: `Codec`
-/// through `Refused` form the `REJECTED` group, where the data itself is the problem, and
-/// `Unavailable` through `Internal` the `FAILED` group, where sending the data again may work.
+/// One of the eleven classes every error has, under the root `ANY` of the class tree: `Codec`
+/// through `Refused`, and `DestinationLimit`, form the `REJECTED` group, where the data itself is
+/// the problem, and `Unavailable` through `Internal` the `FAILED` group, where sending the data
+/// again may work. `DestinationLimit` refines `Limit`: the data is larger than the outside system
+/// it is written to can take. It follows `Internal` so that every earlier value keeps its number.
 enum ErrorClass : ubyte {
   Codec,
   Validation,
@@ -2549,7 +2551,8 @@ enum ErrorClass : ubyte {
   Throttled,
   Timeout,
   Interrupted,
-  Internal
+  Internal,
+  DestinationLimit
 }
 
 /// The error a `Runtime` notice reports: its class and the graph node that produced it.

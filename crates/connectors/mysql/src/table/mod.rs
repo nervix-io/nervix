@@ -278,16 +278,27 @@ impl MySqlWriteError {
     }
 
     /// The rejection of the row this record error refused, carrying the server's error number and
-    /// SQLSTATE as the code its error route reads as `error.external_code`.
+    /// SQLSTATE as the code its error route reads as `error.external_code`. A row whose packet is
+    /// above the server's `max_allowed_packet` is over the destination's limit.
     fn record_rejection(
         &self,
         position: EmitterRecordPosition,
         occurred_at: Timestamp,
     ) -> RejectedEmitterMember<EmitterRecordPosition> {
-        let external_code = match self {
-            Self::Server { state, code } => server_code(*code, state),
-            _ => None,
+        let (external_code, above_packet_limit) = match self {
+            Self::Server { state, code } => {
+                (server_code(*code, state), *code == ER_NET_PACKET_TOO_LARGE)
+            }
+            _ => (None, false),
         };
+        if above_packet_limit {
+            return RejectedEmitterMember::over_destination_limit(
+                position,
+                occurred_at,
+                self.record_reason(),
+                external_code,
+            );
+        }
         RejectedEmitterMember::external(position, occurred_at, self.record_reason(), external_code)
     }
 
@@ -356,8 +367,22 @@ fn server_code(code: u16, state: &str) -> Option<ExternalErrorCode> {
 /// its column cannot hold, and a violated `CHECK` constraint name the rows of one insert, although
 /// the server reports the last two under the generic SQLSTATE `HY000`.
 fn is_record_server_error(state: &str, code: u16) -> bool {
-    state.starts_with("22") || state.starts_with("23") || matches!(code, 1153 | 1366 | 3819)
+    state.starts_with("22")
+        || state.starts_with("23")
+        || matches!(code, ER_NET_PACKET_TOO_LARGE | 1366 | 3819)
 }
+
+/// The error number of `ER_NET_PACKET_TOO_LARGE`, which the server answers a packet above its
+/// `max_allowed_packet` with.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the MySQL server error message reference assigns ER_NET_PACKET_TOO_LARGE the \
+                  error number 1153"
+    )
+)]
+const ER_NET_PACKET_TOO_LARGE: u16 = 1153;
 
 /// The driver's pool as the keeper of its declared minimum counts and draws on it.
 impl KeptPool for ConfiguredPool {
@@ -1219,6 +1244,42 @@ mod tests {
         assert!(report.contains::<MySqlWriteError>());
         assert!(diagnostic.contains("22001"));
         assert!(!diagnostic.contains("secret-row-value"));
+    }
+
+    /// A row whose packet is above `max_allowed_packet` is over the destination's limit; a value
+    /// its column cannot hold stays the server's refusal.
+    #[test]
+    fn a_packet_above_max_allowed_packet_is_over_the_destination_limit() {
+        let position = EmitterRecordPosition {
+            batch_index: 0,
+            row_index: 0,
+        };
+        let classes = [("08S01", 1153), ("22001", 1406)].map(|(state, code)| {
+            let report = MySqlWriteError::report_execute(mysql_async::Error::Server(
+                mysql_async::ServerError {
+                    state: state.to_string(),
+                    code,
+                    message: "Got a packet bigger than 'max_allowed_packet' bytes".to_string(),
+                },
+            ));
+            let rejection = report
+                .current_context()
+                .record_rejection(position, Timestamp::from_unix_nanos(1));
+            (rejection.error.class, rejection.error.external_code)
+        });
+        assert_eq!(
+            classes,
+            [
+                (
+                    nervix_models::RejectedErrorClass::DestinationLimit,
+                    ExternalErrorCode::new("1153 (08S01)")
+                ),
+                (
+                    nervix_models::RejectedErrorClass::Refused,
+                    ExternalErrorCode::new("1406 (22001)")
+                ),
+            ]
+        );
     }
 
     /// A failed write the server answered keeps the code it answered with, which a write the

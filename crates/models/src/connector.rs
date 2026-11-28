@@ -82,6 +82,8 @@ pub(crate) use self::{
 ///
 /// The keyword of a kind is how Plexus spells it, and it is what diagnostics name a client by and
 /// what the phrase naming an ingestor or an emitter starts with. A kind displays as its keyword.
+/// It crosses between nodes where a report names the connector that produced it, such as a decode
+/// rejection a connector made.
 #[derive(
     Debug,
     Clone,
@@ -95,6 +97,9 @@ pub(crate) use self::{
     IntoStaticStr,
     EnumIter,
     Display,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ConnectorKind {

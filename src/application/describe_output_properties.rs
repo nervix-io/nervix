@@ -14,18 +14,20 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
+use meticulous::OptionExt as _;
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_execution::Executor;
 use nervix_interconnect::{
     DescribeIngestorRequest, IngestorDescribeEnvelope, InterconnectRequest, RemoteOperationFailure,
     RkyvMessage,
 };
-use nervix_models::{CodecName, FieldPath, Timestamp};
+use nervix_models::{CodecName, ConnectorKind, FieldPath, Timestamp};
+use strum::IntoEnumIterator as _;
 
 use super::*;
 use crate::runtime::{
-    ClientIngestorGauges, DecodeRejection, IngestorQuiesceCounters, IngestorRateLimitTotals,
-    KafkaDomainOffsetDescribe, TransportPosition,
+    ClientIngestorGauges, DecodeRefuser, DecodeRejection, IngestorQuiesceCounters,
+    IngestorRateLimitTotals, KafkaDomainOffsetDescribe, TransportPosition,
 };
 
 const CASE_BYTES: usize = 2048;
@@ -109,7 +111,14 @@ impl<'a> Reports<'a> {
             return None;
         }
         let reference = uuid::Uuid::from_u128(self.bits128());
-        let codec = self.arbitrary.name::<CodecName>();
+        let refused_by = if self.arbitrary.entropy().flag() {
+            DecodeRefuser::Codec(self.arbitrary.name::<CodecName>())
+        } else {
+            let connectors = ConnectorKind::iter().collect::<Vec<_>>();
+            let count = std::num::NonZeroUsize::new(connectors.len())
+                .assured("the vocabulary declares connector kinds");
+            DecodeRefuser::Connector(connectors[self.arbitrary.entropy().index(count)])
+        };
         let position = self.transport_position();
         let count = self.arbitrary.entropy().count(4);
         let mut fields = Vec::with_capacity(count);
@@ -120,7 +129,7 @@ impl<'a> Reports<'a> {
         let occurred_at = Timestamp::from_unix_nanos(self.arbitrary.entropy().any_i64());
         Some(DecodeRejection {
             reference,
-            codec,
+            refused_by,
             position,
             fields: SortedSet::from_unsorted(fields),
             message,

@@ -226,8 +226,8 @@ Feature: Pulsar emission
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "seq":4 | "error_code":"refused" | "operation":"publish" | "error_message":"PULSAR rejected record: message TIMESTAMP 1970-01-01T00:00:00.000
-      "seq":5 | "error_code":"refused" | "operation":"publish" | "error_message":"PULSAR rejected record: message TIMESTAMP 1969-12-31T23:59:59.999
+      "seq":4 | "error_code":"validation" | "operation":"publish" | "error_message":"message TIMESTAMP 1970-01-01T00:00:00.000
+      "seq":5 | "error_code":"validation" | "operation":"publish" | "error_message":"message TIMESTAMP 1969-12-31T23:59:59.999
       """
     And within "30s" the observed broker receives exactly these Pulsar messages
       | payload                                                    | event time               |
@@ -554,7 +554,7 @@ Feature: Pulsar emission
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "seq":1 | "error_code":"refused" | "operation":"publish" | "error_message":"PULSAR rejected record: the Pulsar broker does not allow the message | "external_code":"NotAllowedError"
+      "seq":1 | "error_code":"refused" | "operation":"publish" | "error_message":"the Pulsar broker does not allow the message | "external_code":"NotAllowedError"
       """
 
     Examples:
@@ -624,7 +624,7 @@ Feature: Pulsar emission
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "seq":1 | "error_code":"refused" | "operation":"publish" | "error_message":"PULSAR rejected record: DELIVER AFTER 3153600000s
+      "seq":1 | "error_code":"validation" | "operation":"publish" | "error_message":"DELIVER AFTER 3153600000s
       """
 
     Examples:
