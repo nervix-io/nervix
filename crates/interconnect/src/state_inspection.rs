@@ -154,7 +154,11 @@ pub struct ReadProcessorStatePage {
     pub partition_exclusions: Option<BTreeSet<BranchKeyFingerprint>>,
     pub after: Option<(Option<BranchKeyFingerprint>, u64)>,
     pub max_rows: u64,
-    pub max_bytes: u64,
+    /// The hard byte bound for the encoded bodies.
+    pub max_bytes: u32,
+    /// The encoded bodies the reader's currently free bulk memory can hold with their decoding
+    /// charge. This limits optional rows. The first row is still eligible for admission.
+    pub preferred_body_bytes: u32,
     pub target: ClusterNodeIdentity,
 }
 
@@ -329,7 +333,12 @@ mod tests {
                     selection,
                     after,
                     max_rows: u64::from(arbitrary.entropy().byte()),
-                    max_bytes: arbitrary.positive_u64().get(),
+                    max_bytes: u32::from_le_bytes(std::array::from_fn(|_| {
+                        arbitrary.entropy().byte()
+                    })),
+                    preferred_body_bytes: u32::from_le_bytes(std::array::from_fn(|_| {
+                        arbitrary.entropy().byte()
+                    })),
                     target: target.clone(),
                 };
                 let reply: ProcessorStatePageReply = if arbitrary.entropy().flag() {

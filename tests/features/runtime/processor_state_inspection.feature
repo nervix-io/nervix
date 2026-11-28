@@ -530,7 +530,8 @@ Feature: Bounded typed reorderer and correlator state inspection
     And http payload for tenant "east" with value 5 and a 1048576 byte message is posted to host "paged-reorderer-{{test_id}}.example.com" path "/events"
     And http payload for tenant "west" with value 6 and a 1048576 byte message is posted to host "paged-reorderer-{{test_id}}.example.com" path "/events"
     Then within "30s" a client of every node sees reorderer "held" hold 6 rows
-    # Each held row carries its 1 MiB message, and gathering its columns takes its bytes. A page
+    # Each held row carries a 1 MiB message. Gathering takes that value's bytes, the remaining
+    # columns, the selection indices and the branch runs. A page
     # read through another node also sets the row's bytes aside for the body that carries it. With
     # 5 MiB left on the reorderer's owner, its reads of its own state return four rows a page and
     # every other node's reads two, each page ending where the next row no longer fits, and the rest

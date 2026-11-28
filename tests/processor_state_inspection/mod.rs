@@ -742,6 +742,23 @@ async fn every_node_reads_every_row(world: &mut ScenarioWorld, kind: String, nam
     }
 }
 
+/// Reads on the unit's owner so the page uses bulk memory for its columns and run records.
+#[then(expr = "the owner reads {word} {string} state in one page with every row once")]
+async fn owner_reads_in_one_page(world: &mut ScenarioWorld, kind: String, name: String) {
+    let StateInspectionResult::Page(page) = &last_state(world).result else {
+        panic!("the last read answered a page");
+    };
+    let [unit] = page.units.as_slice() else {
+        panic!("the inspected processor runs one unit");
+    };
+    let owner = unit.owner.as_str().to_owned();
+    let name = expand_placeholders(world, &name);
+    let client = node_reader(world, &owner).await;
+    let read = read_at_default_limit(world, &client, statement_kind(&kind), &name).await;
+    assert_eq!(read.pages, 1, "the complete page fits on its owner");
+    read.assert_every_row_once(&client);
+}
+
 /// Connects inspection client `name` to a node other than the owner of the unit the last read
 /// inspected, so its next read crosses the interconnect, or to the first node when only the owner
 /// runs.

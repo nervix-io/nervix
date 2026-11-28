@@ -4285,11 +4285,11 @@ subject to the current task execution policy.
 
 Inferencer inspection walks one immutable state-routing publication on the Bulk executor, with
 cancellation checked for every route and memory admission before retaining each registered native
-generation. It sorts selected concrete keys once, counts the entire selected cut, and builds only
-the requested tensor rows directly into Arrow list builders. Captures charge the retained native
-payload and shape footprint because a generation can outlive the owner's next replacement. The
-handles retain their values through column construction. The published tensors, branch activity, mutation
-owner, acknowledgement path and snapshot cadence are unchanged. A bounded synchronous read of the
+generation. It sorts selected concrete keys once, counts the entire selected cut, and sizes Arrow
+builders for the tensors, offsets, shapes, port text and headers the page will return. It charges
+the native payload and shape footprint of one publication and reuses that charge as each branch's
+handle is released. The run vector has room for the admitted header and tensor runs before the
+first row is copied. A bounded synchronous read of the
 existing checkpoint-replication progress owner supplies header progress; no guard crosses a wait.
 Progress may advance while tensor revisions stay fixed and does not fence a tensor continuation.
 The new public inspection outline and direct native-owner tests check branch separation, exact
@@ -4346,9 +4346,11 @@ Window inspection reads input and argument views, sequence and lifetime facts, t
 delayed-removal deadline, and the production state admission charge. Sealed metadata parsing runs
 on the Bulk executor with cancellation; the existing bounded native decoder opens its Arrow
 sections. Decoded columns and metadata remain charged through projection and encoding. Each
-branch's rows, header and accumulator facts come from the same publication. Metadata is bounded
-before retained-row frames, consumes the byte/section budget and never advances a retained-row
-continuation. These reads introduce no branch command, lock or recurring record-path lookup.
+branch's rows, header and accumulator facts come from the same publication. Each page charges the
+selected input and argument column buffers, selection scratch, and the capacity of its row and run
+vectors before gathering. Metadata is bounded before retained-row frames, consumes the byte/section
+budget and never advances a retained-row continuation. These reads introduce no branch command,
+lock or recurring record-path lookup.
 
 Reorderer route buffers and correlator pending sides stay exclusively owned by their concrete
 branch task; nothing publishes them. `SHOW REORDERER ... STATE`, `SHOW CORRELATOR ... STATE` and the
@@ -4375,7 +4377,8 @@ reader's whole wait, from the unit selection to the last branch's answer; a repl
 left is discarded. Gathering the copies into Arrow columns runs on the bounded Bulk executor after
 the branch tasks answered. Before any column is built, the page admits the copied rows in order,
 within the allowances its owner runs the read in: the first row takes the bytes of its columns,
-and for a page another node reads the bytes of its body, as a charge the page requires, so a share
+the views and indices that gather them, its run record and, for a page another node reads, the
+bytes of its body. This charge is required, so a share
 without room for it runs the read again within a larger one; every later row takes them only while
 the share has room for them now, and the page ends before the first row it has none for. The page
 keeps that charge until its rows are presented or carried.

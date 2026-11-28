@@ -828,7 +828,8 @@ impl SessionServiceImpl {
                 partition_exclusions,
                 after,
                 max_rows: u64::try_from(allowed).assured("a row limit fits u64"),
-                max_bytes: u64::try_from(budget.bytes).assured("the session byte limit fits u64"),
+                max_bytes: u32::try_from(budget.bytes).assured("the session byte limit fits u32"),
+                preferred_body_bytes: 0,
                 target: ClusterNodeIdentity::new(owner.clone(), incarnation),
             };
             let page = self.processor_unit_page(request, &plan).await?;
@@ -929,13 +930,17 @@ impl SessionServiceImpl {
     /// owner through the bounded page operation.
     async fn processor_unit_page(
         &self,
-        request: ReadProcessorStatePage,
+        mut request: ReadProcessorStatePage,
         plan: &ProcessorInspectionPlan,
     ) -> Result<OwnerPage, StateInspectionRejection> {
         if request.target.node_id() == self.inner.consensus.local_node_id() {
             return self
                 .native_processor_state_page(request, PageReply::Local)
                 .await;
+        }
+        if request.max_rows != 0 {
+            request.preferred_body_bytes =
+                PageReply::preferred_body_bytes(self.inner.runtime.inspection_executor());
         }
         let deadline = *self
             .inner
@@ -1057,7 +1062,7 @@ impl SessionServiceImpl {
     ) -> Result<OwnerPage, StateInspectionRejection> {
         let request = &request;
         let executor = self.inner.runtime.inspection_executor();
-        let share = reply.initial_share(executor, request.max_rows, request.max_bytes);
+        let share = reply.initial_share(executor, request.max_rows, u64::from(request.max_bytes));
         let read = within_owner_page_shares(executor, share, |page_executor| async move {
             self.native_processor_state_page_with(&page_executor, request, reply)
                 .await
@@ -1122,7 +1127,7 @@ impl SessionServiceImpl {
                     after: request.after,
                     bounds: ProcessorStatePageBounds {
                         rows,
-                        bytes: request.max_bytes.min(
+                        bytes: u64::from(request.max_bytes).min(
                             u64::try_from(SessionLimits::DEFAULT.transfer_bytes())
                                 .assured("session limits fit u64"),
                         ),
@@ -1218,7 +1223,7 @@ impl SessionServiceImpl {
         &self,
         request: ReadProcessorStatePage,
     ) -> Result<StreamingResponse, Report<StreamHandlerError>> {
-        let max_bytes = request.max_bytes.min(
+        let max_bytes = u64::from(request.max_bytes).min(
             u64::try_from(SessionLimits::DEFAULT.transfer_bytes())
                 .assured("session limits fit u64"),
         );
@@ -1232,7 +1237,7 @@ impl SessionServiceImpl {
         // The page travels to another node, so admitting its rows also sets aside its reply. The
         // read and its stream are one attempt within the page's allowances: the stream encodes
         // while the page holds its charges, so both draw from the shares.
-        let reply = PageReply::remote(executor);
+        let reply = PageReply::remote(executor, request.preferred_body_bytes);
         let share = reply.initial_share(executor, request.max_rows, max_bytes);
         let request = &request;
         let answered = timeout(
@@ -1306,6 +1311,7 @@ impl SessionServiceImpl {
                             after: None,
                             max_rows: 0,
                             max_bytes: 0,
+                            preferred_body_bytes: 0,
                             target: ClusterNodeIdentity::new(owner, incarnation),
                         };
                         match timeout(

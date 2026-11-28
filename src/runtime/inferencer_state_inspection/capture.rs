@@ -116,24 +116,9 @@ impl Runtime {
                                 return Ok(());
                             }
                         }
-                        let key_bytes = match &placement.branch_key {
-                            Some(key) => u64::try_from(key.as_str().len())
-                                .assured("a resident branch key fits u64")
-                                .checked_mul(4)
-                                .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?,
-                            None => 0,
-                        };
-                        reserve(
+                        super::super::processor_state_inspection::memory::VecGrowth::reserve(
                             &mut memory,
-                            checked_add(
-                                key_bytes,
-                                u64::try_from(std::mem::size_of::<CapturedBranch>())
-                                    .assured("resident type sizes fit u64")
-                                    .checked_mul(4)
-                                    .ok_or_else(|| {
-                                        Report::new(ProcessorStatePageError::Admission)
-                                    })?,
-                            )?,
+                            &mut captured,
                         )?;
                         captured.push(CapturedBranch::capture(
                             state,
@@ -142,7 +127,10 @@ impl Runtime {
                         )?);
                         Ok(())
                     })?;
-                captured.sort_by(|left, right| BranchKey::canonical_order(&left.key, &right.key));
+                // The selected unit registers at most one publication per typed branch key.
+                captured.sort_unstable_by(|left, right| {
+                    BranchKey::canonical_order(&left.key, &right.key)
+                });
                 let captured = page::CapturedBranches {
                     branches: captured,
                     catalog,

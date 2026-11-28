@@ -3088,6 +3088,12 @@ Sealed window metadata and columns
 are decoded under bounded admission, with cancellation and storage charges retained through
 encoding. A zero-row request returns only counts for the processor's `DESCRIBE` summary.
 
+A processor page request carries its hard encoded byte limit and the encoded-body size that
+fits the reader's free bulk memory beside the decoding charge. Each value uses 32 bits. The owner
+uses the reader's room when selecting optional rows of its captured page. It still offers the first
+row when the reader needs time for memory to free. The reader admits the bodies from their exact
+encoded lengths in the descriptor.
+
 A deduplicator, window or inferencer inspection during repartitioning additionally requests the complete
 selected branch-fingerprint catalog and a set of copies to exclude. Count-only census requests
 use an empty exclusion set. The returned catalog precedes exclusion, while counts, rows and

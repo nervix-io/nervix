@@ -175,45 +175,84 @@ enum AdmittedSections {
     },
 }
 
-fn schema_bytes(
+#[derive(Default)]
+struct SchemaAllocation {
+    fields: u64,
+    names: u64,
+    arrow: u64,
+}
+
+fn layout_slots<T>(length: usize) -> Result<u64, StateInspectionRejection> {
+    let bytes = length
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or(StateInspectionRejection::ReplyTooLarge)?;
+    Ok(u64::try_from(bytes).assured("a resident allocation fits u64"))
+}
+
+fn layout_sum<const N: usize>(parts: [u64; N]) -> Result<u64, StateInspectionRejection> {
+    let mut bytes = 0_u64;
+    for part in parts {
+        bytes = bytes
+            .checked_add(part)
+            .ok_or(StateInspectionRejection::ReplyTooLarge)?;
+    }
+    Ok(bytes)
+}
+
+fn schema_allocation(
     fields: &[SchemaField],
     cancellation: &Cancellation,
-) -> Result<u64, StateInspectionRejection> {
-    let mut bytes = 0_u64;
+) -> Result<SchemaAllocation, StateInspectionRejection> {
+    let mut measured = SchemaAllocation {
+        fields: layout_slots::<SchemaField>(fields.len())?,
+        names: layout_slots::<String>(fields.len())?,
+        arrow: layout_slots::<arrow_schema::Schema>(1)?,
+    };
     for field in fields {
         cancellation
             .check()
             .map_err(|error| inspection_refusal(error, StateInspectionRejection::Deadline))?;
-        let slot = std::mem::size_of::<SchemaField>()
-            .checked_add(std::mem::size_of::<String>())
-            .ok_or(StateInspectionRejection::ReplyTooLarge)?;
-        let slot = slot
-            .checked_add(std::mem::size_of::<[usize; 2]>())
-            .ok_or(StateInspectionRejection::ReplyTooLarge)?;
-        let slot = slot
-            .checked_add(field.name.as_str().len())
-            .ok_or(StateInspectionRejection::ReplyTooLarge)?;
-        bytes = bytes
-            .checked_add(u64::try_from(slot).assured("resident field sizes fit u64"))
-            .ok_or(StateInspectionRejection::ReplyTooLarge)?;
+        // FieldName clones share the text. An Arrow projection creates its own name and Field.
+        let name = layout_slots::<u8>(field.name.as_str().len())?;
+        measured.names = layout_sum([measured.names, name])?;
+        measured.arrow = layout_sum([
+            measured.arrow,
+            layout_slots::<arrow_schema::FieldRef>(1)?,
+            layout_slots::<arrow_schema::Field>(1)?,
+            name,
+        ])?;
         let mut ty = &field.ty;
-        loop {
+        while let ParseAsType::Array { element, .. } | ParseAsType::Vec { element } = ty {
             cancellation
                 .check()
                 .map_err(|error| inspection_refusal(error, StateInspectionRejection::Deadline))?;
-            bytes = bytes
-                .checked_add(
-                    u64::try_from(std::mem::size_of::<ParseAsType>())
-                        .assured("a type slot fits u64"),
-                )
-                .ok_or(StateInspectionRejection::ReplyTooLarge)?;
-            match ty {
-                ParseAsType::Array { element, .. } | ParseAsType::Vec { element } => ty = element,
-                _ => break,
-            }
+            measured.fields = layout_sum([measured.fields, layout_slots::<ParseAsType>(1)?])?;
+            measured.arrow = layout_sum([
+                measured.arrow,
+                layout_slots::<arrow_schema::Field>(1)?,
+                layout_slots::<u8>("item".len())?,
+            ])?;
+            ty = element;
         }
     }
-    Ok(bytes)
+    Ok(measured)
+}
+
+fn section_allocation(
+    schema: &SchemaAllocation,
+    branch_fields: u64,
+) -> Result<u64, StateInspectionRejection> {
+    // Keep the section layout, the copy passed to projection and the complete fields projection
+    // returns. Arrow owns its fields and names. Row presentation clones the projected fields and
+    // the branch schema into its RowSchema.
+    layout_sum([
+        schema.fields,
+        schema.fields,
+        schema.fields,
+        schema.arrow,
+        schema.fields,
+        branch_fields,
+    ])
 }
 
 fn admitted_sections(
@@ -225,33 +264,28 @@ fn admitted_sections(
 ) -> Result<AdmittedSections, StateInspectionRejection> {
     let header = ProcessorStateSection::Header.inferencer_fields(false);
     let tensor = ProcessorStateSection::Tensor(0).inferencer_fields(sensitive);
-    let branch_bytes = schema_bytes(branch, cancellation)?;
-    let header_bytes = schema_bytes(&header, cancellation)?
-        .checked_add(branch_bytes)
-        .ok_or(StateInspectionRejection::ReplyTooLarge)?;
-    let tensor_bytes = schema_bytes(&tensor, cancellation)?
-        .checked_add(branch_bytes)
-        .ok_or(StateInspectionRejection::ReplyTooLarge)?;
+    let branch_fields = schema_allocation(branch, cancellation)?.fields;
+    let header_allocation = schema_allocation(&header, cancellation)?;
+    let tensor_allocation = schema_allocation(&tensor, cancellation)?;
+    let header_bytes = section_allocation(&header_allocation, branch_fields)?;
+    let tensor_bytes = section_allocation(&tensor_allocation, branch_fields)?;
     let count = entries
         .checked_add(1)
         .ok_or(StateInspectionRejection::ReplyTooLarge)?;
-    let slots = u64::try_from(std::mem::size_of::<SectionLayout>())
-        .assured("a section slot fits u64")
-        .checked_mul(u64::try_from(count).assured("a resident declaration count fits u64"))
+    let layout = layout_slots::<SectionLayout>(count)?;
+    let tensor_count = u64::try_from(entries).assured("a resident declaration count fits u64");
+    let tensors = tensor_bytes
+        .checked_mul(tensor_count)
         .ok_or(StateInspectionRejection::ReplyTooLarge)?;
-    // Retain the layout and cover the working schema copies made by projection and Row encoding.
-    let bytes = tensor_bytes
-        .checked_mul(u64::try_from(entries).assured("a resident declaration count fits u64"))
-        .ok_or(StateInspectionRejection::ReplyTooLarge)?;
-    let bytes = bytes
-        .checked_add(header_bytes)
-        .ok_or(StateInspectionRejection::ReplyTooLarge)?;
-    let bytes = bytes
-        .checked_add(slots)
-        .ok_or(StateInspectionRejection::ReplyTooLarge)?;
-    let bytes = bytes
-        .checked_mul(4)
-        .ok_or(StateInspectionRejection::ReplyTooLarge)?;
+    let bytes = layout_sum([
+        layout,
+        layout,
+        header_bytes,
+        tensors,
+        header_allocation.names,
+        tensor_allocation.names,
+        tensor_allocation.fields,
+    ])?;
     let mut charge = GrowingCharge::new(memory);
     if let InspectionGrowth::Short { needed } = grow_inspection(&mut charge, bytes)? {
         return Ok(AdmittedSections::Short { needed });
@@ -276,6 +310,11 @@ fn admitted_sections(
             sensitive_keys: Vec::new(),
         });
     }
+    assert_eq!(
+        sections.capacity(),
+        count,
+        "the admitted section vector did not grow"
+    );
     Ok(AdmittedSections::Admitted { sections, memory })
 }
 

@@ -37,17 +37,31 @@ impl PublishedPage {
             headers: Vec::new(),
             structures: Vec::new(),
             runs: Vec::new(),
-            metadata_runs: Vec::new(),
+            column_bytes: 0,
             memory,
             reply: bounds.reply,
             bodies: 0,
         };
-        page.set_aside_reply(&plan, metadata)?;
+        if let PageReply::Remote { descriptor, .. } = page.reply {
+            reserve_bytes(&mut page.memory, descriptor)?;
+        }
+        let decoded_count = branches
+            .iter()
+            .filter(|branch| matches!(&branch.state, OpenState::Window(WindowRead::Decoded(_))))
+            .count();
+        reserve_bytes(
+            &mut page.memory,
+            page_memory::slots::<AdmittedWindowSnapshot>(decoded_count)?,
+        )?;
         page.digest
             .update(b"nervix/state-inspection/published-processors");
         // Every selected branch is counted, and its metadata charged, before any retained row is
         // admitted. A page ends before a row the bulk class cannot hold, so rows never take the
         // memory the complete counts and every branch's metadata need.
+        reserve_bytes(
+            &mut page.memory,
+            page_memory::slots::<CountedRows<'_>>(branches.len())?,
+        )?;
         let mut counted = Vec::with_capacity(branches.len());
         for branch in &branches {
             cancellation
@@ -62,41 +76,20 @@ impl PublishedPage {
             return Err(Report::new(ProcessorStatePageError::Position));
         }
         for rows in counted {
-            page.admit_rows(rows, cancellation)?;
+            page.admit_rows(rows, &plan, cancellation)?;
         }
         let offset = start
             .checked_add(page.returned)
             .ok_or_else(|| Report::new(ProcessorStatePageError::Position))?;
         let sections = page.sections(&plan, cancellation)?;
-        page.metadata_runs.append(&mut page.runs);
-        let mut windows = Vec::new();
+        page_memory::assert_buffers(&sections, page.column_bytes);
+        let mut windows = Vec::with_capacity(decoded_count);
         for branch in branches {
             if let OpenState::Window(WindowRead::Decoded(decoded)) = branch.state {
                 windows.push(*decoded);
             }
         }
         page.finish(offset, sections, windows)
-    }
-
-    /// Sets aside, for a page another node reads and before anything else, what encoding its
-    /// descriptor takes and, when it can return rows (`metadata`), the framing of each section's
-    /// body. A page its owner presents sets nothing aside.
-    fn set_aside_reply(&mut self, plan: &ReadPlan, metadata: bool) -> ReadResult<()> {
-        let PageReply::Remote {
-            descriptor,
-            framing,
-        } = self.reply
-        else {
-            return Ok(());
-        };
-        reserve_bytes(&mut self.memory, descriptor)?;
-        if metadata {
-            let framing = framing
-                .checked_mul(plan.sections())
-                .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
-            self.set_aside_bodies(framing)?;
-        }
-        Ok(())
     }
 
     /// Counts one selected `branch` into the page's identity, generation and complete counts,
@@ -160,6 +153,7 @@ impl PublishedPage {
             PageReply::Remote {
                 descriptor,
                 framing,
+                ..
             } => {
                 let (descriptor, rest) = self
                     .memory
@@ -184,7 +178,7 @@ impl PublishedPage {
             offset,
             last_branch: self.last_branch,
             more: offset < self.counts.rows,
-            runs: self.metadata_runs,
+            runs: self.runs,
             sections,
             memory: Some(ProcessorStatePageMemory {
                 _reservation: reservation,
@@ -201,14 +195,49 @@ impl PublishedPage {
         Ok(())
     }
 
-    /// Reserves one metadata row's `bytes`, and as much again for the body that carries it when
-    /// another node reads the page.
-    pub(super) fn reserve_metadata(&mut self, bytes: u64) -> ReadResult<()> {
-        reserve_bytes(&mut self.memory, bytes)?;
-        if let PageReply::Remote { .. } = self.reply {
-            self.set_aside_bodies(bytes)?;
+    /// Charges one metadata row's buffers and its remote body independently. Metadata is required
+    /// for every selected branch even on a page whose retained rows stop early.
+    pub(super) fn reserve_metadata(
+        &mut self,
+        columns: u64,
+        body: u64,
+        first_in_section: bool,
+    ) -> ReadResult<()> {
+        reserve_bytes(&mut self.memory, columns)?;
+        self.column_bytes = add_bytes(self.column_bytes, columns)?;
+        if let PageReply::Remote { framing, .. } = self.reply {
+            let body = if first_in_section {
+                add_bytes(body, framing)?
+            } else {
+                body
+            };
+            self.set_aside_bodies(body)?;
         }
         Ok(())
+    }
+
+    pub(super) fn reserve_run(
+        &mut self,
+        section: ProcessorStateSection,
+        key: &Option<BranchKey>,
+    ) -> ReadResult<()> {
+        let growth = self.run_growth(section, key)?;
+        reserve_bytes(&mut self.memory, growth.bytes)?;
+        growth.allocate(&mut self.runs);
+        extend_runs(&mut self.runs, section, key);
+        Ok(())
+    }
+
+    fn run_growth(
+        &self,
+        section: ProcessorStateSection,
+        key: &Option<BranchKey>,
+    ) -> ReadResult<page_memory::VecGrowth> {
+        let continues = self
+            .runs
+            .last()
+            .is_some_and(|run| run.continues(section, key));
+        page_memory::VecGrowth::next(&self.runs, usize::from(!continues))
     }
 
     fn skip_branch(&mut self, key: &Option<BranchKey>, rows: usize) -> ReadResult<usize> {
@@ -238,8 +267,7 @@ impl PublishedPage {
         Ok(())
     }
 
-    /// Whether the next row of `section`, of `bytes` payload bytes and a resident item charging
-    /// `item` bytes, joins the page. The page ends before the row at its row limit, at its byte
+    /// Whether the next row of `section` joins the page. The page ends at its row or byte
     /// allowance, and where its share has no room now for everything the row needs to finish: its
     /// columns and, when another node reads the page, its body. That leaves the read a
     /// continuation. A page's first row is required instead, since without it the read makes no
@@ -248,24 +276,27 @@ impl PublishedPage {
         &mut self,
         key: &Option<BranchKey>,
         section: ProcessorStateSection,
-        bytes: u64,
-        item: u64,
+        row: PublishedRowCharge,
     ) -> ReadResult<bool> {
-        if self.rows_left == 0 || bytes > self.bytes_left {
+        if self.rows_left == 0 || row.logical > self.bytes_left {
             self.rows_left = 0;
             return Ok(false);
         }
-        // Column gathering can retain both the selected views and their contiguous output buffers.
-        let columns = bytes
-            .checked_mul(2)
-            .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
-        let charge = add_bytes(columns, item_bytes::<ProcessorStateRun>()?)?;
-        let charge = add_bytes(charge, item)?;
-        // A row another node reads also sets its bytes aside for the body that carries it.
+        let growth = self.run_growth(section, key)?;
+        let charge = add_bytes(add_bytes(row.columns, growth.bytes)?, row.slot)?;
+        // The peer stream also needs the row's body.
         let body = match self.reply {
             PageReply::Local => 0,
-            PageReply::Remote { .. } => bytes,
+            PageReply::Remote { framing, .. } if self.returned == 0 => {
+                add_bytes(row.body, framing)?
+            }
+            PageReply::Remote { .. } => row.body,
         };
+        let bodies = add_bytes(self.bodies, body)?;
+        if self.returned != 0 && !self.reply.optional_bodies_fit(bodies) {
+            self.rows_left = 0;
+            return Ok(false);
+        }
         let charge = add_bytes(charge, body)?;
         let target = add_bytes(self.memory.bytes(), charge)?;
         if self.returned == 0 {
@@ -282,14 +313,16 @@ impl PublishedPage {
             .verified("a full page returned above");
         self.bytes_left = self
             .bytes_left
-            .checked_sub(bytes)
+            .checked_sub(row.logical)
             .verified("a row beyond the byte allowance returned above");
         self.returned = self
             .returned
             .checked_add(1)
             .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
         self.last_branch = key.as_ref().map(BranchKey::fingerprint);
-        self.bodies = add_bytes(self.bodies, body)?;
+        self.bodies = bodies;
+        self.column_bytes = add_bytes(self.column_bytes, row.columns)?;
+        growth.allocate(&mut self.runs);
         extend_runs(&mut self.runs, section, key);
         Ok(true)
     }
@@ -384,22 +417,52 @@ impl PublishedPage {
 
     /// Admits one counted branch's rows, past those a resumed page skips, until a bound ends the
     /// page.
-    fn admit_rows(&mut self, rows: CountedRows<'_>, cancellation: &Cancellation) -> ReadResult<()> {
+    fn admit_rows(
+        &mut self,
+        rows: CountedRows<'_>,
+        plan: &ReadPlan,
+        cancellation: &Cancellation,
+    ) -> ReadResult<()> {
+        if self.rows_left == 0 {
+            return Ok(());
+        }
         match rows {
             CountedRows::Keys {
                 branch,
                 keys,
                 skipped,
             } => {
+                let ReadPlan::Keys { fields, .. } = plan else {
+                    return Err(Report::new(ProcessorStatePageError::Columns));
+                };
                 for key in keys.iter().skip(skipped) {
                     cancellation
                         .check()
                         .change_context(ProcessorStatePageError::Admission)?;
                     let bytes = key.key.estimated_bytes();
-                    let item = item_bytes::<KeyRow>()?;
-                    if !self.admit(branch, ProcessorStateSection::Keys, bytes, item)? {
+                    let first = self.keys.is_empty();
+                    let mut columns =
+                        page_memory::fixed_columns(page_memory::slots::<i64>(1)?, 1, first)?;
+                    if key.key.parts().len() != fields.len() {
+                        return Err(Report::new(ProcessorStatePageError::Columns));
+                    }
+                    for (field, part) in fields.iter().zip(key.key.parts()) {
+                        columns = add_bytes(
+                            columns,
+                            page_memory::key_part(part, field.data_type(), first)?,
+                        )?;
+                    }
+                    let growth = page_memory::VecGrowth::next(&self.keys, 1)?;
+                    let row = PublishedRowCharge {
+                        logical: bytes,
+                        columns,
+                        slot: growth.bytes,
+                        body: columns,
+                    };
+                    if !self.admit(branch, ProcessorStateSection::Keys, row)? {
                         break;
                     }
+                    growth.allocate(&mut self.keys);
                     self.keys.push(KeyRow {
                         key: key.key.clone(),
                         seen_at: key.seen_at,
@@ -418,11 +481,24 @@ impl PublishedPage {
                     let input = held_row_bytes(&entry.record);
                     let arguments = held_row_bytes(&entry.arguments);
                     let bytes = add_bytes(input, arguments)?;
-                    let bytes = add_bytes(bytes, 16)?;
-                    let item = item_bytes::<WindowRow>()?;
-                    if !self.admit(branch, ProcessorStateSection::Rows, bytes, item)? {
+                    let fixed = page_memory::slots::<u64>(2)?;
+                    let bytes = add_bytes(bytes, fixed)?;
+                    let first = self.windows.is_empty();
+                    let columns = page_memory::payload_row(&entry.record, first)?;
+                    let columns =
+                        add_bytes(columns, page_memory::payload_row(&entry.arguments, first)?)?;
+                    let columns = add_bytes(columns, page_memory::fixed_columns(fixed, 2, first)?)?;
+                    let growth = page_memory::VecGrowth::next(&self.windows, 1)?;
+                    let row = PublishedRowCharge {
+                        logical: bytes,
+                        columns,
+                        slot: growth.bytes,
+                        body: bytes,
+                    };
+                    if !self.admit(branch, ProcessorStateSection::Rows, row)? {
                         break;
                     }
+                    growth.allocate(&mut self.windows);
                     self.windows.push(WindowRow {
                         entry: entry.clone(),
                     });

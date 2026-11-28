@@ -69,7 +69,7 @@ impl PublishedPage {
                         key_fields: arguments.fields().to_vec(),
                     },
                     header_columns(&self.headers),
-                    structure_columns(&self.structures),
+                    structure_columns(&self.structures)?,
                 ])
             }
         }
@@ -115,27 +115,35 @@ fn header_columns(rows: &[HeaderRow]) -> ProcessorStateSectionColumns {
     }
 }
 
-fn structure_columns(rows: &[StructureRow]) -> ProcessorStateSectionColumns {
+fn structure_columns(rows: &[StructureRow]) -> ReadResult<ProcessorStateSectionColumns> {
     let payload: Vec<arrow_array::ArrayRef> = if rows.is_empty() {
         Vec::new()
     } else {
+        let mut bytes = 0_usize;
+        for row in rows {
+            bytes = bytes
+                .checked_add(row.kind.as_ref().len())
+                .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
+        }
+        let mut kinds = StringBuilder::with_capacity(rows.len(), bytes);
+        for row in rows {
+            kinds.append_value(row.kind.as_ref());
+        }
         vec![
             StdArc::new(UInt32Array::from_iter_values(
                 rows.iter().map(|row| row.index),
             )),
-            StdArc::new(StringArray::from_iter_values(
-                rows.iter().map(|row| row.kind.as_str()),
-            )),
+            StdArc::new(kinds.finish()),
             StdArc::new(arrow_array::UInt64Array::from_iter_values(
                 rows.iter().map(|row| row.count),
             )),
         ]
     };
-    ProcessorStateSectionColumns {
+    Ok(ProcessorStateSectionColumns {
         section: ProcessorStateSection::Accumulators,
         rows: u64::try_from(rows.len()).assured("bounded structure counts fit u64"),
         payload,
         appended: Vec::new(),
         key_fields: Vec::new(),
-    }
+    })
 }

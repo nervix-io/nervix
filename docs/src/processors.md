@@ -409,10 +409,11 @@ it handled, so a page resumed after any branch took another batch, released rows
 refused as `stale_continuation`. A branch that is stopping refuses the read as `owner_unavailable`.
 A unit that has not yet installed every branch its node held, while it restores them after its
 task starts or takes the unit over, refuses the read as `not_ready` instead of reporting the
-branches it has not restored as empty. Gathering the copied rows' columns charges the owner's bulk
-memory the rows' bytes, and a page read through another node also sets each row's body aside, so a
-page ends before a row the bulk memory left cannot hold, with complete counts and a continuation,
-as a [window page](#inspect-retained-window-state) does. A page always returns its first row: when
+branches it has not restored as empty. The owner's bulk charge covers the selected column buffers,
+the views and indices used to gather them, and the runs that identify their branches. A page read
+through another node also sets each row's body aside. A page ends before a row the bulk memory
+left cannot hold, with complete counts and a continuation, as a [window
+page](#inspect-retained-window-state) does. A page always returns its first row: when
 the owner's bulk memory cannot hold even that row now, the read waits for room for it rather than
 being refused.
 
@@ -533,11 +534,11 @@ Two additional typed sections describe each selected branch, including an empty 
 
 `LIMIT`, continuation offsets and complete row counts count only retained input rows. Headers and
 accumulator facts do not advance the row position; they do consume the reply's byte bound and are
-repeated on each page. Metadata that cannot fit is refused as `reply_too_large`. Gathering a row's
-columns charges the owner's bulk memory twice the row's bytes, after every selected branch's
-metadata is charged. A page read through another node also sets the row's bytes aside once more for
-the Arrow body that carries it, so it holds fewer rows than one its owner presents. A page therefore
-also ends before a row the bulk memory left cannot hold, with complete counts and a continuation,
+repeated on each page. Metadata that cannot fit is refused as `reply_too_large`. The owner charges
+for each selected branch's metadata first. It then charges for the selected input and argument
+columns, the views and indices that gather them, and the runs that identify their branches. A page
+read through another node also sets aside memory for the Arrow bodies that carry those columns.
+A page ends before a row the bulk memory left cannot hold, with complete counts and a continuation,
 and it always returns its first row: when the owner's bulk memory cannot hold even that row now,
 the read waits for room for it rather than being refused. Read through
 another node, a single row whose encoded columns exceed the owner's snapshot section bound, 8 MiB,
@@ -819,10 +820,10 @@ preserved. If any input or branch-key field is sensitive, the entire `values` ce
 port names, shape and lifecycle metadata remain visible. There is no implicit leakage exception.
 
 Complete row counts, `LIMIT` and continuation offsets count tensor rows. Header rows consume
-the reply's section and byte bounds separately. A page retains the publication of each branch it
-returns tensors from only while it copies them, charging the owner's bulk memory the publication's
-footprint, and building a tensor row takes four times its bytes; a page read through another node
-also sets each row's bytes aside for the body that carries it. A page therefore ends before a row
+the reply's section and byte bounds separately. The owner charges for the tensor values, shape
+elements, port text, offsets and branch headers that the page builds. It reuses one publication
+charge as it copies tensors from one branch at a time. A page read through another node also sets
+aside the Arrow bodies that carry its rows. A page therefore ends before a row
 the bulk memory left cannot hold, with complete counts and a continuation, and it always returns its
 first row: when the owner's bulk memory cannot hold even that row now, the read waits for room for
 it rather than being refused. A continuation names the complete selected

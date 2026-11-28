@@ -245,6 +245,7 @@ impl SessionServiceImpl {
                             after: None,
                             max_rows: 0,
                             max_bytes: 0,
+                            preferred_body_bytes: 0,
                             target: ClusterNodeIdentity::new(owner, incarnation),
                         },
                         plan,
