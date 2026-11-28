@@ -370,7 +370,7 @@ attention: `INFO`, `WARNING` or `ERROR`. Its `message` is text for display. Rout
 ```
 
 A `RUNTIME` notice that reports an error of a graph node carries that error as typed fields:
-`error_class` is the lower-case name of its class, one of the ten [error
+`error_class` is the lower-case name of its class, one of the eleven [error
 classes](errors-and-diagnostics.md#the-message-error-record) such as `evaluation`, `limit` or
 `refused`; `error_node_kind` is the snake_case kind of the node that produced it, such as
 `junction` or `emitter`; and `error_node` is that node's name. They are the values an error route

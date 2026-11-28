@@ -245,8 +245,19 @@ impl MongoDbClient {
 
 /// A write code the server reports for a document it will never accept.
 fn is_record_write_error(code: i32) -> bool {
-    matches!(code, 121 | 10334 | 11000)
+    matches!(code, 121 | BSON_OBJECT_TOO_LARGE | 11000)
 }
+
+/// The write code of `BSONObjectTooLarge`, which the server reports for a document larger than its
+/// document limit.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "MongoDB's error code reference assigns BSONObjectTooLarge the code 10334"
+    )
+)]
+const BSON_OBJECT_TOO_LARGE: i32 = 10334;
 
 /// A code the server answered with, as `error.external_code` holds it: the decimal number MongoDB
 /// documents its error codes by, such as `11000`.
@@ -591,7 +602,7 @@ impl MongoDbCollectionEmitter {
                 // The connector measured the document against the limit MongoDB documents and never
                 // sent it, so no server answered it with a code.
                 Err(error @ UnstorableDocument::AboveDocumentLimit { .. }) => {
-                    outcome.reject(RejectedEmitterMember::external(
+                    outcome.reject(RejectedEmitterMember::over_destination_limit(
                         row.position,
                         row.occurred_at,
                         error.to_string(),
@@ -811,12 +822,22 @@ impl WriteAnswers {
             match self.answer(index) {
                 DocumentAnswer::Delivered => outcome.deliver(row.position),
                 DocumentAnswer::Rejected { code } => {
-                    outcome.reject(RejectedEmitterMember::external(
-                        row.position,
-                        row.occurred_at,
-                        format!("MongoDB rejected document with code {code}"),
-                        server_code(code),
-                    ));
+                    let message = format!("MongoDB rejected document with code {code}");
+                    outcome.reject(if code == BSON_OBJECT_TOO_LARGE {
+                        RejectedEmitterMember::over_destination_limit(
+                            row.position,
+                            row.occurred_at,
+                            message,
+                            server_code(code),
+                        )
+                    } else {
+                        RejectedEmitterMember::external(
+                            row.position,
+                            row.occurred_at,
+                            message,
+                            server_code(code),
+                        )
+                    });
                 }
                 DocumentAnswer::Unresolved => leaves_unresolved = true,
             }
@@ -1561,6 +1582,61 @@ mod tests {
             failure.downcast_ref::<ExternalErrorCode>(),
             ExternalErrorCode::new("91").as_ref(),
             "the retried write keeps the code the server refused its other document with"
+        );
+    }
+
+    /// A document the server refused as larger than its document limit is over the destination's
+    /// limit with the server's code; a document it refused for another reason is refused.
+    #[test]
+    fn a_document_the_server_refuses_for_its_size_is_over_the_destination_limit() {
+        let mut outcome = PerRecordOutcome::empty();
+        let rows = [20, 21].map(|row_index| WrittenRow {
+            position: EmitterRecordPosition {
+                batch_index: 7,
+                row_index,
+            },
+            occurred_at: Timestamp::from_unix_nanos(3),
+        });
+        let insert_error: InsertManyError = mongodb::bson::from_document(doc! {
+            "writeErrors": [
+                { "index": 0, "code": 10334, "errmsg": "BSONObjectTooLarge" },
+                { "index": 1, "code": 11000, "errmsg": "E11000 duplicate key error" },
+            ],
+        })
+        .expect("a server's insert reply deserializes");
+
+        MongoDbCollectionEmitter::apply_insert_many_error(
+            &rows,
+            DriverError::from(ErrorKind::InsertMany(insert_error)),
+            &mut outcome,
+        );
+
+        let outcome = outcome.into_parts();
+        let rejected = outcome
+            .rejected
+            .iter()
+            .map(|rejected| {
+                (
+                    rejected.id.row_index,
+                    rejected.error.class,
+                    rejected.error.external_code.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rejected,
+            vec![
+                (
+                    20,
+                    RejectedErrorClass::DestinationLimit,
+                    ExternalErrorCode::new("10334")
+                ),
+                (
+                    21,
+                    RejectedErrorClass::Refused,
+                    ExternalErrorCode::new("11000")
+                ),
+            ]
         );
     }
 

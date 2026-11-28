@@ -11,7 +11,7 @@ use cucumber::{gherkin::Step, then, when};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::Client;
 use nervix_client_wire::{StateInspection, StateInspectionResult};
-use nervix_models::parse_duration_text;
+use nervix_models::{UnitKind, parse_duration_text};
 use nervix_primitives::time::{Instant, sleep};
 use serde_json::Value;
 
@@ -339,6 +339,56 @@ fn rows_match(world: &mut ScenarioWorld, #[step] step: &Step) {
             .iter()
             .all(|expected| rows.iter().any(|row| row_matches(row, expected))),
         "{rows:?}"
+    );
+}
+
+#[then(expr = "client {string} describes relay {string} with the last inspection's exact counts")]
+async fn describe_counts(world: &mut ScenarioWorld, client: String, relay: String) {
+    let StateInspectionResult::Page(page) = &last_state(world).result else {
+        panic!("expected a materialized state page");
+    };
+    let mut expected = Vec::new();
+    for unit in &page.units {
+        let prefix = match unit.unit.kind() {
+            UnitKind::Partition(partition) => format!("partition {partition}: "),
+            UnitKind::Single | UnitKind::Instance(_) => String::new(),
+        };
+        let counts = unit.counts;
+        expected.extend([
+            format!("{prefix}branches: {}", counts.branches),
+            format!("{prefix}rows: {}", counts.rows),
+            format!("{prefix}state bytes: {}", counts.bytes),
+        ]);
+    }
+    let statement = format!("DESCRIBE RELAY {};", expand_placeholders(world, &relay));
+    let outcome = world
+        .transaction_clients
+        .get(&client)
+        .assured("the inspection client is connected")
+        .execute(statement)
+        .await
+        .assured("the public describe completes");
+    assert!(outcome.state.is_none(), "DESCRIBE returned a state page");
+    let mut actual = Vec::new();
+    for line in outcome.message.lines() {
+        let count = if let Some(partition) = line.strip_prefix("partition ")
+            && let Some((_, count)) = partition.split_once(": ")
+        {
+            count
+        } else {
+            line
+        };
+        if ["branches: ", "rows: ", "state bytes: "]
+            .iter()
+            .any(|label| count.starts_with(label))
+        {
+            actual.push(line);
+        }
+    }
+    assert_eq!(
+        actual, expected,
+        "relay describe output:\n{}",
+        outcome.message
     );
 }
 

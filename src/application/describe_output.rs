@@ -22,8 +22,8 @@ use arch_into::ArchInto;
 use meticulous::ResultExt as _;
 use nervix_dataflow_graph::{DataflowNodeHealth, DataflowNodeStatus};
 use nervix_interconnect::{
-    DataflowNodeStatusEnvelope, DecodeRejectionEnvelope, IngestorDescribeEnvelope,
-    LookupDescribeEnvelope, TransportPositionEnvelope,
+    DataflowNodeStatusEnvelope, DecodeRefuserEnvelope, DecodeRejectionEnvelope,
+    IngestorDescribeEnvelope, LookupDescribeEnvelope, TransportPositionEnvelope,
 };
 use nervix_models::{
     BranchSelection, CanonicalPlexusError, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
@@ -45,8 +45,8 @@ use crate::{
         placement_members,
     },
     runtime::{
-        DataflowNodeTransientState, DecodeRejection, IngestorDescribe as RuntimeIngestorDescribe,
-        TransportPosition,
+        DataflowNodeTransientState, DecodeRefuser, DecodeRejection,
+        IngestorDescribe as RuntimeIngestorDescribe, TransportPosition,
     },
 };
 
@@ -211,9 +211,13 @@ fn decode_rejection_to_envelope(rejection: DecodeRejection) -> DecodeRejectionEn
         }
         None => None,
     };
+    let refused_by = match rejection.refused_by {
+        DecodeRefuser::Codec(codec) => DecodeRefuserEnvelope::Codec(codec),
+        DecodeRefuser::Connector(connector) => DecodeRefuserEnvelope::Connector(connector),
+    };
     DecodeRejectionEnvelope {
         reference: rejection.reference.as_u128(),
-        codec: rejection.codec,
+        refused_by,
         position,
         fields,
         message: rejection.message,
@@ -242,9 +246,13 @@ fn decode_rejection_from_envelope(envelope: DecodeRejectionEnvelope) -> DecodeRe
         }
         None => None,
     };
+    let refused_by = match envelope.refused_by {
+        DecodeRefuserEnvelope::Codec(codec) => DecodeRefuser::Codec(codec),
+        DecodeRefuserEnvelope::Connector(connector) => DecodeRefuser::Connector(connector),
+    };
     DecodeRejection {
         reference: uuid::Uuid::from_u128(envelope.reference),
-        codec: envelope.codec,
+        refused_by,
         position,
         fields: SortedSet::from_unsorted(fields),
         message: envelope.message,

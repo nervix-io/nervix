@@ -43,7 +43,7 @@ fn messages_of_users(count: i64) -> Vec<IngestorPollMessage> {
 fn poll_of_users(count: i64) -> IngestorPoll {
     IngestorPoll {
         messages: messages_of_users(count),
-        failures: Vec::new(),
+        undecodable: Vec::new(),
         dropped_header_values: 0,
         observed_at: observed_at(),
     }

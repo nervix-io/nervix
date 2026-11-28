@@ -2179,11 +2179,17 @@ and reads nothing further once that read-ahead is full. A transport error before
 through the broker loop's retry policy. During intake the host reports and retries transport maintenance while the held
 batch continues through its allowance, its wait and normal settlement.
 
-Every Kafka consumer group and every WebSocket client offers the hook. Short Kafka waits can end
-before maintenance is due. The connector uses
-librdkafka's configured `max.poll.interval.ms` to start maintenance early enough for control
-execution. On the connector control workers, it pauses the current assignment and polls the
-driver once. The stream wakes again for group events or at its native half-interval cadence.
+Every Kafka consumer group and every WebSocket client offers the hook. A Kafka consumer's
+maintenance is due half of librdkafka's configured `max.poll.interval.ms` after the consumer's
+last poll, the cadence on which rust-rdkafka's stream wakes a reader waiting for records. A held
+consumer is therefore polled as often as a waiting one, and the other half of the interval is
+left, as the driver leaves it to a woken reader, for the maintenance job's executor admission and
+its native poll. The connector counts from the last poll it observed, one that handed a read its
+record or its own maintenance poll, never from the moment a read ended: a read that waits out its
+batch deadline or ends at a failure records no poll, so it does not postpone maintenance. A hold
+that ends before maintenance is due takes no control job, so a short hold never pauses fetching.
+On the connector control workers, it pauses the current assignment and polls the driver once. The
+stream wakes again for group events or at its native half-interval cadence.
 It yields after handling a rebalance callback, so the connector can pause newly assigned
 partitions before the next poll. The driver can discard prefetched copies as it pauses
 fetching. Its next read resumes fetching from the first unread position. The ingestor stores
@@ -4133,9 +4139,20 @@ execution plan is published. An emitter initialization failure is reported as an
 the emitter remains unavailable and retries opening on its configured backoff. Invalid settings
 and missing external topics, queues, tables, namespaces, or other required entities surface as
 start errors: Nervix does not create them as a side effect. During execution, read and publish
-failures are classified separately from definitive record rejections. A definitive record rejection
-carries the code its outside system answered with, which `RejectedEmitterMember::external` takes
-beside the message, and a failure that leaves its records for `RETRY POLICY` carries one as an
+failures are classified separately from definitive record rejections. A connector builds each
+definitive record rejection with the helper that names its class: `RejectedEmitterMember::external`
+for a refusal of the outside system (`refused`), `over_destination_limit` for a record larger than
+its destination can take, whether the destination answered so or the connector found the limit
+before sending (`destination_limit`), `oversize` for a record over the emitter's own `MAX SIZE`
+(`limit`), `unrepresentable` for a value the destination cannot hold in the form or type it gives
+it (`validation` of `publish`), and `invalid` for a mapped value a row emitter cannot write
+(`validation` of `values`); `EmitterRecord` and `EmitterHttpRequest` offer the record-level
+shorthands, and a broker's answer through the confirmation window is
+`BrokerVerdict::Rejected` or `BrokerVerdict::OverDestinationLimit`. Its message is the connector's
+typed cause rendered once with `{error:#}`, without a prefix naming the connector, since the error
+names its emitter. A definitive record rejection carries the code its outside system answered
+with, which the helper takes beside the message, and a failure that leaves its records for
+`RETRY POLICY` carries one as an
 `ExternalErrorCode` attached to its report, which the host reads when `GIVE UP AFTER` fails the
 records that failure held. The connector takes the code from the typed answer it classified, a
 status, a reason code or an error code its driver hands it, never from message text, and gives none

@@ -284,8 +284,8 @@ Feature: An emitter's error route reads the source row its route built the recor
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "order_id":"n1" | "amount":7 | "region":"" | "reference":"inv-n1" | "cents":700 | "error_code":"refused" | "operation":"publish" | attribute 'region' has an empty value | key={"tenant":"north"}
-      "order_id":"s2" | "amount":10 | "region":"" | "reference":"inv-s2" | "cents":1000 | "error_code":"refused" | "operation":"publish" | attribute 'region' has an empty value | key={"tenant":"south"}
+      "order_id":"n1" | "amount":7 | "region":"" | "reference":"inv-n1" | "cents":700 | "error_code":"validation" | "operation":"publish" | attribute 'region' has an empty value | key={"tenant":"north"}
+      "order_id":"s2" | "amount":10 | "region":"" | "reference":"inv-s2" | "cents":1000 | "error_code":"validation" | "operation":"publish" | attribute 'region' has an empty value | key={"tenant":"south"}
       """
     And within "30s" the observed broker receives exactly these messages
       | payload                            | key | headers   | group |

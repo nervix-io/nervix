@@ -4,7 +4,7 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The ten error classes and their typed ancestry, the outside system's code, the
+//! - **Owns.** The eleven error classes and their typed ancestry, the outside system's code, the
 //!   error an operation raises before a node is named on it, the record its node attributes, the
 //!   class and node a runtime event reports, and the Arrow shape of the `error` scope.
 //! - **Depends on.** Node references, timestamps and Arrow's schema types.
@@ -68,17 +68,22 @@ pub enum RejectedErrorClass {
     Evaluation,
     /// The data is fine but larger than a declared limit.
     Limit,
+    /// The data is fine but larger than the outside system it is written to can take, such as a
+    /// broker's largest message: a [`Limit`](Self::Limit) the destination holds, whether the
+    /// destination answered so or the connector found it before sending.
+    DestinationLimit,
     /// An outside system, a model or a guest said no to this data, for good.
     Refused,
 }
 
 impl RejectedErrorClass {
     /// Every class of the group, in the order the class tree lists them.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Codec,
         Self::Validation,
         Self::Evaluation,
         Self::Limit,
+        Self::DestinationLimit,
         Self::Refused,
     ];
 
@@ -89,7 +94,17 @@ impl RejectedErrorClass {
             Self::Validation => 1,
             Self::Evaluation => 2,
             Self::Limit => 3,
-            Self::Refused => 4,
+            Self::DestinationLimit => 4,
+            Self::Refused => 5,
+        }
+    }
+
+    /// The class of the group this one refines, which covers it: `destination_limit` is a
+    /// `limit`. Every other class of the group refines none.
+    pub const fn refines(self) -> Option<Self> {
+        match self {
+            Self::DestinationLimit => Some(Self::Limit),
+            Self::Codec | Self::Validation | Self::Evaluation | Self::Limit | Self::Refused => None,
         }
     }
 }
@@ -147,9 +162,10 @@ pub enum MessageErrorClassGroup {
     Failed,
 }
 
-/// One of the ten classes every error has: a fixed tree that users cannot extend, whose root `ANY`
-/// holds the two groups the variants name. The variant is the class's typed ancestry, so a reader
-/// tells the groups apart by matching, never by its text.
+/// One of the eleven classes every error has: a fixed tree that users cannot extend, whose root
+/// `ANY` holds the two groups the variants name. The variant is the class's typed ancestry, so a
+/// reader tells the groups apart by matching, never by its text, and [`Self::refines`] names the
+/// class a class beneath another one refines, such as `destination_limit` beneath `limit`.
 #[derive(
     Debug,
     Clone,
@@ -176,6 +192,7 @@ impl MessageErrorClass {
     pub const VALIDATION: Self = Self::Rejected(RejectedErrorClass::Validation);
     pub const EVALUATION: Self = Self::Rejected(RejectedErrorClass::Evaluation);
     pub const LIMIT: Self = Self::Rejected(RejectedErrorClass::Limit);
+    pub const DESTINATION_LIMIT: Self = Self::Rejected(RejectedErrorClass::DestinationLimit);
     pub const REFUSED: Self = Self::Rejected(RejectedErrorClass::Refused);
     pub const UNAVAILABLE: Self = Self::Failed(FailedErrorClass::Unavailable);
     pub const THROTTLED: Self = Self::Failed(FailedErrorClass::Throttled);
@@ -184,11 +201,12 @@ impl MessageErrorClass {
     pub const INTERNAL: Self = Self::Failed(FailedErrorClass::Internal);
 
     /// Every class, `REJECTED` before `FAILED`, in the order the class tree lists them.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::CODEC,
         Self::VALIDATION,
         Self::EVALUATION,
         Self::LIMIT,
+        Self::DESTINATION_LIMIT,
         Self::REFUSED,
         Self::UNAVAILABLE,
         Self::THROTTLED,
@@ -201,12 +219,36 @@ impl MessageErrorClass {
     pub const fn index(self) -> usize {
         match self {
             Self::Rejected(class) => class.index(),
-            Self::Failed(FailedErrorClass::Unavailable) => 5,
-            Self::Failed(FailedErrorClass::Throttled) => 6,
-            Self::Failed(FailedErrorClass::Timeout) => 7,
-            Self::Failed(FailedErrorClass::Interrupted) => 8,
-            Self::Failed(FailedErrorClass::Internal) => 9,
+            Self::Failed(FailedErrorClass::Unavailable) => 6,
+            Self::Failed(FailedErrorClass::Throttled) => 7,
+            Self::Failed(FailedErrorClass::Timeout) => 8,
+            Self::Failed(FailedErrorClass::Interrupted) => 9,
+            Self::Failed(FailedErrorClass::Internal) => 10,
         }
+    }
+
+    /// The class this one refines, which covers it beneath their group: `destination_limit`
+    /// refines `limit`. A class directly beneath its group refines none.
+    pub const fn refines(self) -> Option<Self> {
+        match self {
+            Self::Rejected(class) => match class.refines() {
+                Some(refined) => Some(Self::Rejected(refined)),
+                None => None,
+            },
+            Self::Failed(_) => None,
+        }
+    }
+
+    /// Whether `ancestor` covers this class: it is this class, or a class this one refines.
+    pub fn is_within(self, ancestor: Self) -> bool {
+        let mut class = Some(self);
+        while let Some(current) = class {
+            if current == ancestor {
+                return true;
+            }
+            class = current.refines();
+        }
+        false
     }
 
     /// The group this class belongs to.
@@ -498,6 +540,7 @@ mod tests {
                 "validation",
                 "evaluation",
                 "limit",
+                "destination_limit",
                 "refused",
                 "unavailable",
                 "throttled",
@@ -517,6 +560,33 @@ mod tests {
                 MessageErrorClass::from(class).group(),
                 MessageErrorClassGroup::Failed
             );
+        }
+    }
+
+    #[test]
+    fn a_destination_limit_is_a_limit_and_no_other_class_refines_one() {
+        assert_eq!(
+            MessageErrorClass::DESTINATION_LIMIT.refines(),
+            Some(MessageErrorClass::LIMIT)
+        );
+        assert!(MessageErrorClass::DESTINATION_LIMIT.is_within(MessageErrorClass::LIMIT));
+        assert!(
+            MessageErrorClass::DESTINATION_LIMIT.is_within(MessageErrorClass::DESTINATION_LIMIT)
+        );
+        assert!(!MessageErrorClass::LIMIT.is_within(MessageErrorClass::DESTINATION_LIMIT));
+        assert!(!MessageErrorClass::DESTINATION_LIMIT.is_within(MessageErrorClass::REFUSED));
+        for class in MessageErrorClass::ALL {
+            assert!(class.is_within(class));
+            if class != MessageErrorClass::DESTINATION_LIMIT {
+                assert_eq!(class.refines(), None, "{} refines no class", class.as_str());
+            }
+            if let Some(refined) = class.refines() {
+                assert_eq!(
+                    refined.group(),
+                    class.group(),
+                    "a class refines one of its group"
+                );
+            }
         }
     }
 

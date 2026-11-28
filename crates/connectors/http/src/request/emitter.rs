@@ -55,7 +55,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use error_stack::{Report, ResultExt as _};
 use http::{
-    HeaderName, HeaderValue, Method, Request, Response, Uri,
+    HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri,
     header::{ACCEPT, CONNECTION, CONTENT_LENGTH, HOST, PROXY_AUTHORIZATION},
 };
 use http_body_util::Full;
@@ -801,10 +801,16 @@ impl nervix_connector::HttpRequestEmitter for HttpRequestEmitter {
             // A delivered or rejected record is final, so its `Retry-After` is never read.
             match status.disposition() {
                 Disposition::Delivered => outcome.deliver(request.id),
-                Disposition::Rejected => outcome.reject(request.rejected(
-                    format!("HTTP endpoint answered with status {}", status.code()),
-                    status_code(status.code()),
-                )),
+                Disposition::Rejected => {
+                    let message = format!("HTTP endpoint answered with status {}", status.code());
+                    let code = status_code(status.code());
+                    // 413 Content Too Large: the endpoint refuses a request larger than it takes.
+                    outcome.reject(if status.code() == StatusCode::PAYLOAD_TOO_LARGE.as_u16() {
+                        request.over_destination_limit(message, code)
+                    } else {
+                        request.rejected(message, code)
+                    });
+                }
                 Disposition::AuthenticationFailure => {
                     outcome.fail(Self::retryable_status_error(
                         HttpAttemptError::Authentication {

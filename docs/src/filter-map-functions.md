@@ -229,7 +229,7 @@ names the node, the program, the kind, and the reason, such as `junction 'enrich
 error division_by_zero: integer division by zero at 12..18`. The range at the end locates the
 failed operation within the route's program. When several operations fail for one message, the
 record reports the first. The scope is the one error record every error of a node has; [Runtime
-Message Errors](errors-and-diagnostics.md#runtime-message-errors) lists its ten classes.
+Message Errors](errors-and-diagnostics.md#runtime-message-errors) lists its eleven classes.
 
 | Field | Type | Holds |
 | --- | --- | --- |

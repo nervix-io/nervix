@@ -1061,7 +1061,7 @@ use ingest_task_handles::IngestTaskHandles;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;
 pub(crate) use ingestors::IngestorStartError;
 use message_error_decode::DecodeRejections;
-pub(crate) use message_error_decode::{DecodeRejection, TransportPosition};
+pub(crate) use message_error_decode::{DecodeRefuser, DecodeRejection, TransportPosition};
 pub use nervix_models::{
     StateInspectionMaxRows, StateInspectionMaxSections, StateInspectionReadTimeout,
     StateInspectionSettings, StateInspectionSettingsError,

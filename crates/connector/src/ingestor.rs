@@ -274,6 +274,10 @@ pub enum IngestorError {
     Open { connector: &'static str },
     #[error("failed to read from {connector} ingestor")]
     Read { connector: &'static str },
+    /// A message a poll read that the connector could not decode into a payload, such as a sample
+    /// whose value is not a number.
+    #[error("{connector} ingestor could not decode one message it read")]
+    Decode { connector: &'static str },
     #[error("failed to acknowledge {connector} ingestor positions")]
     Acknowledge { connector: &'static str },
     #[error("failed to reject {connector} ingestor positions")]
@@ -440,13 +444,16 @@ pub struct IngestorPollMessage {
 
 /// The result of one host-scheduled ingestor poll.
 ///
-/// `failures` contains individual records a connector could not materialize while allowing the
-/// other messages from the same external response to continue through intake.
+/// `undecodable` holds, for each message of the external response the connector could not decode
+/// into a payload, the typed cause it refused the message with, under an
+/// [`IngestorError::Decode`] context, while the other messages of the same response continue
+/// through intake. Polling again would read the same message the same way, so the host consumes
+/// each as a decode rejection under the ingestor's `ON GENERAL ERROR`, never as a failed poll.
 /// `dropped_header_values` counts header values the connector skipped because they were not
 /// valid UTF-8, without discarding their message or treating the header as a record failure.
 pub struct IngestorPoll {
     pub messages: Vec<IngestorPollMessage>,
-    pub failures: Vec<Report<IngestorError>>,
+    pub undecodable: Vec<Report<IngestorError>>,
     pub dropped_header_values: usize,
     pub observed_at: Timestamp,
 }

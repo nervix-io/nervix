@@ -1205,8 +1205,9 @@ reports, so a client routes notices by kind and never by their text:
 | `Licensing` | A licensing lifecycle observation, a refresh/policy warning, or the licensing stop gate closing (`Error`) and lifting (`Info`) | `Info`, `Warning`, `Error` |
 
 A `Runtime` notice that reports an error of a graph node also carries that error as typed fields:
-`ServerNotice.error` is a `NoticeError` table holding the error's `ErrorClass` (one of the ten
-[error classes](./errors-and-diagnostics.md#the-message-error-record), `Codec` through `Internal`)
+`ServerNotice.error` is a `NoticeError` table holding the error's `ErrorClass` (one of the eleven
+[error classes](./errors-and-diagnostics.md#the-message-error-record), `Codec` through `Internal`
+and then `DestinationLimit`, which follows them so that every earlier value keeps its number)
 and the producing node as a `NodeRef` (its `ModelKind` and its name). It is present when a route's
 `ON MESSAGE ERROR LOG`, a node's `ON GENERAL ERROR LOG` or a WASM processor's `ON GLOBAL ERROR LOG`
 reported a failure, a decode rejection or a `RATE LIMIT` rejection, on the serving node or on the

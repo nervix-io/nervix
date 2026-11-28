@@ -1140,7 +1140,7 @@ SET error_reference = error.reference,
     attempted_total = partial_output.total
 ```
 
-`error` is structured: `error.class` is one of the ten [error
+`error` is structured: `error.class` is one of the eleven [error
 classes](./errors-and-diagnostics.md#the-message-error-record), `error.node` and `error.node_kind`
 name the node whose route failed, and `error.external_code`, when an outside system refused the
 row with a code of its own such as a PostgreSQL SQLSTATE, holds that code and is null otherwise.

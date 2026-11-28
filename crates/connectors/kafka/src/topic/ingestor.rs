@@ -927,12 +927,14 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
                 message
             }
         };
-        if let Some(hold) = &mut self.allowance_hold {
-            hold.polled();
-        }
         let first = first
             .change_context(IngestorError::Read { connector: KAFKA })?
             .detach();
+        // A read that hands over a record has just polled the driver; a failed read may have
+        // failed before it polled, so it leaves the hold's last recorded poll as it was.
+        if let Some(hold) = &mut self.allowance_hold {
+            hold.polled();
+        }
         let first = KafkaTopicIngestorMessage::from_message(first)
             .change_context(IngestorError::Read { connector: KAFKA })?;
         let mut messages = Vec::with_capacity(request.max_messages.get());
@@ -947,10 +949,17 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
             Report::new(IngestorError::Read { connector: KAFKA })
                 .attach(KafkaTopicIngestorError::BatchDeadline)
         })?;
+        // Only a gather that ends on a record has just polled the driver. One that waits out its
+        // batch deadline or stops at a failure leaves the service a hold owes the group due from
+        // the first record's poll, which is no later than the driver's last poll.
+        let mut ended_on_record = true;
         while messages.len() < request.max_messages.get() {
             nervix_primitives::task::consume_budget().await;
             nervix_primitives::select! {
-                _ = sleep_until(deadline) => break,
+                _ = sleep_until(deadline) => {
+                    ended_on_record = false;
+                    break;
+                }
                 next = Self::receive_next(&self.consumer, &self.control, &self.topic, &mut self.offset_mode, &mut self.commits) => {
                     match next {
                         Ok(message) => {
@@ -965,6 +974,7 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
                         Err(error) => {
                             if matches!(self.offset_mode, InstanceOffsetMode::ConsumerGroup { committed_partitions: Some(_), .. }) {
                                 self.pending_read_error = Some(error);
+                                ended_on_record = false;
                                 break;
                             }
                             warn!(error = %format_args!("{error:#}"), "failed to receive another Kafka batch message");
@@ -976,7 +986,7 @@ impl BrokerIngestorConnector for KafkaTopicIngestor {
                 }
             }
         }
-        if let Some(hold) = &mut self.allowance_hold {
+        if ended_on_record && let Some(hold) = &mut self.allowance_hold {
             hold.polled();
         }
         Ok(IngestorBatch::Messages(messages))

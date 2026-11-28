@@ -6,7 +6,6 @@
 use std::io::{Read, Write};
 
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
 use nervix_models::{
     BranchKeyFingerprint, DomainName, InferencerModelFingerprint, ModelName, SchemaFingerprint,
     Unit,
@@ -139,32 +138,23 @@ fn tensor_elements(shape: &[u64]) -> Option<u64> {
     })
 }
 
-/// Writes one tensor's exact bits through fixed-size encoding blocks, without a numeric conversion.
-pub fn write_tensor_values(writer: &mut dyn Write, values: &[f32]) -> std::io::Result<()> {
-    let mut block = [0u8; TENSOR_VALUE_BLOCK_BYTES];
-    for values in values.chunks(TENSOR_VALUE_BLOCK_BYTES / 4) {
-        let length = values
-            .len()
-            .checked_mul(4)
-            .verified("a tensor encoding block holds at most 16,384 F32 values");
-        let encoded = &mut block[..length];
-        for (slot, value) in encoded.as_chunks_mut::<4>().0.iter_mut().zip(values) {
-            slot.copy_from_slice(&value.to_bits().to_le_bytes());
-        }
-        writer.write_all(encoded)?;
+/// Writes a tensor slice as exact little-endian F32 bits using the caller's admitted buffer.
+pub fn write_tensor_values(
+    writer: &mut dyn Write,
+    values: &[f32],
+    buffer: &mut [[u8; size_of::<f32>()]],
+) -> std::io::Result<()> {
+    let encoded = buffer.get_mut(..values.len()).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "tensor values exceed the supplied encoding buffer",
+        )
+    })?;
+    for (slot, value) in encoded.iter_mut().zip(values) {
+        *slot = value.to_bits().to_le_bytes();
     }
-    Ok(())
+    writer.write_all(encoded.as_flattened())
 }
-
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "a raw tensor encoding block bounds stack memory and the writer's cancellation \
-                  unit"
-    )
-)]
-const TENSOR_VALUE_BLOCK_BYTES: usize = 64 * 1024;
 
 /// Reads exactly the descriptor's values. The caller admits `byte_length` before calling; the
 /// explicit limit refuses hostile sizes before allocating. The section reader verifies its digest.

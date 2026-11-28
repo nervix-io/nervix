@@ -14,14 +14,12 @@
 
 use std::io::Write;
 
-use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
 use nervix_execution::{Cancellation, Executor, MemoryClass, Reservation};
 use nervix_primitives::sync::StdArc;
 
 use super::{
-    RESTORE_STATE_CHUNK_BYTES, Runtime, SnapshotStagingError, StagedArtifact, StagedSnapshotWriter,
+    Runtime, SnapshotStagingError, StagedArtifact, StagedSnapshotWriter,
     backup_state::stored_branch::StoredBranchCheckpoint,
     inferencer_state::{InferencerGeneration, ReplicatedInferencerState},
     published_generation::Generation,
@@ -132,12 +130,17 @@ impl CapturedInferencer {
         raw_bytes: u64,
         snapshot_bytes: u64,
     ) -> Result<(StagedArtifact, InferencerArchiveMetadata), Report<SnapshotStagingError>> {
+        crate::inferencer_state_snapshot::check_bound(raw_bytes, snapshot_bytes)
+            .change_context(SnapshotStagingError::Admission)?;
         let (charge, retained) = self.reserve_staging(executor, snapshot_bytes).await?;
+        let chunk_bytes =
+            usize::try_from(StagedSnapshotWriter::encoding_buffer_bytes(executor).min(raw_bytes))
+                .change_context(SnapshotStagingError::Admission)?;
         let writer = runtime.try_stage_artifact(raw_bytes).await?;
         writer
             .encode_artifact_with_result(charge, move |output, cancellation| {
                 let _retained = retained;
-                self.write(output, cancellation)
+                self.write(output, cancellation, chunk_bytes)
             })
             .await
     }
@@ -151,20 +154,12 @@ impl CapturedInferencer {
         executor: &Executor,
         snapshot_bytes: u64,
     ) -> Result<(Reservation, Option<Reservation>), Report<SnapshotStagingError>> {
-        let tensors_working = snapshot_bytes
-            .checked_mul(2)
-            .ok_or_else(|| Report::new(SnapshotStagingError::Admission))?;
-        let segment_bytes: u64 = RESTORE_STATE_CHUNK_BYTES.arch_into();
-        // Allow two fixed blocks for native and raw tensor work beside the configured writer.
-        let scratch = segment_bytes
-            .checked_mul(2)
-            .verified("two persisted segments fit in u64");
-        let output_bytes = StagedSnapshotWriter::encoding_buffer_bytes(executor).max(segment_bytes);
-        let buffers = scratch
-            .checked_add(output_bytes)
-            .verified("the fixed blocks and the validated u32 bulk chunk fit in u64");
+        // The native projection and its raw encoding buffer each fit within the snapshot
+        // footprint. The buffer cannot outgrow the section even with a larger chunk setting.
+        let tensors_working = crate::inferencer_state_snapshot::working_bytes(snapshot_bytes)
+            .change_context(SnapshotStagingError::Admission)?;
         let working = tensors_working
-            .checked_add(buffers)
+            .checked_add(StagedSnapshotWriter::encoding_buffer_bytes(executor))
             .ok_or_else(|| Report::new(SnapshotStagingError::Admission))?;
         let retained = self.charge.take();
         let held = match &retained {
@@ -190,6 +185,7 @@ impl CapturedInferencer {
         &self,
         output: &mut dyn Write,
         cancellation: &Cancellation,
+        chunk_bytes: usize,
     ) -> Result<InferencerArchiveMetadata, Report<SnapshotStagingError>> {
         let (incarnation, tensors) = match &self.source {
             Source::Published(_) => {
@@ -217,12 +213,16 @@ impl CapturedInferencer {
             ),
         };
         let mut shapes = Vec::with_capacity(tensors.len());
+        // A float is encoded whole. The staging writer also splits bytes when its chunk is
+        // smaller than one F32.
+        let values_per_chunk = (chunk_bytes / size_of::<f32>()).max(1);
+        let mut buffer = vec![[0; size_of::<f32>()]; values_per_chunk];
         for tensor in tensors {
-            for chunk in tensor.values.chunks(16 * 1024) {
+            for chunk in tensor.values.chunks(values_per_chunk) {
                 cancellation
                     .check()
                     .change_context(SnapshotStagingError::Cancelled)?;
-                nervix_backup::write_tensor_values(output, chunk)
+                nervix_backup::write_tensor_values(output, chunk, &mut buffer)
                     .change_context(SnapshotStagingError::Encode)?;
             }
             shapes.push(tensor.shape);
@@ -242,13 +242,81 @@ impl CapturedInferencer {
 )]
 mod tests {
     use meticulous::ResultExt as _;
+    use nervix_execution::StorageClass;
     use ubyte::ByteUnit;
 
     use super::*;
 
+    #[derive(Default)]
+    struct Writes(Vec<Vec<u8>>);
+
+    impl Write for Writes {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.push(bytes.to_vec());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[rstest::rstest]
-    #[case::large_chunk(ByteUnit::Mebibyte(4), 4 * 1024 * 1024 + 130 * 1024)]
-    #[case::small_chunk(ByteUnit::Kibibyte(32), 194 * 1024)]
+    #[case::one_value(4, &[4, 4, 4, 4, 4])]
+    #[case::unaligned(9, &[8, 8, 4])]
+    #[case::whole_tensor(20, &[20])]
+    #[nervix_primitives::test]
+    async fn inferencer_archive_writes_whole_values_up_to_the_bulk_chunk(
+        #[case] chunk_bytes: u64,
+        #[case] block_lengths: &[usize],
+    ) {
+        let executor = StagedSnapshotWriter::encoding_test_executor(ByteUnit::Byte(chunk_bytes));
+        let chunk_bytes = usize::try_from(StagedSnapshotWriter::encoding_buffer_bytes(&executor))
+            .assured("the test's chunk fits");
+        let bits: [u32; 5] = [0, 0x8000_0000, 0x7fc0_1234, 0x7f80_0000, 0xff80_0000];
+        let output = executor
+            .run_storage(
+                StorageClass::Filesystem,
+                executor.charge_nothing(MemoryClass::Bulk),
+                move |_, cancellation| {
+                    let captured = CapturedInferencer {
+                        revision: 1,
+                        source: Source::Stored(BranchSnapshot {
+                            incarnation: 1,
+                            tensors: vec![TensorSnapshot {
+                                shape: vec![5],
+                                values: std::borrow::Cow::Owned(
+                                    bits.into_iter().map(f32::from_bits).collect(),
+                                ),
+                            }],
+                        }),
+                        charge: None,
+                    };
+                    let mut output = Writes::default();
+                    let metadata = captured
+                        .write(&mut output, cancellation, chunk_bytes)
+                        .assured("the owned tensor can be encoded");
+                    assert_eq!(metadata.shapes, vec![vec![5]]);
+                    output.0
+                },
+            )
+            .await
+            .assured("the storage job ran");
+        assert_eq!(
+            output.iter().map(Vec::len).collect::<Vec<_>>(),
+            block_lengths
+        );
+        assert_eq!(
+            output.into_iter().flatten().collect::<Vec<_>>(),
+            bits.into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::large_chunk(ByteUnit::Mebibyte(4), 4 * 1024 * 1024 + 2 * 1024)]
+    #[case::small_chunk(ByteUnit::Kibibyte(32), 34 * 1024)]
     #[nervix_primitives::test]
     async fn inferencer_capture_grows_the_retained_charge_for_the_staging_buffer(
         #[case] chunk: ByteUnit,

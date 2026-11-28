@@ -284,7 +284,7 @@ never by its text, which is written for people and can change.
 
 A `RUNTIME` notice that reports an error of a graph node, which a route's `ON MESSAGE ERROR LOG`, a
 node's `ON GENERAL ERROR LOG` or a WASM processor's `ON GLOBAL ERROR LOG` handled on any node,
-names that error in typed fields: `error_class` is the lower-case name of one of the ten [error
+names that error in typed fields: `error_class` is the lower-case name of one of the eleven [error
 classes](errors-and-diagnostics.md#the-message-error-record), such as `'evaluation'` or
 `'refused'`, `error_node_kind` the kind of the node that produced it, such as `'junction'` or
 `'emitter'`, and `error_node` that node's name. They are the values an error route reads as

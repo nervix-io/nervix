@@ -353,11 +353,12 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
          unanswered after its caller's 30 s deadline retains its worker and the ingestor's one \
          in-flight commit until the native call ends. Native subscribe, assign, pause, resume and \
          unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.",
-        "While the host holds the loop, during a long read allowance hold or while a payload \
-         waits for the node's extension workers, a consumer-group ingestor pauses fetching and \
-         services its group through the same control turn. Each job polls once. The driver can \
-         discard its own prefetched copies; the next admitted read resumes from its unread \
-         position. No record buffer is added.",
+        "While the host holds the loop, during a read allowance hold or while a payload waits for \
+         the node's extension workers, a consumer-group ingestor services its group from half of \
+         max.poll.interval.ms after its last poll, the cadence on which the driver's stream wakes \
+         a waiting reader: it pauses fetching and polls through the same control turn. Each job \
+         polls once. The driver can discard its own prefetched copies; the next admitted read \
+         resumes from its unread position. No record buffer is added.",
         "A consumer whose last handle is gone is destroyed by one connector control job, which \
          waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s \
          LeaveGroup timeout.",

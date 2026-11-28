@@ -1046,8 +1046,8 @@ Feature: Kafka emission
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "seq":4 | "error_code":"refused" | "operation":"publish" | "error_message":"kafka record timestamp 1970-01-01T00:00:00.000999999Z precedes 1970-01-01T00:00:00.001Z
-      "seq":5 | "error_code":"refused" | "operation":"publish" | "error_message":"kafka record timestamp 1969-12-31T23:59:59.999Z precedes 1970-01-01T00:00:00.001Z
+      "seq":4 | "error_code":"validation" | "operation":"publish" | "error_message":"kafka record timestamp 1970-01-01T00:00:00.000999999Z precedes 1970-01-01T00:00:00.001Z
+      "seq":5 | "error_code":"validation" | "operation":"publish" | "error_message":"kafka record timestamp 1969-12-31T23:59:59.999Z precedes 1970-01-01T00:00:00.001Z
       """
     And within "30s" the observed broker receives exactly these timed messages
       | payload                                                    | created at               |
@@ -1281,7 +1281,7 @@ Feature: Kafka emission
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":2 | "error_code":"refused" | "operation":"publish" | "external_code":"MSG_SIZE_TOO_LARGE"
+      "seq":2 | "error_code":"destination_limit" | "operation":"publish" | "external_code":"MSG_SIZE_TOO_LARGE"
       """
     And within "30s" the observed broker receives exactly these payloads
       """

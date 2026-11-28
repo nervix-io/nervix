@@ -40,20 +40,27 @@ use rdkafka::{
 
 use super::{InstanceOffsetMode, KAFKA, KafkaTopicIngestor, KafkaTopicIngestorError};
 
-/// A normal stream read can end up to half a native poll interval after the last driver poll.
-/// Service starts a quarter interval after that read ends, leaving the last quarter for
-/// executor admission and native control.
+/// rust-rdkafka's stream consumer wakes every reader waiting on its stream twice per
+/// `max.poll.interval.ms`, so a reader waiting for records polls the driver at least every half
+/// interval and keeps the other half for its own scheduling. A held consumer's service is due on
+/// the same cadence, half an interval after the consumer's last poll, which leaves the other half,
+/// as the driver leaves it to a woken reader, for the service job's executor admission and its
+/// native poll.
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
         fixed,
-        reason = "reserves time for a held poll inside the driver's own interval"
+        reason = "rust-rdkafka's StreamConsumer wakes a reader waiting on its stream at half of \
+                  librdkafka's max.poll.interval.ms"
     )
 )]
-const POLL_MARGIN_DIVISOR: u32 = 4;
+const STREAM_WAKES_PER_POLL_INTERVAL: u32 = 2;
 
 pub(super) struct KafkaAllowanceHold {
+    /// Half the consumer's poll interval: how long after its last poll its group service is due.
     service_delay: Duration,
+    /// When the group service is due, counted from the last poll the ingestor observed; `None`
+    /// before the consumer's first poll since it subscribed, when the service is due at once.
     next_service: Option<Instant>,
     /// Each topic partition the current hold may have paused, including revoked partitions
     /// whose native pause can survive a rebalance.
@@ -74,7 +81,7 @@ impl KafkaAllowanceHold {
             "librdkafka validates max.poll.interval.ms as an integer and renders decimal digits",
         );
         Ok(Self {
-            service_delay: Duration::from_millis(milliseconds) / POLL_MARGIN_DIVISOR,
+            service_delay: Duration::from_millis(milliseconds) / STREAM_WAKES_PER_POLL_INTERVAL,
             next_service: None,
             paused: None,
             poll_in_flight: false,
@@ -85,9 +92,13 @@ impl KafkaAllowanceHold {
         self.next_service = None;
     }
 
+    /// Records a driver poll that has just returned: one that handed a read its record, or this
+    /// hold's own service poll. A read that waits out its batch deadline or ends at a failure
+    /// records none, so the service stays due from the latest poll recorded, which is never later
+    /// than the driver's actual last poll.
     pub(super) fn polled(&mut self) {
         self.next_service = Some(Instant::now().checked_add(self.service_delay).assured(
-            "a fraction of librdkafka's maximum one-day poll interval fits the monotonic clock",
+            "half of librdkafka's maximum one-day poll interval fits the monotonic clock",
         ));
     }
 
@@ -301,3 +312,11 @@ impl KafkaTopicIngestor {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+#[path = "ingestor_allowance_tests.rs"]
+mod tests;

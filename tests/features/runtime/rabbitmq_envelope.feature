@@ -233,8 +233,8 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":-1 | "error_code":"refused" | "operation":"publish"
-      "seq":1 | "error_code":"refused" | "operation":"publish"
+      "seq":-1 | "error_code":"validation" | "operation":"publish"
+      "seq":1 | "error_code":"validation" | "operation":"publish"
       """
     And RabbitMQ queue "time_{{test_id}}" yields this envelope message
       """

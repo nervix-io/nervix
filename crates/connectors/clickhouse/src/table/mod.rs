@@ -188,16 +188,26 @@ impl ClickHouseWriteError {
     }
 
     /// The rejection of the row this record error refused, carrying the exception ClickHouse
-    /// refused it with as `error.external_code`.
+    /// refused it with as `error.external_code`. A request larger than the HTTP interface accepts
+    /// is over the destination's limit.
     fn record_rejection(
         &self,
         position: EmitterRecordPosition,
         occurred_at: Timestamp,
     ) -> RejectedEmitterMember<EmitterRecordPosition> {
-        let external_code = match self.record_refusal() {
+        let refusal = self.record_refusal();
+        let external_code = match refusal {
             Some(refusal) => refusal.external_code(),
             None => None,
         };
+        if refusal == Some(RecordRefusal::PayloadTooLarge) {
+            return RejectedEmitterMember::over_destination_limit(
+                position,
+                occurred_at,
+                self.record_reason(),
+                external_code,
+            );
+        }
         RejectedEmitterMember::external(position, occurred_at, self.record_reason(), external_code)
     }
 
@@ -778,6 +788,10 @@ mod tests {
         assert_eq!(
             rejection.error.message,
             "ClickHouse rejected record with PAYLOAD_TOO_LARGE"
+        );
+        assert_eq!(
+            rejection.error.class,
+            nervix_models::RejectedErrorClass::DestinationLimit
         );
         assert_eq!(
             rejection.error.external_code, None,

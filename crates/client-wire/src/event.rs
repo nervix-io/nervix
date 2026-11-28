@@ -53,7 +53,7 @@ wire_enum!(ALL_NOTICE_KINDS: NoticeKind => wire::NoticeKind {
     Licensing,
 });
 
-/// Every error class, in the wire enum's order, which the session's own tests enumerate.
+/// Every error class, which the session's own tests enumerate.
 #[cfg(test)]
 pub(crate) const ALL_ERROR_CLASSES: &[MessageErrorClass] = &MessageErrorClass::ALL;
 
@@ -64,6 +64,9 @@ impl From<MessageErrorClass> for wire::ErrorClass {
             MessageErrorClass::Rejected(RejectedErrorClass::Validation) => Self::Validation,
             MessageErrorClass::Rejected(RejectedErrorClass::Evaluation) => Self::Evaluation,
             MessageErrorClass::Rejected(RejectedErrorClass::Limit) => Self::Limit,
+            MessageErrorClass::Rejected(RejectedErrorClass::DestinationLimit) => {
+                Self::DestinationLimit
+            }
             MessageErrorClass::Rejected(RejectedErrorClass::Refused) => Self::Refused,
             MessageErrorClass::Failed(FailedErrorClass::Unavailable) => Self::Unavailable,
             MessageErrorClass::Failed(FailedErrorClass::Throttled) => Self::Throttled,
@@ -83,6 +86,7 @@ impl TryFrom<wire::ErrorClass> for MessageErrorClass {
             wire::ErrorClass::Validation => Ok(Self::VALIDATION),
             wire::ErrorClass::Evaluation => Ok(Self::EVALUATION),
             wire::ErrorClass::Limit => Ok(Self::LIMIT),
+            wire::ErrorClass::DestinationLimit => Ok(Self::DESTINATION_LIMIT),
             wire::ErrorClass::Refused => Ok(Self::REFUSED),
             wire::ErrorClass::Unavailable => Ok(Self::UNAVAILABLE),
             wire::ErrorClass::Throttled => Ok(Self::THROTTLED),

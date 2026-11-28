@@ -2172,9 +2172,11 @@ report. The route may inspect the eligible original input, its captured material
 snapshot, and an all-optional `partial_output` of construction completed before failure. An error
 handler whose own construction fails does not recursively invoke itself.
 
-Every error has one of ten classes, a fixed tree that users cannot extend. `MessageErrorClass` in
-the vocabulary is that tree, and `MessageErrorClass::group` names the half a class belongs to,
-beneath the root `ANY`:
+Every error has one of eleven classes, a fixed tree that users cannot extend. `MessageErrorClass`
+in the vocabulary is that tree, `MessageErrorClass::group` names the half a class belongs to,
+beneath the root `ANY`, and `MessageErrorClass::refines` names the class a class beneath another
+one refines: `destination_limit` refines `limit`, so whatever selects `limit` covers it too, and
+`MessageErrorClass::is_within` answers whether one class covers another:
 
 | Group | Class | What went wrong |
 | --- | --- | --- |
@@ -2182,6 +2184,7 @@ beneath the root `ANY`:
 | | `validation` | A value did not fit |
 | | `evaluation` | An expression could not be computed |
 | | `limit` | The data is fine but larger than a declared limit |
+| | `destination_limit`, beneath `limit` | The data is fine but larger than the outside system it is written to can take |
 | | `refused` | An outside system, a model or a guest said no to this data, for good |
 | `FAILED`: the data may be fine; sending it again may work | `unavailable` | An outside system kept failing and the node gave up retrying |
 | | `throttled` | Over a rate limit |
@@ -2196,11 +2199,22 @@ What each failure gets:
 | An expression of any clause (`SET`, `INHERIT`, route `WHERE`, `FILTER WHERE`, `FROM ... WHERE`, `INVOKE`, `VALUES`, an envelope or ordering-group expression, an HTTP request field, a window aggregate argument, a `RATE LIMIT` measure) | `evaluation` |
 | A payload its codec refuses (a [decode rejection](#decode-rejections)), a row its codec cannot encode, a batch container the codec cannot write | `codec` |
 | A record over `MAX SIZE`, a payload over a `RATE LIMIT` clause's `BURST`, a window row its retention bound cannot admit, a WASM guest that exhausts `MAX FUEL`, `MAX MEMORY` or `MAX TABLE ELEMENTS` | `limit` |
+| A record larger than its destination can take, whether the destination answered so or the connector found it before sending: a broker's largest message or packet, a request body over what the server accepts (HTTP `413`), a document over the server's document limit, more message attributes than the destination carries | `destination_limit` |
 | A required field left unset, a value a connector or an admission check refuses, an invalid HTTP request field | `validation` |
 | A destination that refuses a record, a model that refuses a row, a guest's declared message error, an emitter publish that fails for good | `refused` |
 | The rows an emitter still holds when its `GIVE UP AFTER` passes, and the staged rows it drops then | `unavailable` |
 | Emitter work cut at a stop or shutdown deadline, and an ingested payload whose domain is not running or whose branch Nervix closed before it was routed | `interrupted` |
 | A model output of the wrong shape, a guest trap or invalid output, and every failure of Nervix's own processing | `internal` |
+
+`limit` is a limit Nervix holds itself, and `destination_limit` one the outside system holds. The
+line between `destination_limit` and `validation` is what is too big. A record that as a whole is
+larger than its destination takes (its message, packet, request or document, or its number of
+attributes) is `destination_limit`. One value its destination cannot hold in the form or type the
+destination gives it is `validation`, even when the value is too long: a routing key or AMQP
+property longer than a short string, a timestamp before the earliest one a Kafka or Pulsar record
+carries, an SQS attribute name or FIFO group out of form. A refusal a connector made before
+sending names no `error.external_code`; the destination's own answer names the code it gave. Each
+connector states its size refusals in the [Emitters](./emitters.md#batch-payloads) manual.
 
 When a publish fails for a whole batch, every row of the batch takes the class of that failure: a
 publish its destination or connector fails for good is `refused`, a batch its codec cannot encode
@@ -2307,22 +2321,35 @@ is returned as the batch's own failure, which the ingestor host reports beneath 
 failure.
 
 The ingestor host, or the endpoint that received the payload, turns each codec refusal into a
-`DecodeRejection`: a UUIDv7 reference, the class `codec`, the operation `decode`, the codec,
-the fields its `MissingField`, `UnexpectedField` and `ParseField` contexts name at fault, including
-those of a failed message an unfolding kept as a report of its own, the instant the ingestor took the
-payload in, the transport position the payload's ingest metadata row names, and the codec report's
-whole chain rendered once as its message. The class and the operation are the same for every decode
-rejection, so the record does not store them. The record never holds the payload, and the codec's
-contexts name the codec and the field, never a value. The ingestor's `ON GENERAL ERROR` policy then
-reports the rejection: `LOG` publishes `ingestor '<name>' general error in domain '<domain>': decode
-rejection <record>` as a runtime event whose typed error names the class `codec` and the ingestor,
-and logs the reference, class, operation and codec as fields; `IGNORE` reports nothing. Either way
-`nervix_message_errors_total` counts it under the ingestor. Unlike a node failure under `LOG`, a decode rejection is never
-negatively acknowledged, because an ingestor that presented the payload again would only be refused
-again. In an acknowledged mode the host resolves the payload's acknowledgement root at once. In
-every mode it counts the payload in `nervix_ingestor_decode_rejections_total` and publishes the
-record as the ingestor's last decode rejection, which `DESCRIBE INGESTOR` reads from the node that
-runs the ingestor through the typed fields of its describe envelope.
+`DecodeRejection`: a UUIDv7 reference, the class `codec`, the operation `decode`, what refused the
+payload (its `DecodeRefuser`, here the codec), the fields its `MissingField`, `UnexpectedField` and
+`ParseField` contexts name at fault, including those of a failed message an unfolding kept as a
+report of its own, the instant the ingestor took the payload in, the transport position the
+payload's ingest metadata row names, and the codec report's whole chain rendered once as its
+message. The class and the operation are the same for every decode rejection, so the record does not
+store them. The record never holds the payload, and the codec's contexts name the codec and the
+field, never a value. The ingestor's `ON GENERAL ERROR` policy then reports the rejection: `LOG`
+publishes `ingestor '<name>' general error in domain '<domain>': decode rejection <record>` as a
+runtime event whose typed error names the class `codec` and the ingestor, and logs the reference,
+class, operation and codec as fields; `IGNORE` reports nothing. Either way
+`nervix_message_errors_total` counts it under the ingestor. Unlike a node failure under `LOG`, a
+decode rejection is never negatively acknowledged, because an ingestor that presented the payload
+again would only be refused again. In an acknowledged mode the host resolves the payload's
+acknowledgement root at once. In every mode it counts the payload in
+`nervix_ingestor_decode_rejections_total` and publishes the record as the ingestor's last decode
+rejection, which `DESCRIBE INGESTOR` reads from the node that runs the ingestor through the typed
+fields of its describe envelope.
+
+A paced poll can read a message its connector cannot decode into a payload at all, before any
+codec sees it, such as a Prometheus sample whose value is not a number. The connector hands it to
+the host in `IngestorPoll::undecodable` as its typed cause under an `IngestorError::Decode`
+context, and the rest of the poll's messages go on through intake. The source would answer the
+same message the same way on the next poll, so the host consumes it as a decode rejection whose
+refuser is the connector, with no transport position and no field, and the connector's whole chain
+rendered once as its message, such as `connector PROMETHEUS refused the payload: prometheus
+ingestor could not decode one message it read: invalid Prometheus sample value: …`. It follows the
+same `ON GENERAL ERROR` policy, the same counters and the same last decode rejection as a codec's
+refusal. Such a message has no row, so no route's `ON MESSAGE ERROR` can receive it.
 
 A payload an ingestor's [`RATE LIMIT`](./ingestors.md#rate-limits) can never admit, because it
 costs more than a clause's `BURST`, or whose measure fails, is consumed the same way as a
@@ -2367,32 +2394,36 @@ or leaves a handed-over row unanswered. Either fails the attempt without a retry
 emitter error that names the violation, the preparation keeps nothing, and the emitter's unresolved
 rows then follow `ON MESSAGE ERROR` as a failed publish.
 
-The Sentry emitter prepares its envelope before the host retains the payload. Invalid event JSON,
-invalid event fields and a final serialized event above its decompressed limit become definitive
-payload rejections at that boundary. The full typed preparation report is projected into the
-external message error once; all source members share its reference while keeping their own
-execution times. No refused envelope is sent or retained for a transport retry. The Syslog emitter
-rejects a UDP datagram above its payload limit, a stream frame whose
-octet count needs more than ten digits, or an LF-bearing non-transparent TCP frame before writing.
-A row emitter — ClickHouse, Postgres, MySQL or MongoDB — and a batching OTEL emitter, which prepares
-its requests from mapped rows, measure each request they would send. If halving still leaves one
-row whose own request exceeds `MAX SIZE`, that row receives a `validation` message error of the
-`encode` operation naming the measured size and the limit, such as
-`Postgres insert of one row measures 1219 bytes, above MAX SIZE 600B`, and the other rows are sent
-in bounded requests. A row within `MAX SIZE` that its destination could never
-accept is the destination's `refused` rejection of the `publish` operation, named with the
-destination's limit: a MongoDB document above its 16 MiB document limit, which is rejected before
-the write that would carry it. A Postgres emitter cannot declare a `MAX SIZE` above the largest
-protocol message the server reads, which `CREATE` refuses, so its rows never reach that limit. A
-SQL write that fails for a reason specific to its rows is written again one row at a time, and
-each row the destination still refuses receives a `refused` `publish` error with the
-destination's reason. That includes a violated MySQL `CHECK` constraint, which the server reports
-under the generic SQLSTATE `HY000`, and a Postgres cardinality violation, which is how
-`ON CONFLICT DO UPDATE` refuses one insert that carries a key twice. A MongoDB write answers for
-each document even when it fails: a document the server refused for good receives a `refused`
-`publish` error with the server's code, a document it applied is delivered, and every other
-document stays unresolved. A write concern the deployment could not satisfy is an infrastructure
-failure the host retries, named with the server's code, such as
+The Sentry emitter prepares its envelope before the host retains the payload. Invalid event JSON and
+invalid event fields become definitive `validation` payload rejections at that boundary, and a final
+serialized event above Sentry's decompressed limit a `destination_limit` one. The full typed
+preparation report is projected into the external message error once; all source members share its
+reference while keeping their own execution times. No refused envelope is sent or retained for a
+transport retry. The Syslog emitter rejects a UDP datagram above its payload limit or a stream frame
+whose octet count needs more than ten digits as `destination_limit`, and an LF-bearing
+non-transparent TCP frame as `validation`, before writing. A row emitter — ClickHouse, Postgres,
+MySQL or MongoDB — and a batching OTEL emitter, which prepares its requests from mapped rows,
+measure each request they would send. If halving still leaves one row whose own request exceeds `MAX
+SIZE`, that row receives a `limit` message error of the `encode` operation naming the measured size
+and the limit, such as `Postgres insert of one row measures 1219 bytes, above MAX SIZE 600B`, and
+the other rows are sent in bounded requests. A record within `MAX SIZE` that is larger than its
+destination can take is a `destination_limit` rejection of the `publish` operation, named with the
+destination's limit, whether the connector found the limit before sending it, as for a MongoDB
+document above its 16 MiB document limit, or the destination answered so, with the code it gave, as
+for a broker's `MSG_SIZE_TOO_LARGE` or an HTTP `413`. A connector's own refusal of a value its
+destination cannot hold, such as a timestamp a Kafka record cannot carry, is a `validation`
+rejection of the `publish` operation. The message a rejection carries is the connector's typed cause
+rendered once, with no prefix naming the connector, since the error already names its emitter. A
+Postgres emitter cannot declare a `MAX SIZE` above the largest protocol message the server reads,
+which `CREATE` refuses, so its rows never reach that limit. A SQL write that fails for a reason
+specific to its rows is written again one row at a time, and each row the destination still refuses
+receives a `refused` `publish` error with the destination's reason. That includes a violated MySQL
+`CHECK` constraint, which the server reports under the generic SQLSTATE `HY000`, and a Postgres
+cardinality violation, which is how `ON CONFLICT DO UPDATE` refuses one insert that carries a key
+twice. A MongoDB write answers for each document even when it fails: a document the server refused
+for good receives a `refused` `publish` error with the server's code, a document it applied is
+delivered, and every other document stays unresolved. A write concern the deployment could not
+satisfy is an infrastructure failure the host retries, named with the server's code, such as
 `MongoDB insert_many write concern failed with code 100 (UnsatisfiableWriteConcern)`, and it never
 undoes the documents the server applied, so the retry carries only the rest. An OTLP receiver's
 `partial_success` has no member identities, so it acknowledges the entire request and emits a

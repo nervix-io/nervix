@@ -163,6 +163,41 @@ enum SqsRecordError {
 
 type SqsRecordResult<T> = Result<T, Report<SqsRecordError>>;
 
+impl SqsRecordError {
+    /// The rejection of record `record`, which `error` refuses before it is sent, so no queue
+    /// answered it with a code: a message larger than SQS accepts, or with more attributes than it
+    /// carries, is over the destination's limit, and every other refusal names a value SQS cannot
+    /// hold.
+    fn rejected(
+        error: &Report<Self>,
+        record: EmitterRecordId,
+        occurred_at: Timestamp,
+    ) -> RejectedEmitterMember<EmitterRecordId> {
+        let message = format!("{error:#}");
+        match error.current_context() {
+            Self::AttributeCount { .. } | Self::RequestSize { .. } => {
+                RejectedEmitterMember::over_destination_limit(record, occurred_at, message, None)
+            }
+            Self::InvalidBodyEncoding
+            | Self::ForbiddenBodyCharacter
+            | Self::AttributeNameLength
+            | Self::ReservedAttributePrefix { .. }
+            | Self::InvalidAttributeName { .. }
+            | Self::ForbiddenAttributeCharacter { .. }
+            | Self::EmptyAttributeValue { .. }
+            | Self::BuildAttribute { .. }
+            | Self::MessageGroupLength
+            | Self::MessageGroupCharacter
+            | Self::UndeclaredAttributeType { .. }
+            | Self::DeduplicationIdLength
+            | Self::DeduplicationIdCharacter
+            | Self::Delay { .. } => {
+                RejectedEmitterMember::unrepresentable(record, occurred_at, message)
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 struct PreparedSqsRecord {
     record: EmitterRecordId,
@@ -282,7 +317,20 @@ impl PreparedSqsRecord {
     ) -> RejectedEmitterMember<EmitterRecordId> {
         RejectedEmitterMember::external(self.record, self.occurred_at, reason, code)
     }
+
+    /// The rejection of this record the queue refused as longer than it accepts, with the error
+    /// code the queue named the refusal with.
+    fn over_destination_limit(
+        &self,
+        reason: String,
+        code: Option<ExternalErrorCode>,
+    ) -> RejectedEmitterMember<EmitterRecordId> {
+        RejectedEmitterMember::over_destination_limit(self.record, self.occurred_at, reason, code)
+    }
 }
+
+/// The code SQS fails a batch entry with whose message is longer than the queue accepts.
+const MESSAGE_TOO_LONG: &str = "MessageTooLong";
 
 /// The error code a queue service named a failed request with, as `error.external_code` holds it,
 /// such as `InvalidMessageContents`.
@@ -562,7 +610,11 @@ impl SqsQueueEmitter {
                         failure.code(),
                         failure.message(),
                     ) {
-                        outcome.reject(records[index].rejected(reason, code));
+                        outcome.reject(if failure.code() == MESSAGE_TOO_LONG {
+                            records[index].over_destination_limit(reason, code)
+                        } else {
+                            records[index].rejected(reason, code)
+                        });
                     } else {
                         if infrastructure_code.is_none() {
                             infrastructure_code = code;
@@ -724,7 +776,7 @@ impl SqsQueueEmitter {
             return false;
         }
         match code {
-            "InvalidMessageContents" | "MessageTooLong" => true,
+            "InvalidMessageContents" | MESSAGE_TOO_LONG => true,
             "InvalidParameterValue" => {
                 let message = message.unwrap_or_default().to_ascii_lowercase();
                 !message.contains("deduplication")
@@ -872,14 +924,9 @@ impl RecordEmitter for SqsQueueEmitter {
             let occurred_at = record.occurred_at;
             match PreparedSqsRecord::new(record) {
                 Ok(record) => prepared.push(record),
-                // The connector refused the record itself and never sent it, so no queue answered
-                // it with a code.
-                Err(error) => outcome.reject(RejectedEmitterMember::external(
-                    record_id,
-                    occurred_at,
-                    error.to_string(),
-                    None,
-                )),
+                Err(error) => {
+                    outcome.reject(SqsRecordError::rejected(&error, record_id, occurred_at))
+                }
             }
         }
         match self.send {
@@ -915,6 +962,7 @@ mod tests {
 
     use aws_sdk_sqs::{error::ConnectorError, types::error::QueueDoesNotExist};
     use nervix_connector::RecordEnvelope;
+    use nervix_models::{MessageErrorOperation, RejectedErrorClass};
 
     use super::*;
     use crate::queue::connection_tests::Fixture;
@@ -948,6 +996,54 @@ mod tests {
             });
         }
         headers
+    }
+
+    /// A message larger than SQS accepts, or with more attributes than it carries, is over the
+    /// destination's limit; a value SQS cannot hold is a `validation` refusal of `publish`. Each is
+    /// found before sending, so none carries a code.
+    #[test]
+    fn a_local_refusal_is_over_the_destination_limit_or_a_value_sqs_cannot_hold() {
+        let ten_attributes = (0..11)
+            .map(|index| (format!("attribute_{index}"), "value".to_string()))
+            .collect::<Vec<_>>();
+        let crowded =
+            record(0, b"body".to_vec()).with_typed_headers(string_headers(ten_attributes));
+        let empty_value = record(1, b"body".to_vec())
+            .with_typed_headers(string_headers(vec![("tenant".to_string(), String::new())]));
+        let oversized = record(2, vec![b'x'; max_request_bytes() + 1]);
+        for (record, class, refusal) in [
+            (
+                crowded,
+                RejectedErrorClass::DestinationLimit,
+                "SQS message has 11 attributes; the service permits at most 10",
+            ),
+            (
+                empty_value,
+                RejectedErrorClass::Validation,
+                "SQS message attribute 'tenant' has an empty value, which SQS does not accept",
+            ),
+            (
+                oversized,
+                RejectedErrorClass::DestinationLimit,
+                "SQS message is",
+            ),
+        ] {
+            let id = record.id;
+            let occurred_at = record.occurred_at;
+            let Err(error) = PreparedSqsRecord::new(record) else {
+                panic!("record {id:?} is refused before it is sent");
+            };
+            let rejection = SqsRecordError::rejected(&error, id, occurred_at);
+            assert_eq!(rejection.id, id);
+            assert_eq!(rejection.error.class, class, "{refusal}");
+            assert_eq!(rejection.error.operation, MessageErrorOperation::Publish);
+            assert_eq!(rejection.error.external_code, None);
+            assert!(
+                rejection.error.message.starts_with(refusal),
+                "{}",
+                rejection.error.message
+            );
+        }
     }
 
     fn prepared(payload_bytes: usize) -> PreparedSqsRecord {

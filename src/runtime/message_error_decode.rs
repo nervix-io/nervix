@@ -1,10 +1,11 @@
-//! The record of a payload its ingestor's codec definitively refused, and how the ingestor's
-//! general error policy reports it.
+//! The record of a payload its ingestor's codec or connector definitively refused to decode, and
+//! how the ingestor's general error policy reports it.
 //!
 //! Layer: data plane.
-//! - **Owns.** Turning one codec refusal of an ingestor payload into its decode rejection, naming the
-//!   transport position its ingest metadata row carries, and reporting the rejection under the
-//!   ingestor's `ON GENERAL ERROR` policy.
+//! - **Owns.** Turning one codec refusal of an ingestor payload, or one message a paced poll read
+//!   but its connector could not decode, into its decode rejection, naming the transport position
+//!   its ingest metadata row carries, and reporting the rejection under the ingestor's
+//!   `ON GENERAL ERROR` policy.
 //! - **Depends on.** The codec's report, the ingestor's ingest metadata row, the message-error
 //!   vocabulary and the node's runtime event bus.
 //! - **Must not know.** The payload's bytes, the ingestor's driver, or how the host settles the
@@ -18,6 +19,7 @@
 use std::{fmt, net::SocketAddr};
 
 use nervix_connector::{IngestMetadataRow, IngestTransportPosition};
+use nervix_models::ConnectorKind;
 use uuid::Uuid;
 
 use super::*;
@@ -86,18 +88,37 @@ impl fmt::Display for TransportPosition {
     }
 }
 
-/// A payload its ingestor's codec definitively refused, as the message error that remains of
-/// it once the ingestor consumed it.
+/// What refused to decode a payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DecodeRefuser {
+    /// The ingestor's codec, which refused the payload the ingestor read.
+    Codec(CodecName),
+    /// The ingestor's connector, which could not decode one message of its source's answer into a
+    /// payload, such as a Prometheus sample whose value is not a number.
+    Connector(ConnectorKind),
+}
+
+impl fmt::Display for DecodeRefuser {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Codec(codec) => write!(formatter, "codec '{}'", codec.as_str()),
+            Self::Connector(connector) => write!(formatter, "connector {connector}"),
+        }
+    }
+}
+
+/// A payload its ingestor's codec or connector definitively refused to decode, as the message
+/// error that remains of it once the ingestor consumed it.
 ///
 /// Presenting the payload again would only repeat the refusal, so the payload is consumed rather
 /// than retried. Every decode rejection has the class [`Self::CLASS`] and the operation
-/// [`Self::OPERATION`]. It never holds the payload: its message is the codec's own diagnostic, which
-/// names the codec and the field at fault and never a payload value.
+/// [`Self::OPERATION`]. It never holds the payload: its message is the refuser's own diagnostic,
+/// which names what is at fault and never a payload value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DecodeRejection {
     /// The rejection's stable reference, a UUIDv7.
     pub(crate) reference: Uuid,
-    pub(crate) codec: CodecName,
+    pub(crate) refused_by: DecodeRefuser,
     /// Where the ingestor read the payload, when its metadata names a position.
     pub(crate) position: Option<TransportPosition>,
     /// The fields the codec named at fault.
@@ -124,9 +145,27 @@ impl DecodeRejection {
         collect_refused_fields(report, &mut fields);
         Self {
             reference: Uuid::now_v7(),
-            codec: CodecName::from(&codec.name),
+            refused_by: DecodeRefuser::Codec(CodecName::from(&codec.name)),
             position: metadata.position.map(TransportPosition::retain),
             fields: SortedSet::from_unsorted(fields),
+            message: format!("{report:#}"),
+            occurred_at,
+        }
+    }
+
+    /// The rejection of one message a paced poll of the `connector` ingestor read and could not
+    /// decode, for the typed cause `report`, when the poll was observed at `occurred_at`. A poll
+    /// names no transport position and no field.
+    pub(super) fn undecodable(
+        connector: ConnectorKind,
+        report: &Report<nervix_connector::IngestorError>,
+        occurred_at: Timestamp,
+    ) -> Self {
+        Self {
+            reference: Uuid::now_v7(),
+            refused_by: DecodeRefuser::Connector(connector),
+            position: None,
+            fields: SortedSet::new(),
             message: format!("{report:#}"),
             occurred_at,
         }
@@ -137,10 +176,10 @@ impl fmt::Display for DecodeRejection {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{} at {}: codec '{}' refused the payload",
+            "{} at {}: {} refused the payload",
             self.reference,
             self.occurred_at.to_rfc3339(),
-            self.codec.as_str()
+            self.refused_by
         )?;
         if let Some(position) = &self.position {
             write!(formatter, " from {position}")?;
@@ -230,8 +269,9 @@ impl Runtime {
                     domain = domain.as_str(),
                     ingestor = ingestor.as_str(),
                     error_reference = %rejection.reference,
-                    codec = rejection.codec.as_str(),
-                    "consumed a payload its codec refused under an IGNORE general error policy"
+                    refused_by = %rejection.refused_by,
+                    "consumed a payload its codec or connector refused under an IGNORE general \
+                     error policy"
                 );
             }
             GeneralErrorPolicy::Log => {
@@ -253,9 +293,9 @@ impl Runtime {
                     error_reference = %rejection.reference,
                     error_class = DecodeRejection::CLASS.as_str(),
                     error_operation = DecodeRejection::OPERATION.as_ref(),
-                    codec = rejection.codec.as_str(),
+                    refused_by = %rejection.refused_by,
                     rejection = %rejection,
-                    "runtime node consumed a payload its codec refused"
+                    "runtime node consumed a payload its codec or connector refused"
                 );
             }
         }

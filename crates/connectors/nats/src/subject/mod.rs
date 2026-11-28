@@ -310,11 +310,13 @@ impl CoreWrites {
                     handed_over.push(record_id);
                     self.pending.accepted(connection);
                 }
+                // The client refused a payload above the server's `max_payload` before writing
+                // it, so no server answered it with a code.
                 Err(error) if NatsSubjectEmitter::is_core_record_rejection(&error) => {
-                    outcome.reject(RejectedEmitterMember::external(
+                    outcome.reject(RejectedEmitterMember::over_destination_limit(
                         record_id,
                         occurred_at,
-                        format!("nats rejected record: {error}"),
+                        format!("{error:#}"),
                         None,
                     ));
                 }
@@ -1090,9 +1092,15 @@ mod tests {
         let rejected = outcome
             .rejected
             .iter()
-            .map(|rejected| rejected.id)
+            .map(|rejected| (rejected.id, rejected.error.class))
             .collect::<Vec<_>>();
-        assert_eq!(rejected, vec![EmitterRecordId::new(1)]);
+        assert_eq!(
+            rejected,
+            vec![(
+                EmitterRecordId::new(1),
+                nervix_models::RejectedErrorClass::DestinationLimit
+            )]
+        );
         assert!(outcome.infrastructure_error.is_none());
         let (plain, tagged, _connection) = script.await.expect("the scripted server ran");
         assert_eq!(plain, b"plain");

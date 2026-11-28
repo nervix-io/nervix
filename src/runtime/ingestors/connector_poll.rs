@@ -82,11 +82,12 @@ impl RuntimeIngestorHost {
                 .header_values_dropped
                 .inc_by(poll.dropped_header_values.arch_into());
         }
-        for failure in poll.failures {
+        // The source would answer the same message the same way on the next poll, so each message
+        // the connector could not decode is consumed as a decode rejection, and the rest of the
+        // poll goes on.
+        for undecodable in &poll.undecodable {
             nervix_primitives::task::consume_budget().await;
-            self.report_error(format!(
-                "ingestor poll could not materialize one message: {failure:?}"
-            ));
+            self.consume_undecodable(undecodable, poll.observed_at);
         }
         let mut entered = false;
         for payload in PollIntakeBatches::new(poll.messages, intake_batch, poll.observed_at) {
@@ -100,5 +101,17 @@ impl RuntimeIngestorHost {
             }
         }
         Ok(entered)
+    }
+
+    /// Consumes one message a paced poll read and its connector could not decode, for the typed
+    /// cause `report`, as a decode rejection of the poll observed at `observed_at`.
+    fn consume_undecodable(
+        &self,
+        report: &Report<nervix_connector::IngestorError>,
+        observed_at: Timestamp,
+    ) {
+        let rejection = DecodeRejection::undecodable(self.connector, report, observed_at);
+        self.decode_rejections
+            .consume(&self.runtime, &self.domain, &self.ingestor, rejection);
     }
 }

@@ -227,8 +227,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
       """
     Then within "30s" the relay subscription receives payloads containing all fragments that share one "error_reference"
       """
-      "seq":3 | "error_code":"refused" | "operation":"publish"
-      "seq":4 | "error_code":"refused" | "operation":"publish"
+      "seq":3 | "error_code":"destination_limit" | "operation":"publish"
+      "seq":4 | "error_code":"destination_limit" | "operation":"publish"
       """
     And within "30s" the observed broker receives exactly these payloads
       """

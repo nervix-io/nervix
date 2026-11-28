@@ -1531,7 +1531,7 @@ async fn paced_reads_record_one_outcome_and_one_duration_for_each_poll_answer() 
         connector.stop_after_poll = Some(shutdown);
         let mut poll = IngestorPoll {
             messages: Vec::new(),
-            failures: Vec::new(),
+            undecodable: Vec::new(),
             dropped_header_values: 0,
             observed_at: Timestamp::from_unix_nanos(1),
         };

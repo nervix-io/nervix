@@ -105,7 +105,10 @@ async fn a_refused_field_is_named_with_its_codec_and_its_kafka_position() {
     let report = refusal(&codec, br#"{"user_id":"one"}"#).await;
     let rejection = DecodeRejection::new(&codec, &kafka_metadata(), &report, occurred_at());
 
-    assert_eq!(rejection.codec, CodecName::from(&codec.name));
+    assert_eq!(
+        rejection.refused_by,
+        DecodeRefuser::Codec(CodecName::from(&codec.name))
+    );
     assert_eq!(
         rejection.position,
         Some(TransportPosition::Kafka {
@@ -233,5 +236,44 @@ async fn the_general_policy_logs_a_rejection_or_reports_nothing() {
             class: MessageErrorClass::CODEC,
             node: NodeRef::new(ModelKind::Ingestor, ingestor.clone()),
         })
+    );
+}
+
+/// A message a paced poll read but its connector could not decode is a decode rejection that
+/// names the connector, renders the connector's whole cause once, and names no position or field.
+#[test]
+fn a_message_its_connector_could_not_decode_is_a_decode_rejection_of_the_connector() {
+    #[derive(Debug, thiserror::Error)]
+    #[error("the sample value is not a number")]
+    struct NotANumber;
+
+    let report = error_stack::Report::new(NotANumber).change_context(
+        nervix_connector::IngestorError::Decode {
+            connector: "prometheus",
+        },
+    );
+
+    let rejection = DecodeRejection::undecodable(ConnectorKind::Prometheus, &report, occurred_at());
+
+    assert_eq!(
+        rejection.refused_by,
+        DecodeRefuser::Connector(ConnectorKind::Prometheus)
+    );
+    assert_eq!(rejection.position, None);
+    assert!(rejection.fields.is_empty());
+    assert_eq!(
+        rejection.message,
+        "prometheus ingestor could not decode one message it read: the sample value is not a \
+         number"
+    );
+    assert_eq!(rejection.occurred_at, occurred_at());
+    assert_eq!(
+        rejection.to_string(),
+        format!(
+            "{} at {}: connector PROMETHEUS refused the payload: {}",
+            rejection.reference,
+            occurred_at().to_rfc3339(),
+            rejection.message
+        )
     );
 }

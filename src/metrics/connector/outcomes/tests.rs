@@ -104,9 +104,10 @@ fn emitter_outcomes_register_every_child_at_zero_with_only_bounded_dimensions() 
         }
     }
     assert_eq!(families, 13);
-    // The rejection family holds one child for each of the five classes of the REJECTED group.
-    assert_eq!(samples, 23);
-    assert_eq!(handle.describe_lines().len(), 38);
+    // The rejection family holds one child for each of the six classes of the REJECTED group,
+    // `destination_limit` among them beside the `limit` it refines.
+    assert_eq!(samples, 24);
+    assert_eq!(handle.describe_lines().len(), 39);
 }
 
 /// Each unit of work the host gives up counts once, and an empty give-up counts nothing.
@@ -137,6 +138,9 @@ fn emitter_outcomes_keep_source_record_units_and_fractional_wait_seconds() {
         outcomes.reject(RejectedErrorClass::Refused);
         outcomes.reject(RejectedErrorClass::Refused);
         outcomes.reject(RejectedErrorClass::Limit);
+        outcomes.reject(RejectedErrorClass::DestinationLimit);
+        outcomes.reject(RejectedErrorClass::DestinationLimit);
+        outcomes.reject(RejectedErrorClass::DestinationLimit);
         outcomes.reject(RejectedErrorClass::Validation);
         outcomes.reject(RejectedErrorClass::Codec);
         outcomes.fail();
@@ -144,9 +148,11 @@ fn emitter_outcomes_keep_source_record_units_and_fractional_wait_seconds() {
         outcomes.fail();
         assert_eq!(sample(&metrics, FAILED, &[]), 0.0);
     }
+    // A destination's limit is counted under its own class, not under the `limit` it refines.
     for (code, expected) in [
         ("refused", 2.0),
         ("limit", 1.0),
+        ("destination_limit", 3.0),
         ("validation", 1.0),
         ("codec", 1.0),
         ("evaluation", 0.0),

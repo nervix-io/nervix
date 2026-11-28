@@ -163,22 +163,15 @@ impl RabbitMqDestination {
                 }),
                 // The connector refused the record itself and never wrote it, so no broker
                 // answered it with a code.
-                Err(error) => Err(Unaddressed::Rejected(record.rejected(
-                    format!(
-                        "{} rejected record: {error:#}",
-                        nervix_models::ConnectorKind::RabbitMq
-                            .to_string()
-                            .to_ascii_lowercase()
-                    ),
-                    None,
-                ))),
+                Err(error) => Err(Unaddressed::Rejected(
+                    record.unrepresentable(format!("{error:#}")),
+                )),
             },
             Err(source) => {
                 let error = RabbitMqRecordError::RoutingKeyTooLong { key_bytes, source };
-                Err(Unaddressed::Rejected(record.rejected(
-                    format!("rabbitmq rejected record: {error}"),
-                    None,
-                )))
+                Err(Unaddressed::Rejected(
+                    record.unrepresentable(format!("{error:#}")),
+                ))
             }
         }
     }
@@ -902,7 +895,7 @@ impl RabbitMqChannel {
             body_bytes: record.payload.len(),
             limit,
         };
-        record.rejected(format!("rabbitmq rejected record: {error}"), code)
+        record.over_destination_limit(format!("{error:#}"), code)
     }
 
     /// The failure of a write whose channel the broker closed, or whose connection failed, for a
@@ -1037,7 +1030,7 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_connector::RecordEnvelope;
     use nervix_dns::DnsLookupFailure;
-    use nervix_models::{DeadlineKey, Timestamp};
+    use nervix_models::{DeadlineKey, MessageErrorOperation, RejectedErrorClass, Timestamp};
 
     use super::*;
 
@@ -1239,9 +1232,22 @@ mod tests {
 
     fn too_large(body_bytes: usize) -> String {
         format!(
-            "rabbitmq rejected record: message body of {body_bytes} bytes exceeds the broker's \
-             max_message_size of {LIMIT} bytes"
+            "message body of {body_bytes} bytes exceeds the broker's max_message_size of {LIMIT} \
+             bytes"
         )
+    }
+
+    #[test]
+    fn a_body_above_max_message_size_is_over_the_destination_limit_with_the_reply_code() {
+        let record = message(0, 2000).record;
+
+        let rejected =
+            RabbitMqChannel::refused_for_size(&record, LIMIT, ExternalErrorCode::new("406"));
+
+        assert_eq!(rejected.error.class, RejectedErrorClass::DestinationLimit);
+        assert_eq!(rejected.error.operation, MessageErrorOperation::Publish);
+        assert_eq!(rejected.error.external_code, ExternalErrorCode::new("406"));
+        assert_eq!(rejected.error.message, too_large(2000));
     }
 
     #[test]
@@ -1645,10 +1651,12 @@ mod tests {
                 panic!("a 256-byte key does not fit an AMQP short string");
             };
             assert_eq!(rejected.id.index(), 0);
+            assert_eq!(rejected.error.class, RejectedErrorClass::Validation);
+            assert_eq!(rejected.error.operation, MessageErrorOperation::Publish);
             assert_eq!(
                 rejected.error.message,
-                "rabbitmq rejected record: routing key of 256 bytes is longer than the 255 bytes \
-                 an AMQP short string carries"
+                "routing key of 256 bytes is longer than the 255 bytes an AMQP short string \
+                 carries"
             );
         }
     }
