@@ -913,8 +913,10 @@ refusal follows `ON MESSAGE ERROR`, even with `ON GENERAL ERROR IGNORE`.
 A record's message error names the operation that rejected it and where applicable the request
 field or invocation: `publish` with the field `method` or `path`, `invoke` with the zero-based
 position of the header write, `encode` for a body the codec cannot produce, and, for a refused
-request, the class `refused` with the operation `publish` and a message carrying the numeric status,
-such as `HTTP endpoint answered with status 404`. Message errors, emitter status, runtime events,
+request, the operation `publish` and a message carrying the numeric status, such as
+`HTTP endpoint answered with status 404`, with the class `destination_limit` for `413 Content Too
+Large`, which refuses a request larger than the endpoint takes, and `refused` for every other
+status. Message errors, emitter status, runtime events,
 logs and metric labels never carry an evaluated target, a header value, a credential, a request body
 or a response body.
 
@@ -1128,32 +1130,38 @@ counting what it writes around the payload:
 | Syslog COLLECTOR | UDP: at most 65,507 payload bytes; octet-counted TCP/TLS: at most 9,999,999,999 payload bytes; non-transparent TCP: no LF in the payload | UDP adds no transport framing; octet counting adds the decimal payload length and one space (at most 11 bytes); non-transparent framing appends one LF |
 
 A batch message that does not fit is never written. Every member follows `ON MESSAGE ERROR` with
-class `refused`, operation `publish` and one shared reference, and the message names the size and
-the limit, such as `mqtt rejected record: MQTT PUBLISH packet of 1200090 bytes exceeds the broker's
-maximum packet size of 1048576 bytes`. The messages around it are still written. Declare a
-`MAX SIZE` that leaves room for the metadata to keep batches from reaching the limit.
+class `destination_limit`, which refines `limit`, operation `publish` and one shared reference,
+and the message names the size and the limit, such as `MQTT PUBLISH packet of 1200090 bytes
+exceeds the broker's maximum packet size of 1048576 bytes`. No outside system answered it, so it
+carries no `error.external_code`. The messages around it are still written. Declare a `MAX SIZE`
+that leaves room for the metadata to keep batches from reaching the limit.
 
 The Syslog limits apply to the complete encoded payload, including a codec's batch container.
 Transport framing is added afterwards and does not count toward `MAX SIZE`. A payload containing LF
-under non-transparent framing follows the same `ON MESSAGE ERROR` path, with a reason naming the LF
+under non-transparent framing follows the same `ON MESSAGE ERROR` path as a `validation` error,
+since it is a value the frame cannot hold rather than one too large, with a reason naming the LF
 refusal. The generated [SYSLOG COLLECTOR reference](#syslog) states the shared frame limits.
 
-A Pulsar broker announces its `maxMessageSize` on every connection, so a producer that reconnects
-to another broker checks against the new one's. A Pulsar topic can also set a smaller
-`maxMessageSize` policy of its own. Only the broker applies it, measuring the metadata and payload
-with ten bytes of framing, so such a message is written and refused afterwards. In `MODE ACK` the
-refusal rejects every member the same way, with the broker's reason, such as
-`PULSAR rejected record: the Pulsar broker does not allow the message: Exceed maximum message
-size`. In `MODE NO ACK` the message was already delivered when the producer accepted it, so the
-refusal is reported at finish through the emitter's typed failure, after that earlier completion.
+A Pulsar broker announces its `maxMessageSize` on every connection, so a producer that reconnects to
+another broker checks against the new one's. A Pulsar topic can also set a smaller `maxMessageSize`
+policy of its own. Only the broker applies it, measuring the metadata and payload with ten bytes of
+framing, so such a message is written and refused afterwards. In `MODE ACK` the refusal rejects
+every member the same way, as `destination_limit` with the broker's reason and its server error
+`NotAllowedError` as `error.external_code`, such as `the Pulsar broker does not allow the message:
+Exceed maximum message size`. The protocol gives that refusal no code of its own, so the connector
+tells it from the broker's other `NotAllowedError` refusals, such as a delivery delay beyond what
+its namespace allows, which stay `refused`, by the reason Pulsar's broker gives it. In `MODE NO ACK`
+the message was already delivered when the producer accepted it, so the refusal is reported at
+finish through the emitter's typed failure, after that earlier completion.
 
 The remaining limits are not visible to the client. RabbitMQ's `max_message_size` is a broker
 setting that AMQP never tells a client, and the broker compares it with the message body alone. A
 batch message whose body is larger reaches the broker, which refuses it by closing the channel it
 arrived on and names the limit, and Nervix rejects the message on that answer, in every publishing
-mode: every member follows `ON MESSAGE ERROR` with class `refused`, operation `publish` and one
-shared reference, and the message names the size and the limit, such as `rabbitmq rejected record:
-message body of 1200090 bytes exceeds the broker's max_message_size of 1048576 bytes`. The broker
+mode: every member follows `ON MESSAGE ERROR` with class `destination_limit`, operation `publish`,
+one shared reference and the reply code the broker closed the channel with as
+`error.external_code`, and the message names the size and the limit, such as `message body of
+1200090 bytes exceeds the broker's max_message_size of 1048576 bytes`. The broker
 discards the messages written after the refused one with the channel, and Nervix writes them again
 on a new channel. A message written ahead of it that the broker had not confirmed yet may have
 reached its queue, as it can on a quorum queue, so the write then fails as an infrastructure
@@ -1162,7 +1170,8 @@ Headers do not count, so a `MAX SIZE` no larger than `max_message_size` keeps ev
 within it.
 
 Redis rejects a value above its `proto-max-bulk-len` itself, and that rejection follows
-`ON MESSAGE ERROR` like the ones above. ZeroMQ fixes no limit; a receiving socket configured with a
+`ON MESSAGE ERROR` like the ones above, as `destination_limit` with the reply's error prefix as
+`error.external_code`. ZeroMQ fixes no limit; a receiving socket configured with a
 maximum message size drops a larger message after the sending socket has accepted it.
 
 ### Database writes
@@ -1198,10 +1207,10 @@ placeholders, so an insert carries at most as many rows as fit them: 13,107 rows
 columns, whatever `MAX MESSAGES` allows. Postgres reads no protocol message above 1,073,741,822
 bytes, so a Postgres emitter accepts `MAX SIZE` up to `1073741822B` and is refused above it at
 `CREATE`; a write's measured size is never smaller than the message that carries its arrays, so
-every Postgres insert stays within the message the server reads. A MongoDB document holds at most
-16 MiB, so a row whose document exceeds it follows `ON MESSAGE ERROR` as a `refused` `publish`
-error naming 16777216 bytes before any write, and the rows around it are written. MongoDB takes
-100,000 writes in one command, more than `MAX MESSAGES` allows, and its driver divides a write
+every Postgres insert stays within the message the server reads. A MongoDB document holds at most 16
+MiB, so a row whose document exceeds it follows `ON MESSAGE ERROR` as a `destination_limit`
+`publish` error naming 16777216 bytes before any write, and the rows around it are written. MongoDB
+takes 100,000 writes in one command, more than `MAX MESSAGES` allows, and its driver divides a write
 larger than the `maxMessageSizeBytes` the server reports into several commands whose documents it
 still answers for one by one.
 
@@ -1730,7 +1739,7 @@ Nervix writes the millisecond that contains the value: `2001-02-03T04:05:06.7899
 or unanswered publish writes the time the first attempt wrote. librdkafka reads a zero timestamp as
 the time it takes the record, and a Kafka record carries no time before the Unix epoch, so a record
 whose millisecond is not after the epoch, any time before `1970-01-01T00:00:00.001Z`, is rejected
-through `ON MESSAGE ERROR` before the producer takes it, as a `refused` error of the `publish`
+through `ON MESSAGE ERROR` before the producer takes it, as a `validation` error of the `publish`
 operation whose message names its timestamp, and the emitter's other records are still sent.
 Without `TIMESTAMP`, librdkafka gives each record the time the producer takes it. A topic whose
 `message.timestamp.type` is `LogAppendTime` replaces either time with the time the broker appends
@@ -1894,7 +1903,7 @@ counts nanoseconds and a Pulsar message counts whole milliseconds, so Nervix wri
 that contains the value: `2001-02-03T04:05:06.789999999Z` becomes `2001-02-03T04:05:06.789Z`. Pulsar
 reads a zero event time as none, and a message carries no time before the Unix epoch, so a record
 whose millisecond is not after the epoch, any time before `1970-01-01T00:00:00.001Z`, is rejected
-through `ON MESSAGE ERROR` before the producer takes it, as a `refused` error of the `publish`
+through `ON MESSAGE ERROR` before the producer takes it, as a `validation` error of the `publish`
 operation whose message names its timestamp, and the emitter's other records are still sent. Without
 `TIMESTAMP`, a message carries no event time and its `publish_time` is the only time it has.
 
@@ -2089,9 +2098,10 @@ create a queue or make a transient queue durable, and it does not remove the dup
 a lost confirmation.
 
 `TIMESTAMP` computes a non-null `DATETIME`, encoded as a whole unsigned Unix second. A timestamp
-before the Unix epoch or with a fractional second rejects its record without sending it; Nervix
-never truncates or clamps it. The Unix epoch itself is a valid timestamp, distinct from an omitted
-property. RabbitMQ preserves this application-provided time rather than generating one.
+before the Unix epoch or with a fractional second rejects its record without sending it, as a
+`validation` error of the `publish` operation; Nervix never truncates or clamps it. The Unix epoch
+itself is a valid timestamp, distinct from an omitted property. RabbitMQ preserves this
+application-provided time rather than generating one.
 
 | `PROPERTIES` key | Exact non-null type | AMQP property |
 | --- | --- | --- |
@@ -2271,7 +2281,8 @@ retry or subscriber-delivery guarantee. See [Connector-declared events](metrics-
 
 Nervix tells a rejected record from a failed publish by the text of Redis's error reply: a reply
 that contains `Protocol error: invalid bulk length` or `string exceeds maximum allowed size`
-rejects that record through `ON MESSAGE ERROR`. Redis answers a payload above its
+rejects that record through `ON MESSAGE ERROR` as `destination_limit`, since both refuse a value
+larger than Redis takes. Redis answers a payload above its
 `proto-max-bulk-len` with the first and then closes the connection that sent it; the pool replaces
 that connection at its next checkout. Every other error reply, such as an ACL's `NOPERM` refusal,
 `OOM` or a replica's `READONLY`, and every connection failure fails the publish as transient: the
@@ -2407,12 +2418,13 @@ non-sensitive type (use explicit sensitive-value leakage where intended):
 | `response_topic` | `STRING` | A nonempty MQTT publication topic, without subscription wildcards or NUL. |
 | `correlation_data` | `BYTES` | Opaque correlation bytes, including an empty value. |
 
-`INVOKE write_header(name, value)` writes MQTT 5 user properties. Both arguments are strings;
-names compare exactly, repeated names remain repeated and writes keep their order. MQTT string
-and binary property fields are limited to 65,535 bytes, and strings contain no NUL. A record that
-violates a field limit follows `ON MESSAGE ERROR` before it reaches the client. Packet admission
-counts every property and both variable-length prefixes, in addition to the topic, payload and
-packet identifier. A rejected record does not prevent its valid neighbours from being sent.
+`INVOKE write_header(name, value)` writes MQTT 5 user properties. Both arguments are strings; names
+compare exactly, repeated names remain repeated and writes keep their order. MQTT string and binary
+property fields are limited to 65,535 bytes, and strings contain no NUL. A record that violates a
+field limit follows `ON MESSAGE ERROR` as `validation` before it reaches the client, and a record
+whose packet is larger than the broker or the protocol takes as `destination_limit`. Packet
+admission counts every property and both variable-length prefixes, in addition to the topic, payload
+and packet identifier. A rejected record does not prevent its valid neighbours from being sent.
 
 Nervix evaluates this envelope once with its payload. Every retry carries identical flags,
 properties and user properties, including the original expiry interval. A broker may reduce
@@ -2835,24 +2847,27 @@ See the [SQS QUEUE capability and mirror reference](connector-capabilities.md#sq
 `SQS CLIENT` it names declares the keys the [SQS ingestion section](ingestors.md#sqs) lists.
 
 `SEND` is the request shape, and every statement writes it. It belongs to emission alone, as the
-parallel receive belongs to ingestion, and it is independent of the [batching clause](#batching),
-as [Broker and message emitters](#broker-and-message-emitters) describes. `SEND SINGLE` issues one
+parallel receive belongs to ingestion, and it is independent of the [batching clause](#batching), as
+[Broker and message emitters](#broker-and-message-emitters) describes. `SEND SINGLE` issues one
 `SendMessage` request per message. `SEND BATCH` groups messages into `SendMessageBatch` requests
 within SQS's fixed limit of ten entries and 1 MiB per request. Both shapes publish in `MODE ACK`,
 the mode every request/response emitter uses: requests are issued sequentially, and a record is
-acknowledged once the service accepts it. A record whose contents the service refuses, and a
-message larger than 1 MiB, counting its attributes and FIFO message group, follow
-`ON MESSAGE ERROR` individually. A request or a batch entry that fails for any other reason ends
-the write: the retry resends that record and every record the write had not yet sent, never one
-the service accepted or refused. Nervix checks what SQS refuses before sending: a body that is not
-UTF-8, a body or attribute value holding a character SQS forbids, more than ten attributes, an
-attribute name SQS does not allow, an empty attribute value, and an invalid FIFO message group. A
-later `write_header` of a name replaces the earlier value, so the ten are counted after repeated
-names keep their last value: eleven writes of ten names make a message SQS accepts. SQS
-accepts the characters of the XML 1.0 `Char` production: tab, line feed, carriage return, U+0020
-to U+D7FF, U+E000 to U+FFFD and U+10000 to U+10FFFF. Every other C0 control and the noncharacters
-U+FFFE and U+FFFF are forbidden, while the other noncharacters fall inside those ranges and are
-sent.
+acknowledged once the service accepts it. A record whose contents the service refuses, and a message
+larger than 1 MiB, counting its attributes and FIFO message group, follow `ON MESSAGE ERROR`
+individually: a message larger than SQS takes, whether Nervix measured it or the service answered
+`MessageTooLong`, is `destination_limit`, and every other refusal `refused`. A request or a batch
+entry that fails for any other reason ends the write: the retry resends that record and every record
+the write had not yet sent, never one the service accepted or refused. Nervix checks what SQS
+refuses before sending: a body that is not UTF-8, a body or attribute value holding a character SQS
+forbids, more than ten attributes, an attribute name SQS does not allow, an empty attribute value,
+and an invalid FIFO message group. More than ten attributes and a message over 1 MiB are
+`destination_limit`; each of the others is a value SQS cannot hold, a `validation` error of the
+`publish` operation. A later `write_header` of a name replaces the earlier value, so the ten are
+counted after repeated names keep their last value: eleven writes of ten names make a message SQS
+accepts. SQS accepts the characters of the XML 1.0 `Char` production: tab, line feed, carriage
+return, U+0020 to U+D7FF, U+E000 to U+FFFD and U+10000 to U+10FFFF. Every other C0 control and the
+noncharacters U+FFFE and U+FFFF are forbidden, while the other noncharacters fall inside those
+ranges and are sent.
 
 `write_header` writes message attributes, and the value's exact type decides the attribute's data
 type: a `STRING` is a `String` attribute, a `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64` or `I64`
@@ -3071,7 +3086,7 @@ A write sends its envelopes one at a time, in order, and the answer to each deci
 | Answer | Outcome |
 | --- | --- |
 | A `2xx` status | The event is delivered and its records are acknowledged. |
-| `400`, `413` or `422` | Sentry rejected the event. Its records follow `ON MESSAGE ERROR` with a `refused` message error of the `publish` operation naming the status, and the write continues with the next envelope. |
+| `400`, `413` or `422` | Sentry rejected the event. Its records follow `ON MESSAGE ERROR` with a message error of the `publish` operation naming the status, `destination_limit` for `413`, which refuses an event larger than Sentry takes, and `refused` for the others, and the write continues with the next envelope. |
 | Any other status, such as `401`, `403`, `404`, `408`, `429` or a `5xx` | The write stops. This event and every later one stay retained and are sent again on the mode's `RETRY POLICY`, while the events delivered before it stay delivered. |
 | No answer within `timeout_ms`, or a failed lookup, connection or TLS handshake | As for a retried status. |
 
@@ -3562,24 +3577,26 @@ ClickHouse answers a failed insert with an exception whose name its response tex
 parentheses, such as `(CANNOT_PARSE_NUMBER)`. The emitter treats an insert as refused for its rows
 only when that name is `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN`, `CANNOT_PARSE_DATE`,
 `CANNOT_PARSE_DATETIME`, `CANNOT_PARSE_NUMBER`, `CANNOT_PARSE_TEXT`, `TOO_LARGE_STRING_SIZE` or
-`VIOLATED_CONSTRAINT`, or when the answer's text contains `413 Payload Too Large` or
-`413 Request Entity Too Large`, as a proxy in front of ClickHouse answers an oversized body; the
-emitter names that refusal `PAYLOAD_TOO_LARGE`. Every other failure is infrastructure-wide: another
-exception name, a lost connection, an expired `timeout_ms` or a failed lookup leaves the insert's
-rows unresolved, and the emitter retries them on its `RETRY POLICY`.
-For ClickHouse, Postgres, and MySQL, a failed multi-row insert is classified first as
-record-specific or infrastructure-wide. Infrastructure failures retry with backpressure. A
-record-specific failure is isolated by re-executing the insert one record at a time so healthy rows
-land and only poison rows follow `ON MESSAGE ERROR`. Postgres and MySQL re-execute them on the
-connection the failed insert already holds, so isolation does not wait for the client's pool again,
-as [Database client pools](./database-client-pools.md#borrowing-and-waiting) describes. Isolation can
-reapply rows from the failed insert; use the emitter's idempotent write facilities where available.
-Dividing a flush into inserts also means one flush is not an atomic database transaction.
-For a rejected row, the error names a safe ClickHouse error name, Postgres SQLSTATE, or MySQL
-SQLSTATE and code, and carries it as [`error.external_code`](#the-outside-systems-code): the
-ClickHouse exception name, such as `VIOLATED_CONSTRAINT`, the SQLSTATE, such as `23514`, or the
-MySQL error number with its SQLSTATE, such as `3819 (HY000)`. Destination response text can quote
-a bound value, so it is not included in diagnostics. Connection and pool failures retain their causes for diagnosing a retry.
+`VIOLATED_CONSTRAINT`, or when the answer's text contains `413 Payload Too Large` or `413 Request
+Entity Too Large`, as a proxy in front of ClickHouse answers an oversized body; the emitter names
+that refusal `PAYLOAD_TOO_LARGE`. A refused row is `refused` with the exception's name as
+`error.external_code`, and a row of a request refused as too large is `destination_limit` with no
+code, since that answer names no ClickHouse exception. Every other failure is infrastructure-wide:
+another exception name, a lost connection, an expired `timeout_ms` or a failed lookup leaves the
+insert's rows unresolved, and the emitter retries them on its `RETRY POLICY`. For ClickHouse,
+Postgres, and MySQL, a failed multi-row insert is classified first as record-specific or
+infrastructure-wide. Infrastructure failures retry with backpressure. A record-specific failure is
+isolated by re-executing the insert one record at a time so healthy rows land and only poison rows
+follow `ON MESSAGE ERROR`. Postgres and MySQL re-execute them on the connection the failed insert
+already holds, so isolation does not wait for the client's pool again, as [Database client
+pools](./database-client-pools.md#borrowing-and-waiting) describes. Isolation can reapply rows from
+the failed insert; use the emitter's idempotent write facilities where available. Dividing a flush
+into inserts also means one flush is not an atomic database transaction. For a rejected row, the
+error names a safe ClickHouse error name, Postgres SQLSTATE, or MySQL SQLSTATE and code, and carries
+it as [`error.external_code`](#the-outside-systems-code): the ClickHouse exception name, such as
+`VIOLATED_CONSTRAINT`, the SQLSTATE, such as `23514`, or the MySQL error number with its SQLSTATE,
+such as `3819 (HY000)`. Destination response text can quote a bound value, so it is not included in
+diagnostics. Connection and pool failures retain their causes for diagnosing a retry.
 
 ### Postgres
 
@@ -3824,8 +3841,10 @@ bound values; it excludes packet headers, parameter types and the execute packet
 Nervix does not learn the server's `max_allowed_packet` to narrow these inserts. Set `MAX SIZE`
 below the server's configured packet limit with room for that framing, and keep individual
 values within the server's limit. Equal byte limits do not guarantee that every packet fits.
-A packet or bound value the driver or server refuses can still fail a write; automatic sizing
-against that server setting is outside the current contract.
+A packet or bound value the driver or server refuses can still fail a write: written again alone,
+a row whose packet the server still refuses as larger than `max_allowed_packet` (error 1153) is
+`destination_limit` with the code `1153 (08S01)`. Automatic sizing against that server setting is
+outside the current contract.
 
 MySQL emitters may include an insert conflict policy after `VALUES`:
 
@@ -3980,8 +3999,9 @@ Every write is unordered, and MongoDB's answer to a write says what became of it
 when the write fails, so no separate isolation pass is needed. A document the server applied is
 delivered. A document the server refuses for good — one the collection's validator refuses
 (code 121), one too large to store (code 10334) or one that repeats a unique key (code 11000) —
-follows `ON MESSAGE ERROR` as a `refused` `publish` error naming the code, such as
-`MongoDB rejected document with code 11000`. Every other document stays unresolved and is written
+follows `ON MESSAGE ERROR` as a `publish` error naming the code, such as
+`MongoDB rejected document with code 11000`: `destination_limit` for a document too large to
+store, and `refused` for the others. Every other document stays unresolved and is written
 again on the emitter's `RETRY POLICY` backoff, so a retry never carries a document the server
 applied or refused for good. A write the server never answered, such as one whose connection
 failed and whose resend by the driver, described below, failed too, leaves every document it

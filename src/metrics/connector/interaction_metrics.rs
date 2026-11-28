@@ -111,8 +111,8 @@ fn every_bounded_child_is_registered_at_zero_with_the_vocabulary_labels() {
     }
     assert_eq!(attempts, 8);
     assert_eq!(durations, 2);
-    // The rejection family holds one child for each of the five classes of the REJECTED group.
-    assert_eq!(handle.describe_lines().len(), 38);
+    // The rejection family holds one child for each of the six classes of the REJECTED group.
+    assert_eq!(handle.describe_lines().len(), 39);
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn registration_keeps_process_totals_and_separates_nodes_entities_and_processes(
     let lines = metrics.describe_emitter_interactions(&entity);
     assert_eq!(lines[0], "destination:");
     // Three registrations, each with one rejection child for every class of the REJECTED group.
-    assert_eq!(lines.len(), 114);
+    assert_eq!(lines.len(), 117);
     let missing = DomainNodeRef::node_in(
         entity.domain,
         ModelKind::Emitter,

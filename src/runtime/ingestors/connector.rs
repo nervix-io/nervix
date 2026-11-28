@@ -578,8 +578,11 @@ pub(super) struct RuntimeIngestorHost {
     /// Retained ingestor host counters, also handed to endpoint bindings where needed.
     interactions: IngestorInteractionMetrics,
     /// Consumes the payloads the ingestor's codec refuses, for this host and the endpoint bindings
-    /// it hands out.
+    /// it hands out, and the messages a paced poll of its connector could not decode.
     decode_rejections: DecodeRejections,
+    /// The connector the ingestor reads through, which a decode rejection of a message a poll could
+    /// not decode names.
+    connector: nervix_models::ConnectorKind,
     /// The `RATE LIMIT` allowance of this execution unit, which admits every payload it reads
     /// before decoding. Absent for an ingestor that writes no `RATE LIMIT`.
     allowance: Option<UnitAllowance>,
@@ -710,6 +713,7 @@ impl RuntimeIngestorHost {
             work,
             interactions,
             decode_rejections,
+            connector: spec.kind.connector(),
             allowance,
             confirmation_delay,
             _failure_observation: failure_observation,

@@ -149,8 +149,12 @@ enum PulsarRecordError {
          the broker's maximum message size of {maximum} bytes"
     )]
     MessageTooLarge { message_bytes: usize, maximum: u32 },
-    /// The broker received the message and refused it, such as for a topic's own maximum message
-    /// size.
+    /// The broker received the message and refused it as larger than the topic's own
+    /// `maxMessageSize` policy allows, which only the broker applies.
+    #[error("the Pulsar broker does not allow the message: {reason}")]
+    AboveTopicMaximum { reason: String },
+    /// The broker received the message and refused it for another reason, such as a delivery delay
+    /// beyond what its namespace allows.
     #[error("the Pulsar broker does not allow the message: {reason}")]
     NotAllowed { reason: String },
     /// The record's envelope sets a time its message cannot carry.
@@ -159,20 +163,69 @@ enum PulsarRecordError {
 }
 
 impl PulsarRecordError {
-    fn message(&self) -> String {
-        format!("{PULSAR} rejected record: {self}")
-    }
-
     /// The name of the protocol's server error the broker refused the message with, as
     /// `error.external_code` holds it. A message the client or the record's envelope refused never
     /// reached the broker, so it has none.
     fn external_code(&self) -> Option<ExternalErrorCode> {
         match self {
-            Self::NotAllowed { .. } => server_error_code(PulsarServerError::NotAllowedError),
+            Self::AboveTopicMaximum { .. } | Self::NotAllowed { .. } => {
+                server_error_code(PulsarServerError::NotAllowedError)
+            }
             Self::MessageTooLarge { .. } | Self::MessageTime(_) => None,
         }
     }
+
+    /// The rejection of record `record` this refusal ends: a message larger than the broker or its
+    /// topic takes is over the destination's limit, a time the message cannot carry is a value
+    /// the destination cannot hold, and every other refusal is the broker's.
+    fn rejected(
+        &self,
+        record: EmitterRecordId,
+        occurred_at: Timestamp,
+    ) -> RejectedEmitterMember<EmitterRecordId> {
+        let message = self.to_string();
+        match self {
+            Self::MessageTooLarge { .. } | Self::AboveTopicMaximum { .. } => {
+                RejectedEmitterMember::over_destination_limit(
+                    record,
+                    occurred_at,
+                    message,
+                    self.external_code(),
+                )
+            }
+            Self::MessageTime(_) => {
+                RejectedEmitterMember::unrepresentable(record, occurred_at, message)
+            }
+            Self::NotAllowed { .. } => {
+                RejectedEmitterMember::external(record, occurred_at, message, self.external_code())
+            }
+        }
+    }
+
+    /// The broker's verdict on a message it or the client refused for good. A record's times are
+    /// checked before its message exists, so no answer refuses one.
+    fn verdict(&self) -> BrokerVerdict {
+        let message = self.to_string();
+        let external_code = self.external_code();
+        match self {
+            Self::MessageTooLarge { .. } | Self::AboveTopicMaximum { .. } => {
+                BrokerVerdict::OverDestinationLimit {
+                    message,
+                    external_code,
+                }
+            }
+            Self::NotAllowed { .. } | Self::MessageTime(_) => BrokerVerdict::Rejected {
+                message,
+                external_code,
+            },
+        }
+    }
 }
+
+/// What the reason of a Pulsar broker's `NotAllowedError` begins with when the message is larger
+/// than its topic's `maxMessageSize` policy allows; the protocol gives that refusal no code of its
+/// own.
+const TOPIC_SIZE_REFUSAL: &str = "Exceed maximum message size";
 
 /// A server error of the Pulsar protocol as `error.external_code` holds it: the name the protocol
 /// gives its value, such as `NotAllowedError`.
@@ -218,6 +271,14 @@ impl From<PulsarError> for PulsarSendFailure {
                 maximum: *max_message_size,
             }),
             // The broker names the reason in every send error it answers a message with.
+            PulsarConnectionError::PulsarError(
+                Some(PulsarServerError::NotAllowedError),
+                Some(reason),
+            ) if reason.starts_with(TOPIC_SIZE_REFUSAL) => {
+                Self::Rejected(PulsarRecordError::AboveTopicMaximum {
+                    reason: reason.clone(),
+                })
+            }
             PulsarConnectionError::PulsarError(
                 Some(PulsarServerError::NotAllowedError),
                 Some(reason),
@@ -611,10 +672,7 @@ impl PulsarTopicEmitter {
     fn broker_answer(answer: Result<CommandSendReceipt, PulsarError>) -> BrokerAnswer {
         match answer.map_err(PulsarSendFailure::from) {
             Ok(_receipt) => Ok(BrokerVerdict::Confirmed),
-            Err(PulsarSendFailure::Rejected(rejection)) => Ok(BrokerVerdict::Rejected {
-                message: rejection.message(),
-                external_code: rejection.external_code(),
-            }),
+            Err(PulsarSendFailure::Rejected(rejection)) => Ok(rejection.verdict()),
             Err(PulsarSendFailure::Infrastructure(error)) => Err(Self::publish_error(error)),
         }
     }
@@ -643,12 +701,7 @@ impl PulsarTopicEmitter {
         occurred_at: Timestamp,
         rejection: &PulsarRecordError,
     ) -> RejectedEmitterMember<EmitterRecordId> {
-        RejectedEmitterMember::external(
-            record,
-            occurred_at,
-            rejection.message(),
-            rejection.external_code(),
-        )
+        rejection.rejected(record, occurred_at)
     }
 
     /// A client that did not connect: one its configuration cannot describe is invalid, and any
@@ -794,6 +847,7 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_connector::RecordEnvelope;
     use nervix_connector_fake::FakeEmitterHost;
+    use nervix_models::RejectedErrorClass;
     use nervix_primitives::{
         net::{TcpListener, TcpStream},
         sync::{CancellationToken, mpsc},
@@ -900,12 +954,18 @@ mod tests {
     }
 
     #[test]
-    fn a_message_the_broker_does_not_allow_is_rejected_with_the_broker_reason() {
+    fn a_message_above_the_topic_maximum_is_over_the_destination_limit_with_the_broker_reason() {
         let refused = rejection(server_error(
             PulsarServerError::NotAllowedError,
             Some("Exceed maximum message size"),
         ));
 
+        assert_eq!(
+            refused,
+            PulsarRecordError::AboveTopicMaximum {
+                reason: "Exceed maximum message size".to_string(),
+            }
+        );
         assert_eq!(
             refused.to_string(),
             "the Pulsar broker does not allow the message: Exceed maximum message size"
@@ -914,6 +974,35 @@ mod tests {
             refused.external_code(),
             ExternalErrorCode::new("NotAllowedError"),
             "the broker's refusal carries the name of its server error"
+        );
+        assert_eq!(
+            refused.verdict(),
+            BrokerVerdict::OverDestinationLimit {
+                message: refused.to_string(),
+                external_code: ExternalErrorCode::new("NotAllowedError"),
+            }
+        );
+    }
+
+    #[test]
+    fn a_message_the_broker_does_not_allow_for_another_reason_is_refused() {
+        let refused = rejection(server_error(
+            PulsarServerError::NotAllowedError,
+            Some("Exceeds max allowed delivery delay"),
+        ));
+
+        assert_eq!(
+            refused,
+            PulsarRecordError::NotAllowed {
+                reason: "Exceeds max allowed delivery delay".to_string(),
+            }
+        );
+        assert_eq!(
+            refused.verdict(),
+            BrokerVerdict::Rejected {
+                message: refused.to_string(),
+                external_code: ExternalErrorCode::new("NotAllowedError"),
+            }
         );
     }
 
@@ -1382,6 +1471,15 @@ mod tests {
             .collect()
     }
 
+    fn rejected_classes(
+        rejected: &[RejectedEmitterMember<EmitterRecordId>],
+    ) -> Vec<RejectedErrorClass> {
+        rejected
+            .iter()
+            .map(|rejected| rejected.error.class)
+            .collect()
+    }
+
     #[nervix_primitives::test]
     async fn finishing_waits_for_the_receipt_of_an_unconfirmed_record() {
         let release = CancellationToken::new();
@@ -1509,10 +1607,12 @@ mod tests {
                 panic!("exactly the oversize record is rejected: {rejected:?}");
             };
             assert_eq!(*rejected, EmitterRecordId::new(0));
-            assert!(
-                message.starts_with("PULSAR rejected record: Pulsar message of 50"),
-                "{message}"
+            assert_eq!(
+                rejected_classes(&outcome.rejected),
+                vec![RejectedErrorClass::DestinationLimit],
+                "{mode:?}"
             );
+            assert!(message.starts_with("Pulsar message of 50"), "{message}");
             assert!(
                 message.ends_with("exceeds the broker's maximum message size of 4096 bytes"),
                 "{message}"
@@ -1548,10 +1648,13 @@ mod tests {
             rejected_messages(&outcome.rejected),
             vec![(
                 EmitterRecordId::new(0),
-                "PULSAR rejected record: the Pulsar broker does not allow the message: Exceed \
-                 maximum message size"
+                "the Pulsar broker does not allow the message: Exceed maximum message size"
                     .to_string()
             )]
+        );
+        assert_eq!(
+            rejected_classes(&outcome.rejected),
+            vec![RejectedErrorClass::DestinationLimit]
         );
         assert!(outcome.infrastructure_error.is_none());
     }
@@ -1661,11 +1764,15 @@ mod tests {
                 rejected_messages(&outcome.rejected),
                 vec![(
                     EmitterRecordId::new(0),
-                    "PULSAR rejected record: message TIMESTAMP 1969-12-31T23:59:59.999999999Z \
-                     precedes 1970-01-01T00:00:00.001Z, the earliest event time a PULSAR message \
-                     carries"
+                    "message TIMESTAMP 1969-12-31T23:59:59.999999999Z precedes \
+                     1970-01-01T00:00:00.001Z, the earliest event time a PULSAR message carries"
                         .to_string()
                 )],
+                "{mode:?}"
+            );
+            assert_eq!(
+                rejected_classes(&outcome.rejected),
+                vec![RejectedErrorClass::Validation],
                 "{mode:?}"
             );
             assert!(outcome.infrastructure_error.is_none(), "{mode:?}");

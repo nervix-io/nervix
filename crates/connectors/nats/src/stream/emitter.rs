@@ -114,10 +114,7 @@ impl NatsStreamEmitter {
     fn broker_answer(acknowledgement: Result<PublishAck, JetStreamPublishError>) -> BrokerAnswer {
         match acknowledgement {
             Ok(_ack) => Ok(BrokerVerdict::Confirmed),
-            Err(error) if Self::is_record_rejection(&error) => Ok(BrokerVerdict::Rejected {
-                message: format!("nats JetStream rejected record: {error}"),
-                external_code: Self::jetstream_code(&error),
-            }),
+            Err(error) if Self::is_record_rejection(&error) => Ok(Self::rejection_verdict(&error)),
             Err(error) => {
                 let description = format!("nats JetStream publish failed: {error}");
                 let code = Self::jetstream_code(&error);
@@ -146,6 +143,31 @@ impl NatsStreamEmitter {
         let cause = source.downcast_ref::<NatsJetStreamError>()?;
         let ErrorCode(code) = cause.error_code();
         ExternalErrorCode::new(code.to_string())
+    }
+
+    /// The verdict on a record the server or the client refused for good with `error`: a payload
+    /// above the server's `max_payload` is over the destination's limit, and every other refusal
+    /// is refused.
+    fn rejection_verdict(error: &JetStreamPublishError) -> BrokerVerdict {
+        let message = format!("{error:#}");
+        let external_code = Self::jetstream_code(error);
+        if Self::is_size_rejection(error) {
+            BrokerVerdict::OverDestinationLimit {
+                message,
+                external_code,
+            }
+        } else {
+            BrokerVerdict::Rejected {
+                message,
+                external_code,
+            }
+        }
+    }
+
+    /// Whether `error` refuses a payload above the largest one the server takes, which the client
+    /// checks against the `max_payload` the server announced before it writes the message.
+    fn is_size_rejection(error: &JetStreamPublishError) -> bool {
+        matches!(error.kind(), PublishErrorKind::MaxPayloadExceeded)
     }
 
     fn is_record_rejection(error: &JetStreamPublishError) -> bool {
@@ -259,12 +281,18 @@ impl RecordEmitter for NatsStreamEmitter {
             let pending = match handed_over {
                 Ok(pending) => pending,
                 Err(error) if Self::is_record_rejection(&error) => {
-                    window.reject(RejectedEmitterMember::external(
-                        record_id,
-                        occurred_at,
-                        format!("nats JetStream rejected record: {error}"),
-                        Self::jetstream_code(&error),
-                    ));
+                    let message = format!("{error:#}");
+                    let code = Self::jetstream_code(&error);
+                    window.reject(if Self::is_size_rejection(&error) {
+                        RejectedEmitterMember::over_destination_limit(
+                            record_id,
+                            occurred_at,
+                            message,
+                            code,
+                        )
+                    } else {
+                        RejectedEmitterMember::external(record_id, occurred_at, message, code)
+                    });
                     continue;
                 }
                 Err(error) => return window.fail(Self::refused_hand_over(error)),
@@ -524,5 +552,23 @@ mod tests {
         );
         let other = JetStreamPublishError::new(PublishErrorKind::TimedOut);
         assert!(!NatsStreamEmitter::is_record_rejection(&other));
+    }
+
+    #[test]
+    fn a_payload_above_max_payload_is_over_the_destination_limit() {
+        let error = JetStreamPublishError::new(PublishErrorKind::MaxPayloadExceeded);
+        assert!(NatsStreamEmitter::is_record_rejection(&error));
+        let Ok(BrokerVerdict::OverDestinationLimit {
+            message,
+            external_code,
+        }) = NatsStreamEmitter::broker_answer(Err(error))
+        else {
+            panic!("a payload above max_payload is over the destination's limit");
+        };
+        assert!(!message.contains("rejected record"), "{message}");
+        assert_eq!(
+            external_code, None,
+            "the client refused the payload before any server answered it"
+        );
     }
 }

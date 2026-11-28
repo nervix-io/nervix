@@ -212,7 +212,7 @@ Feature: MQTT publications carry the envelope the statement prepares
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "user_id":41 | "error_code":"refused" | maximum packet size of 1024 bytes
+      "user_id":41 | "error_code":"destination_limit" | maximum packet size of 1024 bytes
       """
     When MQTT message is published to topic "mqtt_properties_in_{{test_id}}"
       """

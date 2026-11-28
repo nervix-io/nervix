@@ -227,7 +227,7 @@ async fn a_poll_its_codec_refuses_whole_enters_nothing() {
                     headers: RetainedIngestHeaders::none(),
                     metadata: nervix_connector::RetainedIngestMetadata::none(0),
                 }],
-                failures: Vec::new(),
+                undecodable: Vec::new(),
                 dropped_header_values: 0,
                 observed_at: Timestamp::from_unix_nanos(1),
             },
@@ -269,7 +269,7 @@ async fn a_poll_consumes_a_message_its_codec_refuses_and_delivers_the_rest() {
                         metadata: nervix_connector::RetainedIngestMetadata::none(0),
                     },
                 ],
-                failures: Vec::new(),
+                undecodable: Vec::new(),
                 dropped_header_values: 0,
                 observed_at: Timestamp::from_unix_nanos(1),
             },
@@ -290,6 +290,88 @@ async fn a_poll_consumes_a_message_its_codec_refuses_and_delivers_the_rest() {
         vec![Some(RuntimeValue::I64(9))]
     );
     assert_rejected(&fixture, &report, 1);
+    fixture.finish().await;
+}
+
+/// A message a poll read but its connector could not decode is consumed as a decode rejection of
+/// the connector under the ingestor's `ON GENERAL ERROR`: it is reported with its class and the
+/// connector's whole cause, counted and described as the ingestor's last decode rejection, and the
+/// poll's other messages are delivered.
+#[nervix_primitives::test]
+async fn a_poll_consumes_a_message_its_connector_could_not_decode_and_delivers_the_rest() {
+    #[derive(Debug, thiserror::Error)]
+    #[error("the sample value is not a number")]
+    struct NotANumber;
+
+    let mut fixture = UnfoldingDomain::start().await;
+    let mut errors = fixture.runtime.events().subscribe();
+    let (_shutdown_tx, shutdown) = watch::channel(false);
+    let quiesce = fixture.quiesce();
+    let mut host = fixture.host(quiesce, shutdown, WAITING_INTAKE).await;
+    let observed_at = Timestamp::from_unix_nanos(1);
+
+    let polled = host
+        .intake_poll(
+            IngestorPoll {
+                messages: vec![IngestorPollMessage {
+                    payload: br#"{"user_id":11}"#.to_vec(),
+                    headers: RetainedIngestHeaders::none(),
+                    metadata: nervix_connector::RetainedIngestMetadata::none(0),
+                }],
+                undecodable: vec![error_stack::Report::new(NotANumber).change_context(
+                    nervix_connector::IngestorError::Decode {
+                        connector: "fixture",
+                    },
+                )],
+                dropped_header_values: 0,
+                observed_at,
+            },
+            WHOLE_POLL,
+        )
+        .await;
+
+    assert!(
+        matches!(polled, Ok(true)),
+        "the poll's decoded message enters the ingest group: {polled:?}"
+    );
+    let report = next_error(&mut errors).await;
+    host.flush()
+        .await
+        .expect("the group holding the poll flushes");
+    assert_eq!(
+        fixture.delivered_user_ids(1).await,
+        vec![Some(RuntimeValue::I64(11))]
+    );
+    assert!(report.starts_with(REJECTION), "{report}");
+    let described = fixture
+        .runtime
+        .describe_local_ingestor(
+            &fixture.domain,
+            &fixture.ingestor,
+            nervix_models::Unit::SINGLE,
+            nervix_models::IngestorEntityKind::Http(nervix_models::HttpIngestorEntity::Endpoint),
+        )
+        .expect("the fixture's ingestor describes itself");
+    assert_eq!(described.decode_rejections_total, 1);
+    let last = described
+        .last_decode_rejection
+        .assured("the undecodable message is the ingestor's last decode rejection");
+    assert_eq!(
+        last.refused_by,
+        DecodeRefuser::Connector(nervix_models::ConnectorKind::Http),
+        "the connector the ingestor reads through refused the message"
+    );
+    assert_eq!(
+        last.message,
+        "fixture ingestor could not decode one message it read: the sample value is not a number"
+    );
+    assert_eq!(last.occurred_at, observed_at);
+    assert_eq!(last.position, None);
+    assert!(last.fields.is_empty());
+    assert!(
+        report.ends_with(&last.to_string()),
+        "the event reports the record the ingestor describes: {report} / {last}"
+    );
     fixture.finish().await;
 }
 

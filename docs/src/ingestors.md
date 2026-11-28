@@ -591,13 +591,19 @@ past it and a RabbitMQ queue no longer holds it. In `MODE NO ACK` the payload is
 rejection. A JAQ-backed codec that refuses one message an unfolding payload produced refuses the
 whole payload, and so does an unfolding that panics.
 
-A decode rejection carries a stable UUIDv7 reference, the class `codec`, the operation `decode`,
-the codec, the fields the codec named at fault, the instant the ingestor took the payload in, and the
-codec's diagnostic as its message. When the ingestor's metadata names where on its transport the
-payload was read, the rejection names it too: a Kafka record's topic, partition and offset, or the
-peer a syslog frame came from. An ingestor whose metadata holds only headers names no position, because
-a header value is what its sender wrote. The rejection never holds the payload, and the codec's
-diagnostic names the codec and the field at fault, never a payload value.
+A paced poll's message its connector cannot decode into a payload before any codec sees it, such
+as a [Prometheus sample](#prometheus-samples) whose value is no number, takes the same path: the
+rejection names the connector instead of a codec, such as `connector PROMETHEUS refused the
+payload`, and no position or field.
+
+A decode rejection carries a stable UUIDv7 reference, the class `codec`, the operation `decode`, the
+codec or connector that refused the payload, the fields the codec named at fault, the instant the
+ingestor took the payload in, and the codec's diagnostic as its message. When the ingestor's
+metadata names where on its transport the payload was read, the rejection names it too: a Kafka
+record's topic, partition and offset, or the peer a syslog frame came from. An ingestor whose
+metadata holds only headers names no position, because a header value is what its sender wrote. The
+rejection never holds the payload, and the codec's diagnostic names the codec and the field at
+fault, never a payload value.
 
 The node counts the payloads its ingestor consumed this way in
 `nervix_ingestor_decode_rejections_total`. `DESCRIBE INGESTOR` renders that count and
@@ -3249,6 +3255,15 @@ out as text.
   [decode rejection](#when-the-codec-refuses-a-payload), while the samples beside it are delivered.
 - `timestamp` is the sample's own instant as RFC 3339 text in UTC, read from the digits of the API's
   decimal seconds so that no float rounds them. Prometheus reports it to the millisecond.
+
+A sample the ingestor cannot turn into that object at all, because its value is no number and none
+of the strings above, or its instant does not fit a timestamp, never reaches the codec. A
+Prometheus server never answers such a sample, but another server that answers the same API can.
+The ingestor consumes it as a [decode rejection](#when-the-codec-refuses-a-payload) of its connector
+under `ON GENERAL ERROR`: it is counted in `nervix_ingestor_decode_rejections_total`, `DESCRIBE
+INGESTOR` shows it as the last decode rejection, such as `connector PROMETHEUS refused the payload:
+prometheus ingestor could not decode one message it read: invalid Prometheus sample value: …`, and
+the samples beside it are delivered. The next poll reads it, and refuses it, again.
 
 `WIRE JSON` declares no nested object, so a codec that reads a label is a JAQ codec, as in the
 example above. A codec that reads only the sample's own members can stay a `MODE LOOSE` wire schema,

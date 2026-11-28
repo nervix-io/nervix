@@ -566,7 +566,7 @@ impl KafkaTopicEmitter {
         }
         // The connector measured the payload itself and never handed it over, so no broker
         // answered it with a code.
-        Some(record.rejected(
+        Some(record.over_destination_limit(
             format!(
                 "{KAFKA} record payload is {bytes} bytes, exceeding {QUEUE_CAPACITY_PROPERTY} \
                  capacity {} bytes",
@@ -658,7 +658,7 @@ impl KafkaTopicEmitter {
             let create_time = match KafkaCreateTime::of(&record) {
                 Ok(create_time) => create_time,
                 Err(refusal) => {
-                    outcome.reject(record.rejected(refusal.to_string(), None));
+                    outcome.reject(record.unrepresentable(refusal.to_string()));
                     continue;
                 }
             };
@@ -667,8 +667,7 @@ impl KafkaTopicEmitter {
                 // librdkafka refused the record itself as it was handed over, before any broker
                 // saw it, so no broker answered it with a code.
                 Err(error) if Self::is_record_rejection(&error) => {
-                    outcome
-                        .reject(record.rejected(format!("kafka rejected record: {error}"), None));
+                    outcome.reject(Self::handed_over_rejection(&record, &error));
                 }
                 Err(error) => {
                     outcome.fail(Self::refused_hand_over(error));
@@ -705,7 +704,7 @@ impl KafkaTopicEmitter {
             let create_time = match KafkaCreateTime::of(&record) {
                 Ok(create_time) => create_time,
                 Err(refusal) => {
-                    window.reject(record.rejected(refusal.to_string(), None));
+                    window.reject(record.unrepresentable(refusal.to_string()));
                     continue;
                 }
             };
@@ -727,9 +726,7 @@ impl KafkaTopicEmitter {
                     if let Some(error) = failure.downcast_ref::<KafkaError>()
                         && Self::is_record_rejection(error)
                     {
-                        window.reject(
-                            record.rejected(format!("{KAFKA} rejected record: {error}"), None),
-                        );
+                        window.reject(Self::handed_over_rejection(&record, error));
                         continue;
                     }
                     return Self::give_up(producer, window, failure).await;
@@ -897,9 +894,18 @@ impl KafkaTopicEmitter {
         match report {
             Ok(KafkaDeliveryReport::Delivered) => Ok(BrokerVerdict::Confirmed),
             Ok(KafkaDeliveryReport::Failed(error)) if Self::is_record_rejection(&error) => {
-                Ok(BrokerVerdict::Rejected {
-                    message: format!("kafka rejected record: {error}"),
-                    external_code: Self::broker_code(&error),
+                let message = format!("{error:#}");
+                let external_code = Self::broker_code(&error);
+                Ok(if Self::is_size_rejection(&error) {
+                    BrokerVerdict::OverDestinationLimit {
+                        message,
+                        external_code,
+                    }
+                } else {
+                    BrokerVerdict::Rejected {
+                        message,
+                        external_code,
+                    }
                 })
             }
             Ok(KafkaDeliveryReport::Failed(error)) => {
@@ -978,6 +984,30 @@ impl KafkaTopicEmitter {
             return None;
         }
         ExternalErrorCode::new(code.name()?)
+    }
+
+    /// The rejection of `record`, which librdkafka refused with `error` as it was handed over,
+    /// before any broker saw it, so no broker answered it with a code: one larger than the
+    /// producer sends is over the destination's limit, and every other one is refused.
+    fn handed_over_rejection(
+        record: &EmitterRecord,
+        error: &KafkaError,
+    ) -> RejectedEmitterMember<EmitterRecordId> {
+        let message = format!("{error:#}");
+        if Self::is_size_rejection(error) {
+            record.over_destination_limit(message, None)
+        } else {
+            record.rejected(message, None)
+        }
+    }
+
+    /// Whether `error` refuses a record as larger than the topic or the producer takes:
+    /// `message.max.bytes`, which librdkafka checks before it sends and a broker checks again.
+    fn is_size_rejection(error: &KafkaError) -> bool {
+        matches!(
+            error,
+            KafkaError::MessageProduction(RDKafkaErrorCode::MessageSizeTooLarge)
+        )
     }
 
     fn is_record_rejection(error: &KafkaError) -> bool {
@@ -1201,11 +1231,31 @@ mod tests {
         };
         assert_eq!(
             verdict,
-            BrokerVerdict::Rejected {
-                message: format!("kafka rejected record: {error}"),
+            BrokerVerdict::OverDestinationLimit {
+                message: format!("{error:#}"),
                 external_code: ExternalErrorCode::new("MSG_SIZE_TOO_LARGE"),
             },
-            "a refused record carries librdkafka's name for the broker's code"
+            "a record larger than the topic takes is over its limit, with librdkafka's name for \
+             the broker's code"
+        );
+    }
+
+    #[test]
+    fn a_delivery_error_about_the_record_other_than_its_size_is_refused() {
+        let error = KafkaError::MessageProduction(RDKafkaErrorCode::InvalidTimestamp);
+
+        let answer =
+            KafkaTopicEmitter::broker_answer(Ok(KafkaDeliveryReport::Failed(error.clone())));
+
+        let Ok(verdict) = answer else {
+            panic!("a refused record has an answer, got {answer:?}");
+        };
+        assert_eq!(
+            verdict,
+            BrokerVerdict::Rejected {
+                message: format!("{error:#}"),
+                external_code: ExternalErrorCode::new("INVALID_TIMESTAMP"),
+            }
         );
     }
 

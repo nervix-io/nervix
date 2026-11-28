@@ -40,7 +40,7 @@ use meticulous::OptionExt as _;
 use nervix_connector::{
     ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle,
     EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError,
-    EmitterWriteResult, PerRecordOutcome, RecordEmitter,
+    EmitterWriteResult, PerRecordOutcome, RecordEmitter, RejectedEmitterMember,
 };
 use nervix_dns::{DnsResolver, LookupShare, OperationBudget};
 use nervix_models::{
@@ -99,6 +99,24 @@ enum SyslogPayloadError {
         "encoded Syslog payload contains LF, which is not allowed with non-transparent framing"
     )]
     NonTransparentLf,
+}
+
+impl SyslogPayloadError {
+    /// The rejection of `record`, whose payload `error` refuses before it is written: a frame
+    /// larger than its transport carries is over the destination's limit, and an LF that
+    /// non-transparent framing would read as the frame's end is a value the frame cannot hold.
+    fn rejected(
+        error: &Report<Self>,
+        record: &EmitterRecord,
+    ) -> RejectedEmitterMember<EmitterRecordId> {
+        let message = format!("{error:#}");
+        match error.current_context() {
+            Self::OversizedUdp { .. } | Self::OversizedOctetCount { .. } => {
+                record.over_destination_limit(message, None)
+            }
+            Self::NonTransparentLf => record.unrepresentable(message),
+        }
+    }
 }
 
 impl SyslogCollectorEmitter {
@@ -511,7 +529,7 @@ impl RecordEmitter for SyslogCollectorEmitter {
             // The emitter refused the payload itself; a syslog collector answers no record, so no
             // record carries a code.
             if let Err(reason) = self.validate_payload(&record.payload) {
-                outcome.reject(record.rejected(reason.to_string(), None));
+                outcome.reject(SyslogPayloadError::rejected(&reason, &record));
                 continue;
             }
             match self.publish_payload(&record.payload).await {
@@ -1296,6 +1314,68 @@ mod tests {
         let (tcp, _listener) = tcp_connector(SyslogFraming::NonTransparent).await;
         assert!(tcp.validate_payload(b"line one\nline two").is_err());
         assert!(tcp.validate_payload(b"one line").is_ok());
+    }
+
+    /// A frame larger than its transport carries is over the destination's limit; an LF that
+    /// non-transparent framing would end the frame at is a value the frame cannot hold. Neither
+    /// reached a collector, so neither carries a code.
+    #[nervix_primitives::test]
+    async fn an_oversized_frame_is_over_the_destination_limit_and_an_lf_is_unrepresentable() {
+        let udp = udp_connector().await;
+        let datagram_payload = usize::try_from(SYSLOG_FRAME_LIMITS.datagram_payload())
+            .assured("a datagram payload fits a 64-bit usize");
+        let oversized = EmitterRecord::new(
+            EmitterRecordId::new(0),
+            None,
+            vec![
+                0_u8;
+                datagram_payload
+                    .checked_add(1)
+                    .assured("a datagram payload is far below usize::MAX")
+            ],
+            Vec::new(),
+            nervix_models::Timestamp::from_unix_nanos(0),
+        );
+        let refusal = udp
+            .validate_payload(&oversized.payload)
+            .err()
+            .assured("a payload above the datagram limit is refused");
+        let rejected = SyslogPayloadError::rejected(&refusal, &oversized);
+        assert_eq!(
+            rejected.error.class,
+            nervix_models::RejectedErrorClass::DestinationLimit
+        );
+        assert_eq!(
+            rejected.error.operation,
+            nervix_models::MessageErrorOperation::Publish
+        );
+        assert_eq!(rejected.error.external_code, None);
+        assert_eq!(
+            rejected.error.message,
+            format!(
+                "encoded Syslog UDP payload is {} bytes; maximum is {datagram_payload}",
+                oversized.payload.len()
+            )
+        );
+
+        let (tcp, _listener) = tcp_connector(SyslogFraming::NonTransparent).await;
+        let framed = EmitterRecord::new(
+            EmitterRecordId::new(1),
+            None,
+            b"line one\nline two".to_vec(),
+            Vec::new(),
+            nervix_models::Timestamp::from_unix_nanos(0),
+        );
+        let refusal = tcp
+            .validate_payload(&framed.payload)
+            .err()
+            .assured("an LF is refused under non-transparent framing");
+        let rejected = SyslogPayloadError::rejected(&refusal, &framed);
+        assert_eq!(
+            rejected.error.class,
+            nervix_models::RejectedErrorClass::Validation
+        );
+        assert_eq!(rejected.error.external_code, None);
     }
 
     #[nervix_primitives::test]

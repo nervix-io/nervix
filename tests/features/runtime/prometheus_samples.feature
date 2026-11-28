@@ -145,6 +145,54 @@ Feature: Prometheus samples
       | 1            |
       | 3            |
 
+  @prometheus_undecodable_samples
+  Scenario Outline: A sample its connector cannot decode is a decode rejection and leaves the samples beside it delivered
+    Given the HTTP mock server is running
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA sample ( value F64 );
+      CREATE WIRE JSON SCHEMA sample_wire MODE LOOSE ( value number );
+      CREATE WIRE JSON CODEC sample_codec FROM WIRE SCHEMA sample_wire TO SCHEMA sample;
+      CREATE RELAY samples SCHEMA sample UNBRANCHED;
+      CREATE PROMETHEUS CLIENT prom_main CONFIG {
+        'addr' = '{{mock_http_addr}}/prometheus-answer/{{test_id}}/undecodable-sample',
+        'timeout_ms' = 5000
+      };
+      CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'samples' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING sample_codec
+        TO samples INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION samples_subscription TO samples;
+      START;
+      """
+    # The answer's second sample holds the value "one", which no number spells, so the connector
+    # cannot decode it into a message. Every poll reads it again, so the ingestor consumes it as a
+    # decode rejection of its connector under ON GENERAL ERROR, counts it and describes it as its
+    # last, and the sample beside it is delivered.
+    Then within "30s" the relay subscription receives a payload
+      """
+      "value":2.5
+      """
+    And within "30s" the active session observes a server error containing
+      """
+      ingestor 'prom_samples' general error in domain '{{domain}}': decode rejection
+      """
+    And within "30s" DESCRIBE INGESTOR "prom_samples" on the leader node contains
+      """
+      connector PROMETHEUS refused the payload: prometheus ingestor could not decode one message it read: invalid Prometheus sample value
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @prometheus_unsupported_results
   Scenario Outline: A <result_type> answer fails its poll and names its type
     Given Prometheus is running

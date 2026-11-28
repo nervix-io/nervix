@@ -94,6 +94,7 @@ use nervix_connector::{
 use nervix_dns::DnsResolver;
 use nervix_models::{
     ClientConfigEntry, ExternalErrorCode, MQTT_MAX_REMAINING_LENGTH, MqttTopicName, PropertyType,
+    Timestamp,
 };
 use nervix_primitives::{
     sync::{
@@ -168,8 +169,8 @@ pub struct MqttTopicEmitter {
     nervix_lint,
     nervix::error_boundary(
         outcome,
-        reason = "the emitter projects these validation failures into per-record external \
-                  rejections"
+        reason = "the emitter projects these refusals into per-record destination-limit and \
+                  validation rejections"
     )
 )]
 enum MqttRecordError {
@@ -200,6 +201,31 @@ enum MqttRecordError {
 }
 
 type MqttRecordResult<T> = Result<T, Report<MqttRecordError>>;
+
+impl MqttRecordError {
+    /// The rejection of record `record`, which `error` refuses before it is handed over, so no
+    /// broker answered it with a code: a packet larger than the broker or the protocol takes is
+    /// over the destination's limit, and every other refusal names a value the packet cannot
+    /// carry.
+    fn rejected(
+        error: &Report<Self>,
+        record: EmitterRecordId,
+        occurred_at: Timestamp,
+    ) -> RejectedEmitterMember<EmitterRecordId> {
+        let message = format!("{error:#}");
+        match error.current_context() {
+            Self::PacketTooLarge { .. } | Self::BeyondProtocol { .. } => {
+                RejectedEmitterMember::over_destination_limit(record, occurred_at, message, None)
+            }
+            Self::PropertyLength { .. }
+            | Self::PropertyNul { .. }
+            | Self::ResponseTopic
+            | Self::PropertyType { .. } => {
+                RejectedEmitterMember::unrepresentable(record, occurred_at, message)
+            }
+        }
+    }
+}
 
 /// What the client writes around every payload this emitter publishes, which its topic and quality
 /// of service fix for the emitter's lifetime.
@@ -677,6 +703,16 @@ impl MqttTopicEmitter {
         matches!(error, MqttClientError::InvalidRequest(_))
     }
 
+    /// The rejection of record `record`, which the client refused to take as an invalid request,
+    /// one whose topic MQTT cannot publish to, before any broker saw it.
+    fn client_rejection(
+        error: &MqttClientError,
+        record: EmitterRecordId,
+        occurred_at: Timestamp,
+    ) -> RejectedEmitterMember<EmitterRecordId> {
+        RejectedEmitterMember::unrepresentable(record, occurred_at, format!("{error:#}"))
+    }
+
     /// Whether the broker refused a record for good: a v5 reason code about the record itself.
     fn is_record_notice_rejection(error: &PublishNoticeError) -> bool {
         matches!(
@@ -702,7 +738,7 @@ impl MqttTopicEmitter {
         match completion {
             Ok(()) => Ok(BrokerVerdict::Confirmed),
             Err(error) if Self::is_record_notice_rejection(&error) => Ok(BrokerVerdict::Rejected {
-                message: format!("mqtt rejected record: {error}"),
+                message: format!("{error:#}"),
                 external_code: notice_code(&error),
             }),
             Err(error) => {
@@ -750,12 +786,7 @@ impl MqttTopicEmitter {
             let options = match self.prepare_options(&mut record) {
                 Ok(options) => options,
                 Err(error) => {
-                    outcome.reject(RejectedEmitterMember::external(
-                        record_id,
-                        occurred_at,
-                        format!("mqtt rejected record: {error}"),
-                        None,
-                    ));
+                    outcome.reject(MqttRecordError::rejected(&error, record_id, occurred_at));
                     continue;
                 }
             };
@@ -768,12 +799,7 @@ impl MqttTopicEmitter {
                     outcome.deliver(record_id);
                 }
                 Err(error) if Self::is_record_client_rejection(&error) => {
-                    outcome.reject(RejectedEmitterMember::external(
-                        record_id,
-                        occurred_at,
-                        format!("mqtt rejected record: {error}"),
-                        None,
-                    ));
+                    outcome.reject(Self::client_rejection(&error, record_id, occurred_at));
                 }
                 Err(error) => {
                     outcome.fail(Self::refused_hand_over(error));
@@ -805,12 +831,7 @@ impl MqttTopicEmitter {
             let options = match self.prepare_options(&mut record) {
                 Ok(options) => options,
                 Err(error) => {
-                    window.reject(RejectedEmitterMember::external(
-                        record_id,
-                        occurred_at,
-                        format!("mqtt rejected record: {error}"),
-                        None,
-                    ));
+                    window.reject(MqttRecordError::rejected(&error, record_id, occurred_at));
                     continue;
                 }
             };
@@ -820,12 +841,7 @@ impl MqttTopicEmitter {
             let notice = match handed_over {
                 Ok(notice) => notice,
                 Err(error) if Self::is_record_client_rejection(&error) => {
-                    window.reject(RejectedEmitterMember::external(
-                        record_id,
-                        occurred_at,
-                        format!("mqtt rejected record: {error}"),
-                        None,
-                    ));
+                    window.reject(Self::client_rejection(&error, record_id, occurred_at));
                     continue;
                 }
                 Err(error) => return window.fail(Self::refused_hand_over(error)),
@@ -927,7 +943,7 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_connector::{ConfirmationWindowError, HostServiceError, PerRecordOutcomeParts};
     use nervix_connector_fake::FakeEmitterHost;
-    use nervix_models::{MQTT_MAXIMUM_PACKET_BYTES, Timestamp};
+    use nervix_models::{MQTT_MAXIMUM_PACKET_BYTES, RejectedErrorClass};
 
     use super::*;
     use crate::topic::{scripted_broker::ScriptedBroker, test_fixtures::DnsFixture};
@@ -940,38 +956,87 @@ mod tests {
         assert_eq!(verdict, BrokerVerdict::Confirmed);
     }
 
+    /// A packet larger than the broker or the protocol takes is over the destination's limit, and
+    /// a property MQTT cannot carry is a value it cannot hold. Neither reached a broker, so
+    /// neither carries a code.
+    #[test]
+    fn a_refusal_before_hand_over_is_over_the_destination_limit_or_a_value_mqtt_cannot_hold() {
+        let maximum = NonZeroU32::new(64).expect("64 is positive");
+        for (error, class) in [
+            (
+                MqttRecordError::PacketTooLarge {
+                    packet_bytes: 65,
+                    maximum,
+                },
+                RejectedErrorClass::DestinationLimit,
+            ),
+            (
+                MqttRecordError::BeyondProtocol { payload_bytes: 1 },
+                RejectedErrorClass::DestinationLimit,
+            ),
+            (
+                MqttRecordError::PropertyLength {
+                    field: "content_type",
+                    bytes: 65536,
+                },
+                RejectedErrorClass::Validation,
+            ),
+            (
+                MqttRecordError::PropertyNul {
+                    field: "content_type",
+                },
+                RejectedErrorClass::Validation,
+            ),
+            (
+                MqttRecordError::ResponseTopic,
+                RejectedErrorClass::Validation,
+            ),
+        ] {
+            let message = error.to_string();
+            let rejection = MqttRecordError::rejected(
+                &Report::new(error),
+                EmitterRecordId::new(4),
+                Timestamp::from_unix_nanos(9),
+            );
+            assert_eq!(rejection.id, EmitterRecordId::new(4));
+            assert_eq!(rejection.error.class, class, "{message}");
+            assert_eq!(rejection.error.message, message);
+            assert_eq!(rejection.error.external_code, None);
+        }
+    }
+
     #[test]
     fn a_reason_code_about_the_record_refuses_it_for_good() {
         // The reason codes the MQTT 5 specification gives these reasons, as error routes read them.
         let refusals = [
             (
                 PublishNoticeError::V5PubAck(MqttPubAckReason::NotAuthorized),
-                "mqtt rejected record: v5 puback returned non-success reason: NotAuthorized",
+                "v5 puback returned non-success reason: NotAuthorized",
                 "135",
             ),
             (
                 PublishNoticeError::V5PubAck(MqttPubAckReason::TopicNameInvalid),
-                "mqtt rejected record: v5 puback returned non-success reason: TopicNameInvalid",
+                "v5 puback returned non-success reason: TopicNameInvalid",
                 "144",
             ),
             (
                 PublishNoticeError::V5PubAck(MqttPubAckReason::PayloadFormatInvalid),
-                "mqtt rejected record: v5 puback returned non-success reason: PayloadFormatInvalid",
+                "v5 puback returned non-success reason: PayloadFormatInvalid",
                 "153",
             ),
             (
                 PublishNoticeError::V5PubRec(MqttPubRecReason::NotAuthorized),
-                "mqtt rejected record: v5 pubrec returned non-success reason: NotAuthorized",
+                "v5 pubrec returned non-success reason: NotAuthorized",
                 "135",
             ),
             (
                 PublishNoticeError::V5PubRec(MqttPubRecReason::TopicNameInvalid),
-                "mqtt rejected record: v5 pubrec returned non-success reason: TopicNameInvalid",
+                "v5 pubrec returned non-success reason: TopicNameInvalid",
                 "144",
             ),
             (
                 PublishNoticeError::V5PubRec(MqttPubRecReason::PayloadFormatInvalid),
-                "mqtt rejected record: v5 pubrec returned non-success reason: PayloadFormatInvalid",
+                "v5 pubrec returned non-success reason: PayloadFormatInvalid",
                 "153",
             ),
         ];
@@ -1527,10 +1592,10 @@ mod tests {
             );
         };
         assert_eq!(rejected.id, EmitterRecordId::new(1));
+        assert_eq!(rejected.error.class, RejectedErrorClass::DestinationLimit);
         assert_eq!(
             rejected.error.message,
-            "mqtt rejected record: MQTT PUBLISH packet of 65 bytes exceeds the broker's maximum \
-             packet size of 64 bytes"
+            "MQTT PUBLISH packet of 65 bytes exceeds the broker's maximum packet size of 64 bytes"
         );
         assert!(outcome.infrastructure_error.is_none());
     }
@@ -1757,10 +1822,10 @@ mod tests {
             );
         };
         assert_eq!(rejected.id, EmitterRecordId::new(1));
+        assert_eq!(rejected.error.class, RejectedErrorClass::DestinationLimit);
         assert_eq!(
             rejected.error.message,
-            "mqtt rejected record: MQTT PUBLISH packet of 65 bytes exceeds the broker's maximum \
-             packet size of 64 bytes"
+            "MQTT PUBLISH packet of 65 bytes exceeds the broker's maximum packet size of 64 bytes"
         );
         assert!(outcome.infrastructure_error.is_none());
     }
@@ -1803,7 +1868,7 @@ mod tests {
         assert_eq!(rejected.id, EmitterRecordId::new(0));
         assert_eq!(
             rejected.error.message,
-            "mqtt rejected record: v5 puback returned non-success reason: NotAuthorized"
+            "v5 puback returned non-success reason: NotAuthorized"
         );
         assert!(outcome.infrastructure_error.is_none());
     }

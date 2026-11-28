@@ -157,7 +157,7 @@ impl PacedIngestorConnector for PrometheusQueryIngestor {
         let samples = response.samples().change_context_lazy(read)?;
         let metadata = Self::poll_metadata(&self.query, scheduled_at, response.body.len());
         let mut messages = Vec::with_capacity(samples.len());
-        let mut failures = Vec::new();
+        let mut undecodable = Vec::new();
         for sample in samples {
             nervix_primitives::task::consume_budget().await;
             match sample.payload() {
@@ -166,12 +166,16 @@ impl PacedIngestorConnector for PrometheusQueryIngestor {
                     headers: RetainedIngestHeaders::none(),
                     metadata: metadata.clone(),
                 }),
-                Err(error) => failures.push(error.change_context(read())),
+                // The server answers the same sample the same way on every poll, so it is a
+                // decode rejection of this one message and the rest of the answer goes on.
+                Err(error) => undecodable.push(error.change_context(IngestorError::Decode {
+                    connector: PROMETHEUS,
+                })),
             }
         }
         Ok(IngestorPoll {
             messages,
-            failures,
+            undecodable,
             dropped_header_values: 0,
             observed_at: actual_utc_now(),
         })
@@ -750,12 +754,12 @@ mod tests {
             "the messages of one poll share one copy of its metadata"
         );
 
-        let [failure] = poll.failures.as_slice() else {
+        let [failure] = poll.undecodable.as_slice() else {
             panic!("one of the three samples is not a number");
         };
         assert!(matches!(
             failure.current_context(),
-            IngestorError::Read { .. }
+            IngestorError::Decode { .. }
         ));
         assert!(matches!(
             failure.downcast_ref::<PrometheusQueryIngestorError>(),

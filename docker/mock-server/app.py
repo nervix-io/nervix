@@ -112,8 +112,10 @@ async def handle_prometheus_answer(request: web.Request) -> web.StreamResponse:
     """Answers an instant query with a shape a scenario cannot ask a real Prometheus for.
 
     `native-histogram` answers one float sample beside one native histogram, in the shape the
-    pinned Prometheus image answers a scraped histogram in, and `proxy-page` answers as a proxy in
-    front of the API would, with a status and a page that is not the API's JSON.
+    pinned Prometheus image answers a scraped histogram in, `undecodable-sample` answers one float
+    sample beside one whose value is not a number, which no Prometheus writes, and `proxy-page`
+    answers as a proxy in front of the API would, with a status and a page that is not the API's
+    JSON.
     """
     answer = request.match_info["answer"]
     if answer == "proxy-page":
@@ -121,6 +123,20 @@ async def handle_prometheus_answer(request: web.Request) -> web.StreamResponse:
             status=503,
             text="<html><body>upstream unavailable</body></html>",
             content_type="text/html",
+        )
+    if answer == "undecodable-sample":
+        query_time = float(request.query["time"])
+        return web.json_response(
+            {
+                "status": "success",
+                "data": {
+                    "resultType": "vector",
+                    "result": [
+                        {"metric": {"source": "float"}, "value": [query_time, "2.5"]},
+                        {"metric": {"source": "word"}, "value": [query_time, "one"]},
+                    ],
+                },
+            }
         )
     if answer != "native-histogram":
         return web.Response(status=404, text=f"unknown answer '{answer}'")

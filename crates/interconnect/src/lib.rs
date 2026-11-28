@@ -22,12 +22,13 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dns::{DnsLookupError, DnsLookupFailure};
 use nervix_execution::{ChargedBytes, Executor, Reservation};
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CodecName, CoordinationIdentity,
-    DomainClockProgress, DomainName, EmitterName, FieldName, IngestorName, LookupName, ModelKind,
-    ModelName, NodeEndpoint, NodePrerequisites, NodeRef, OwnershipStateRecoveryOutcome,
-    OwnershipStateReset, PrerequisiteMismatch, RelayName, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeRecordMetadata, ReportedError, ResourceName,
-    SHORTEST_POSITIVE_DURATION, SubscriptionBinding, Timestamp, Unit, WasmStateResetScope,
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CodecName, ConnectorKind,
+    CoordinationIdentity, DomainClockProgress, DomainName, EmitterName, FieldName, IngestorName,
+    LookupName, ModelKind, ModelName, NodeEndpoint, NodePrerequisites, NodeRef,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, PrerequisiteMismatch, RelayName,
+    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeRecordMetadata, ReportedError,
+    ResourceName, SHORTEST_POSITIVE_DURATION, SubscriptionBinding, Timestamp, Unit,
+    WasmStateResetScope,
 };
 use nervix_primitives::sync::{mpsc, watch};
 use rkyv::{Archive, Deserialize, Serialize};
@@ -675,20 +676,29 @@ pub struct IngestorDescribeEnvelope {
     pub metrics: Vec<String>,
 }
 
-/// The latest payload an ingestor's codec refused on the node that executes the ingestor, as that
-/// node reports it. Its code and operation are the same for every decode rejection, so they do not
-/// cross.
+/// The latest payload an ingestor's codec or connector refused to decode on the node that executes
+/// the ingestor, as that node reports it. Its code and operation are the same for every decode
+/// rejection, so they do not cross.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DecodeRejectionEnvelope {
     /// The rejection's UUID reference, as its 128 bits.
     pub reference: u128,
-    pub codec: CodecName,
+    pub refused_by: DecodeRefuserEnvelope,
     pub position: Option<TransportPositionEnvelope>,
     /// The field paths the codec named at fault, sorted.
     pub fields: Vec<String>,
-    /// The codec's rendered diagnostic, which names no payload value.
+    /// The refusal's rendered diagnostic, which names no payload value.
     pub message: String,
     pub occurred_at: Timestamp,
+}
+
+/// What refused to decode a payload.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DecodeRefuserEnvelope {
+    /// The ingestor's codec.
+    Codec(CodecName),
+    /// The ingestor's connector, which could not decode one message of its source's answer.
+    Connector(ConnectorKind),
 }
 
 /// Where on its transport a refused payload was read.

@@ -116,6 +116,21 @@ enum SentryEventError {
     },
 }
 
+impl SentryEventError {
+    /// The class of the rejection of an event this refuses before it is sent: an event over
+    /// Sentry's size limit is over the destination's limit, an event Sentry cannot read is a value
+    /// it cannot hold, and an envelope that cannot be written is a row that could not be encoded.
+    fn class(&self) -> RejectedErrorClass {
+        match self {
+            Self::OversizedEvent { .. } => RejectedErrorClass::DestinationLimit,
+            Self::EventJson { .. } | Self::Event { .. } => RejectedErrorClass::Validation,
+            Self::SerializeEvent { .. }
+            | Self::SerializeEnvelopeHeader { .. }
+            | Self::SerializeItemHeader { .. } => RejectedErrorClass::Codec,
+        }
+    }
+}
+
 impl SentryEventEmitter {
     fn prepare(config: SentryEventEmitterConfig, host: EmitterHost) -> EmitterStartResult<Self> {
         // A node without its resolver cannot open the emitter at all, so that is reported before
@@ -340,7 +355,7 @@ impl RecordEmitter for SentryEventEmitter {
         Self::encode_envelope(&payload, occurred_at, &self.platform).map_err(|error| {
             RaisedMessageError {
                 reference: uuid::Uuid::now_v7(),
-                class: RejectedErrorClass::Refused,
+                class: error.current_context().class(),
                 message: format!("{error:#}"),
                 operation: MessageErrorOperation::Publish,
                 operation_index: None,
@@ -373,10 +388,13 @@ impl RecordEmitter for SentryEventEmitter {
                 continue;
             }
             if Self::is_record_status(status) {
-                outcome.reject(record.rejected(
-                    format!("Sentry rejected the event with HTTP status {status}"),
-                    Self::status_code(status),
-                ));
+                let message = format!("Sentry rejected the event with HTTP status {status}");
+                let code = Self::status_code(status);
+                outcome.reject(if status == StatusCode::PAYLOAD_TOO_LARGE {
+                    record.over_destination_limit(message, code)
+                } else {
+                    record.rejected(message, code)
+                });
                 continue;
             }
             let retry_delay = Self::server_retry_delay(
@@ -558,9 +576,56 @@ mod tests {
             Timestamp::from_unix_nanos(946_684_800_000_000_000),
             PLATFORM,
         );
-        assert!(
-            result.is_err(),
-            "an oversized event must be rejected locally"
+        let Err(refusal) = result else {
+            panic!("an oversized event must be rejected locally");
+        };
+        assert!(matches!(
+            refusal.current_context(),
+            SentryEventError::OversizedEvent { maximum, .. }
+                if *maximum == nervix_models::SENTRY_MAX_EVENT_BYTES
+        ));
+        assert_eq!(
+            refusal.current_context().class(),
+            RejectedErrorClass::DestinationLimit,
+            "an event above Sentry's limit is over the destination's limit"
+        );
+    }
+
+    /// An event Sentry cannot read is a value it cannot hold, an envelope that cannot be written
+    /// is a row that could not be encoded, and an event over Sentry's limit is over the
+    /// destination's limit.
+    #[test]
+    fn each_preparation_refusal_names_the_class_of_its_rejection() {
+        let Err(json) = serde_json::from_slice::<serde_json::Value>(b"not json") else {
+            panic!("the fixture is not JSON");
+        };
+        let Err(event) =
+            serde_json::from_value::<Event<'static>>(serde_json::json!({ "level": 7 }))
+        else {
+            panic!("a numeric level is not a Sentry event level");
+        };
+        let Err(serialize) = serde_json::from_slice::<serde_json::Value>(b"{") else {
+            panic!("the fixture is not complete JSON");
+        };
+        assert_eq!(
+            SentryEventError::EventJson { source: json }.class(),
+            RejectedErrorClass::Validation
+        );
+        assert_eq!(
+            SentryEventError::Event { source: event }.class(),
+            RejectedErrorClass::Validation
+        );
+        assert_eq!(
+            SentryEventError::SerializeEvent { source: serialize }.class(),
+            RejectedErrorClass::Codec
+        );
+        assert_eq!(
+            SentryEventError::OversizedEvent {
+                size: 2,
+                maximum: 1,
+            }
+            .class(),
+            RejectedErrorClass::DestinationLimit
         );
     }
 

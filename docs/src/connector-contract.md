@@ -4139,9 +4139,20 @@ execution plan is published. An emitter initialization failure is reported as an
 the emitter remains unavailable and retries opening on its configured backoff. Invalid settings
 and missing external topics, queues, tables, namespaces, or other required entities surface as
 start errors: Nervix does not create them as a side effect. During execution, read and publish
-failures are classified separately from definitive record rejections. A definitive record rejection
-carries the code its outside system answered with, which `RejectedEmitterMember::external` takes
-beside the message, and a failure that leaves its records for `RETRY POLICY` carries one as an
+failures are classified separately from definitive record rejections. A connector builds each
+definitive record rejection with the helper that names its class: `RejectedEmitterMember::external`
+for a refusal of the outside system (`refused`), `over_destination_limit` for a record larger than
+its destination can take, whether the destination answered so or the connector found the limit
+before sending (`destination_limit`), `oversize` for a record over the emitter's own `MAX SIZE`
+(`limit`), `unrepresentable` for a value the destination cannot hold in the form or type it gives
+it (`validation` of `publish`), and `invalid` for a mapped value a row emitter cannot write
+(`validation` of `values`); `EmitterRecord` and `EmitterHttpRequest` offer the record-level
+shorthands, and a broker's answer through the confirmation window is
+`BrokerVerdict::Rejected` or `BrokerVerdict::OverDestinationLimit`. Its message is the connector's
+typed cause rendered once with `{error:#}`, without a prefix naming the connector, since the error
+names its emitter. A definitive record rejection carries the code its outside system answered
+with, which the helper takes beside the message, and a failure that leaves its records for
+`RETRY POLICY` carries one as an
 `ExternalErrorCode` attached to its report, which the host reads when `GIVE UP AFTER` fails the
 records that failure held. The connector takes the code from the typed answer it classified, a
 status, a reason code or an error code its driver hands it, never from message text, and gives none

@@ -1002,17 +1002,17 @@ do. Only the failed class carries the answering node's own description, because 
 another node's subsystem is opaque to the caller and that text exists for the operator reading it.
 State snapshot exchange, dataflow node status, domain and entity drain status, entity gating, metric
 description, relay, hash map and ingestor description, hash map queries, and subscription-interest
-visibility all answer in these terms. A dataflow node status request names one execution unit of
-its node, so an emitter with several [instances](emitters.md#emitter-instances) is asked about each
-instance at that instance's owner; a node scheduled as one unit is asked about its `Single` unit.
-A domain or entity drain status reports each publishing emitter with the unit that publishes, so
-instances of one emitter are reported apart. An emitter's dataflow node status carries its
-retried failure with whether that failure is a misconfiguration, and the milliseconds that remained
-before the owner gives up its oldest retried unit when the owner answered, so `DESCRIBE EMITTER` on
-any node shows the owner's `misconfigured:` and `give up in:` lines. An ingestor description is the
-execution owner's
-report of the ingestor. Its last decode rejection crosses as a typed record: a reference, an
-instant, a codec name, field paths, an optional Kafka or syslog position and the rendered codec
+visibility all answer in these terms. A dataflow node status request names one execution unit of its
+node, so an emitter with several [instances](emitters.md#emitter-instances) is asked about each
+instance at that instance's owner; a node scheduled as one unit is asked about its `Single` unit. A
+domain or entity drain status reports each publishing emitter with the unit that publishes, so
+instances of one emitter are reported apart. An emitter's dataflow node status carries its retried
+failure with whether that failure is a misconfiguration, and the milliseconds that remained before
+the owner gives up its oldest retried unit when the owner answered, so `DESCRIBE EMITTER` on any
+node shows the owner's `misconfigured:` and `give up in:` lines. An ingestor description is the
+execution owner's report of the ingestor. Its last decode rejection crosses as a typed record: a
+reference, an instant, what refused the payload (a codec name, or the connector kind for a message a
+paced poll could not decode), field paths, an optional Kafka or syslog position and the rendered
 diagnostic. The asking node renders that record; it never parses one.
 
 Each handler registration publishes a complete replacement dispatch table, so an arriving operation

@@ -77,7 +77,7 @@ Feature: Fixed-format emitter batch envelopes
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA error_event ( message STRING );
-      CREATE SCHEMA rejected_event ( error_message STRING );
+      CREATE SCHEMA rejected_event ( error_class STRING, error_message STRING );
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA error_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE JAQ JSON CODEC sentry_batch_codec TO SCHEMA error_event
@@ -104,7 +104,7 @@ Feature: Fixed-format emitter batch envelopes
         BATCH MAX MESSAGES 2 MAX SIZE 2MiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
-          SET error_message = error.message
+          SET error_class = error.class, error_message = error.message
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
       START;
@@ -115,7 +115,7 @@ Feature: Fixed-format emitter batch envelopes
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      encoded Sentry event | maximum is 1000000
+      "error_class":"destination_limit" | encoded Sentry event | maximum is 1000000
       """
 
     Examples:
@@ -199,7 +199,7 @@ Feature: Fixed-format emitter batch envelopes
       CREATE SCHEMA syslog_event (
         facility U8, severity U8, hostname STRING OPTIONAL, message STRING
       );
-      CREATE SCHEMA rejected_event ( error_message STRING );
+      CREATE SCHEMA rejected_event ( error_class STRING, error_message STRING );
       CREATE JAQ JSON CODEC ingest_codec TO SCHEMA syslog_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.';
       CREATE SYSLOG CODEC syslog_codec TO SCHEMA syslog_event;
@@ -223,7 +223,7 @@ Feature: Fixed-format emitter batch envelopes
         BATCH MAX MESSAGES 2 MAX SIZE 128KiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
-          SET error_message = error.message
+          SET error_class = error.class, error_message = error.message
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
       START;
@@ -234,7 +234,7 @@ Feature: Fixed-format emitter batch envelopes
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      encoded Syslog UDP payload | maximum is 65507
+      "error_class":"destination_limit" | encoded Syslog UDP payload | maximum is 65507
       """
 
     Examples:
