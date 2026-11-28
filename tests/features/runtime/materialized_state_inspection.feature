@@ -129,6 +129,7 @@ Feature: Bounded typed materialized relay inspection
       """
     Then the last typed inspection has 1 returned rows and 2 complete rows
     And the typed inspection used its unit owner and a remote page when the cluster permits it
+    And client "reader" describes relay "events" with the last inspection's exact counts
     And the last inspection page is the saved complete inspection's first row
     And the typed inspection preserves redaction and distinct watermark columns
     And the inspection continuation is saved with its complete counts and rows
@@ -203,11 +204,141 @@ Feature: Bounded typed materialized relay inspection
       """
       {"branch":null,"fields":{"tenant":"\u003cmasked\u003e","secret":"\u003cmasked\u003e","seq":99,"ingested_at_low_watermark":17}}
       """
+    And client "reader" describes relay "root_events" with the last inspection's exact counts
+    When these Plexus commands are executed on the leader node
+      """
+      STOP;
+      """
+    And client "reader" executes these Plexus commands
+      """
+      SHOW RELAY events MATERIALIZED STATE FOR ALL BRANCHES LIMIT 2 FORMAT JSON;
+      """
+    Then the last typed inspection has 2 returned rows and 2 complete rows
+    And client "reader" describes relay "events" with the last inspection's exact counts
 
     Examples:
       | cluster_size |
       | 1            |
       | 3            |
+
+  @materialized_state_inspection
+  Scenario Outline: A relay description gives exact counts for each partition and a typed refusal for an unassigned unit
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( tenant STRING, seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE RELAY events SCHEMA event BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE VHOST edge partition-counts-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
+        TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "partition-counts-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","seq":1}
+      """
+    And http payload is posted to node "node-1" with host "partition-counts-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","seq":2}
+      """
+    Then within "30s" node "node-1" eventually reports materialized state for relay "events" containing
+      """
+      {"branch":{"tenant":"beta"},"fields":{"tenant":"beta","seq":1}}
+      {"branch":{"tenant":"acme"},"fields":{"tenant":"acme","seq":2}}
+      """
+    Given client "reader" is connected to node "node-1"
+    When client "reader" executes these Plexus commands
+      """
+      SHOW RELAY events MATERIALIZED STATE FOR ALL BRANCHES LIMIT 2 FORMAT JSON;
+      """
+    Then the last typed inspection has 2 returned rows and 2 complete rows
+    And client "reader" describes relay "events" with the last inspection's exact counts
+    When these Plexus commands are executed on the leader node
+      """
+      STOP;
+      BEGIN;
+      CREATE RELAY unavailable SCHEMA event UNBRANCHED WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE PLACEMENT unreachable FOR unavailable REQUIRE NODES WHERE tag('zone') = 'inspect-unavailable';
+      COMMIT;
+      """
+    And client "reader" submits this Plexus command request
+      """
+      SHOW RELAY unavailable MATERIALIZED STATE FORMAT JSON;
+      """
+    Then the typed inspection refuses the read with "owner_unavailable"
+    When client "reader" executes these Plexus commands
+      """
+      DESCRIBE RELAY unavailable;
+      """
+    Then the last command output contains
+      """
+      branches: unavailable (owner_unavailable)
+      rows: unavailable (owner_unavailable)
+      state bytes: unavailable (owner_unavailable)
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @materialized_state_inspection
+  Scenario: A relay description gives exact counts when a partition owner goes offline
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When leadership is transferred to node "node-1"
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( seq I64 );
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 2;
+      CREATE RELAY events SCHEMA event BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      START;
+      RELOCATE RELAY events PARTITION 0 ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE RELAY events PARTITION 1 ONTO NODE node-2 IGNORE PREFERENCES;
+      STOP;
+      """
+    And these Plexus commands are executed on node "node-1"
+      """
+      DESCRIBE RELAY events;
+      """
+    Then the last command output contains
+      """
+      partition 0: owner=node-1 replicas=-
+      partition 1: owner=node-2 replicas=-
+      """
+    When node "node-2" is stopped
+    Then within "90s" node "node-1" eventually reports status containing "raft member 'node-2' is not currently visible in gossip"
+    When these Plexus commands are executed on node "node-1"
+      """
+      DESCRIBE RELAY events;
+      """
+    Then the last command output contains
+      """
+      partition 0: branches: 0
+      partition 0: rows: 0
+      partition 0: state bytes: 0
+      partition 1: branches: unavailable (owner_unavailable)
+      partition 1: rows: unavailable (owner_unavailable)
+      partition 1: state bytes: unavailable (owner_unavailable)
+      buffer metrics: unavailable
+      """
 
   @materialized_state_inspection
   Scenario: A materialized page read from another node waits for bulk memory on the reading node
@@ -302,7 +433,8 @@ Feature: Bounded typed materialized relay inspection
     # for room for it, holding nothing, rather than refusing the read.
     When inspection client "reader" connects away from the last relay owner when possible
     And bulk memory on the owner of the last read relay keeps only "524288" bytes free
-    And client "reader" begins executing these Plexus commands in the background
+    Then client "reader" describes relay "events" with the last inspection's exact counts
+    When client "reader" begins executing these Plexus commands in the background
       """
       SHOW RELAY events MATERIALIZED STATE FOR ALL BRANCHES LIMIT 2 FORMAT JSON;
       """
