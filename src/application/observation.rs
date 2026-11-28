@@ -193,11 +193,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         describe: DescribeRelay,
     ) -> CommandResult {
-        let SubscriptionTarget {
-            relay: ack_model,
-            branching,
-            ..
-        } = match self
+        let target = match self
             .subscription_target_from_schedule(domain, &describe.relay)
             .await
         {
@@ -217,11 +213,14 @@ impl SessionServiceImpl {
             }
         };
 
-        if describe.bindings.is_empty() && ack_model.materialized_state.is_some() {
-            return self
-                .describe_materialized_relay(domain, &ack_model, &branching)
-                .await;
+        if describe.bindings.is_empty() {
+            return self.describe_unfiltered_relay(domain, target).await;
         }
+        let SubscriptionTarget {
+            relay: ack_model,
+            branching,
+            ..
+        } = target;
         let schedule = self.inner.consensus.current_schedule().await;
         let scheduled_relay = if let Some(domain_schedule) = schedule.domain(domain) {
             domain_schedule.nodes.get(&NodeRef::new(
@@ -231,25 +230,6 @@ impl SessionServiceImpl {
         } else {
             None
         };
-        if describe.bindings.is_empty() {
-            let metrics = match self
-                .describe_metrics_for_scheduled_node(
-                    domain,
-                    ModelKind::Relay,
-                    &describe.relay,
-                    scheduled_relay,
-                )
-                .await
-            {
-                Ok(metrics) => metrics,
-                Err(message) => return command_error(format!("{message:#}")),
-            };
-            return command_ok(append_metrics_lines(
-                format_relay_describe_output(&ack_model, &branching, scheduled_relay),
-                metrics,
-            ));
-        }
-
         let filter =
             match validate_subscription_bindings(&ack_model.name, &branching, &describe.bindings) {
                 Ok(filter) => filter,
@@ -358,6 +338,39 @@ impl SessionServiceImpl {
         lines.extend(metrics);
 
         command_ok(lines.join("\n"))
+    }
+
+    async fn describe_unfiltered_relay(
+        &self,
+        domain: &DomainName,
+        target: SubscriptionTarget,
+    ) -> CommandResult {
+        let SubscriptionTarget {
+            relay, branching, ..
+        } = target;
+        if relay.materialized_state.is_some() {
+            return self
+                .describe_materialized_relay(domain, &relay, &branching)
+                .await;
+        }
+        let schedule = self.inner.consensus.current_schedule().await;
+        let scheduled = schedule.domain(domain).and_then(|domain_schedule| {
+            domain_schedule.nodes.get(&NodeRef::new(
+                ModelKind::Relay,
+                ModelName::from(&relay.name),
+            ))
+        });
+        let metrics = match self
+            .describe_metrics_for_scheduled_node(domain, ModelKind::Relay, &relay.name, scheduled)
+            .await
+        {
+            Ok(metrics) => metrics,
+            Err(message) => return command_error(format!("{message:#}")),
+        };
+        command_ok(append_metrics_lines(
+            format_relay_describe_output(&relay, &branching, scheduled),
+            metrics,
+        ))
     }
 
     pub(in crate::application) async fn handle_describe_stream_request(
