@@ -34,11 +34,13 @@ use std::io::{Read, Write};
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
-use nervix_execution::{Cancellation, Executor, MemoryClass};
+use nervix_execution::{Cancellation, Executor, MemoryClass, Reservation, StorageClass};
 use nervix_interconnect::StatePlacementEnvelope;
 use nervix_models::{
-    BranchKeyFingerprint, DomainName, DomainStatus, ModelName, NodeRef, NodeUnitRef, Timestamp,
+    BranchKeyFingerprint, DomainName, DomainStatus, ModelKind, ModelName, NodeRef, NodeUnitRef,
+    Timestamp,
 };
+use nervix_recovery::Reported as _;
 use thiserror::Error;
 
 pub(in crate::runtime) mod stored_branch;
@@ -163,6 +165,27 @@ impl CapturedNativeMetadata {
                 entity: self.checkpoint.placement.identifier.clone(),
             })
         })
+    }
+
+    /// After conversion, the read buffers are gone. The aligned payload stays live, and Kafka's
+    /// partition ordering can take up to another payload's worth of memory.
+    pub(crate) fn retain_conversion(
+        &self,
+        conversion: Reservation,
+    ) -> error_stack::Result<Reservation, BackupStateCaptureError> {
+        let admission = || BackupStateCaptureError::Admission {
+            entity: self.checkpoint.placement.identifier.clone(),
+        };
+        let retained = if self.checkpoint.placement.state.kind() == RuntimeStateKind::KafkaOffset {
+            self.stored_bytes
+                .checked_mul(2)
+                .ok_or_else(|| Report::new(admission()))?
+        } else {
+            self.stored_bytes
+        };
+        let (retained, read_buffers) = conversion.split(retained).change_context_lazy(admission)?;
+        drop(read_buffers);
+        Ok(retained)
     }
 
     /// Reads and validates a branch lifecycle checkpoint. The caller holds its conversion charge.
@@ -953,6 +976,81 @@ impl Runtime {
         })
     }
 
+    /// The restore-metadata share a backup starts from. Native checkpoints convert one at a time,
+    /// so only the largest known conversion is needed initially. The actual cut checks its own
+    /// descriptors and retries with the measured shortfall if a publication changed or another
+    /// reader needs more.
+    pub(crate) async fn backup_capture_metadata_bytes(
+        &self,
+        domain: &DomainName,
+        primaries: &ahash::HashSet<NodeUnitRef>,
+    ) -> error_stack::Result<u64, BackupStateCaptureError> {
+        let placements = self.backup_native_metadata_placements(domain, primaries);
+        if placements.is_empty() {
+            return Ok(0);
+        }
+        let store = self
+            .inner
+            .state_store
+            .clone()
+            .ok_or_else(|| Report::new(BackupStateCaptureError::Unavailable))?;
+        let domain = domain.clone();
+        let executor = self.executor();
+        let charge = executor.charge_nothing(MemoryClass::RestoreMetadata);
+        let estimate = executor
+            .run_storage(StorageClass::Filesystem, charge, move |_, cancellation| {
+                store.largest_backup_checkpoint_bytes(&domain, &placements, cancellation)
+            })
+            .await
+            .change_context(BackupStateCaptureError::Storage)?;
+        let largest = match estimate {
+            Ok(largest) => largest,
+            Err(error) => {
+                // The actual cut checks its own view and reports any read failure there.
+                Err::<(), _>(error).reported("size the first backup metadata share");
+                None
+            }
+        };
+        let capacity = executor.memory(MemoryClass::RestoreMetadata).capacity_bytes;
+        Ok(largest
+            .and_then(native_conversion_bytes)
+            .filter(|bytes| *bytes <= capacity)
+            .unwrap_or(0))
+    }
+
+    fn backup_native_metadata_placements(
+        &self,
+        domain: &DomainName,
+        primaries: &ahash::HashSet<NodeUnitRef>,
+    ) -> Vec<RuntimeStatePlacement> {
+        let mut placements = Vec::new();
+        for primary in primaries {
+            let kind = primary.node.kind;
+            if !Self::node_has_branch_lifecycle(kind) {
+                continue;
+            }
+            let metadata_kinds: &[RuntimeStateKind] = if kind == ModelKind::Ingestor {
+                &[RuntimeStateKind::BranchLru, RuntimeStateKind::KafkaOffset]
+            } else {
+                &[RuntimeStateKind::BranchLru]
+            };
+            for state in metadata_kinds {
+                if let Ok(placement) = self.state_placement_for_unit(
+                    domain,
+                    *state,
+                    kind,
+                    primary.node.identifier.clone(),
+                    primary.unit,
+                    None,
+                ) && self.runtime_state_placement_is_current(&placement)
+                {
+                    placements.push(placement);
+                }
+            }
+        }
+        placements
+    }
+
     /// The bulk share a backup capture of `domain` starts from: the live materialized generations
     /// the cut of `primaries` would hold, and the staging working set beside them, up to the whole
     /// class. A capture that needs more is cut again within a larger share.
@@ -1631,11 +1729,16 @@ mod tests {
         for entity in [&owned, &replicated] {
             schedule(&runtime, &domain, ModelKind::Deduplicator, entity);
             let lifecycle = lifecycle_of(&domain, ModelKind::Deduplicator, entity);
+            let branches = if entity == &owned {
+                vec![branch("alpha", 3)]
+            } else {
+                vec![branch("alpha", 3), branch("beta", 4)]
+            };
             store
                 .publish_sealed_snapshot(
                     &lifecycle,
                     9,
-                    &encode_branch_lru_snapshot(&[branch("alpha", 3)]).assured("lifecycle encodes"),
+                    &encode_branch_lru_snapshot(&branches).assured("lifecycle encodes"),
                 )
                 .assured("lifecycle persists");
             let placement = RuntimeStatePlacement {
@@ -1661,7 +1764,19 @@ mod tests {
             .executor()
             .try_reserve(MemoryClass::RestoreMetadata, budget)
             .assured("the test occupies conversion admission");
-        let replica_only = capture(&runtime, &domain, primaries([]))
+        let no_primaries = primaries([]);
+        assert_eq!(
+            runtime
+                .backup_capture_metadata_bytes(&domain, &no_primaries)
+                .await
+                .assured("a node with no primaries starts with no metadata charge"),
+            0
+        );
+        let first_share = runtime
+            .backup_capture_metadata_bytes(&domain, &owned_only)
+            .await
+            .assured("reading the size descriptor does not need conversion memory");
+        let replica_only = capture(&runtime, &domain, no_primaries)
             .await
             .assured("a node that is no placement's primary reads no lifecycle");
         assert!(replica_only.native_metadata.is_empty());
@@ -1679,6 +1794,13 @@ mod tests {
         let captured = capture(&runtime, &domain, owned_only)
             .await
             .assured("the primary's placements are captured");
+        assert_eq!(
+            first_share,
+            captured.native_metadata[0]
+                .conversion_bytes()
+                .assured("the primary's checkpoint conversion has a bounded size"),
+            "the larger replica's checkpoint contributes nothing to the first share"
+        );
         let metadata = captured
             .native_metadata
             .iter()

@@ -33,7 +33,7 @@ use nervix_backup::{
     KafkaPartitionOffset, MAX_RECORD_BYTES, RecordKind, SectionContent, SectionPath, StateField,
     StreamedBranchLifecycle, StreamedKafkaOffsets,
 };
-use nervix_execution::{Cancellation, Executor, MemoryClass};
+use nervix_execution::{Cancellation, Executor, MemoryClass, Reservation};
 use nervix_interconnect::{RemoteOperationFailure, RuntimeState};
 use nervix_models::{DomainName, DomainSchedule, ModelKind, ModelName, SchemaFingerprint};
 use nervix_primitives::sync::{
@@ -215,9 +215,15 @@ impl SessionServiceImpl {
         let firing = StdArc::clone(&fired);
         let staged = writer
             .encode_artifact(working, move |output, cancellation| {
-                let _conversion = conversion;
                 section
-                    .write(&executor, output, cancellation, interruption, &firing)
+                    .write(
+                        &executor,
+                        conversion,
+                        output,
+                        cancellation,
+                        interruption,
+                        &firing,
+                    )
                     .change_context(SnapshotStagingError::Encode)
             })
             .await;
@@ -237,6 +243,7 @@ impl NativeSection {
     fn write(
         &self,
         executor: &Executor,
+        conversion: Reservation,
         output: &mut dyn Write,
         cancellation: &Cancellation,
         interruption: Option<u64>,
@@ -244,6 +251,10 @@ impl NativeSection {
     ) -> error_stack::Result<(), NativeSectionError> {
         let kind = self.record.kind();
         let entity = || self.entity.clone();
+        let scratch_error = || NativeSectionError::Scratch {
+            kind,
+            entity: entity(),
+        };
         let entries = Cell::new(0_u64);
         let stop = || {
             if cancellation.is_cancelled() {
@@ -273,7 +284,11 @@ impl NativeSection {
                         kind,
                         entity: entity(),
                     })?;
-                offsets.with_positions(|positions| {
+                let retained = self
+                    .captured
+                    .retain_conversion(conversion)
+                    .change_context_lazy(scratch_error)?;
+                let result = offsets.with_positions(|positions| {
                     let record = StreamedKafkaOffsets {
                         domain: self.domain.clone(),
                         entity: entity(),
@@ -297,7 +312,10 @@ impl NativeSection {
                             entity: entity(),
                         })?;
                     Ok(())
-                })
+                });
+                drop(offsets);
+                drop(retained);
+                result
             }
             NativeRecord::BranchLifecycle { owner_kind, schema } => {
                 let lifecycle = self
@@ -307,7 +325,11 @@ impl NativeSection {
                         kind,
                         entity: entity(),
                     })?;
-                lifecycle.with_branches(|branches| {
+                let retained = self
+                    .captured
+                    .retain_conversion(conversion)
+                    .change_context_lazy(scratch_error)?;
+                let result = lifecycle.with_branches(|branches| {
                     let record = StreamedBranchLifecycle {
                         domain: self.domain.clone(),
                         owner_kind: *owner_kind,
@@ -331,7 +353,10 @@ impl NativeSection {
                             entity: entity(),
                         })?;
                     Ok(())
-                })
+                });
+                drop(lifecycle);
+                drop(retained);
+                result
             }
         }
     }

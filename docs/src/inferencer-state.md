@@ -301,12 +301,17 @@ A quiesced cut forces each branch to publish and captures that generation; `WITH
 the latest publication without a common quiesced boundary; a branch without a live owner, as in a
 stopped domain, is captured from its stored snapshot. Capture checks that the placement names the
 scheduled schema and model fingerprints and that the tensors have the declared shapes, and stages
-one branch at a time. `WITHOUT STATE` omits the sections.
+one branch at a time. The encoder takes its block size from `--execution-bulk-chunk-bytes`, capped
+by the size of the branch's raw tensor section, and encodes whole F32 values. The staging writer
+also applies the byte limit, including when a chunk is smaller than one value. `WITHOUT STATE`
+omits the sections.
 
 A restore accepts a descriptor only when its fingerprints and shapes match the restored schedule's
-inferencer, wraps the identical bits in the current snapshot frame and installs them on the
-scheduled owner and replicas, with no numeric conversion and no model run. Restored branches start from those tensors at
-`RESUME` and at a later `START`. See [Backup And Restore](./backup-and-restore.md#archive-format) and
+inferencer. It reads the raw values in chunks of up to `--execution-bulk-chunk-bytes`, checking for
+cancellation before each read, and releases the read buffer before building the native frame. It
+installs the identical bits on the scheduled owner and replicas without running the model.
+Restored branches start from those tensors at `RESUME` and at a later `START`. See
+[Backup And Restore](./backup-and-restore.md#archive-format) and
 [Backup And Restore Architecture](./backup-and-restore-architecture.md).
 
 ## Rebinding And Redeclaration

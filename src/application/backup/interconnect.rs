@@ -46,18 +46,6 @@ use crate::{
     },
 };
 
-/// The restore metadata share a capture starts from. A capture that needs more is cut again within
-/// a share at least twice as large.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "a capture's restore metadata share starts at one MiB and doubles to what its \
-                  cut needs"
-    )
-)]
-const CAPTURE_METADATA_SHARE: u64 = 1024 * 1024;
-
 /// The cut's progress, which every attempt of the capture records its phases in.
 pub(super) type SharedProgress<'p> = nervix_primitives::sync::blocking::Mutex<&'p mut CutProgress>;
 
@@ -488,6 +476,14 @@ impl SessionServiceImpl {
             )
             .await?;
             let schedule = capture.schedule.domain(&request.domain);
+            let metadata_share = self
+                .inner
+                .runtime
+                .backup_capture_metadata_bytes(&request.domain, &primaries)
+                .await
+                .change_context_lazy(|| {
+                    failure_context(&request.domain, "state capture sizing failed")
+                })?;
             let bulk_share = self
                 .inner
                 .runtime
@@ -506,7 +502,7 @@ impl SessionServiceImpl {
                 executor
                     .within_allowance(
                         MemoryClass::RestoreMetadata,
-                        CAPTURE_METADATA_SHARE,
+                        metadata_share,
                         |metadata| async move {
                             metadata
                                 .within_allowance(MemoryClass::Bulk, bulk_share, |bulk| async move {

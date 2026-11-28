@@ -434,6 +434,46 @@ impl RuntimeStateStore {
         Ok(())
     }
 
+    /// Read size descriptors for known placements from one view without walking a domain's branch
+    /// checkpoints. A segmented value contributes its declared body length.
+    pub(in crate::runtime) fn largest_backup_checkpoint_bytes(
+        &self,
+        domain: &DomainName,
+        placements: &[RuntimeStatePlacement],
+        cancellation: &nervix_execution::Cancellation,
+    ) -> error_stack::Result<Option<u64>, RuntimePersistenceError> {
+        let view = self.db.snapshot();
+        let namespace = active_namespace(&view, &self.restore_publications, domain)?;
+        let mut largest = None;
+        for placement in placements {
+            cancellation
+                .check()
+                .change_context(RuntimePersistenceError::Cancelled)?;
+            let key = namespace.key(placement)?;
+            let Some(item) = view
+                .range(&self.latest, key.as_slice()..=key.as_slice())
+                .next()
+            else {
+                continue;
+            };
+            let raw_bytes = item
+                .size()
+                .change_context(RuntimePersistenceError::ReadValue)?;
+            let (_, stored) = physical_placement(&key)?;
+            let checkpoint = checkpoint_reader::ListedCheckpoint::new(
+                stored,
+                view.clone(),
+                self.latest.clone(),
+                self.checkpoint_chunks.clone(),
+                key,
+                raw_bytes,
+            );
+            let bytes = checkpoint.stored_bytes()?;
+            largest = largest.max(Some(bytes));
+        }
+        Ok(largest)
+    }
+
     /// The active pointer, checkpoint headers and every listed checkpoint's chunks share this one
     /// view.
     pub(in crate::runtime) fn snapshot_backup_domain(
