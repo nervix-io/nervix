@@ -2179,11 +2179,17 @@ and reads nothing further once that read-ahead is full. A transport error before
 through the broker loop's retry policy. During intake the host reports and retries transport maintenance while the held
 batch continues through its allowance, its wait and normal settlement.
 
-Every Kafka consumer group and every WebSocket client offers the hook. Short Kafka waits can end
-before maintenance is due. The connector uses
-librdkafka's configured `max.poll.interval.ms` to start maintenance early enough for control
-execution. On the connector control workers, it pauses the current assignment and polls the
-driver once. The stream wakes again for group events or at its native half-interval cadence.
+Every Kafka consumer group and every WebSocket client offers the hook. A Kafka consumer's
+maintenance is due half of librdkafka's configured `max.poll.interval.ms` after the consumer's
+last poll, the cadence on which rust-rdkafka's stream wakes a reader waiting for records. A held
+consumer is therefore polled as often as a waiting one, and the other half of the interval is
+left, as the driver leaves it to a woken reader, for the maintenance job's executor admission and
+its native poll. The connector counts from the last poll it observed, one that handed a read its
+record or its own maintenance poll, never from the moment a read ended: a read that waits out its
+batch deadline or ends at a failure records no poll, so it does not postpone maintenance. A hold
+that ends before maintenance is due takes no control job, so a short hold never pauses fetching.
+On the connector control workers, it pauses the current assignment and polls the driver once. The
+stream wakes again for group events or at its native half-interval cadence.
 It yields after handling a rebalance callback, so the connector can pause newly assigned
 partitions before the next poll. The driver can discard prefetched copies as it pauses
 fetching. Its next read resumes fetching from the first unread position. The ingestor stores

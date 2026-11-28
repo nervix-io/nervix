@@ -144,6 +144,75 @@ Feature: Ingestor rate limits
       | 1            | 9 OF payload.bytes PER 15s BURST 10 | 13333ms        |
       | 3            | 9 OF payload.bytes PER 15s BURST 10 | 13333ms        |
 
+  # A held consumer's group service is due half of max.poll.interval.ms after its last poll, the
+  # cadence on which the Kafka driver wakes a consumer that waits for records. The 7.5-second hold
+  # before the second record ends before the 10 seconds half of the 20-second interval leaves, so
+  # the consumer runs no control job: it never pauses fetching, polls the group or resumes. In MODE
+  # NO ACK the driver commits on its own cadence, so nothing else runs a control job meanwhile.
+  Scenario Outline: A rate-limited Kafka ingestor whose hold ends within half its poll interval never pauses fetching
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "rate_short_{{test_id}}" exists with 1 partitions
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA event (seq I64);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (seq integer);
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_main CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'session.timeout.ms' = '6000',
+        'max.poll.interval.ms' = '20000',
+        'heartbeat.interval.ms' = '500'
+      };
+      CREATE KAFKA TOPIC INGESTOR limited
+        FROM kafka_main TOPIC 'rate_short_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'rate_short_{{test_id}}' START AT EARLIEST
+        MODE NO ACK
+        RATE LIMIT 2 PER 15s BURST 1
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION observations TO events;
+      START;
+      """
+    Then within "30s" Kafka consumer group "rate_short_{{test_id}}" eventually has 1 consumers
+    When these Plexus commands are executed
+      """
+      DESCRIBE INGESTOR limited;
+      """
+    Then the last command output owner is saved as placeholder "ingestor_owner"
+    And node "{{ingestor_owner}}" observability metric "nervix_execution_jobs_total" with labels is saved as placeholder "control_jobs"
+      """
+      class="connector_storage"
+      """
+    When the rate limit start is recorded
+    And these Kafka messages are rapidly published to topic "rate_short_{{test_id}}"
+      """
+      {"seq":1}
+      {"seq":2}
+      """
+    Then within "45s" the relay subscription receives one payload for each fragment set and records their arrivals
+      """
+      "seq":1
+      "seq":2
+      """
+    And arrival 2 came no sooner than "7500ms" after the recorded rate limit start
+    And node "{{ingestor_owner}}" observability metric "nervix_execution_jobs_total" with labels equals saved placeholder "control_jobs"
+      """
+      class="connector_storage"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @kafka_allowance_rebalance @deloxide_stress
   Scenario Outline: A rate-limited Kafka ingestor pauses a partition that leaves and returns during a hold
     Given Kafka is running
