@@ -90,16 +90,6 @@ macro_rules! export_processor {
             }
 
             #[unsafe(no_mangle)]
-            pub extern "C" fn nervix_buffer_len() -> i32 {
-                $crate::abi::buffer_len()
-            }
-
-            #[unsafe(no_mangle)]
-            pub extern "C" fn nervix_buffer_capacity() -> i32 {
-                $crate::abi::buffer_capacity()
-            }
-
-            #[unsafe(no_mangle)]
             pub extern "C" fn nervix_alloc(size: i32) -> i32 {
                 $crate::abi::alloc(size)
             }

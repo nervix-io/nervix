@@ -63,8 +63,10 @@ done
 "${generator}" 49283072 >"${tmp_dir}/padded.wat" \
     || fail 'the padded guest generator refused the largest save that fits'
 "${generator}" 2097152 >"${tmp_dir}/padded.wat"
-[[ "$(grep -c 'i32.const 2097152' "${tmp_dir}/padded.wat")" -eq 3 ]] \
-    || fail 'the padded guest does not save, report and load exactly 2097152 bytes'
+grep -Fxq '    i32.const 2097152)' "${tmp_dir}/padded.wat" \
+    || fail 'the padded guest does not return the length of its 2097152-byte save'
+grep -Fxq '    local.get $len i32.const 2097152 i32.ne' "${tmp_dir}/padded.wat" \
+    || fail 'the padded guest does not check for a 2097152-byte save on load'
 grep -Fq 'i32.const 2162688 i32.ge_u' "${tmp_dir}/padded.wat" \
     || fail 'the padded guest does not fill its save up to the end of the region at 64 KiB'
 grep -Fq 'i32.const 2162688)' "${tmp_dir}/padded.wat" \

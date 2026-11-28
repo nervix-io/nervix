@@ -198,7 +198,6 @@ fn branch_counter_wat() -> String {
   (global $next (mut i32) (i32.const 0))
   (global $base (mut i64) (i64.const 0))
   (global $read_ptr (mut i32) (i32.const {ENVELOPE_ADDRESS}))
-  (global $read_len (mut i32) (i32.const 0))
   (data (i32.const {ENVELOPE_ADDRESS}) "{envelope_text}")
   ;; The absolute address of field `slot` of the FlatBuffers table at `table`.
   (func $field (param $table i32) (param $slot i32) (result i32)
@@ -216,9 +215,6 @@ fn branch_counter_wat() -> String {
     i32.const 1 call $field call $follow
     i32.const 0 call $field call $follow)
   (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
-  (func (export "nervix_buffer_len") (result i32) global.get $read_len)
-  (func (export "nervix_buffer_capacity") (result i32)
-    memory.size i32.const 65536 i32.mul i32.const {INPUT_ADDRESS} i32.sub)
   (func (export "nervix_alloc") (param $len i32) (result i32)
     (local $pages i32)
     local.get $len i32.const {INPUT_ADDRESS} i32.add i32.const 65535 i32.add
@@ -273,13 +269,11 @@ fn branch_counter_wat() -> String {
       i64.store
       global.get $next i32.const 1 i32.add global.set $next
       i32.const {ENVELOPE_ADDRESS} global.set $read_ptr
-      i32.const {envelope_len} global.set $read_len
       i32.const {envelope_len}
     end)
   (func (export "nervix_dump_state") (result i32)
     i32.const {STATE_ADDRESS} global.get $count i64.store
     i32.const {STATE_ADDRESS} global.set $read_ptr
-    i32.const {SAVED_STATE_BYTES} global.set $read_len
     i32.const {SAVED_STATE_BYTES})
   (func (export "nervix_load_state") (param $ptr i32) (param $len i32) (result i32)
     local.get $len i32.const {SAVED_STATE_BYTES} i32.ne
