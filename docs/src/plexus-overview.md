@@ -951,10 +951,13 @@ Show commands:
 SHOW CREATE <kind> <name>;
 SHOW CREATE PARAMETRIZER by_tenant;
 SHOW PLACEMENTS;
-SHOW RELAY <name> MATERIALIZED STATE;
-SHOW REORDERER <name> STATE;
-SHOW CORRELATOR <name> STATE;
-SHOW WASM PROCESSOR <name> STATE;
+SHOW RELAY <name> MATERIALIZED STATE [<state clauses>];
+SHOW DEDUPLICATOR <name> STATE [<state clauses>];
+SHOW REORDERER <name> STATE [<state clauses>];
+SHOW CORRELATOR <name> STATE [<state clauses>];
+SHOW WINDOW PROCESSOR <name> STATE [<state clauses>];
+SHOW INFERENCER <name> STATE [<state clauses>];
+SHOW WASM PROCESSOR <name> STATE [<state clauses>];
 SHOW CLUSTER STATUS;
 SHOW NODES [WHERE <expression>] [FORMAT TEXT | JSON];
 DESCRIBE CLUSTER;
@@ -967,6 +970,12 @@ RELOCATE <selection> ONTO NODE <node_id>
   FOLLOW PREFERENCES | IGNORE PREFERENCES
   [FOR <kind> <name> FOLLOW PREFERENCES | IGNORE PREFERENCES ...];
 ```
+
+`<state clauses>` are, in this order, an optional selector, `FOR ALL BRANCHES`, `FOR UNBRANCHED` or
+`FOR BRANCH KEY { <field> = <literal>, ... }`, an optional `LIMIT <n> [AFTER '<continuation>']` and
+an optional `FORMAT TEXT | JSON`. Every state read returns one typed envelope; see
+[Inspect Materialized State](relay.md#inspect-materialized-state) for the clauses and
+[State Inspection](state-inspection.md) for how a read is answered.
 
 A relocation `<selection>` is a kind-qualified list, `<kind> <name>[, ...]`, or a directed corridor,
 `FROM <kind> <name>[, ...] TO <kind> <name>[, ...]`.

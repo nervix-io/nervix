@@ -34,6 +34,9 @@ Use it for:
 - [client host bindings: the shared runtime, threads, cancellation, host lifetimes, failures,
   Arrow exchange, packaging, qualification, and the host suites and guides](./client-host-bindings.md)
 - [transaction impact planning, scoped quiescence, inspection, and retained outcomes](./transaction-quiescence.md)
+- [state inspection: the `SHOW ... STATE` family, owner-side bounded reads, the typed envelope,
+  continuations and their fences, refusals, bounds, sensitivity and the guest's own description of
+  its state](./state-inspection.md)
 - [visual creation and shared completion: browser drafts and canonical submission, text completion
   and typed choices, the console's request ownership and fencing, recovery, and the evidence behind
   them](./visual-creation.md)

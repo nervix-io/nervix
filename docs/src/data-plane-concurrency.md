@@ -4247,6 +4247,9 @@ memory-ordering or delivery guarantee.
 
 ## Materialized Inspection Capture
 
+[State Inspection](./state-inspection.md) describes the operator read these captures answer; this
+section and the next own how an owner captures state beside the work that changes it.
+
 Operator inspection uses the published unit routing index and the existing materialized assignment
 barrier to capture shared row views. It adds no lock ordering, async synchronization or per-record
 publication work. The owner runs the capture, and for a page another node reads its stream too,

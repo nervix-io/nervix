@@ -291,7 +291,7 @@ SHOW DEDUPLICATOR unique_notifications STATE
 ```
 
 `SHOW DEDUPLICATOR <name> STATE` reads one immutable publication per selected branch through the
-[shared inspection envelope](relay.md#inspect-materialized-state). Its `keys` section contains
+[shared inspection envelope](state-inspection.md#the-envelope). Its `keys` section contains
 `key_1` onwards in `DEDUPLICATE ON` order, with each expression's exact type, followed by
 `seen_at`, the key's ingestion time. A key expression that reads a sensitive input or branch field
 is redacted. Keys are listed oldest first within each branch. Expired keys are excluded using one
@@ -542,7 +542,8 @@ and it always returns its first row: when the owner's bulk memory cannot hold ev
 the read waits for room for it rather than being refused. Read through
 another node, a single row whose encoded columns exceed the owner's snapshot section bound, 8 MiB,
 refuses the page as `reply_too_large`. Every section uses the same captured publication, and a changed publication
-or branch lifetime invalidates its continuation. Branch selectors, formats and owner routing use the shared inspection contract.
+or branch lifetime invalidates its continuation. Branch selectors, formats and owner routing use the
+[shared inspection contract](state-inspection.md).
 During a [partition transition](relay.md#changing-the-partition-count), the selected partition contributes the branch's
 rows, header, accumulator facts and byte charge once, including while its holder retains the
 transfer checkpoint. A branch-catalog change racing the read produces `not_ready`.
@@ -802,7 +803,7 @@ SHOW INFERENCER running STATE
 ```
 
 `SHOW INFERENCER <name> STATE` reads the immutable tensor generation published by each selected
-branch. It uses the [shared state inspection envelope](relay.md#inspect-materialized-state),
+branch. It uses the [shared state inspection envelope](state-inspection.md#the-envelope),
 owner routing, ordered selection and paging clauses, declared read bounds and typed refusals.
 An inferencer without `STATE` returns `not_materialized`. A stateful inferencer with no live
 branches returns zero counts and no sections.
@@ -887,8 +888,9 @@ checkpoint stages.
 
 ### Read guest-state facts from Plexus
 
-`SHOW WASM PROCESSOR <processor> STATE` reads the facts behind that summary through the typed state
-inspection envelope, branch by branch, with the clauses every `SHOW ... STATE` statement shares:
+`SHOW WASM PROCESSOR <processor> STATE` reads the facts behind that summary through the typed
+[state inspection envelope](state-inspection.md), branch by branch, with the clauses every
+`SHOW ... STATE` statement shares:
 
 ```plexus
 SHOW WASM PROCESSOR normalize_events STATE;

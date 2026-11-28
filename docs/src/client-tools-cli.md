@@ -378,8 +378,8 @@ event readers never wait for the terminal. An overflow is reported when output n
 including when no later event arrives.
 
 Ordinary `--command` runs do not print asynchronous subscription, clock or server-notice lines.
-The single transaction-inspection JSON mode sends unrelated events to stderr, keeping stdout for
-the report. Use `subscribe` or `domain-clock` for a stream that remains open after its initial
+The standalone JSON inspection mode sends unrelated events to stderr, keeping stdout for the
+report. Use `subscribe` or `domain-clock` for a stream that remains open after its initial
 request.
 
 Output keeps printing across reconnects. When the session is lost, the next statement you run opens
@@ -491,7 +491,8 @@ processor state inspections are bounded and carry an opaque continuation. See
 counts, row limits and stale-token handling,
 [Inspect Held Rows](./processors.md#inspect-held-rows) for reorderer and correlator rows, and
 [Inspect Carried Inference State](./processors.md#inspect-carried-inference-state) for tensor sections, and
-[WASM State And Recovery](./wasm-state.md#observability) for WASM checkpoint facts. Standalone JSON
+[WASM State And Recovery](./wasm-state.md#observability) for WASM checkpoint facts;
+[State Inspection](./state-inspection.md) describes how every state read is answered. Standalone JSON
 mode accepts `DESCRIBE TRANSACTION`, `SHOW NODES`, `SHOW RELAY ... MATERIALIZED STATE`,
 `SHOW REORDERER ... STATE`, `SHOW CORRELATOR ... STATE`, `SHOW DEDUPLICATOR ... STATE`,
 `SHOW WINDOW PROCESSOR ... STATE`, `SHOW INFERENCER ... STATE` and `SHOW WASM PROCESSOR ... STATE` with `FORMAT JSON`.

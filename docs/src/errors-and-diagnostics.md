@@ -2,13 +2,6 @@
 
 *Plexus, the Nervix graph definition language.*
 
-Processor state inspection reports `not_ready` when installation or forget changes a branch catalog
-between its partition census and owner page, or when two holders identify no installed claimant.
-It returns no partial page or inflated counts. A census that exceeds the session byte budget is
-`reply_too_large`. A full Bulk class holds an inspection back until it has room, within the read
-deadline, and is never a refusal; unavailable owners and expired read deadlines retain their
-existing typed outcomes. These refusals contain no branch field values.
-
 Secure random values come from `nervix-crypto`. Its pinned AWS-LC generator returns complete
 random bytes or aborts if sufficient entropy cannot be obtained; it has no recoverable entropy
 failure to classify as a record, authentication or transport rejection. No default value replaces
@@ -1590,10 +1583,6 @@ branch by the fingerprint of its key, as described under
 `unbranched`. [Data Plane](./data-plane.md) owns branch execution and
 [Cluster Interconnect](./interconnect.md) owns snapshot exchange.
 
-Materialized-state inspection refuses a missing scheduled payload schema or resolved branch
-metadata with the observation owner's typed error. It never substitutes an empty sensitivity
-set. Local and remote report failures retain their complete cause chain at the command boundary.
-
 The materialized installation owner refuses a lower snapshot revision with
 `RuntimeStateOperationError::MaterializedSnapshotRevision { received, current }`, a snapshot from an
 earlier branch lifecycle with `MaterializedSnapshotBranchGeneration { received, current }`, and one
@@ -2995,6 +2984,23 @@ the original refusal. An unconfirmed recovery, a lost fence or a transaction tha
 pause keeps the admitted command retryable under the same reference. A confirmed resume emits
 the lifecycle log `resumed orphaned ALTER pause`; an unchanged status emits no such log. Neither
 outcome adds a client notice or a second success result.
+
+### State Inspection
+
+A state read projects every failure to one of the fixed refusal reasons of
+[State Inspection](./state-inspection.md#refusals) where the response is constructed: the
+coordinator or owner logs the complete report at `debug` beside the reason it chose, and the
+command fails with that reason in its typed envelope, rendered in the requested format. A refusal
+names no branch field value. Materialized-state inspection refuses a missing scheduled payload
+schema or resolved branch metadata as `not_ready`; it never substitutes an empty sensitivity set.
+Local and remote report failures retain their complete cause chain in that `debug` record.
+
+Processor state inspection reports `not_ready` when installation or forget changes a branch catalog
+between its partition census and owner page, or when two holders identify no installed claimant.
+It returns no partial page or inflated counts. A census that exceeds the session byte budget is
+`reply_too_large`. A full Bulk class holds an inspection back until it has room, within the read
+deadline, and is never a refusal; unavailable owners and expired read deadlines retain their
+existing typed outcomes. These refusals contain no branch field values.
 
 ### Domain Clock Attachment
 

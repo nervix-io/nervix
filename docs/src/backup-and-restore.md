@@ -855,6 +855,13 @@ arrives.
 | `domains/<domain>/state/window_processor/<processor>/<unit>/<branch>/groups/<group>/input.arrow` | The retained input rows as Arrow IPC of the window's input relay schema | Every nonempty window group |
 | `domains/<domain>/state/window_processor/<processor>/<unit>/<branch>/groups/<group>/arguments.arrow` | Each retained row's aggregate argument values, one nullable column per argument in demand order, row-aligned with the input rows | With each window input group |
 
+A running domain's state of the same kinds can be read without an archive: the `SHOW ... STATE`
+statements return a materialized relay's rows with their watermarks, a deduplicator's keys with
+`seen_at`, a window's retained inputs with their argument columns, an inferencer's tensors and a
+WASM processor's checkpoint facts, each from the owner of its unit, while an archive holds the
+durable copy. See [State Inspection](state-inspection.md). Kafka domain offsets and the branch
+lifecycle are archived but not inspected.
+
 Inferencer `state.bin` concatenates tensors in `STATE` declaration order and each tensor's values
 in row-major order. Each value is its four little-endian IEEE-754 F32 bits. Shapes remain in the
 descriptor; scalar shape `[]` holds one value. Positive axes and checked products must agree with

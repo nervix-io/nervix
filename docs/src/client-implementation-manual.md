@@ -1517,7 +1517,9 @@ ordered names and a JSON projection of the full verified envelope.
 
 ## Reading Typed Materialized State
 
-Clients MUST retain `CommandOutcome.state` independently of the command message and preserve its
+Every `SHOW ... STATE` statement and `DESCRIBE LICENSE` return this envelope; [State
+Inspection](./state-inspection.md) describes what each read means. Clients MUST retain
+`CommandOutcome.state` independently of the command message and preserve its
 Page-or-Rejected distinction, complete counts, unit identities, owners/replicas, captured origins,
 section schemas, watermark positions, row frames and continuation. A refused inspection has an
 unsuccessful command disposition while retaining its typed reason. Clients MUST NOT derive success

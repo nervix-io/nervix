@@ -540,13 +540,15 @@ The Protocol](./client-session-protocol.md#transactions-over-the-protocol).
 ## Materialized State Results
 
 A materialized relay inspection returns the typed `CommandOutcome.state` envelope beside its text
-or JSON message. Clients read verified Row frames using their section schemas; sensitive cells use
-the subscription redaction policy. Bounded pages carry complete counts and an opaque continuation.
-A changed generation, source lifetime, committed control revision or captured row set refuses a
-resume as stale. See [Inspect Materialized State](./relay.md#inspect-materialized-state) for clause
-order and [the protocol](./client-session-protocol.md#state-inspection-envelope) for
-wire ownership and reply bounds. A WASM processor state read returns the same envelope with typed
-guest-state facts per unit; see [WASM State And Recovery](./wasm-state.md#observability).
+or JSON message, as every `SHOW ... STATE` statement and `DESCRIBE LICENSE` do. Clients read
+verified Row frames using their section schemas; sensitive cells use the subscription redaction
+policy. Bounded pages carry complete counts and an opaque continuation. A changed generation,
+source lifetime, committed control revision or captured row set refuses a resume as stale. See
+[Inspect Materialized State](./relay.md#inspect-materialized-state) for clause order,
+[State Inspection](./state-inspection.md) for how a read is answered and
+[the protocol](./client-session-protocol.md#state-inspection-envelope) for wire ownership and reply
+bounds. A WASM processor state read returns the same envelope with typed guest-state facts per
+unit; see [WASM State And Recovery](./wasm-state.md#observability).
 
 ## Listener Lifetimes
 
