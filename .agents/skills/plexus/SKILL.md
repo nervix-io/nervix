@@ -1008,6 +1008,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   <positive_u64> MAX MEMORY <positive_byte_size> MAX TABLE ELEMENTS <u64>`. Fuel is reset per
   logical guest operation; memory caps each branch guest's Wasmtime linear memory, and table
   elements cap its table's slots.
+  If you are checking a guest module for upload, use the required exports listed in
+  [WASM Processor Guests](../../../docs/src/wasm-processor-guests.md#contract-summary).
 - Write the optional `ON REJECTED STATE PRESERVE|RESET` between the last `TO` clause and
   `ON GLOBAL ERROR`. It answers only a guest's own verdict on the snapshot it was handed, and it
   defaults to `PRESERVE`. Offer `RESET` only when the user accepts losing that branch's computation

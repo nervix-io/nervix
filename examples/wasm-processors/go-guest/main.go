@@ -128,16 +128,6 @@ func nervixBufferPtr() int32 {
 	return int32(uintptr(unsafe.Pointer(&buffer[0])))
 }
 
-//export nervix_buffer_len
-func nervixBufferLen() int32 {
-	return int32(len(buffer))
-}
-
-//export nervix_buffer_capacity
-func nervixBufferCapacity() int32 {
-	return int32(cap(buffer))
-}
-
 //export nervix_global_error_ptr
 func nervixGlobalErrorPtr() int32 {
 	if len(globalError) == 0 {
