@@ -11499,8 +11499,6 @@ fn every_host_export_wasm_fixture(declarations: &str) -> Vec<u8> {
         r#"(module
       {declarations}
       (func (export "nervix_buffer_ptr") (result i32) (i32.const 0))
-      (func (export "nervix_buffer_len") (result i32) (i32.const 0))
-      (func (export "nervix_buffer_capacity") (result i32) (i32.const 65536))
       (func (export "nervix_alloc") (param i32) (result i32) (i32.const 0))
       (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
       (func (export "nervix_current_domain_time_nanos") (result i64) (i64.const 0))
@@ -11784,8 +11782,6 @@ fn malformed_output_wasm_fixture(length: u32) -> Vec<u8> {
       (global $emitted (mut i32) (i32.const 0))
       (data (i32.const 32768) "{encoded}")
       (func (export "nervix_buffer_ptr") (result i32) (i32.const 32768))
-      (func (export "nervix_buffer_len") (result i32) (i32.const {length}))
-      (func (export "nervix_buffer_capacity") (result i32) (i32.const 65536))
       (func (export "nervix_alloc") (param i32) (result i32) (i32.const 0))
       (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
       (func (export "nervix_current_domain_time_nanos") (result i64) call $domain_time)
@@ -11862,8 +11858,6 @@ fn historical_time_tokenless_wasm_fixture(output_relay: &str) -> Vec<u8> {
           (global $emitted (mut i32) (i32.const 0))
           (data (i32.const 32768) "{encoded_wat}")
           (func (export "nervix_buffer_ptr") (result i32) (i32.const 32768))
-          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
-          (func (export "nervix_buffer_capacity") (result i32) (i32.const 131072))
           (func (export "nervix_alloc") (param i32) (result i32) (i32.const 0))
           (func (export "nervix_init") (param i32 i32) (result i32)
             call $domain_time
@@ -12074,8 +12068,6 @@ fn unreadable_generated_column_wasm_fixture(
           (global $emitted (mut i32) (i32.const 0))
           (data (i32.const 32768) "{encoded_wat}")
           (func (export "nervix_buffer_ptr") (result i32) (i32.const 32768))
-          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
-          (func (export "nervix_buffer_capacity") (result i32) (i32.const 131072))
           (func (export "nervix_alloc") (param i32) (result i32) (i32.const 0))
           (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
           (func (export "nervix_current_domain_time_nanos") (result i64) (i64.const 0))
@@ -12132,8 +12124,6 @@ fn uninitialized_output_wasm_fixture(output_relay: &str) -> Vec<u8> {
           (global $emitted (mut i32) (i32.const 0))
           (data (i32.const 32768) "{encoded_wat}")
           (func (export "nervix_buffer_ptr") (result i32) (i32.const 32768))
-          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
-          (func (export "nervix_buffer_capacity") (result i32) (i32.const 131072))
           (func (export "nervix_alloc") (param i32) (result i32) (i32.const 0))
           (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
           (func (export "nervix_current_domain_time_nanos") (result i64) (i64.const 0))
@@ -12170,8 +12160,6 @@ fn trapping_wasm_fixture() -> &'static [u8] {
       (import "env" "nervix_timeout_after_nanos" (func $timeout (param i64) (result i64)))
       (memory (export "memory") 1)
       (func (export "nervix_buffer_ptr") (result i32) (i32.const 0))
-      (func (export "nervix_buffer_len") (result i32) (i32.const 0))
-      (func (export "nervix_buffer_capacity") (result i32) (i32.const 65536))
       (func (export "nervix_alloc") (param i32) (result i32) (i32.const 0))
       (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
       (func (export "nervix_current_domain_time_nanos") (result i64) call $domain_time)
@@ -12260,7 +12248,6 @@ fn state_counting_wasm_fixture_with_size(output_relay: &str, state_bytes: usize)
         .checked_add(65536)
         .assured("the bounded fixture save fits beside its input and output buffers");
     let pages = memory_bytes.div_ceil(65536);
-    let buffer_capacity = state_bytes.max(16384);
     let token = 0x4a3b_2c1d_6e5f_8071_u64;
     let encoded = WasmEnvelope::output(
         Vec::new(),
@@ -12355,8 +12342,6 @@ fn state_counting_wasm_fixture_with_size(output_relay: &str, state_bytes: usize)
             i32.const {token_address} local.get $token i64.store
             i32.const {ack_token_address} local.get $token i64.store)
           (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
-          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
-          (func (export "nervix_buffer_capacity") (result i32) (i32.const {buffer_capacity}))
           (func (export "nervix_alloc") (param $len i32) (result i32)
             local.get $len
             i32.const 16384
@@ -12474,8 +12459,6 @@ fn guest_requested_reset_wasm_fixture(output_relay: &str) -> Vec<u8> {
           (global $read_ptr (mut i32) (i32.const 0))
           (data (i32.const 32768) "{encoded_wat}")
           (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
-          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
-          (func (export "nervix_buffer_capacity") (result i32) (i32.const 16384))
           (func (export "nervix_alloc") (param i32) (result i32)
             i32.const 0
             global.set $read_ptr
@@ -12601,8 +12584,6 @@ fn timeout_buffering_wasm_fixture(output_relay: &str) -> Vec<u8> {
           (global $read_ptr (mut i32) (i32.const 0))
           (data (i32.const 32768) "{encoded_wat}")
           (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
-          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
-          (func (export "nervix_buffer_capacity") (result i32) (i32.const 16384))
           (func (export "nervix_alloc") (param i32) (result i32)
             i32.const 0
             global.set $read_ptr
@@ -12701,8 +12682,6 @@ fn state_rejecting_wasm_fixture(output_relay: &str) -> Vec<u8> {
           (data (i32.const 16) "\2a")
           (data (i32.const 32768) "{encoded_wat}")
           (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
-          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
-          (func (export "nervix_buffer_capacity") (result i32) (i32.const 131072))
           (func (export "nervix_alloc") (param i32) (result i32)
             i32.const 0
             global.set $read_ptr
@@ -13134,8 +13113,6 @@ impl WasmLifecycleFailureFixture {
             end
             i32.const 0)
           (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
-          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
-          (func (export "nervix_buffer_capacity") (result i32) (i32.const 65536))
           (func (export "nervix_alloc") (param i32) (result i32)
             i32.const 0
             global.set $read_ptr
